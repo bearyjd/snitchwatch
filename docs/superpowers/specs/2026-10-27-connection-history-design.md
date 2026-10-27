@@ -24,10 +24,10 @@ limits in [D8](#d8-reading-history) are part of this design.
 | D2 | Default | **Off.** Enabled only by an explicit user action, consent stored in the bridge |
 | D3 | Store | One SQLite file in the bridge state directory; strict 0700 directory, 0600 files, via `sqlite_file::open_owner_only` |
 | D4 | What is stored | A fixed field allowlist. Command line, `process_args`, `process_env` and rule conditions on them are never stored. **Raw executable and destination strings are stored and may contain user-chosen text; this is a stated limit, not a guarantee** |
-| D5 | Retention and disk | Age (default 30 days) and a 64 MiB total budget split into explicit main-file, journal and maintenance shares; oldest first; admission quotas against floods |
+| D5 | Retention and disk | Age (default 30 days) and a 64 MiB total budget split into main-file, journal and slack shares; page-bounded transactions; no full VACUUM; oldest first; admission quotas against floods |
 | D6 | Gaps | Session ledger with a durable coverage watermark; every discontinuity is an explicit gap; permanently unobservable traffic is labelled as such |
-| D7 | Rule identity | Rule name + semantic hash + a redacted display snapshot (hash and snapshot are separate); captured at the point the final rule is known, including interactive decisions |
-| D8 | Reads | Paged, byte-bounded, cancellable, off the verdict path |
+| D7 | Rule identity | Rule name + semantic hash + a redacted display snapshot (hash and snapshot are separate); captured by a per-prompt outcome guard for interactive decisions; `sensitive` is hashed |
+| D8 | Reads | Paged, byte-bounded, bridge-wide admission, read-only opener, off the verdict path |
 | D9 | Encryption at rest | Not in v1; rely on file permissions and say so |
 | D10 | Multi-user (system bridge) | **Not supported in v1**; history is disabled there |
 
@@ -154,7 +154,7 @@ history status, so the UI states which of the rows above applies today.
     the bridge's uid**, checked on every open with `O_NOFOLLOW|O_DIRECTORY`;
     anything else makes history `unavailable`. The existing per-user state
     check is not sufficient because it tolerates 0755.
-  - The database is opened only through `sqlite_file::open_owner_only`
+  - The writer opens the database only through `sqlite_file::open_owner_only`
     (existing in `snitchwatch-bridge/src/sqlite_file.rs`): `O_NOFOLLOW`,
     0600, regular-file/owner/link-count checks, refusal of unsafe
     `-journal/-wal/-shm` sidecars, `trusted_schema=OFF`, defensive mode. The
@@ -218,20 +218,33 @@ Two independent limits; whichever trips first evicts.
 
 | Share of `B` | Purpose | Enforced by |
 |--------------|---------|-------------|
-| 70% | Main database file | `PRAGMA max_page_count` set from this share, plus a high-water check on `page_count × page_size` (not on live data) |
-| 20% | Journal / temp headroom | `journal_mode=DELETE` with `journal_size_limit`; every write transaction is limited (≤ 256 events and ≤ 256 KiB per batch, ≤ 2,000 rows per eviction chunk) so its dirty pages fit in the share; the journal is counted in the budget check |
-| 10% | Slack | Never allocated to events |
+| 70% | Main database file | `PRAGMA max_page_count` set from this share, plus a high-water check on `page_count × page_size` |
+| 20% | Rollback journal | `journal_mode=DELETE`. **`journal_size_limit` only trims the journal after a commit and does not cap an active transaction**, so the bound is on dirty pages per transaction (below) |
+| 10% | Slack and reserved ledger space | Never allocated to events; 2% of `B` is reserved for gap/session rows (D6) |
 
-  Freelist is accounted: after deletes, pages are returned with
-  `auto_vacuum=INCREMENTAL` and `PRAGMA incremental_vacuum`, so the file
-  shrinks and `page_count` reflects reality. Eviction decisions use
-  `(page_count − freelist_count)` for live data and `page_count` for the
-  high-water mark. The incoming batch's size is added before the check.
-  A full `VACUUM` is **maintenance only**: it needs temporary space roughly
-  the database size, so it runs only when the free space on the filesystem is
-  at least 2× the database size **and** is counted against a separate
-  maintenance peak (not the 20% share); otherwise it is skipped and reported
-  in storage health.
+  **Transaction bound (the actual journal cap).** A rollback journal holds at
+  most one copy of each page the transaction modifies, so its size is bounded
+  by pages touched. Every write transaction is therefore limited by *pages*,
+  not rows: at most **512 modified pages** (2 MiB at 4 KiB pages, within the
+  20% share even at the 16 MiB budget). A row can touch its table leaf,
+  overflow pages (rows up to about 8.5 KiB) and each index; using a worst-case
+  of 8 pages per row, inserts and eviction deletes are chunked to **64 rows
+  per transaction**, each chunk committing before the next. Incremental
+  vacuum runs as `incremental_vacuum(N)` with N pages per transaction under
+  the same bound. The verification plan measures the real peak journal and
+  fails if a chunk exceeds the bound.
+
+  **Freelist and shrinking.** `auto_vacuum=INCREMENTAL` returns freed pages in
+  bounded steps so `page_count` reflects reality. Eviction decisions use
+  `page_count` for the high-water mark and `(page_count − freelist_count)` for
+  live data; the incoming batch size is added before the check.
+
+  **No full `VACUUM`.** It needs temporary space about equal to the database
+  and cannot fit inside `B`, so it is dropped. Deleted content is removed by
+  `secure_delete` (zeroing) and incremental vacuum. **Clear-all does not use
+  a delete transaction at all** (it would journal nearly the whole database):
+  under the H02 barrier the bridge closes the database, unlinks it and its
+  sidecars, and recreates an empty one, so nothing is journalled.
 - **Eviction order:** oldest `ts_ms` first, in bounded chunks. If a chunk
   does not bring usage under the high-water mark after a fixed number of
   rounds (default 3), recording pauses with a `write-failed (cap)` gap and
@@ -250,9 +263,15 @@ Two independent limits; whichever trips first evicts.
     and a per-`process_path` token bucket (default 20 events/s, burst 100).
   - A per-process share of retained rows (default 25%): beyond it, that
     process's *oldest* rows are evicted first, before anyone else's.
-  - Every refusal increments an `admission-drop` counter per process (bounded
-    table of the top 64 offenders) and is written as a gap with the count, so
-    drops are never silent.
+  - Every refusal increments an in-memory `admission-drop` counter, and drops
+    are never silent, but the bookkeeping is itself bounded: the token-bucket
+    map holds at most **1,024 entries** and expires entries idle for 60 s
+    (a process-path flood therefore evicts idle buckets, never grows memory);
+    the offender table keeps the top 64 by drops; counters are flushed as
+    **one aggregated gap row per cause per minute**, never one row per
+    refusal; the ledger tables are capped (D6) and use the 2% reserved
+    ledger space, so refusals cannot fill the database or stop unrelated
+    recording.
   - The numbers are initial proposals needing owner confirmation (open
     question 2); the mechanism is part of the design.
 
@@ -265,6 +284,21 @@ History is only honest if its holes are visible.
 same transaction* that commits a batch (and by a heartbeat commit every 30 s
 when idle). Events still in the queue are not covered by the watermark, so a
 crash can never imply coverage for events that were never written.
+
+**The watermark is capped at the oldest uncaptured source event.** Prompts
+are captured at settlement, so a prompt that is still waiting has not been
+written yet. The watermark committed with any batch or heartbeat is
+`min(commit time, arrival time of the oldest prompt still pending or queued)`.
+A crash then reconstructs a gap that starts no later than that prompt's
+arrival, so a lost pending prompt falls inside a labelled gap instead of
+outside coverage. (The alternative of durably writing each pending prompt is
+heavier and writes before the final rule is known; it is not proposed.)
+
+**Ledger bounds.** `gaps` and `sessions` together are capped at 5,000 rows.
+Adjacent gaps with the same cause are merged on write; gaps and sessions older
+than the oldest retained event are compacted into one `evicted` marker. The
+cap and merge rules use the reserved ledger space, so the ledger cannot be
+used to exhaust the database.
 
 - Every time recording starts, the bridge compares against the previous
   session: a **clean stop** has an exact `end_ms`, so the gap from that
@@ -314,27 +348,40 @@ rule has since been edited or deleted.
   a `Connection`, and the reply rule is built later (`grpc_server/replies.rs`).
   Rules the bridge sends back are also not re-reported as events (once-rule
   events generated by the bridge are deliberately suppressed in
-  `translator/connection.rs`). So the capture point is **where the final
-  outgoing reply rule is constructed**, including fallback and pause replies
-  (`FilterPaused`, `NoAnswer` timeouts). Definition:
+  `translator/connection.rs`). Not every outcome constructs a reply rule: a
+  `NoAnswer` timeout returns `Err(Status)` from the answer wait
+  (`grpc_server/answer_wait.rs`, `grpc_server.rs`) and skips reply
+  construction entirely. So there is no single construction point to hook.
+  The design instead requires a **per-prompt outcome guard** created when the
+  `AskRule` handler accepts a prompt, which records exactly one terminal
+  outcome on every exit path (including drop/cancellation):
+  `replied(final rule)` (including pause replies), `timeout`
+  (`NoAnswer`, no rule), `error` (terminal `Status`), `gui-lost` (GUI
+  disconnected while pending) or `cancelled` (daemon cancelled the call).
+  Definition:
   - one history event per prompt, keyed by the prompt's connection id;
-  - `ts_ms` = prompt arrival (bridge clock), `decided_ts_ms` = reply send time;
-  - **settled** when the reply is sent to the daemon, or when the prompt is
-    abandoned (connection gone, GUI closed → `no-answer`/`unknown` with no
-    rule);
-  - **duplicates:** if the daemon later reports a ping event for the same
-    connection (for example a persistent rule created by the reply), the ping
-    event is merged into the existing prompt event by (process_path,
-    destination, port, protocol, rule name) within a bounded window rather than
-    stored twice; if it cannot be merged it is stored and marked
-    `possible-duplicate`, never silently dropped or double counted.
+  - `ts_ms` = prompt arrival (bridge clock), `decided_ts_ms` = terminal
+    outcome time;
+  - **settled** when the guard records an outcome; only then is the event
+    queued, and until then the prompt pins the coverage watermark (D6);
+  - **duplicates, never merged by guess.** A later ping event can describe the
+    same connection (for example a persistent rule created by the reply), but
+    the available fields (program, destination, port, protocol, rule name)
+    do not identify a connection: rule names are deterministic and the source
+    port is not carried, so two distinct connections can share all of them.
+    The bridge therefore **merges only on verified correlation** (a shared
+    connection id, or a source port if open question 11 approves storing it).
+    Otherwise both events are kept and marked `possible-duplicate`, and any
+    count that could include both says so ("may include decisions counted
+    twice"). Nothing is silently dropped or merged.
 
 ### Identity fields
 
 - `rule_name` (as today).
 - `rule_hash`: SHA-256 truncated to 128 bits over a canonical encoding of the
   **redacted** rule (below): name, action, duration, enabled, precedence,
-  `nolog`, and the operator tree in fixed order, no timestamps. It is computed
+  `nolog`, and the operator tree (type, operand kind, `sensitive`, redacted
+  data) in fixed order, no timestamps. It is computed
   from the redacted form so no digest of a withheld value is ever stored: an
   unsalted digest of a low-entropy value (a command-line fragment, an
   environment value) would let anyone with the file confirm guesses.
@@ -347,7 +394,10 @@ rule has since been edited or deleted.
 by a **recursive allowlist**, never by copying the rule:
 
 - Keep structure: action, duration, enabled, precedence, `nolog`, operator
-  type and nesting.
+  type and nesting, and **`Operator.sensitive` on every operator, including
+  nested ones**: it changes case-sensitive matching, so it is shown in the
+  snapshot and is part of the hash. A sensitivity-only edit must change the
+  hash (test below).
 - Keep operand *values* only for these operand kinds: `process.path`,
   `dest.host`, `dest.ip`, `dest.port`, `protocol`, `user.id`, and `lists.*`
   (the list directory path, see below). Everything else, **including
@@ -380,6 +430,13 @@ At most 2,000 snapshots, 8 KiB per snapshot, 4 MiB total. Snapshot eviction is
 even if events still reference it (events keep `rule_hash`; the UI says "rule
 definition no longer retained"). So the limit always has an eviction victim.
 
+**Snapshot cleanup on every deletion path.** Snapshots hold rule paths and
+hosts, so they must not outlive their last event. Expiry, range delete, limit
+reduction and capacity eviction each delete, **in the same transaction**, every
+snapshot with no remaining referencing event (`NOT EXISTS`). Clear-all removes
+the file. A test deletes a single event below the cap and asserts its
+now-unreferenced snapshot bytes are gone.
+
 ### UI behaviour (R05)
 
 The inspector shows the recorded name and, if the current rule has the same
@@ -394,11 +451,23 @@ rule never rewrites stored events.
 - Paged only: a request returns at most 200 rows **and** 256 KiB per response,
   with a keyset cursor (`(ts_ms, id)`), never `OFFSET`. There is no
   "return everything".
-- At most 2 concurrent history queries per WS connection; a new query or a
-  disconnect cancels the previous one. A query has a 2 s time budget and
+- **Bridge-wide bound, not just per connection.** A global, non-blocking
+  admission gate allows at most 2 history queries at once across all WS
+  connections, with 2 bounded response slots of 256 KiB; a request that cannot
+  get a permit immediately is refused with `busy` and is never queued. Permits
+  are owned by the blocking worker and released only when that worker has
+  actually exited, so a cancelled query still holds its slot until it stops.
+  This follows the pattern already used by the cache export
+  (`bridge-cli/src/analysis_export.rs`, admission and response slots). Per
+  connection, a new query or a disconnect cancels the previous one. A query has a 2 s time budget and
   returns partial-with-cursor on expiry.
-- Reads run on a **separate read-only SQLite connection** on a blocking
-  thread pool. They never run on the verdict path and never hold the cache or
+- Reads run on a **separate read-only SQLite connection** on a dedicated
+  blocking pool. That connection needs a **validated read-only opener**:
+  `sqlite_file::open_owner_only` always opens writable and may create/chmod
+  the file, so a new variant (`open_owner_only_readonly`) must apply the same
+  checks (`O_NOFOLLOW`, regular file, owner, link count, unsafe-sidecar
+  refusal, `trusted_schema=OFF`, defensive mode) while opening read-only
+  without creating or changing modes, and set `query_only=ON`. They never run on the verdict path and never hold the cache or
   verdict lock during SQL, hashing or serialization. If reads and the writer
   contend, reads yield; verdict latency is never traded for history.
 - The GUI keeps a bounded window of pages (the existing row store appends
@@ -415,21 +484,25 @@ change) first closes ingestion by incrementing the generation under the queue
 gate, so any event enqueued before it belongs to the old generation. The
 writer, on reaching the control message, **discards** every older-generation
 item (and its pending snapshots), then performs the delete, cleanup and
-`VACUUM`/truncate, and only then acknowledges. Consequences: a batch accepted
+file recreation or bounded chunked deletes, and only then acknowledges. Consequences: a batch accepted
 before the clear can never commit after it; "disabled" means no event of any
 generation can be written afterwards. Tested with a blocked writer and a
 non-empty queue.
 
-- **Clear all** deletes events, gaps, sessions, `rules_seen` and the
-  watermark in one transaction, then cleanup so deleted pages are not left
-  in free space (`secure_delete` plus `VACUUM`/truncation of journal). The UI
-  reports counts and bytes only after the bridge confirms; on failure it says
-  exactly what remains.
+- **Clear all** closes the database under the barrier, unlinks it and its
+  sidecars, and recreates it empty (no giant delete transaction, no journal
+  growth). The UI reports counts and bytes only after the bridge confirms; on
+  failure it says exactly what remains. Range delete and limit reduction use
+  the bounded 64-row chunks of D5 and snapshot cleanup.
 - **Retention preview** (for clear, a range delete, or lowering a limit):
-  the bridge returns a **stable cutoff** (generation + maximum row id at
-  request time) with `N events from A to B, about X MB`. The confirmed
-  operation deletes only rows at or below that cutoff, so what the user
-  confirmed is what is deleted. Counts are exact; bytes are an estimate and
+  the bridge returns `N events from A to B, about X MB` plus an **expiring
+  preview token** (60 s) bound to the generation, the maximum row id, and a
+  checksum of the previewed set (row count, sum of row ids and of
+  `repeat_count`). A cutoff row id alone does not fix the set, because
+  retention can remove rows and coalescing can raise a `repeat_count` before
+  the user confirms. On confirm the bridge recomputes the checksum; if it
+  differs, or the token expired, nothing is deleted and the user is shown a
+  fresh preview. Counts are exact at preview time; bytes are an estimate and
   labelled so.
 - **Storage health:** enabled, reported path, usage against each share of the
   budget, event count, oldest event, current session, queue drops, admission
@@ -455,7 +528,7 @@ inventory, work patterns, and sensitive sites. It is a profile of the user.
 | Other local users | No | 0700/0600; the system-bridge case is why D10 |
 | root | Yes | Out of scope |
 | Backups of `~` or the host state directory | **Yes** | Long-lived, often off-box. The opt-in text names the bridge-reported path so the user can exclude it |
-| Other Flatpak apps | No | The history is host-side, outside any app's sandbox; no Flatpak permission is added |
+| Other Flatpak apps | **Only if they have been granted host access** | The database is a host file owned by the user. Snitchwatch adds no permission for it, but another Flatpak granted `--filesystem=home`/`host` (or the state directory) can read it as the same uid, and any app that can reach the bridge socket and token can read history through the bridge. Snitchwatch cannot control other apps' grants; the opt-in text says so |
 | Disk theft / offline access | Yes | See encryption |
 | Remote | No | No listener, no upload path |
 
@@ -510,24 +583,35 @@ writes; copies outside the file are not reachable.
 - **Canary tests on database bytes.** A canary in `process_args`,
   `process_env`, a `process.command` rule condition, a `process.env.*` rule
   condition, nested list operators, an unknown operand kind and a description
-  must not appear anywhere in the DB, sidecars or snapshots. Separate tests
+  must not appear anywhere in the DB, sidecars or snapshots. Because a
+  plaintext scan cannot detect a hash taken over an unredacted secret, a
+  **redaction-equivalence test** varies *only* withheld values (command and
+  environment conditions, unknown operand kinds, descriptions, including inside
+  nested lists and duplicated list JSON) and asserts the redacted canonical
+  bytes **and the resulting hashes** are identical. A second test changes only
+  `Operator.sensitive` and asserts the hash changes. Separate tests
   assert that a canary placed in a *path* or *host* **does** appear (documenting
   the stated limit) so the limit cannot silently change either way.
 - **Allowlist test** that fails if a new field reaches the insert API.
-- **Budget tests** measuring the main file, journal and maintenance peak
-  simultaneously during inserts, eviction and `VACUUM`; the total never
-  exceeds `B` (maintenance peak shown separately); freelist reclaim works.
+- **Budget tests** measuring the main file and the peak journal
+  simultaneously during inserts, chunked eviction, range delete, incremental
+  vacuum and clear-all; the total never exceeds `B`, no transaction modifies
+  more than 512 pages, and with 4 KiB paths a 64-row chunk stays within bound.
+  Freelist reclaim works. There is no maintenance peak outside `B` because
+  full `VACUUM` is not used.
 - **Flood tests:** alternating-destination flood from one process cannot evict
   another application's history beyond its quota; drops are counted.
 - **Barrier tests:** blocked writer with a non-empty queue; clear/disable
-  leaves zero rows afterwards; preview cutoff deletes exactly the previewed
-  set.
+  leaves zero rows afterwards; a preview token is refused after retention or
+  coalescing changes the set, and when expired.
 - **Gap tests:** clean stop, kill -9, daemon disconnect, full queue, full
   disk, counter reset (`rule_hits` module cases), `nolog`/stock-default
   labels. Watermark never covers uncommitted events.
 - **Capture tests with `mock_opensnitchd`** (never a live daemon): interactive
-  allow, deny, fallback and `FilterPaused`/`NoAnswer` replies; duplicate ping
-  merge; rule edited/deleted afterwards leaves the stored explanation intact.
+  allow, deny, fallback and `FilterPaused`/`NoAnswer` replies; two distinct
+  connections sharing program, endpoint and rule are both kept and flagged;
+  timeout, error, GUI-lost and cancel outcomes each record exactly one event;
+  a pending prompt pins the watermark across a kill -9; rule edited/deleted afterwards leaves the stored explanation intact.
 - **Permission tests:** directory exactly 0700, files 0600, symlink and
   wrong-owner refusal, unsafe sidecar refusal.
 - **Read-limit tests:** page and byte caps, cancellation, no verdict-lock
@@ -563,3 +647,10 @@ writes; copies outside the file are not reachable.
 10. **Backups and disable default.** Should the opt-in text give a specific
     backup-exclude recipe for the reported path, and is "Disable and delete"
     the right default button?
+11. **Source port.** Store the connection's source port so prompt and ping
+    events can be correlated exactly (more precise, one more stored field
+    that identifies a connection), or keep `possible-duplicate` flags and
+    qualified counts only?
+12. **Preview scope.** Is a 60 s preview token that refuses a stale set
+    acceptable, or should retention changes made while the dialog is open
+    simply be shown on confirm?
