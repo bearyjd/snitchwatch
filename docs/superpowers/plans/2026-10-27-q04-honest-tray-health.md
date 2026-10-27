@@ -58,6 +58,16 @@ monitor-state alert on start and fallback), which belongs with Q05/r16.
    - a failure carrying a daemon alert (detail other than the bare snapshot
      text) reads "Firewall issue reported by opensnitchd", not "not running".
    - a new bridge session clears the stamp.
+   - the tray reads diagnostics from the snapshot its feed requests and
+     never sends `RecheckDiagnostics`, which clears the bridge's stored
+     daemon alerts.
+   Lifecycle (review of #235): the tray shows only state from the live
+   session. Until a live session's tray state arrives (bridge unavailable,
+   starting) it keeps "Snitchwatch — waiting for the bridge" and offers no
+   pause. A 250 ms session watch (the link has no change notification)
+   forgets a disconnected or replaced session's tray, pause and firewall
+   state. `tests/tray_lifecycle_qml.rs` and `tests/tray_diagnostics_qml.rs`
+   drive a real `TrayController` against a fixture bridge service.
    Local time comes from `QDateTime::current_date_time()` plus
    `set_msecs_since_epoch`, also now used for "paused until", replacing
    `QTimeZone::system_time_zone()` (UTC in the sandbox).

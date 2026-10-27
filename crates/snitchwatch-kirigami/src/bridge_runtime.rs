@@ -147,6 +147,12 @@ impl BridgeHandles {
         state.connected && state.pause_answers_waiting
     }
 
+    /// The live session's connection id, or `None` while disconnected.
+    pub fn live_session(&self) -> Option<u64> {
+        let state = self.connection.lock().unwrap_or_else(|p| p.into_inner());
+        state.connected.then_some(state.connection_id)
+    }
+
     pub fn runtime(&self) -> &Handle {
         &self.runtime
     }

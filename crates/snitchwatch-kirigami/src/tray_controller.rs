@@ -26,7 +26,7 @@ use crate::tray::{
     live_slot_holders, menu_label_token, startup_tooltip,
 };
 use crate::tray_health::{compose_tooltip, firewall_report, FirewallSeen};
-use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
+use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -96,7 +96,12 @@ pub struct TrayControllerRust {
     paused_until: QString,
     pause_answers_waiting: bool,
     tray_state: BridgeTrayState,
+    /// The session `tray_state` came from; `None` until one arrives. Only a
+    /// state from the live session is shown, so the default `Idle` never
+    /// claims a connection (Q04).
+    tray_session: Option<u64>,
     pause_state: BridgePauseState,
+    pause_session: Option<u64>,
     /// How many prompts hold the daemon's single slot (issue #78;
     /// `PromptSlot` messages), as of session `slot_session`.
     slot_holders: u32,
@@ -113,7 +118,9 @@ impl Default for TrayControllerRust {
             paused_until: QString::default(),
             pause_answers_waiting: false,
             tray_state: BridgeTrayState::Idle,
+            tray_session: None,
             pause_state: BridgePauseState::NOT_PAUSED,
+            pause_session: None,
             slot_holders: 0,
             slot_session: 0,
             firewall: FirewallSeen::default(),
@@ -142,9 +149,11 @@ impl qobject::TrayController {
         let _ = qt_thread.queue(move |mut qobject| {
             if initial_handles.is_current_session(initial_tray.connection_id) {
                 qobject.as_mut().rust_mut().tray_state = initial_tray.state;
+                qobject.as_mut().rust_mut().tray_session = Some(initial_tray.connection_id);
             }
             if initial_handles.is_current_session(initial_pause.connection_id) {
                 qobject.as_mut().rust_mut().pause_state = initial_pause.state;
+                qobject.as_mut().rust_mut().pause_session = Some(initial_pause.connection_id);
             }
             qobject.refresh();
         });
@@ -156,7 +165,8 @@ impl qobject::TrayController {
         }
         spawn_tray_feed(&handles, qt_thread.clone(), tray_rx);
         spawn_pause_feed(&handles, qt_thread.clone(), pause_rx);
-        spawn_diagnostics_feed(&handles, qt_thread);
+        spawn_diagnostics_feed(&handles, qt_thread.clone());
+        spawn_session_watch(&handles, qt_thread);
     }
 }
 
@@ -200,6 +210,7 @@ fn spawn_tray_feed(
             let _ = qt_thread.queue(move |mut qobject| {
                 if session_handles.is_current_session(received.connection_id) {
                     qobject.as_mut().rust_mut().tray_state = received.state;
+                    qobject.as_mut().rust_mut().tray_session = Some(received.connection_id);
                     qobject.refresh();
                 }
             });
@@ -220,6 +231,7 @@ fn spawn_pause_feed(
             let _ = qt_thread.queue(move |mut qobject| {
                 if session_handles.is_current_session(received.connection_id) {
                     qobject.as_mut().rust_mut().pause_state = received.state;
+                    qobject.as_mut().rust_mut().pause_session = Some(received.connection_id);
                     qobject.refresh();
                 }
             });
@@ -227,9 +239,9 @@ fn spawn_pause_feed(
     });
 }
 
-/// The firewall check from every `DiagnosticsReport`. Broadcasts don't
-/// replay and the snapshot resync carries no report, so the tray asks for
-/// one itself rather than rely on `DaemonHealthModel` starting first.
+/// The firewall check from every `DiagnosticsReport`, starting with the one
+/// in the snapshot `spawn_feed` requests. Never `RecheckDiagnostics`: it
+/// clears the bridge's stored daemon alerts before reporting.
 fn spawn_diagnostics_feed(handles: &BridgeHandles, qt_thread: TrayThread) {
     let session_handles = handles.clone();
     crate::bridge_dispatch::spawn_feed(
@@ -255,9 +267,44 @@ fn spawn_diagnostics_feed(handles: &BridgeHandles, qt_thread: TrayThread) {
             });
         },
     );
-    if let Err(error) = handles.try_send(ClientMessage::RecheckDiagnostics) {
-        tracing::warn!(error = %error, "TrayController: initial diagnostics recheck ignored");
-    }
+}
+
+/// How often the tray checks for a disconnect or a new session. The link has
+/// no change notification; `BridgeFeed`'s banner polls it every second.
+const SESSION_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Forget what a session that's no longer live reported, on a disconnect or
+/// a session change, so the tray never shows it as current (Q04).
+fn spawn_session_watch(handles: &BridgeHandles, qt_thread: TrayThread) {
+    let handles = handles.clone();
+    handles.runtime().clone().spawn(async move {
+        let mut seen = handles.live_session();
+        loop {
+            tokio::time::sleep(SESSION_POLL).await;
+            let live = handles.live_session();
+            if live == seen {
+                continue;
+            }
+            seen = live;
+            let queued = qt_thread.queue(move |mut qobject| {
+                let mut rust = qobject.as_mut().rust_mut();
+                if rust.tray_session != live {
+                    rust.tray_session = None;
+                }
+                if rust.pause_session != live {
+                    rust.pause_session = None;
+                    rust.pause_state = BridgePauseState::NOT_PAUSED;
+                }
+                if Some(rust.firewall.session()) != live {
+                    rust.firewall = FirewallSeen::default();
+                }
+                qobject.refresh();
+            });
+            if queued.is_err() {
+                break;
+            }
+        }
+    });
 }
 
 impl qobject::TrayController {
@@ -278,12 +325,27 @@ impl qobject::TrayController {
 
 impl qobject::TrayController {
     fn refresh(mut self: Pin<&mut Self>) {
-        let pause = self.rust().pause_state;
+        let handles = crate::bridge_runtime::handles();
+        let live = |session: Option<u64>| {
+            session.is_some_and(|id| handles.as_ref().is_some_and(|h| h.is_current_session(id)))
+        };
+        if !live(self.rust().tray_session) {
+            // Bridge unavailable, or its state not here yet: wait, offer nothing.
+            self.as_mut().set_tooltip(QString::from(&startup_tooltip()));
+            self.as_mut().set_menu_label(QString::from("default"));
+            self.as_mut().set_paused_until(QString::default());
+            self.as_mut().set_pause_answers_waiting(false);
+            return;
+        }
+        let pause = if live(self.rust().pause_session) {
+            self.rust().pause_state
+        } else {
+            BridgePauseState::NOT_PAUSED
+        };
         let until = match (pause.paused, pause.expires_at_unix_ms) {
             (true, Some(ms)) => local_hh_mm(ms),
             _ => String::new(),
         };
-        let handles = crate::bridge_runtime::handles();
         let session_is_current = handles
             .as_ref()
             .is_some_and(|handles| handles.is_current_session(self.rust().slot_session));
@@ -292,11 +354,9 @@ impl qobject::TrayController {
             .is_some_and(|handles| handles.advertises_pause_answers_waiting());
         let holders = live_slot_holders(self.rust().slot_holders, session_is_current);
         let state_text = derive_tooltip_with_slot(&self.rust().tray_state, &pause, &until, holders);
-        let firewall_session = self.rust().firewall.session();
-        let firewall = handles
-            .as_ref()
-            .filter(|handles| handles.is_current_session(firewall_session))
-            .and_then(|_| self.rust().firewall.line());
+        let firewall = live(Some(self.rust().firewall.session()))
+            .then(|| self.rust().firewall.line())
+            .flatten();
         let tooltip = compose_tooltip(&state_text, firewall.as_deref());
         let label = derive_menu_label(&self.rust().tray_state, &pause);
         self.as_mut().set_tooltip(QString::from(&tooltip));
