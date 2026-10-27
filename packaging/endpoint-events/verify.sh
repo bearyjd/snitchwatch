@@ -99,7 +99,6 @@ client=verify-host.test
 host_id=verify-host
 pki=/etc/pki/snitchwatch-endpoint-events
 instance_conf=/etc/snitchwatch-endpoint-events/rsyslog.conf
-mkdir -p /var/lib/snitchwatch-endpoint-events
 
 rpm -q rsyslog rsyslog-mmjsonparse rsyslog-gnutls nftables
 rsyslogd_path=$(command -v rsyslogd)
@@ -217,6 +216,15 @@ producer_events() {
     event 0 | jq -c '.Event.process_path = "kworker/0:1" | del(.Event.user_id)
         | .Action = "allow" | .Rule = "000-snitchwatch-bridge-fetch"'
 }
+# comm may hold any byte (prctl PR_SET_NAME): checked by length only, and
+# jsonf must escape it into valid JSON.
+comm_values=($'tab\there' 'quo"te' 'back\\slash' 'é1')
+comm_events() {
+    local comm
+    for comm in "${comm_values[@]}"; do
+        event 0 | jq -c --arg c "$comm" '.Event.process_path = $c'
+    done
+}
 # Events the validation must drop, each also carrying the token.
 bad_events() {
     event 0 | jq -c '.Event.protocol = ("t" * 10000)'
@@ -241,6 +249,7 @@ send_all() {
         bad_events
         event 0
         producer_events
+        comm_events
     } | send_lines
 }
 # Worst case for frame size: every capped field exactly at its cap, the path
@@ -273,6 +282,47 @@ utf8_event() { # path|rule total-bytes
     esac
 }
 
+# The fenced block after `<!-- verify.sh: NAME -->`, with the list item's
+# indentation removed (both may sit inside a numbered step).
+snippet() { # marker
+    awk -v m="<!-- verify.sh: $1 -->" '
+        { line = $0; sub(/^[ \t]+/, "", line) }
+        line == m { armed = 1; next }
+        armed && line ~ /^```/ {
+            if (inside) exit
+            inside = 1; indent = index($0, "`") - 1; next
+        }
+        inside { print substr($0, indent + 1) }' "$src/README.md"
+}
+for marker in prepare check start enable way-back; do
+    [[ -n "$(snippet "$marker")" ]] || fail "README has no '$marker' snippet"
+done
+# sudo runs the command (we are root); restorecon is a no-op with SELinux
+# off in the container, recorded so the order can be checked.
+mkdir -p "$work/stubs"
+printf '#!/bin/sh\nexec "$@"\n' >"$work/stubs/sudo"
+printf '#!/bin/sh\necho "restorecon $*" >>%s/restorecon.log\n' "$work" >"$work/stubs/restorecon"
+chmod +x "$work/stubs/"*
+run_snippet() { # marker [extra PATH dir]
+    (cd /src && PATH="${2:+$2:}$work/stubs:$PATH" bash -e -c "$(snippet "$1")")
+}
+# The README's fresh install, verbatim and in order, with nothing created
+# beforehand except what step 2 has the operator place by hand (the
+# certificates, already in $pki) and the filled-in placeholders.
+fresh_install() {
+    [[ ! -e /var/lib/rsyslog/snitchwatch-endpoint-events ]] || fail "work dir pre-exists"
+    [[ ! -e "$instance_conf" ]] || fail "instance config pre-exists"
+    run_snippet prepare
+    [[ $(stat -c %a /var/lib/rsyslog/snitchwatch-endpoint-events) == 700 ]] ||
+        fail "work dir is not 0700"
+    grep -q 'restorecon -RFv /var/lib/rsyslog/snitchwatch-endpoint-events' "$work/restorecon.log" ||
+        fail "prepare didn't restore labels"
+    run_snippet check && fail "check accepted unfilled placeholders"
+    cp "$(fill_conf 6514)" "$instance_conf"
+    run_snippet check
+    echo "OK: README prepare and check ran in order on a fresh system"
+}
+
 if [[ "$1" == --systemd-inside ]]; then
     # ---- phase 2: the units under real systemd ---------------------------
     echo "== systemd: waiting for boot"
@@ -282,12 +332,14 @@ if [[ "$1" == --systemd-inside ]]; then
         sleep 1
     done
     echo "system state: $state"
-    install -D -m 0644 "$src/snitchwatch-endpoint-events.nft" /etc/nftables/snitchwatch-endpoint-events.nft
-    install -m 0644 "$src/snitchwatch-endpoint-events-nft.service" \
-        "$src/snitchwatch-endpoint-events.service" /etc/systemd/system/
-    install -D -m 0644 "$(fill_conf 6514)" "$instance_conf"
-    systemctl daemon-reload
+    echo "== systemd: the README's fresh install, verbatim"
+    fresh_install
+    run_snippet start
     units=(snitchwatch-endpoint-events-nft.service snitchwatch-endpoint-events.service)
+    systemctl is-active -q "${units[@]}" || fail "README start left the units inactive"
+    can_connect 0 || fail "README start: no listener"
+    can_connect 65534 && fail "README start: uid 65534 can connect"
+    echo "OK: README start: both units active, root connects, uid 65534 refused"
     table_up() { nft list table inet snitchwatch_endpoint_events >/dev/null 2>&1; }
     reset() {
         systemctl stop "${units[@]}" 2>/dev/null || true
@@ -295,6 +347,7 @@ if [[ "$1" == --systemd-inside ]]; then
     }
 
     echo "== systemd: a failed table load means no listener"
+    systemctl stop "${units[@]}"
     cp /etc/nftables/snitchwatch-endpoint-events.nft "$work/good.nft"
     echo "this is not nft syntax" >>/etc/nftables/snitchwatch-endpoint-events.nft
     systemctl start snitchwatch-endpoint-events.service && fail "the listener started without its table"
@@ -386,8 +439,9 @@ nft list table inet snitchwatch_endpoint_events
 [[ $(nft list table inet snitchwatch_endpoint_events | grep -c 'reject') -eq 4 ]] ||
     fail "the table doesn't hold exactly the four reject rules after a reload"
 
-echo "== rsyslogd -N1 on the instance's config"
-rsyslogd -N1 -f "$(fill_conf 6514)" 2>&1 | tee n1.log
+echo "== the README's fresh install (prepare, check)"
+fresh_install
+rsyslogd -N1 -f "$instance_conf" 2>&1 | tee n1.log
 grep -qi 'error' n1.log && fail "config check reported errors"
 
 echo "== a broken config: -N1 fails, rsyslogd refuses to start, no listener"
@@ -502,13 +556,13 @@ fi
 
 echo "== end to end: host rsyslog alongside, pinned receiver"
 send_all
-wait_for_lines "$work/server.out" 3 20 || fail "receiver got $(lines "$work/server.out") of 3 events"
+wait_for_lines "$work/server.out" 7 20 || fail "receiver got $(lines "$work/server.out") of 7 events"
 sleep 3 # let any stray extra frame arrive before counting
 stop_sender
 kill "$(cat /run/host-rsyslog.pid)"
 echo "receiver got:"
 cat "$work/server.out"
-[[ $(lines "$work/server.out") -eq 3 ]] || fail "expected exactly three events"
+[[ $(lines "$work/server.out") -eq 7 ]] || fail "expected exactly seven events"
 grep -q "$token" "$work/server.out" && fail "the fake token reached the receiver"
 # Values and types, not just keys: the frame equals the sample but for time.
 [[ $(head -n1 "$work/server.out" | jq -cS 'del(.time)') == $(jq -cS 'del(.time)' "$src/sample-event.json") ]] ||
@@ -521,8 +575,16 @@ sed -n 2p "$work/server.out" | jq -e '.process_path == "Kernel connection" and .
 sed -n 3p "$work/server.out" | jq -e '.process_path == "kworker/0:1" and .user_id == 0
     and .action == "allow" and .rule == "000-snitchwatch-bridge-fetch"' >/dev/null ||
     fail "the comm-path event isn't as sent"
+for i in "${!comm_values[@]}"; do
+    line=$(sed -n "$((i + 4))p" "$work/server.out")
+    jq -e --arg c "${comm_values[$i]}" '.process_path == $c' <<<"$line" >/dev/null ||
+        fail "comm $(printf %q "${comm_values[$i]}") didn't arrive as valid JSON with its value"
+done
+grep -q $'\t' "$work/server.out" && fail "a raw tab reached a frame (not escaped)"
+iconv -f UTF-8 -t UTF-8 "$work/server.out" >/dev/null || fail "a frame is not valid UTF-8"
 no_token_in /var/log /var/lib /var/spool
-echo "OK: three events (invalid ones dropped); the first equals sample-event.json;"
+echo "OK: tab, quote, backslash and UTF-8 comm values arrive escaped, as valid JSON"
+echo "OK: seven events (invalid ones dropped); the first equals sample-event.json;"
 echo "    no token in frames or under /var/log, /var/lib, /var/spool"
 echo "SAMPLE: $(head -n1 "$work/server.out")"
 
@@ -589,34 +651,15 @@ expect_refused server 6514 nocert "" "sender without a client certificate"
 expect_refused server 6514 nokey "" "sender without a client key"
 
 echo "== README merge and way back"
-mkdir -p /etc/opensnitchd stubs
-printf '#!/bin/sh\nexec "$@"\n' >stubs/sudo
-printf '#!/bin/sh\necho "systemctl $*" >>%s/systemctl.log\n' "$work" >stubs/systemctl
-chmod +x stubs/*
+mkdir -p /etc/opensnitchd "$work/stub-systemctl"
+printf '#!/bin/sh\necho "systemctl $*" >>%s/systemctl.log\n' "$work" >"$work/stub-systemctl/systemctl"
+chmod +x "$work/stub-systemctl/systemctl"
 cp /src/packaging/system/opensnitchd-default-config.json /etc/opensnitchd/default-config.json
 chmod 600 /etc/opensnitchd/default-config.json
 original=$(jq -S . /etc/opensnitchd/default-config.json)
-# The fenced block after `<!-- verify.sh: NAME -->`, with the list item's
-# indentation removed (both may sit inside a numbered step).
-snippet() { # marker
-    awk -v m="<!-- verify.sh: $1 -->" '
-        { line = $0; sub(/^[ \t]+/, "", line) }
-        line == m { armed = 1; next }
-        armed && line ~ /^```/ {
-            if (inside) exit
-            inside = 1; indent = index($0, "`") - 1; next
-        }
-        inside { print substr($0, indent + 1) }' "$src/README.md"
-}
-for marker in enable way-back; do
-    [[ -n "$(snippet "$marker")" ]] || fail "README has no '$marker' snippet"
-done
-run_snippet() { # marker
-    (cd /src && PATH="$work/stubs:$PATH" bash -e -c "$(snippet "$1")")
-}
 loggers='.Server.Loggers | map(select(.Name == "remote" and .Server == "127.0.0.1:514")) | length'
-run_snippet enable
-run_snippet enable # a second run must not add a second entry
+run_snippet enable "$work/stub-systemctl"
+run_snippet enable "$work/stub-systemctl" # a second run must not add a second entry
 cfg=/etc/opensnitchd/default-config.json
 [[ $(jq "$loggers" "$cfg") -eq 1 ]] || fail "merge didn't leave exactly one logger"
 jq -e --slurpfile l "$src/opensnitchd-logger.json" '.Server.Loggers == $l' "$cfg" >/dev/null ||
@@ -625,7 +668,7 @@ jq -e --slurpfile l "$src/opensnitchd-logger.json" '.Server.Loggers == $l' "$cfg
 [[ $(jq -S 'del(.Server.Loggers)' "$cfg") == "$original" ]] ||
     fail "merge changed more than Server.Loggers"
 grep -q 'restart opensnitch.service' systemctl.log || fail "no daemon restart"
-run_snippet way-back
+run_snippet way-back "$work/stub-systemctl"
 [[ $(jq -S . "$cfg") == "$original" ]] || fail "way back didn't restore the config"
 [[ $(stat -c %a "$cfg") == 600 ]] || fail "way back changed the file mode"
 echo "OK: merge is idempotent, keeps 0600, and the way back restores the config"

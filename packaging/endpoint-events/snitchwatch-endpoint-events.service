@@ -22,7 +22,9 @@ Type=notify
 # abortOnUncleanConfig): never a listener with a broken ruleset.
 ExecStartPre=/usr/sbin/rsyslogd -N1 -f /etc/snitchwatch-endpoint-events/rsyslog.conf
 ExecStart=/usr/sbin/rsyslogd -n -iNONE -f /etc/snitchwatch-endpoint-events/rsyslog.conf
-StateDirectory=snitchwatch-endpoint-events
+# Under /var/lib/rsyslog, so it carries rsyslog's SELinux label
+# (syslogd_var_lib_t); the README creates and labels it before the first -N1.
+StateDirectory=rsyslog/snitchwatch-endpoint-events
 StateDirectoryMode=0700
 UMask=0077
 Restart=on-failure

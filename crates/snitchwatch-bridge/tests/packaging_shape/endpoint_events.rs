@@ -482,6 +482,7 @@ fn nft_table_lets_only_root_connect_to_the_listener() {
     );
 }
 
+const WORK_DIR: &str = "/var/lib/rsyslog/snitchwatch-endpoint-events";
 const LISTENER_UNIT: &str = "packaging/endpoint-events/snitchwatch-endpoint-events.service";
 
 /// The `Key=` values of a unit's active lines, split on whitespace.
@@ -558,10 +559,15 @@ fn listener_is_a_separate_rsyslog_instance_bound_to_the_table() {
         param(&global, "abortOnUncleanConfig").as_deref(),
         Some("on")
     );
+    assert_eq!(param(&global, "workDirectory").as_deref(), Some(WORK_DIR));
+    // codex round 3: under /var/lib/rsyslog, so it carries rsyslog's own
+    // SELinux label (syslogd_var_lib_t), and the unit's StateDirectory is
+    // the same directory.
     assert_eq!(
-        param(&global, "workDirectory").as_deref(),
-        Some("/var/lib/snitchwatch-endpoint-events")
+        unit_values(&body, "StateDirectory"),
+        ["rsyslog/snitchwatch-endpoint-events"]
     );
+    assert_eq!(unit_values(&body, "StateDirectoryMode"), ["0700"]);
     let modules: Vec<String> = statements(&active, "module")
         .iter()
         .filter_map(|body| param(body, "load"))
@@ -630,7 +636,10 @@ fn path_gate_accepts_the_daemons_kernel_and_comm_values() {
     let active = rsyslog_active();
     let ruleset = ruleset_block(&active);
     assert!(ruleset.contains("$!Event!process_path == \"Kernel connection\""));
-    assert!(ruleset.contains("re_match($!Event!process_path, \"^[[:print:]]{1,15}\\$\")"));
+    // comm by its byte length only (codex round 3): a character class would
+    // drop a comm holding a tab; jsonf escapes whatever it holds.
+    assert!(ruleset.contains("or strlen($!Event!process_path) <= 15)"));
+    assert!(!ruleset.contains("[[:print:]]"));
     assert!(ruleset.contains("re_match($!Event!protocol, \"^(tcp|udp|udplite|sctp|icmp)6?\\$\")"));
     // uint32 by pattern: a RainerScript number literal can't hold 4294967295.
     assert!(ruleset.contains("|429496729[0-5])\\$\")"));
@@ -698,6 +707,26 @@ fn nothing_shipped_enables_a_logger() {
 /// The README's procedure edits the 0600, root-only daemon config the same
 /// way as "Restoring the allow default": built and validated as root, swapped
 /// in only on success, and the daemon restarted by its Fedora unit name.
+/// codex round 3: on a fresh install the README creates the work directory
+/// (root, 0700) and restores SELinux labels BEFORE the first `-N1`, and its
+/// install steps are marked so verify.sh runs them verbatim, in order.
+#[test]
+fn readme_creates_and_labels_the_work_dir_before_the_config_check() {
+    let body = read(README);
+    let marker = |name: &str| {
+        body.find(&format!("<!-- verify.sh: {name} -->"))
+            .unwrap_or_else(|| panic!("README has no `{name}` snippet"))
+    };
+    let (prepare, check, start) = (marker("prepare"), marker("check"), marker("start"));
+    assert!(prepare < check && check < start, "snippets out of order");
+    let prepare_block = &body[prepare..check];
+    assert!(prepare_block.contains(&format!("install -d -m 0700 {WORK_DIR}")));
+    let label = prepare_block.find("restorecon -RFv").expect("restorecon");
+    assert!(prepare_block[label..].contains(WORK_DIR));
+    assert!(prepare_block[label..].contains("/etc/pki/snitchwatch-endpoint-events"));
+    assert!(body[check..start].contains("rsyslogd -N1 -f"));
+}
+
 #[test]
 fn readme_merges_atomically_as_root_and_restarts_the_fedora_unit() {
     let body = read(README);
@@ -720,6 +749,10 @@ fn readme_merges_atomically_as_root_and_restarts_the_fedora_unit() {
         "reported by this host",
         "debug",
         "Server.Loggers",
+        "restorecon -RFv",
+        "semanage port -l | grep -w",
+        "semanage port -a -t syslogd_port_t -p tcp",
+        "6514",
     ] {
         assert!(body.contains(needle), "README missing `{needle}`");
     }

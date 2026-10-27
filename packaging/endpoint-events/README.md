@@ -218,35 +218,72 @@ Do this as root, from a checkout of this repository (the merge reads
    | Placeholder | Value |
    | ----------- | ----- |
    | `@VIGIE_ADDRESS@` | Vigie's IP address (an IP, so rsyslog needs no DNS under `deny`) |
-   | `@VIGIE_PORT@` | Vigie's TLS syslog port, e.g. `6514` |
+   | `@VIGIE_PORT@` | Vigie's TLS syslog port: `6514` (syslog over TLS) unless Vigie says otherwise; see the SELinux note below |
    | `@VIGIE_CERT_NAME@` | the name in Vigie's certificate (checked by `x509/name`) |
    | `@HOST_ID@` | a label for this computer, at most 64 characters; informational only (Vigie identifies the host by its client certificate) |
 
+   First the instance's work directory (rsyslog's `-N1` needs it to exist)
+   and the SELinux labels. The directory is under `/var/lib/rsyslog` so it
+   gets rsyslog's own label (`syslogd_var_lib_t`); `restorecon` applies it,
+   and the certificates' `cert_t`, to anything you created by hand:
+
+   <!-- verify.sh: prepare -->
+   ```bash
+   sudo install -d -m 0700 /var/lib/rsyslog/snitchwatch-endpoint-events
+   sudo install -D -m 0644 packaging/endpoint-events/snitchwatch-endpoint-events.conf \
+     /etc/snitchwatch-endpoint-events/rsyslog.conf
+   sudo restorecon -RFv /var/lib/rsyslog/snitchwatch-endpoint-events \
+     /etc/pki/snitchwatch-endpoint-events /etc/snitchwatch-endpoint-events
+   ```
+
+   Fill the placeholders (`sudoedit /etc/snitchwatch-endpoint-events/rsyslog.conf`),
+   then check:
+
+   <!-- verify.sh: check -->
    ```bash
    c=/etc/snitchwatch-endpoint-events/rsyslog.conf
-   sudo install -D -m 0644 packaging/endpoint-events/snitchwatch-endpoint-events.conf "$c"
-   sudoedit "$c"                          # fill @...@
-   sudo grep -n '@[A-Z_]*@' "$c"          # must print nothing
+   sudo grep -n '@[A-Z_]*@' "$c" && echo "fill these placeholders first" && false
    sudo rsyslogd -N1 -f "$c"              # must report no errors
    ```
+
+   **SELinux and Vigie's port.** Under enforcing SELinux, rsyslog may connect
+   out only to ports labelled for syslog. `6514` is (`syslog_tls_port_t`), so
+   the default needs nothing. For any other port, check it first:
+
+   ```bash
+   sudo semanage port -l | grep -w 7514   # your port
+   ```
+
+   If it prints nothing, the port is unassigned: label it with
+   `sudo semanage port -a -t syslogd_port_t -p tcp 7514`. If it's already
+   assigned to another type, don't relabel it; ask Vigie to use `6514` or
+   another free port. Without this the listener runs but nothing reaches Vigie
+   (`ausearch -m avc` shows the `name_connect` denial).
 
 3. **Install and start the table and the listener**, before the daemon starts
    logging to it.
 
+   <!-- verify.sh: start -->
    ```bash
    sudo install -D -m 0644 packaging/endpoint-events/snitchwatch-endpoint-events.nft \
      /etc/nftables/snitchwatch-endpoint-events.nft
    sudo install -m 0644 packaging/endpoint-events/snitchwatch-endpoint-events-nft.service \
      packaging/endpoint-events/snitchwatch-endpoint-events.service /etc/systemd/system/
+   sudo restorecon -Fv /etc/nftables/snitchwatch-endpoint-events.nft \
+     /etc/systemd/system/snitchwatch-endpoint-events-nft.service \
+     /etc/systemd/system/snitchwatch-endpoint-events.service
    sudo systemctl daemon-reload
    sudo systemctl enable --now snitchwatch-endpoint-events-nft.service \
      snitchwatch-endpoint-events.service
    sudo nft list table inet snitchwatch_endpoint_events   # two output and two input rejects
    sudo ss -ltnp 'sport = :514'   # one rsyslogd, on 127.0.0.1:514 only
-   bash -c 'exec 3<>/dev/tcp/127.0.0.1/514' && echo "OPEN TO USERS: stop" || echo "refused: good"
    ```
 
-   The last line runs as you, not root, and must print `refused: good`.
+   Then, as yourself (not root), this must print `refused: good`:
+
+   ```bash
+   bash -c 'exec 3<>/dev/tcp/127.0.0.1/514' && echo "OPEN TO USERS: stop" || echo "refused: good"
+   ```
 
    How the two units keep the listener safe:
    - **It needs the table.** The listener unit `BindsTo=` and is `After=` the
@@ -272,10 +309,9 @@ Do this as root, from a checkout of this repository (the merge reads
    - `sudo ausearch -m avc -ts recent` shows an SELinux denial. Fedora's policy
      allows rsyslog to bind TCP 514 (see "Why port 514" above), so a denial
      means this host's policy differs; stop and report it rather than
-     relabelling the port. This instance's state directory
-     (`/var/lib/snitchwatch-endpoint-events`) is not labelled for rsyslog; it
-     holds nothing with memory-only queues, but a denial on it is a sign to
-     report too (unverified under enforcing mode).
+     relabelling the port. A denial on
+     `/var/lib/rsyslog/snitchwatch-endpoint-events` or the certificates means
+     the `restorecon` in step 2 was skipped; rerun it.
 
 4. **Add the logger to the daemon config.** First check what's already there:
    every other entry in `Server.Loggers` gets the full event, environment
@@ -406,6 +442,9 @@ the container's own namespaces, so nothing touches the host's firewall or `/etc`
   `route_localnet` veth is refused by the input rule, with a positive control
   (accepted without it). If the container can't build that path, the run
   prints `UNREPRODUCED` instead.
+- **Fresh install.** The README's own `prepare` and `check` snippets run first,
+  in order, with nothing pre-created, so a step that depends on a later one
+  fails here.
 - **Broken config.** `rsyslogd -N1` passes on the filled config. A config with
   its ruleset name misspelt fails `-N1`, and `rsyslogd` refuses to start with
   it (`abortOnUncleanConfig`) without ever opening port 514.
@@ -426,8 +465,9 @@ the container's own namespaces, so nothing touches the host's firewall or `/etc`
 - **README snippets.** The merge and way-back snippets above (marked
   `verify.sh:`) run against a copy of the packaged daemon config.
 
-**Phase 2, the same image booted with systemd,** with the units installed as
-in step 3:
+**Phase 2, the same image booted with systemd,** installed by running the
+README's `prepare`, `check` and `start` snippets verbatim on a fresh system
+(`sudo` and `restorecon` stubbed; SELinux is off in the container):
 
 - a broken table file means the listener never starts;
 - starting the listener brings the table up first;
