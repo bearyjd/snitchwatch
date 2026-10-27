@@ -81,14 +81,31 @@ Item {
         keyNavigationEnabled: true
         Keys.onReturnPressed: pane.openCurrent()
         Keys.onEnterPressed: pane.openCurrent()
-        // Q01: the Menu key or Shift+F10 opens the selected row's actions
-        // (also from a focused button in it: keys bubble up to the list).
+        // Q01: the Menu key or Shift+F10 opens a row's actions: the row
+        // whose button has focus (keys bubble up to the list), else the
+        // selected row; nothing with no row. Below the row; closing the menu
+        // gives focus back (Popup).
+        // Focus on the list itself: on the selected row, never on a button
+        // the list's focus scope last held.
+        function focusCurrent() {
+            (list.currentItem || list).forceActiveFocus(Qt.BacktabFocusReason);
+        }
+        function rowOf(item) {
+            for (let it = item; it; it = it.parent) {
+                if (it.parent === list.contentItem) return it;
+            }
+            return null;
+        }
         Keys.onPressed: event => {
             const menuKey = event.key === Qt.Key_Menu
                 || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier));
-            if (menuKey && list.currentItem) {
-                // Below the row; closing the menu gives focus back (Popup).
-                pane.page.connectionActions.open(list.currentItem, 0, list.currentItem.height);
+            // A delegate itself holding the list's focus is not a button in
+            // it: then the selected row counts.
+            const focused = list.Window.activeFocusItem;
+            const inRow = list.rowOf(focused);
+            const row = !menuKey ? null : inRow && inRow !== focused ? inRow : list.currentItem;
+            if (row) {
+                pane.page.connectionActions.open(row, 0, row.height);
                 event.accepted = true;
             }
         }

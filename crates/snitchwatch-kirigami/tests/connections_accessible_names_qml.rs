@@ -94,6 +94,16 @@ Window {
         return same;
     }
     function settled() { return probe.menu.opened || !probe.menu.visible; }
+    function find(root, pred) {
+        if (!root) return null;
+        if (pred(root)) return root;
+        const kids = root.children || [];
+        for (let i = 0; i < kids.length; ++i) {
+            const f = probe.find(kids[i], pred);
+            if (f) return f;
+        }
+        return null;
+    }
     function headerOrNull(level, key) {
         for (let i = 0; i < probe.list.count; ++i) {
             const item = probe.list.itemAtIndex(i);
@@ -124,7 +134,9 @@ Window {
             probe.checked++;
             probe.seen["role " + role] = (probe.seen["role " + role] || 0) + 1;
             const name = String(item.Accessible.name || "").trim();
-            if (name.length < 2) probe.missing[probe.describe(item)] = where;
+            probe.names[name] = true;
+            const why = probe.unnamed(name, item, role);
+            if (why) probe.missing[probe.describe(item) + ": " + why] = where;
             // Its parts (a combo box's display field) are named by it.
             return;
         }
@@ -133,6 +145,22 @@ Window {
     }
     // Controls checked per sweep, by role.
     property var seen: ({})
+    property var names: ({})
+    // Words that name a kind of control, not this one.
+    readonly property var generic: ["button", "push button", "combobox", "combo box", "switch",
+        "checkbox", "check box", "menuitem", "menu item", "item", "textfield", "text field",
+        "text", "edit", "toolbutton", "tool button", "control"]
+    // Why `name` does not name the control, or "" when it does.
+    function unnamed(name, item, role) {
+        if (name.length < 2) return "no name";
+        if (probe.generic.indexOf(name.toLowerCase()) >= 0) return "a generic name";
+        if (role === Accessible.ComboBox) {
+            const value = String(item.displayText || "").trim();
+            if (name === value) return "only its value, no label";
+            if (/:\s*$/.test(name)) return "a label with an empty value";
+        }
+        return "";
+    }
     function sweep(where) {
         const before = probe.checked;
         probe.walk(probe.contentItem, where);
@@ -195,8 +223,27 @@ Window {
                     probe.sweep("connection menu");
                     probe.menu.close();
                     probe.expect(probe.checked > 20, "the guard saw too few controls: " + JSON.stringify(probe.seen));
+                    // The names identified as needed, exactly.
+                    const expected = ["Scope: This host only", "Duration: Forever", "Actions for this group",
+                        "Grouped", "Pending only", "Denied only", "From now", "Full list", "Show all",
+                        "Expand", "Dismiss", "Allow all (1)", "Deny all (1)", "Copy host",
+                        "Expand / collapse group", "Group connections by app"];
+                    const absent = expected.filter(n => !probe.names[n]);
+                    probe.expect(absent.length === 0, "expected names not found: " + JSON.stringify(absent));
+                    probe.expect(Object.keys(probe.names).some(n => n.indexOf("Search connections.") === 0),
+                                 "the search field lost its name");
+                    // A choice and a model change: names follow the values.
+                    const scope = probe.find(page, it => String(it.Accessible && it.Accessible.name).indexOf("Scope:") === 0);
+                    scope.currentIndex = 1;
+                    probe.send({ action: "insertConnectionRows", rows: [probe.row("n", "new.example.org", null, null)] });
+                } else if (probe.phase === 9) {
+                    probe.names = {};
+                    probe.sweep("after a change");
+                    probe.expect(probe.names["Scope: Any host on this domain"] === true,
+                                 "the Scope name did not follow its value: "
+                                 + JSON.stringify(Object.keys(probe.names).filter(n => n.indexOf("Scope") === 0)));
                     const bad = Object.keys(probe.missing);
-                    probe.expect(bad.length === 0, bad.length + " interactive controls have no Accessible.name: "
+                    probe.expect(bad.length === 0, bad.length + " interactive controls lack a meaningful Accessible.name: "
                         + bad.map(k => k + " (" + probe.missing[k] + ")").join("; "));
                     done = true;
                 }

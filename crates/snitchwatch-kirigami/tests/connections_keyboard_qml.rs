@@ -5,7 +5,13 @@
 //!     every action in it, Enter fires one, Escape closes it, and focus goes
 //!     back to where it was.
 //!   * From a selected group header, Tab goes to that header's bulk actions
-//!     (Allow all, Deny all) in order, Shift+Tab goes back, Space fires.
+//!     (Allow all, Deny all) in order, Shift+Tab goes back (from the first
+//!     one, back to the list), Space fires.
+//!   * The menu opens for the row whose button has focus, not the selected
+//!     one; it does not open with no row, from the search field, or from the
+//!     decision prompt in the inspector.
+//!   * Focus stays in the list when the focused row is removed or collapses
+//!     into the background group.
 //!
 //! Each phase waits on a readiness gate (the #237 pattern in
 //! `connections_row_click_qml.rs`) instead of a fixed tick, so it holds under
@@ -56,9 +62,16 @@ Window {
             return true;
         }
     }
+    // The page's title row (only a page stack draws its `titleDelegate`).
+    ConnectionsHeader {
+        id: header
+        width: parent.width
+        model: model
+        title: "Connections"
+    }
     ConnectionsPage {
         id: page
-        anchors.fill: parent
+        anchors { top: header.bottom; left: parent.left; right: parent.right; bottom: parent.bottom }
         bridgeFeed: feedStub
         model: ConnectionsModel { id: model }
     }
@@ -128,6 +141,24 @@ Window {
         const item = probe.list.itemAtIndex(index);
         return item && item.isGroupHeader ? item : null;
     }
+    function find(root, pred) {
+        if (!root) return null;
+        if (pred(root)) return root;
+        const kids = root.children || [];
+        for (let i = 0; i < kids.length; ++i) {
+            const f = probe.find(kids[i], pred);
+            if (f) return f;
+        }
+        return null;
+    }
+    // On the list itself: the list, or the selected row's delegate, has focus.
+    function onList() {
+        const f = probe.focused();
+        return f === probe.list || (f !== null && f === probe.list.currentItem);
+    }
+    function inList() { return probe.list.activeFocus || probe.list.rowOf(probe.focused()) !== null; }
+    function rowAt(i) { return probe.list.itemAtIndex(i); }
+    function top() { tc.keyClick(Qt.Key_Down); for (let i = 0; i < 5; ++i) tc.keyClick(Qt.Key_Up); }
     function text(item) { return item && item.text !== undefined ? String(item.text) : ""; }
     function inside(item, ancestor) {
         for (let it = item; it; it = it.parent) if (it === ancestor) return true;
@@ -145,6 +176,10 @@ Window {
         case 4: case 8: case 13: return probe.menuOpen() ? "" : "menu open";
         case 5: case 9: case 14: return probe.menuClosed() ? "" : "menu closed";
         case 11: return probe.stable("h1", probe.headerAt(1)) ? "" : "second group header";
+        case 16: return probe.list.count === 3 && probe.stable("f2", probe.rowAt(2)) ? "" : "three flat rows";
+        case 18: return probe.menuOpen() ? "" : "menu open";
+        case 23: return probe.settled() && probe.list.count === 2 ? "" : "row removed";
+        case 25: return probe.list.count === 2 && probe.stable("c1", probe.rowAt(1)) ? "" : "collapsed snapshot";
         default: return probe.settled() ? "" : "popup transition";
         }
     }
@@ -168,9 +203,15 @@ Window {
                     model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows",
                         rows: [probe.pending("a", "x.example.com"), probe.pending("b", "y.example.com")] }));
                 } else if (probe.phase === 1) {
-                    // Tab, and only Tab, brings focus to the list.
-                    for (let i = 0; i < 40 && !probe.list.activeFocus; ++i) tc.keyClick(Qt.Key_Tab);
-                    probe.expect(probe.list.activeFocus, "Tab never reached the connections list");
+                    // From a control before the list, Tab, and only Tab,
+                    // brings focus to the list.
+                    const start = probe.find(page, it => probe.text(it) === "Pending only");
+                    start.forceActiveFocus();
+                    probe.expect(start.activeFocus && !probe.list.activeFocus, "could not start before the list");
+                    let presses = 0;
+                    for (; presses < 40 && !probe.onList(); ++presses) tc.keyClick(Qt.Key_Tab);
+                    probe.expect(presses > 0 && probe.onList(),
+                                 "Tab never reached the connections list (" + presses + " presses)");
                 } else if (probe.phase === 2) {
                     // A pending row may already be selected; arrows go to the top.
                     tc.keyClick(Qt.Key_Down);
@@ -257,6 +298,89 @@ Window {
                                  "Enter on Expand / collapse did nothing: " + probe.list.count);
                     probe.expect(probe.focused() === probe.focusBefore,
                                  "focus did not return to the bulk button: " + probe.focused());
+                } else if (probe.phase === 15) {
+                    model.setGroupedMode(false);
+                } else if (probe.phase === 16) {
+                    probe.expect(probe.inList(), "regrouping left focus nowhere: " + probe.focused());
+                    // The list itself focused, no row selected.
+                    probe.list.forceActiveFocus();
+                    probe.list.currentIndex = -1;
+                    tc.keyClick(Qt.Key_Menu);
+                    tc.keyClick(Qt.Key_F10, Qt.ShiftModifier);
+                } else if (probe.phase === 17) {
+                    probe.expect(!probe.menu.visible, "the menu opened with no row selected");
+                    // Select a, then Tab on into b's buttons: focus and
+                    // selection on different rows.
+                    probe.top();
+                    tc.keyClick(Qt.Key_Tab);
+                    for (let i = 0; i < 10 && !probe.inside(probe.focused(), probe.rowAt(1)); ++i)
+                        tc.keyClick(Qt.Key_Tab);
+                    probe.expect(probe.list.currentIndex === 0 && probe.inside(probe.focused(), probe.rowAt(1)),
+                                 "could not focus b's buttons with a selected");
+                    tc.keyClick(Qt.Key_Menu);
+                } else if (probe.phase === 18) {
+                    probe.expect(probe.actions.target && probe.actions.target.rowId === "b",
+                                 "the menu opened for the selected row, not the focused one: "
+                                 + (probe.actions.target ? probe.actions.target.rowId : "none"));
+                    tc.keyClick(Qt.Key_Escape);
+                } else if (probe.phase === 19) {
+                    // Shift+Tab from a first tab stop goes back to the list.
+                    tc.keyClick(Qt.Key_Backtab, Qt.ShiftModifier);
+                    probe.expect(probe.onList(), "Shift+Tab from b's Allow did not reach the list: "
+                                 + probe.text(probe.focused()));
+                    tc.keyClick(Qt.Key_Tab);
+                    probe.expect(probe.inside(probe.focused(), probe.rowAt(0)), "Tab did not reach a's Allow: "
+                                 + probe.focused() + " '" + probe.text(probe.focused()) + "' current "
+                                 + probe.list.currentIndex + " row0 " + (probe.rowAt(0) && probe.rowAt(0).rowId));
+                    tc.keyClick(Qt.Key_Backtab, Qt.ShiftModifier);
+                    probe.expect(probe.onList(), "Allow, then Shift+Tab, did not reach the list: " + probe.focused());
+                    // The search field takes neither shortcut.
+                    const search = probe.find(header, it => it.placeholderText !== undefined);
+                    tc.mouseClick(search, 5, 5);
+                    probe.expect(search.activeFocus, "could not focus the search field");
+                    tc.keyClick(Qt.Key_Menu);
+                    tc.keyClick(Qt.Key_F10, Qt.ShiftModifier);
+                } else if (probe.phase === 20) {
+                    probe.expect(!probe.menu.visible, "the menu opened from the search field");
+                    // Nor does the decision prompt in the inspector.
+                    const scope = probe.find(page, it => it.Accessible && String(it.Accessible.name).indexOf("Scope:") === 0);
+                    probe.expect(scope !== null, "no decision prompt in the inspector");
+                    if (scope) scope.forceActiveFocus();
+                    tc.keyClick(Qt.Key_Menu);
+                    tc.keyClick(Qt.Key_F10, Qt.ShiftModifier);
+                } else if (probe.phase === 21) {
+                    probe.expect(!probe.menu.visible, "the menu opened from the decision prompt");
+                    // A focused row that goes away.
+                    probe.list.forceActiveFocus();
+                    probe.top();
+                    tc.keyClick(Qt.Key_Tab);
+                    probe.expect(probe.inside(probe.focused(), probe.rowAt(0)), "could not focus a's Allow");
+                } else if (probe.phase === 22) {
+                    model.applyServerMessageJson(JSON.stringify({ action: "removeConnectionRows", ids: ["a"] }));
+                } else if (probe.phase === 23) {
+                    probe.expect(probe.onList(), "removing the focused row did not put focus on the list: " + probe.focused());
+                    // A snapshot whose rules collapse a handled row.
+                    model.applyServerMessageJson(JSON.stringify({ action: "clearConnectionRows" }));
+                    model.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                        probe.pending("b", "y.example.com"),
+                        probe.pending("d", "w.example.com"),
+                        Object.assign(probe.pending("x", "n.example.com"),
+                                      { action: "allow", matchedRule: "snitchwatch-default-app" })] }));
+                    model.applyServerMessageJson(JSON.stringify({ action: "setRules", rules: [
+                        { name: "snitchwatch-default-app", enabled: true, action: "allow", toggleable: true }] }));
+                } else if (probe.phase === 24) {
+                    // (gate 25 waits for the collapsed list)
+                } else if (probe.phase === 25) {
+                    if (!probe.inList()) probe.list.forceActiveFocus();
+                    probe.top();
+                    tc.keyClick(Qt.Key_Tab);
+                    probe.expect(probe.inside(probe.focused(), probe.rowAt(0)), "could not focus b's Allow");
+                    model.applyServerMessageJson(JSON.stringify({ action: "updateConnectionRows", rows: [
+                        Object.assign(probe.pending("b", "y.example.com"),
+                                      { action: "allow", matchedRule: "snitchwatch-default-app" })] }));
+                } else if (probe.phase === 26) {
+                    probe.expect(model.backgroundCount === 2, "b did not collapse: " + model.backgroundCount);
+                    probe.expect(probe.onList(), "a focused row collapsing did not put focus on the list: " + probe.focused() + " " + probe.text(probe.focused()));
                     done = true;
                 }
                 probe.phase++;

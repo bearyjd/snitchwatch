@@ -38,7 +38,32 @@ change. Change only what keyboard and screen-reader use need; no redesign.
     are not counted as controls.
 - Both use the readiness-gate pattern from `connections_row_click_qml.rs`.
 
+## Review fixes, round 1 (2026-10-27)
+- The menu opens for the row whose button has focus. Focus on a delegate
+  itself, the list's leftover focus-scope child, counts as the selected
+  row. Nothing opens with no row.
+- Shift+Tab from a row's first tab stop goes back to the list, onto the
+  selected row (`focusCurrent`), never back to a button the focus scope
+  last held.
+- When the focused row goes away (answered and removed, or collapsed into
+  the background group) while other rows remain, focus lands on the list.
+  The list's focus scope already does this; the probe pins it.
+- Tests:
+  - focus and selection on different rows;
+  - Allow, Shift+Tab, the list;
+  - no shortcut from the search field, from the inspector's decision
+    prompt, or with no selection;
+  - the focused row removed, or collapsed;
+  - Tab reaching the list from a control before it.
+- The guard asserts the exact expected names, rejects generic names and
+  value-only combo box names, and checks again after a choice and a model
+  change.
+
 ## Not covered
 - Other pages (Rules, Blocklists, Profiles, Settings, Learning, Map page).
+- When the focused row was the last one shown, Qt moves focus on to the
+  next control (the inspector's buttons); not changed here.
+- Modal sheets opened from this page (Make a rule, Simulate): the shortcuts
+  are not tested while one is open.
 - Real screen-reader output (Orca), which needs a desktop session. The guard
   checks names at Qt's accessibility layer, not what Orca speaks.

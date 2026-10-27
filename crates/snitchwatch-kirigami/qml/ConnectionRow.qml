@@ -270,6 +270,7 @@ Item {
 
             Controls.Button {
                 id: batchAllowButton
+                Keys.onBacktabPressed: row.ListView.view.focusCurrent()
                 flat: true
                 enabled: !row.submitted
                 text: "Allow all (" + row.groupPending + ")"
@@ -312,6 +313,7 @@ Item {
 
             Controls.Button {
                 id: rowAllowButton
+                Keys.onBacktabPressed: row.ListView.view.focusCurrent()
                 flat: true
                 enabled: !row.submitted
                 text: !row.isGroupHeader && row.pending ? verdictHelper.allowLabel(row.rowId) : "Allow"
