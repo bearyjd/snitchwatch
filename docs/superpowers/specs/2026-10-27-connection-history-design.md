@@ -24,8 +24,8 @@ limits in [D8](#d8-reading-history) are part of this design.
 | D2 | Default | **Off.** Enabled only by an explicit user action, consent stored in the bridge |
 | D3 | Store | One SQLite file in the bridge state directory; strict 0700 directory, 0600 files, via `sqlite_file::open_owner_only` |
 | D4 | What is stored | A fixed field allowlist. Command line, `process_args`, `process_env` and rule conditions on them are never stored. **Raw executable and destination strings are stored and may contain user-chosen text; this is a stated limit, not a guarantee** |
-| D5 | Retention and disk | Age (default 30 days) and a 64 MiB total budget split into main-file, journal and slack shares; page-bounded transactions; no full VACUUM; oldest first; admission quotas against floods |
-| D6 | Gaps | Session ledger with a durable coverage watermark; every discontinuity is an explicit gap; permanently unobservable traffic is labelled as such |
+| D5 | Retention and disk | Age (default 30 days) and a 64 MiB total budget split into main-file, journal and slack shares; invariants S1-S5 (field caps, page-bounded transactions, no full VACUUM); oldest first; admission quotas against floods |
+| D6 | Gaps | Session ledger; invariant: coverage never passes an uncommitted item; every discontinuity is an explicit gap; permanently unobservable traffic is labelled as such |
 | D7 | Rule identity | Rule name + semantic hash + a redacted display snapshot (hash and snapshot are separate); captured by a per-prompt outcome guard for interactive decisions; `sensitive` is hashed |
 | D8 | Reads | Paged, byte-bounded, bridge-wide admission, read-only opener, off the verdict path |
 | D9 | Encryption at rest | Not in v1; rely on file permissions and say so |
@@ -212,40 +212,24 @@ is a protocol change and is open question 6; until approved it is `gui`.
 Two independent limits; whichever trips first evicts.
 
 - **Age:** default 30 days; choices 7 / 30 / 90. No "forever".
-- **Disk:** a single **total budget** `B` for everything the feature may put
-  on disk (default 64 MiB; choices 16 / 64 / 256 MiB; ceiling 256 MiB),
-  divided so each part is enforced where it can actually be:
+- **Disk: invariants.** `B` is a single total budget for everything the
+  feature may put on disk (default 64 MiB; choices 16 / 64 / 256 MiB; ceiling
+  256 MiB). Each invariant has one enforcement mechanism and one test; where a
+  number is not yet known, the implementation must prove it (see open
+  question 2) and this design does not guess it.
 
-| Share of `B` | Purpose | Enforced by |
-|--------------|---------|-------------|
-| 70% | Main database file | `PRAGMA max_page_count` set from this share, plus a high-water check on `page_count × page_size` |
-| 20% | Rollback journal | `journal_mode=DELETE`. **`journal_size_limit` only trims the journal after a commit and does not cap an active transaction**, so the bound is on dirty pages per transaction (below) |
-| 10% | Slack and reserved ledger space | Never allocated to events; 2% of `B` is reserved for gap/session rows (D6) |
+| # | Invariant | Enforcement mechanism | Test |
+|---|-----------|-----------------------|------|
+| S1 | Every persisted field has a fixed maximum byte length, so the largest possible row, index entry and snapshot are known from the schema | One field-cap table in the insert API (`rule_name`, `process_path`, `dst_host`, rule snapshot parts and every other column); longer values are truncated with a marker or the row is refused; `page_size` is pinned (4096) at creation and verified on open | Property test: for every column, a value at cap+1 never reaches the file at more than cap |
+| S2 | No write transaction can modify more pages than the journal share can hold | The writer sizes each transaction from S1's worst-case pages **per row including indexes, snapshot rows and orphan-snapshot cleanup**, and commits when the page budget is reached. **The implementation must prove the per-row page constant from the schema and caps; it is not asserted here.** If it cannot be proved, fall back to reserving headroom for a full rollback journal (main-file share ≤ B/2) | Fault test: worst-case rows (all fields at cap) through insert, eviction, snapshot cleanup and incremental vacuum; assert pages modified per transaction never exceeds the budget |
+| S3 | main file + maximum journal + slack ≤ B | `max_page_count` for the main file; journal = S2's page budget × page size; 10% slack never allocated; 2% reserved for the ledger (D6) | Measured simultaneous file sizes under S2's worst-case workload stay ≤ B (measurement validates the invariant; it is not the enforcement) |
+| S4 | Freed space returns to the filesystem without a full rewrite | `auto_vacuum=INCREMENTAL`, `incremental_vacuum(N)` in steps that obey S2. **No full `VACUUM`**: its temporary space cannot fit in B | Delete 90% of rows; file shrinks; no step exceeds S2 |
+| S5 | Deleted content is not left readable in the file | `secure_delete=ON`; clear-all recreates the file (H02) instead of deleting inside it | Canary scan after delete and after clear |
 
-  **Transaction bound (the actual journal cap).** A rollback journal holds at
-  most one copy of each page the transaction modifies, so its size is bounded
-  by pages touched. Every write transaction is therefore limited by *pages*,
-  not rows: at most **512 modified pages** (2 MiB at 4 KiB pages, within the
-  20% share even at the 16 MiB budget). A row can touch its table leaf,
-  overflow pages (rows up to about 8.5 KiB) and each index; using a worst-case
-  of 8 pages per row, inserts and eviction deletes are chunked to **64 rows
-  per transaction**, each chunk committing before the next. Incremental
-  vacuum runs as `incremental_vacuum(N)` with N pages per transaction under
-  the same bound. The verification plan measures the real peak journal and
-  fails if a chunk exceeds the bound.
-
-  **Freelist and shrinking.** `auto_vacuum=INCREMENTAL` returns freed pages in
-  bounded steps so `page_count` reflects reality. Eviction decisions use
-  `page_count` for the high-water mark and `(page_count − freelist_count)` for
-  live data; the incoming batch size is added before the check.
-
-  **No full `VACUUM`.** It needs temporary space about equal to the database
-  and cannot fit inside `B`, so it is dropped. Deleted content is removed by
-  `secure_delete` (zeroing) and incremental vacuum. **Clear-all does not use
-  a delete transaction at all** (it would journal nearly the whole database):
-  under the H02 barrier the bridge closes the database, unlinks it and its
-  sidecars, and recreates an empty one, so nothing is journalled.
-- **Eviction order:** oldest `ts_ms` first, in bounded chunks. If a chunk
+  `journal_size_limit` only trims the journal after a commit and is not
+  relied on for any of the above.
+- **Eviction order:** per-process byte share first (admission, below), then
+  oldest `ts_ms` first, in chunks obeying S2. If a chunk
   does not bring usage under the high-water mark after a fixed number of
   rounds (default 3), recording pauses with a `write-failed (cap)` gap and
   retries with exponential backoff; it never grows past the budget and never
@@ -261,8 +245,15 @@ Two independent limits; whichever trips first evicts.
     **duplicate compression only** and is not claimed as a rate cap.
   - A global admission budget (default 200 events/s sustained, burst 1,000)
     and a per-`process_path` token bucket (default 20 events/s, burst 100).
-  - A per-process share of retained rows (default 25%): beyond it, that
-    process's *oldest* rows are evicted first, before anyone else's.
+  - **A per-process share of retained *bytes*, not rows (default 25%).**
+    Large records must not let one process fill the budget while staying under
+    a row share. The share counts the process's events **and the rule
+    snapshots attributable only to it**. It is enforced **before** global
+    eviction: once a process is over its byte share, its own oldest rows (and
+    snapshots that become unreferenced) are evicted first, and only then is any
+    other process's data touched. Test: a mixed-size flood of large records
+    from one process cannot cause eviction of another process's small records
+    while the flooder is over its share.
   - Every refusal increments an in-memory `admission-drop` counter, and drops
     are never silent, but the bookkeeping is itself bounded: the token-bucket
     map holds at most **1,024 entries** and expires entries idle for 60 s
@@ -280,25 +271,34 @@ Two independent limits; whichever trips first evicts.
 History is only honest if its holes are visible.
 
 **Session ledger.** `sessions(start_ms, end_ms, end_kind)` plus
-`meta.watermark_ms`, a **durable coverage watermark** advanced *only inside the
-same transaction* that commits a batch (and by a heartbeat commit every 30 s
-when idle). Events still in the queue are not covered by the watermark, so a
-crash can never imply coverage for events that were never written.
+`meta.watermark_ms`, the durable coverage watermark.
 
-**The watermark is capped at the oldest uncaptured source event.** Prompts
-are captured at settlement, so a prompt that is still waiting has not been
-written yet. The watermark committed with any batch or heartbeat is
-`min(commit time, arrival time of the oldest prompt still pending or queued)`.
-A crash then reconstructs a gap that starts no later than that prompt's
-arrival, so a lost pending prompt falls inside a labelled gap instead of
-outside coverage. (The alternative of durably writing each pending prompt is
-heavier and writes before the final rule is known; it is not proposed.)
+**Invariant W1: coverage never advances past any accepted-but-uncommitted
+item.** An item is *accepted* when the bridge takes responsibility for it and
+*committed* when its durable event or gap row is written. The accepted
+uncommitted items are: queued daemon events, in-flight batches, pending
+prompts (guards), and **in-memory loss and drop counters** (admission drops,
+queue overflow, upstream-loss tallies). Enforcement: every accepted item takes
+a **pin** recording its arrival time in a single pin registry; the watermark
+written by any batch or heartbeat commit is `min(commit time, oldest pin)`,
+computed in the same transaction as the commit; a pin is released **atomically
+with** the commit of that item's durable event or gap row (same transaction),
+never earlier. A counter is flushed to its aggregated gap row and its pin
+released in one transaction. Test: kill -9 with (a) a queued daemon event,
+(b) a pending prompt, (c) an unflushed drop counter, each followed by a
+heartbeat commit; the reconstructed gap begins no later than the pinned
+item's arrival in every case.
 
-**Ledger bounds.** `gaps` and `sessions` together are capped at 5,000 rows.
-Adjacent gaps with the same cause are merged on write; gaps and sessions older
-than the oldest retained event are compacted into one `evicted` marker. The
-cap and merge rules use the reserved ledger space, so the ledger cannot be
-used to exhaust the database.
+**Invariant L1: the ledger is bounded in bytes and rows, with a defined
+overflow.** `gaps` and `sessions` are capped by a byte limit (the 2% reserve,
+S3) and a row count. Adjacent same-cause gaps merge on write; entries older
+than the oldest retained event compact into one `evicted` marker. When either
+ceiling is still exceeded (for example many recent, non-mergeable restarts),
+the **oldest recent entries are compacted into a single explicitly
+`uncertain` coverage span**: "coverage between X and Y is uncertain; N
+restarts/gaps occurred", which never claims continuity and loses only detail.
+Test: thousands of non-mergeable restarts keep the ledger within both limits
+and produce one uncertain span, never a silent loss of a gap.
 
 - Every time recording starts, the bridge compares against the previous
   session: a **clean stop** has an exact `end_ms`, so the gap from that
@@ -362,8 +362,21 @@ rule has since been edited or deleted.
   - one history event per prompt, keyed by the prompt's connection id;
   - `ts_ms` = prompt arrival (bridge clock), `decided_ts_ms` = terminal
     outcome time;
+  - **Invariant G1: eligibility and generation are fixed at acceptance.**
+    When the guard is created it captures (a) whether recording is enabled and
+    the consent record in force, and (b) the current generation. Both are kept
+    through settlement. At settlement the outcome is accepted only if the
+    captured generation equals the current one **and** recording is still
+    enabled under the same consent; otherwise the outcome is discarded, its
+    snapshot is never written, and its watermark pin is released under the
+    control gate (so a clear, or a disable then re-enable, can never be
+    repopulated by a prompt that was already waiting). A guard is also a
+    pending-item pin for W1 until it settles or is discarded. Test: clear, and
+    disable then re-enable, while prompts are still pending; after the
+    prompts settle, no row, snapshot or pin from before the control operation
+    exists.
   - **settled** when the guard records an outcome; only then is the event
-    queued, and until then the prompt pins the coverage watermark (D6);
+    queued (subject to G1).
   - **duplicates, never merged by guess.** A later ping event can describe the
     same connection (for example a persistent rule created by the reply), but
     the available fields (program, destination, port, protocol, rule name)
@@ -457,7 +470,7 @@ rule never rewrites stored events.
   get a permit immediately is refused with `busy` and is never queued. Permits
   are owned by the blocking worker and released only when that worker has
   actually exited, so a cancelled query still holds its slot until it stops.
-  This follows the pattern already used by the cache export
+  Readers are also part of the clear/disable gate (C1). This follows the pattern already used by the cache export
   (`bridge-cli/src/analysis_export.rs`, admission and response slots). Per
   connection, a new query or a disconnect cancels the previous one. A query has a 2 s time budget and
   returns partial-with-cursor on expiry.
@@ -477,23 +490,37 @@ rule never rewrites stored events.
 
 ## H02. Clear, preview, barrier, health
 
-**Barrier for disable and clear.** Writes and control operations are
-serialized through the single writer. Each queued item carries the current
-**generation**; a control operation (clear, disable-and-delete, retention
-change) first closes ingestion by incrementing the generation under the queue
-gate, so any event enqueued before it belongs to the old generation. The
-writer, on reaching the control message, **discards** every older-generation
-item (and its pending snapshots), then performs the delete, cleanup and
-file recreation or bounded chunked deletes, and only then acknowledges. Consequences: a batch accepted
-before the clear can never commit after it; "disabled" means no event of any
-generation can be written afterwards. Tested with a blocked writer and a
-non-empty queue.
+**Invariant C1: after a control operation is acknowledged, nothing from
+before it is readable or writable.** Writers *and* readers are covered by one
+control gate. Enforcement for disable, clear and retention change:
 
-- **Clear all** closes the database under the barrier, unlinks it and its
-  sidecars, and recreates it empty (no giant delete transaction, no journal
-  growth). The UI reports counts and bytes only after the bridge confirms; on
+1. Increment the generation under the queue gate (new events carry the new
+   generation; guards from before are handled by G1).
+2. **Close read admission** (D8 gate refuses new queries with `busy`),
+   **cancel and join every reader worker, and close every SQLite handle**,
+   including the read-only connection.
+3. The writer discards every older-generation queued item and its pending
+   snapshots and releases their pins.
+4. Only then perform the operation (below), and acknowledge after cleanup.
+5. **Invalidate** any already-produced response and GUI page of an older
+   generation: responses carry the generation, the bridge refuses to deliver a
+   stale one, and the GUI drops pages whose generation differs.
+
+Tests: blocked writer with a non-empty queue; a reader mid-query when clear
+arrives (its handle is closed before unlink, no deleted row is delivered
+afterwards); stale page after clear is dropped.
+
+- **Clear all** unlinks the database and sidecars and recreates it empty (no
+  giant delete transaction, no journal growth) **only after** step 1-3 above,
+  so no reader holds the old file. **Invariant C2: clear-all deletes only the
+  previewed set or fewer.** Under the same writer barrier as the deletion, the
+  bridge checks that no row exists above the previewed maximum row id and that
+  the previewed checksum still matches; if either fails nothing is deleted and
+  a fresh preview is required. (The alternative, falling back to bounded
+  deletion that preserves newer rows, is allowed instead of refusal; open
+  question 12.) The UI reports counts and bytes only after confirmation; on
   failure it says exactly what remains. Range delete and limit reduction use
-  the bounded 64-row chunks of D5 and snapshot cleanup.
+  bounded chunks obeying S2, plus snapshot cleanup.
 - **Retention preview** (for clear, a range delete, or lowering a limit):
   the bridge returns `N events from A to B, about X MB` plus an **expiring
   preview token** (60 s) bound to the generation, the maximum row id, and a
@@ -593,12 +620,12 @@ writes; copies outside the file are not reachable.
   assert that a canary placed in a *path* or *host* **does** appear (documenting
   the stated limit) so the limit cannot silently change either way.
 - **Allowlist test** that fails if a new field reaches the insert API.
-- **Budget tests** measuring the main file and the peak journal
-  simultaneously during inserts, chunked eviction, range delete, incremental
-  vacuum and clear-all; the total never exceeds `B`, no transaction modifies
-  more than 512 pages, and with 4 KiB paths a 64-row chunk stays within bound.
-  Freelist reclaim works. There is no maintenance peak outside `B` because
-  full `VACUUM` is not used.
+- **Invariant tests** S1-S5, W1, L1, G1, C1 and C2 as tabled above, each
+  adversarial (worst-case rows, kill -9, stale prompts, mid-query clear,
+  newer-row-after-preview), not only happy path.
+- **Budget tests** are the S1-S5 tests above; they measure main file and
+  journal together as a validation of the invariants, not as their
+  enforcement.
 - **Flood tests:** alternating-destination flood from one process cannot evict
   another application's history beyond its quota; drops are counted.
 - **Barrier tests:** blocked writer with a non-empty queue; clear/disable
@@ -625,7 +652,13 @@ writes; copies outside the file are not reachable.
    history there (D10). Per-uid rows with uid-scoped reads (needs an
    authorization design), or per-user-bridge only?
 2. **Numbers.** Confirm defaults: 30 days; 64 MiB total budget (ceiling
-   256 MiB); admission 200 events/s global, 20/s and 25% of rows per process.
+   256 MiB); admission 200 events/s global, 20/s per process and a 25% byte
+   share per process. The per-row page constant behind S2 and the field caps
+   behind S1 are not guessed here: the implementation must derive and prove
+   them from the schema, and if S2 cannot be proved the fallback is
+   reserving a full-database journal (main file ≤ half of B). Which cap
+   values to use for `rule_name`, `process_path` and `dst_host` is for the
+   owner to confirm.
 3. **Exclusions.** Per-application and per-host "don't record" lists in v1
    (recommended, small) or defer?
 4. **Eviction bias.** Oldest-first regardless of verdict (proposed), or keep
@@ -651,6 +684,6 @@ writes; copies outside the file are not reachable.
     events can be correlated exactly (more precise, one more stored field
     that identifies a connection), or keep `possible-duplicate` flags and
     qualified counts only?
-12. **Preview scope.** Is a 60 s preview token that refuses a stale set
-    acceptable, or should retention changes made while the dialog is open
-    simply be shown on confirm?
+12. **Preview scope and clear-all.** Is refusing a stale preview (and refusing
+    clear-all when newer rows exist) acceptable, or should clear-all fall
+    back to bounded deletion that keeps the newer rows?
