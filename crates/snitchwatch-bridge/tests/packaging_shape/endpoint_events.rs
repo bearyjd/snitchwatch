@@ -748,7 +748,7 @@ fn recipe_targets_6514_and_never_runs_semanage() {
             "semanage port -a",
             "semanage port -d",
             "selinux-port-added",
-            "@VIGIE_PORT@",
+            "VIGIE_PORT",
         ] {
             assert!(!body.contains(needle), "{rel} contains `{needle}`");
         }

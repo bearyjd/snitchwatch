@@ -374,7 +374,7 @@ prints `command -v rsyslogd` for the pinned image). Check yours with
     "list": [
       {"operand": "process.path", "type": "simple", "data": "/usr/bin/rsyslogd", "sensitive": true, "list": []},
       {"operand": "dest.ip", "type": "simple", "data": "VIGIE_ADDRESS", "sensitive": false, "list": []},
-      {"operand": "dest.port", "type": "simple", "data": "VIGIE_PORT", "sensitive": false, "list": []},
+      {"operand": "dest.port", "type": "simple", "data": "6514", "sensitive": false, "list": []},
       {"operand": "protocol", "type": "simple", "data": "tcp", "sensitive": false, "list": []}
     ]
   }
