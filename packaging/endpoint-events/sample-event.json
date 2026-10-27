@@ -1,0 +1,1 @@
+{"time":"2026-10-26T23:54:16.307368+00:00", "host_id": "verify-host", "protocol":"tcp", "src_ip":"192.168.1.20", "src_port":43210, "dst_ip":"93.184.215.14", "dst_port":443, "dst_host":"example.com", "process_path":"\/usr\/bin\/curl", "user_id":1000, "action":"<nil>", "rule":"<nil>", "type":0}

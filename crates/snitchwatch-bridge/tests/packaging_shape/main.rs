@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 mod daemon_and_flatpak_configs;
+mod endpoint_events;
 mod fetch_rule;
 mod systemd_units_and_docs;
 

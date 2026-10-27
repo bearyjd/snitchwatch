@@ -1,0 +1,7 @@
+{
+    "Name": "remote",
+    "Format": "json",
+    "Protocol": "tcp",
+    "Server": "127.0.0.1:514",
+    "Tag": "snitchwatch-endpoint-events"
+}
