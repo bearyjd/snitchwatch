@@ -5,8 +5,8 @@
 //! counts each row once, and `refreshVerdictWindows` (the 60 s tick) leaves
 //! fresh figures unchanged. Rows are stamped from `Date.now()`, and the old
 //! row just before local midnight, so the windows are deterministic. Any
-//! TypeError in the capture fails the test. Run headless with
-//! `QT_QPA_PLATFORM=offscreen`.
+//! TypeError in the capture fails the test, whichever file reports it.
+//! Run headless with `QT_QPA_PLATFORM=offscreen`.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -243,7 +243,7 @@ Window {
     );
     let bad: Vec<&str> = captured
         .lines()
-        .filter(|l| l.contains(PROBE_URL))
+        .filter(|l| l.contains(PROBE_URL) || l.contains("TypeError"))
         .filter(|l| !l.contains(DONE_MARKER))
         .collect();
     assert!(
