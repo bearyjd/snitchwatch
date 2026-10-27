@@ -81,6 +81,24 @@ Item {
         keyNavigationEnabled: true
         Keys.onReturnPressed: pane.openCurrent()
         Keys.onEnterPressed: pane.openCurrent()
+        // Q01: the Menu key or Shift+F10 opens the selected row's actions
+        // (also from a focused button in it: keys bubble up to the list).
+        Keys.onPressed: event => {
+            const menuKey = event.key === Qt.Key_Menu
+                || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier));
+            if (menuKey && list.currentItem) {
+                // Below the row; closing the menu gives focus back (Popup).
+                pane.page.connectionActions.open(list.currentItem, 0, list.currentItem.height);
+                event.accepted = true;
+            }
+        }
+        // Tab from a selected row goes to its own buttons (a header's
+        // Allow all / Deny all, a pending row's Allow), not the first row's.
+        Keys.onTabPressed: event => {
+            const stop = list.currentItem ? list.currentItem.firstTabStop : null;
+            event.accepted = !!stop && stop.visible && stop.enabled;
+            if (event.accepted) stop.forceActiveFocus(Qt.TabFocusReason);
+        }
 
         // Keep the Rust model's notion of the current selection in sync so its
         // auto-select policy knows whether the user is investigating a row.

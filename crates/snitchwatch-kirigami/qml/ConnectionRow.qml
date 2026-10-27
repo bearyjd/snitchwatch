@@ -110,6 +110,9 @@ Item {
     property alias denyButton: rowDenyButton
     property alias denyAllButton: batchDenyButton
     readonly property var actions: row.page.connectionActions
+    // Q01: where Tab from the list goes while this row is selected.
+    readonly property Item firstTabStop: row.isGroupHeader ? (row.groupPending > 0 ? batchAllowButton : null)
+        : row.pending ? rowAllowButton : null
 
     // Share one submission latch across every verdict button. Plain onClicked
     // receives nested button clicks; adding TapHandler dispatches twice, as
@@ -266,6 +269,7 @@ Item {
             spacing: Kirigami.Units.smallSpacing
 
             Controls.Button {
+                id: batchAllowButton
                 flat: true
                 enabled: !row.submitted
                 text: "Allow all (" + row.groupPending + ")"
@@ -307,6 +311,7 @@ Item {
             spacing: Kirigami.Units.smallSpacing
 
             Controls.Button {
+                id: rowAllowButton
                 flat: true
                 enabled: !row.submitted
                 text: !row.isGroupHeader && row.pending ? verdictHelper.allowLabel(row.rowId) : "Allow"

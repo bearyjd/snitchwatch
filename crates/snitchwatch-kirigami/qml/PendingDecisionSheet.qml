@@ -137,6 +137,7 @@ ColumnLayout {
         Controls.ComboBox {
             id: scopeBox
             Layout.fillWidth: true
+            Accessible.name: "Scope: " + displayText
             textRole: "label"
             valueRole: "token"
             // Back-reference: `model[0]`'s token ("this_host") is the scope
@@ -167,6 +168,7 @@ ColumnLayout {
         Controls.ComboBox {
             id: durationBox
             Layout.fillWidth: true
+            Accessible.name: "Duration: " + displayText
             textRole: "label"
             valueRole: "token"
             // `Durations.all[0]` ("this_time") is the only choice where a
