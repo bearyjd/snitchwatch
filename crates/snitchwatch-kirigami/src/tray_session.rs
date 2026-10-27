@@ -75,23 +75,38 @@ where
     move |state| state.reconcile(live())
 }
 
+/// What the watch compares between polls: whether the link is up, and the
+/// latest session id, which moves on every connect. A whole session that
+/// connects and disconnects between two polls still changes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkKey {
+    connected: bool,
+    session: u64,
+}
+
+/// The key for a link `connected` or not, whose latest session id (live or
+/// last) is `session`.
+pub fn link_key(connected: bool, session: u64) -> LinkKey {
+    LinkKey { connected, session }
+}
+
 /// Calls `reconcile` once at once (state may have been rendered before the
-/// watch began), then whenever `live` changes, every `period`, until `stop`
+/// watch began), then whenever `link` changes, every `period`, until `stop`
 /// fires or its sender is dropped with the controller. Also stops when
 /// `reconcile` returns false (the Qt object is gone).
 pub async fn watch_sessions<L, R>(
-    live: L,
+    link: L,
     mut reconcile: R,
     period: Duration,
     mut stop: oneshot::Receiver<()>,
 ) where
-    L: Fn() -> Option<u64>,
+    L: Fn() -> LinkKey,
     R: FnMut() -> bool,
 {
     let mut seen = None;
     let mut first = true;
     loop {
-        let now = live();
+        let now = Some(link());
         if first || now != seen {
             first = false;
             seen = now;
@@ -195,8 +210,8 @@ mod tests {
         let (stop_tx, stop_rx) = oneshot::channel();
         let handle = tokio::spawn(watch_sessions(
             move || match live.load(Ordering::SeqCst) {
-                0 => None,
-                id => Some(id),
+                0 => link_key(false, 0),
+                id => link_key(true, id),
             },
             move || {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -255,11 +270,50 @@ mod tests {
         assert!(handle.await.is_ok(), "the watch ended by panicking");
     }
 
+    /// Disconnected at the first pass; session A then connects, renders and
+    /// disconnects entirely between two polls. Both polls see no live
+    /// session, but the next one must still clean up after A.
+    #[tokio::test(start_paused = true)]
+    async fn a_whole_session_between_two_polls_is_still_cleaned_up() {
+        let link = Arc::new(std::sync::Mutex::new((false, 0_u64)));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (_stop, stop_rx) = oneshot::channel();
+        let _handle = tokio::spawn(watch_sessions(
+            {
+                let link = link.clone();
+                move || {
+                    let (connected, session) = *link.lock().unwrap();
+                    link_key(connected, session)
+                }
+            },
+            {
+                let calls = calls.clone();
+                move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    true
+                }
+            },
+            Duration::from_millis(250),
+            stop_rx,
+        ));
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "first pass");
+        *link.lock().unwrap() = (true, 1);
+        *link.lock().unwrap() = (false, 1);
+        tokio::time::advance(Duration::from_millis(250)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "session A came and went unreconciled"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_gone_qt_object_ends_the_watch() {
         let (_stop, stop_rx) = oneshot::channel();
         let handle = tokio::spawn(watch_sessions(
-            || Some(1),
+            || link_key(true, 1),
             || false,
             Duration::from_millis(250),
             stop_rx,

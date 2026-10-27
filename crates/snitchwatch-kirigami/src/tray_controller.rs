@@ -25,7 +25,7 @@ use crate::tray::{
     live_slot_holders, menu_label_token, startup_tooltip,
 };
 use crate::tray_health::{compose_tooltip, firewall_report};
-use crate::tray_session::{cleanup_job, watch_sessions, TraySession};
+use crate::tray_session::{cleanup_job, link_key, watch_sessions, TraySession};
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
@@ -289,7 +289,10 @@ fn spawn_session_watch(handles: &BridgeHandles, qt_thread: TrayThread) -> onesho
     let watch_handles = handles.clone();
     let job_handles = handles.clone();
     handles.runtime().spawn(watch_sessions(
-        move || watch_handles.live_session(),
+        move || {
+            let (connected, session) = watch_handles.link_generation();
+            link_key(connected, session)
+        },
         move || {
             let job_handles = job_handles.clone();
             let job = cleanup_job(move || job_handles.live_session());

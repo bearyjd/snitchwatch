@@ -153,6 +153,13 @@ impl BridgeHandles {
         state.connected.then_some(state.connection_id)
     }
 
+    /// Whether the link is up, and the latest session id (live or last),
+    /// which moves on every connect.
+    pub fn link_generation(&self) -> (bool, u64) {
+        let state = self.connection.lock().unwrap_or_else(|p| p.into_inner());
+        (state.connected, state.connection_id)
+    }
+
     pub fn runtime(&self) -> &Handle {
         &self.runtime
     }
