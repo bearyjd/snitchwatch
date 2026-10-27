@@ -17,6 +17,11 @@ pub const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
 /// Larger files are refused unread past this many bytes.
 pub const MAX_BYTES: u64 = 16 * 1024;
 const MAX_BOOT_ID_BYTES: u64 = 128;
+/// The helper's longest trial (`on` takes 1 to 60 minutes).
+const MAX_TRIAL_MS: i64 = 60 * 60_000;
+/// Clock skew tolerated between the helper's write and this clock, and on
+/// top of the longest trial.
+const SKEW_MS: i64 = 2 * 60_000;
 
 /// The commands the page offers to copy, in display order.
 pub const COMMANDS: [&str; 4] = [
@@ -37,6 +42,11 @@ pub enum UnknownReason {
     UnknownSchema,
     NoBootId,
     StaleBoot,
+    /// A trial deadline the helper couldn't have set (its trials last 1 to 60
+    /// minutes from `updatedAt`).
+    ImplausibleDeadline,
+    /// `updatedAt` is later than this clock: one of the two clocks is wrong.
+    ClockBehind,
 }
 
 /// What the snapshot says, judged against this boot and the clock.
@@ -77,8 +87,9 @@ impl DenyView {
     }
 }
 
-/// The schema-1 fields. Unknown fields are ignored; a missing or mistyped
-/// required one fails the parse.
+/// The schema-1 fields. Unknown fields are ignored; every field must be
+/// present (`deserialize_with` keeps serde from defaulting a missing `Option`
+/// to `None`), and a mistyped one fails the parse.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Snapshot {
@@ -88,11 +99,13 @@ struct Snapshot {
     default_action: String,
     opt_in: bool,
     pending: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
     expires_at: Option<String>,
     can_enable: bool,
     blockers: Vec<String>,
     expired: bool,
     updated_at: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     boot_id: Option<String>,
 }
 
@@ -186,6 +199,15 @@ pub fn evaluate(bytes: &[u8], boot_id: Option<&str>, now_ms: i64) -> DenyView {
         },
         None => None,
     };
+    if updated_ms > now_ms + SKEW_MS {
+        return DenyView::unknown(UnknownReason::ClockBehind);
+    }
+    if let Some(expires_ms) = expires_ms {
+        let length = expires_ms - updated_ms;
+        if snapshot.pending && !(0 < length && length <= MAX_TRIAL_MS + SKEW_MS) {
+            return DenyView::unknown(UnknownReason::ImplausibleDeadline);
+        }
+    }
     let state = if snapshot.pending {
         match expires_ms {
             Some(expires_ms) if !snapshot.expired && now_ms < expires_ms => DenyState::Trial {
@@ -297,6 +319,12 @@ fn unknown_detail(reason: UnknownReason) -> &'static str {
         UnknownReason::UnknownSchema => "The status file uses a format this version doesn't know.",
         UnknownReason::NoBootId => "This boot's id couldn't be read, so the status can't be checked.",
         UnknownReason::StaleBoot => "The status file is from an earlier boot.",
+        UnknownReason::ImplausibleDeadline => {
+            "The status file's trial deadline isn't one the helper could have set."
+        }
+        UnknownReason::ClockBehind => {
+            "The status file is dated after this clock's time, so it can't be timed."
+        }
     }
 }
 

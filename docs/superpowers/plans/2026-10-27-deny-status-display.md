@@ -23,7 +23,7 @@ image change, and no new Flatpak permission. Contract: bazzite-tower #138.
 ## States shown
 | State | When |
 |---|---|
-| Unknown | file missing, not a regular file, a symlink, over 16 KiB, unreadable, not JSON, a required field missing or mistyped, `schema` other than 1, no current boot id, or `bootId` null or not this boot's |
+| Unknown | file missing, not a regular file, a symlink, over 16 KiB, unreadable, not JSON, any field missing (`expiresAt` and `bootId` may be null, not absent) or mistyped, `schema` other than 1, no current boot id, `bootId` null or not this boot's, `updatedAt` more than 2 min after this clock, or a pending trial whose deadline isn't 0 to 60 min (plus 2 min slack) after `updatedAt` |
 | Allow | `defaultAction: allow`, no trial; blockers listed when `canEnable` is false |
 | Deny trial | `pending: true`, `expired: false`, now before `expiresAt`: "reverts in M min S s (at HH:MM)" |
 | Revert overdue | `pending: true` and now at or past `expiresAt`, or `expired: true` while still pending |
@@ -35,7 +35,8 @@ Every known state carries "as of HH:MM" from `updatedAt`. Unknown fields are
 ignored. Blocker text is daemon/config content, shown as plain text.
 
 ## UI
-A small section on the Daemon Health page, injected from `main.qml` (so tests
+A small section on the Daemon Health page, re-read once a second only while
+it and its window are shown, injected from `main.qml` (so tests
 that load the page never read `/run`): the state line, the countdown or
 overdue line, "as of", the blockers, and the four `ujust` commands, each with
 a Copy button. No action buttons, no privilege, no process spawning.

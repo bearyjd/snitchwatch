@@ -40,13 +40,14 @@ fn utc_stamp(secs: i64) -> String {
     )
 }
 
-/// A trial that ends five minutes from now, in the helper's format.
+/// A trial written now that ends five minutes from now, in the helper's format.
 fn live_trial(dir: &std::path::Path) -> String {
     assert_eq!(utc_stamp(1_793_016_300), "2026-10-26T12:05:00Z");
-    let stamp = utc_stamp(QDateTime::current_secs_since_epoch() + 300);
+    let now = QDateTime::current_secs_since_epoch();
     let text = std::fs::read_to_string(fixture("trial.json"))
         .unwrap()
-        .replace("2026-10-26T12:05:00Z", &stamp);
+        .replace("2026-10-26T12:05:00Z", &utc_stamp(now + 300))
+        .replace("2026-10-26T12:00:00Z", &utc_stamp(now));
     let path = dir.join("trial-live.json");
     std::fs::write(&path, text).unwrap();
     path.display().to_string()
@@ -108,7 +109,8 @@ Window {
         check(find("denyAsOf").text.indexOf("as of ") === 0, "no as-of time");
         show("TRIAL");
         check(deny.state === "trial", "live trial: " + deny.state + " " + deny.detail);
-        check(/^Reverts to allow in [45] min \d+ s \(at \d\d:\d\d\) unless confirmed\.$/.test(find("denyDetail").text),
+        // "(at HH:MM)", or with the date when the deadline falls tomorrow.
+        check(/^Reverts to allow in [45] min \d+ s \(at (\d{4}-\d\d-\d\d )?\d\d:\d\d\) unless confirmed\.$/.test(find("denyDetail").text),
               "countdown: " + find("denyDetail").text);
         show("FIXTURE/trial.json");
         check(deny.state === "overdue" && find("denyHeadline").text === "Deny mode: revert overdue", "overdue: " + deny.state);
@@ -133,6 +135,13 @@ Window {
         check(JSON.parse(deny.commandsJson).join("|") ===
               "ujust snitchwatch-deny status|ujust snitchwatch-deny on 10|ujust snitchwatch-deny confirm|ujust snitchwatch-deny off",
               "commands: " + deny.commandsJson);
+        // The once-a-second re-read runs only while the window is shown.
+        const section = find("denyStatusSection");
+        check(section && section.refreshing, "not refreshing while shown");
+        root.visible = false;
+        check(!section.refreshing, "still refreshing while the window is hidden");
+        root.visible = true;
+        check(section.refreshing, "refresh didn't resume on show");
         console.info("DENY_STATUS_OK");
     }
 }

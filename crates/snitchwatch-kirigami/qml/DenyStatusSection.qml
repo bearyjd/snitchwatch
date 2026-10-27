@@ -5,18 +5,24 @@
 import QtQuick
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import org.kde.kirigami as Kirigami
 
 ColumnLayout {
     id: section
+    objectName: "denyStatusSection"
     required property var model
+    // Re-reads only while the section and its window are shown: a window
+    // hidden to the tray reads nothing.
+    readonly property bool refreshing: refreshTimer.running
     spacing: Kirigami.Units.smallSpacing
 
     // The countdown and staleness are against the clock, so re-read while shown.
     Timer {
+        id: refreshTimer
         interval: 1000
         repeat: true
-        running: section.visible
+        running: section.visible && section.Window.window !== null && section.Window.window.visible
         triggeredOnStart: true
         onTriggered: section.model.refresh()
     }

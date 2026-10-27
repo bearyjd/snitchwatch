@@ -107,3 +107,27 @@ fn local_time(now: &QDateTime, ms: i64) -> String {
         format!("{date} {time}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_hh_mm(text: &str) -> bool {
+        text.len() == 5 && text.as_bytes()[2] == b':'
+    }
+
+    /// A deadline on today's date reads "HH:MM"; one on another date (a
+    /// trial that ends after midnight) carries the date too.
+    #[test]
+    fn local_times_add_the_date_off_today() {
+        let mut noon = QDateTime::current_date_time();
+        noon.set_time(cxx_qt_lib::QTime::new(12, 0, 0, 0));
+        let noon_ms = noon.to_msecs_since_epoch();
+        let today = local_time(&noon, noon_ms + 5 * 60_000);
+        assert!(is_hh_mm(&today), "{today}");
+        assert_eq!(today, "12:05");
+        let tomorrow = local_time(&noon, noon_ms + 24 * 3_600_000);
+        assert_eq!(tomorrow.len(), "yyyy-MM-dd HH:mm".len(), "{tomorrow}");
+        assert!(tomorrow.ends_with(" 12:00"), "{tomorrow}");
+    }
+}

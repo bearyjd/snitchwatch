@@ -308,3 +308,102 @@ fn only_the_blockers_carry_snapshot_text() {
         );
     }
 }
+
+/// The helper's trials last 1 to 60 minutes; anything else can't be a real
+/// trial, so it's unknown, never a known countdown.
+#[test]
+fn an_impossible_trial_deadline_is_unknown() {
+    let trial = std::fs::read_to_string(fixture("trial.json")).unwrap();
+    for expires in [
+        "9999-12-31T23:59:59Z",
+        "2026-10-26T13:05:00Z",
+        "2026-10-26T12:00:00Z",
+        "2026-10-26T11:55:00Z",
+    ] {
+        let text = trial.replace("2026-10-26T12:05:00Z", expires);
+        assert_eq!(
+            evaluate(text.as_bytes(), Some(BOOT), UPDATED_MS).state,
+            DenyState::Unknown(UnknownReason::ImplausibleDeadline),
+            "{expires}"
+        );
+    }
+    // 60 minutes plus the slack is still a trial.
+    let longest = trial.replace("2026-10-26T12:05:00Z", "2026-10-26T13:01:00Z");
+    assert!(matches!(
+        evaluate(longest.as_bytes(), Some(BOOT), UPDATED_MS).state,
+        DenyState::Trial { .. }
+    ));
+}
+
+/// A snapshot written "after now" means this clock went back (or the file's
+/// did): nothing in it can be timed, so it's unknown.
+#[test]
+fn a_snapshot_from_the_future_is_unknown() {
+    for name in ["allow.json", "trial.json", "confirmed.json"] {
+        assert_eq!(
+            load_fixture(name, UPDATED_MS - 10 * MINUTE_MS).state,
+            DenyState::Unknown(UnknownReason::ClockBehind),
+            "{name}"
+        );
+    }
+    // A small skew is tolerated.
+    assert_eq!(
+        load_fixture("allow.json", UPDATED_MS - 30_000).state,
+        DenyState::Allow
+    );
+}
+
+/// Every field must be present; `expiresAt` and `bootId` may be null but not
+/// missing.
+#[test]
+fn every_field_must_be_present_even_the_nullable_ones() {
+    let allow = std::fs::read_to_string(fixture("allow.json")).unwrap();
+    for field in [
+        "\"expiresAt\":null,",
+        "\"profile\":\"system\",",
+        "\"expired\":false,",
+        "\"canEnable\":true,",
+    ] {
+        let text = allow.replace(field, "");
+        assert_ne!(text, allow, "{field}");
+        assert_eq!(
+            evaluate(text.as_bytes(), Some(BOOT), UPDATED_MS).state,
+            DenyState::Unknown(UnknownReason::Unparseable),
+            "missing {field}"
+        );
+    }
+    let no_boot = allow.replace(&format!(",\"bootId\":\"{BOOT}\""), "");
+    assert_ne!(no_boot, allow);
+    assert_eq!(
+        evaluate(no_boot.as_bytes(), Some(BOOT), UPDATED_MS).state,
+        DenyState::Unknown(UnknownReason::Unparseable)
+    );
+    // Present and null is fine for expiresAt (allow.json has it so).
+    assert_eq!(
+        evaluate(allow.as_bytes(), Some(BOOT), UPDATED_MS).state,
+        DenyState::Allow
+    );
+}
+
+#[test]
+fn the_new_unknown_reasons_have_fixed_text() {
+    let trial = std::fs::read_to_string(fixture("trial.json"))
+        .unwrap()
+        .replace("2026-10-26T12:05:00Z", "9999-12-31T23:59:59Z");
+    let far = texts(
+        &evaluate(trial.as_bytes(), Some(BOOT), UPDATED_MS),
+        utc_hh_mm,
+    );
+    assert_eq!(
+        far.detail,
+        "The status file's trial deadline isn't one the helper could have set."
+    );
+    let ahead = texts(
+        &load_fixture("allow.json", UPDATED_MS - 10 * MINUTE_MS),
+        utc_hh_mm,
+    );
+    assert_eq!(
+        ahead.detail,
+        "The status file is dated after this clock's time, so it can't be timed."
+    );
+}
