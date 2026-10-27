@@ -58,19 +58,9 @@ fn the_deny_section_shows_each_state_and_only_copy_buttons() {
     init_headless_qt_env();
     let dir = tempfile::tempdir().unwrap();
     let trial = live_trial(dir.path());
-    // Rewritten from allow to confirmed while the window is hidden.
+    // Rewritten from allow to confirmed once the window is hidden.
     let mutable = dir.path().join("mutable.json");
     std::fs::copy(fixture("allow.json"), &mutable).unwrap();
-    let writer = {
-        let mutable = mutable.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(1500));
-            let staged = mutable.with_extension("tmp");
-            std::fs::copy(fixture("confirmed.json"), &staged).unwrap();
-            std::fs::rename(&staged, &mutable).unwrap();
-        })
-    };
-
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
     let root_ok = Arc::new(AtomicBool::new(false));
@@ -113,11 +103,12 @@ Window {
     function show(path) { deny.statusPath = path; deny.refresh(); }
     function fail(message) { console.warn("Error: " + message); Qt.quit(); }
     Timer { interval: 15000; running: true; onTriggered: root.fail("TIMEOUT") }
-    // The file turns from allow to confirmed 1.5 s after load, while hidden:
-    // not read until the window is shown again.
+    // onCompleted hides the window; the test then rewrites the file from
+    // allow to confirmed before the event loop starts, so the write is done
+    // before this checks the hidden page still shows the old headline.
     Timer {
         id: hiddenWait
-        interval: 3000
+        interval: 2500
         onTriggered: {
             try {
                 check(find("denyHeadline").text === "Deny mode: off (allow)",
@@ -206,13 +197,17 @@ Window {
             );
         }
         if root_ok.load(Ordering::SeqCst) {
+            // onCompleted ran inside load_data and hid the window; rewrite
+            // now, finished before any timer can fire.
+            let staged = mutable.with_extension("tmp");
+            std::fs::copy(fixture("confirmed.json"), &staged).unwrap();
+            std::fs::rename(&staged, &mutable).unwrap();
             if let Some(app) = app.as_mut() {
                 app.exec();
             }
         }
     });
     drop(guard);
-    writer.join().unwrap();
     assert!(stderr.contains("DENY_STATUS_OK"), "{stderr}");
     assert!(root_ok.load(Ordering::SeqCst), "{stderr}");
     assert!(!stderr.contains("Error:"), "{stderr}");

@@ -119,6 +119,25 @@ fn a_snapshot_rewritten_after_the_deadline_is_a_revert_overdue() {
     ));
 }
 
+/// The helper sets `expired` only once now > `expiresAt`, so a write in the
+/// deadline's own second has `expired: false` and `updatedAt == expiresAt`.
+/// That's a real snapshot: overdue by the clock once the deadline is reached.
+#[test]
+fn a_write_in_the_deadline_second_is_judged_by_the_clock() {
+    let text = std::fs::read_to_string(fixture("trial.json"))
+        .unwrap()
+        .replace("2026-10-26T12:05:00Z", "2026-10-26T12:00:00Z");
+    for now in [UPDATED_MS, UPDATED_MS + 30 * MINUTE_MS] {
+        assert_eq!(
+            evaluate(text.as_bytes(), Some(BOOT), now).state,
+            DenyState::RevertOverdue {
+                expires_ms: Some(UPDATED_MS)
+            },
+            "now {now}"
+        );
+    }
+}
+
 /// `expired: true` written before the deadline, or `expired: false` written
 /// after it, contradicts how the helper computes the flag.
 #[test]
@@ -361,7 +380,6 @@ fn an_impossible_trial_deadline_is_unknown() {
     for expires in [
         "9999-12-31T23:59:59Z",
         "2026-10-26T13:05:00Z",
-        "2026-10-26T12:00:00Z",
         "2026-10-26T11:55:00Z",
     ] {
         let text = trial.replace("2026-10-26T12:05:00Z", expires);

@@ -241,10 +241,16 @@ pub fn evaluate(bytes: &[u8], boot_id: Option<&str>, now_ms: i64) -> DenyView {
 /// never more than 60 minutes (plus skew) past `updatedAt`. It computes
 /// `expired` at write time as now > `expiresAt`, so an expired snapshot was
 /// written after its deadline (a revert that failed, then republished), and a
-/// live one before it.
+/// live one at or before it (a write in the deadline's own second is still
+/// `expired: false`).
 fn plausible_deadline(expires_ms: i64, updated_ms: i64, expired: bool) -> bool {
     let ahead = expires_ms - updated_ms;
-    ahead <= MAX_TRIAL_MS + SKEW_MS && if expired { ahead <= SKEW_MS } else { ahead > 0 }
+    ahead <= MAX_TRIAL_MS + SKEW_MS
+        && if expired {
+            ahead <= SKEW_MS
+        } else {
+            ahead >= 0
+        }
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` (the helper's `TIME_FORMAT`, whole seconds, always
