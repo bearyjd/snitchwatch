@@ -125,6 +125,27 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
             harness.with(|c| c.status_text().to_string()),
             refusal(ExportError::TooLarge)
         );
+        // Delivered straight to on_delivery with no event pump in between, so
+        // the sheet's periodic poll cannot have expired the request first.
+        let direct = harness.request();
+        harness.with(|mut c| {
+            c.as_mut().rust_mut().view.begin(
+                1,
+                direct.clone(),
+                Instant::now() - Duration::from_secs(16),
+            );
+            c.as_mut()
+                .on_delivery(1, Delivery::Artifact(direct, ARTIFACT.into()));
+        });
+        assert!(
+            !harness.with(|c| *c.busy()),
+            "on_delivery left an expired request busy"
+        );
+        assert!(!harness.with(|c| *c.preview_ready()));
+        assert_eq!(
+            harness.with(|c| c.status_text().to_string()),
+            refusal(ExportError::TimedOut)
+        );
         let expired = harness.request();
         harness.with(|mut c| {
             c.as_mut().rust_mut().view.begin(
