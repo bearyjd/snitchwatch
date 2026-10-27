@@ -1,7 +1,8 @@
 # Connection history (r17): opt-in storage, retention, gaps, event-time rule identity
 
-Status: **Design decisions resolved by the owner 2026-10-27; awaiting final
-approval to merge.** Design only; no code is authorized by this document. The
+Status: **Approved design (owner, 2026-10-27).** Design only; no code is
+authorized by this document. Implementation needs its own plan, approved by the
+owner. The
 owner's decisions are collected in
 [Owner decisions](#owner-decisions-2026-10-27); the only items still open are
 two implementation-proof obligations (S1, S2).
