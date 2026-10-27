@@ -35,6 +35,11 @@ impl Harness {
             std::thread::sleep(Duration::from_millis(1));
         }
     }
+    /// The claimed delivery is queued to the Qt thread after the claim, so one
+    /// `process_events` can run first; wait for the request to finish instead.
+    fn pump_until_idle(&mut self) {
+        self.pump_until(|h| !h.with(|c| *c.busy()));
+    }
     fn request(&mut self) -> String {
         self.with(|mut c| {
             c.as_mut().request_export(&QString::from("{}"));
@@ -97,7 +102,7 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
             })
             .unwrap();
         wait_claimed(&gate);
-        native::ffi::process_events();
+        harness.pump_until_idle();
         assert!(
             !harness.with(|c| *c.preview_ready()),
             "malformed artifact enabled preview and Save"
@@ -114,7 +119,7 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
             })
             .unwrap();
         wait_claimed(&gate);
-        native::ffi::process_events();
+        harness.pump_until_idle();
         assert!(!harness.with(|c| *c.preview_ready()));
         assert_eq!(
             harness.with(|c| c.status_text().to_string()),
@@ -130,7 +135,7 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
         });
         reply(&link, 1, expired);
         wait_claimed(&gate);
-        native::ffi::process_events();
+        harness.pump_until_idle();
         assert!(
             !harness.with(|c| *c.busy()),
             "late matching reply left the request permanently busy"
@@ -151,7 +156,7 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
             })
             .unwrap();
         wait_claimed(&gate);
-        native::ffi::process_events();
+        harness.pump_until_idle();
         assert!(!harness.with(|c| *c.busy() || *c.preview_ready()));
         reply(&link, 1, refused);
         std::thread::sleep(Duration::from_millis(10));
