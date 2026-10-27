@@ -23,6 +23,7 @@ fn baselined(path: &Path, present: &[&str]) -> SeenPrograms {
     let mut state = SeenPrograms::persisted(path.to_path_buf(), uid());
     state.note_clear_applied();
     assert!(state.on_rules_applied(present.iter().copied(), T0));
+    assert!(state.sync(), "the baseline was not written");
     state
 }
 
@@ -181,6 +182,7 @@ fn an_acknowledged_program_is_persisted() {
     let mut state = baselined(&path, &["/usr/bin/a"]);
     state.observe(["/usr/bin/late"], T0);
     state.acknowledge(T0 + 1);
+    assert!(state.sync());
     let again = baselined(&path, &["/usr/bin/late"]);
     assert!(!again.is_new("/usr/bin/late"));
 }
@@ -196,6 +198,7 @@ fn writes_merge_with_another_gui_instead_of_overwriting_it() {
     second.acknowledge(T0);
     first.observe(["/usr/bin/d"], T0);
     first.acknowledge(T0);
+    assert!(second.sync() && first.sync());
     let Loaded::Valid(on_disk) = read(&path, uid()) else {
         panic!("unreadable")
     };
@@ -332,6 +335,7 @@ fn last_seen_times_persist_debounced_and_on_drop() {
     state.observe(["/usr/bin/a"], T0 + 10);
     assert_eq!(on_disk(&path), Some(T0), "saved again within the debounce");
     state.observe(["/usr/bin/a"], T0 + TOUCH_PERSIST_MS);
+    assert!(state.sync());
     assert_eq!(
         on_disk(&path),
         Some(T0 + TOUCH_PERSIST_MS),
@@ -368,6 +372,7 @@ fn a_program_used_in_an_earlier_life_outlives_an_unused_one_at_the_cap() {
     let mut second = baselined(&path, &[]);
     second.observe(["/usr/bin/fresh"], T0 + 2_000_000);
     assert!(second.acknowledge(T0 + 2_000_000));
+    assert!(second.sync());
     let Loaded::Valid(saved) = read(&path, uid()) else {
         panic!("unreadable")
     };
@@ -381,4 +386,108 @@ fn a_program_used_in_an_earlier_life_outlives_an_unused_one_at_the_cap() {
         "the least recently used stayed"
     );
     assert!(saved.contains_key("/usr/bin/fresh"));
+}
+
+fn hold_lock(path: &Path) -> std::fs::File {
+    let (held, _) = crate::learned::acquire_lock(
+        &crate::learned::lock_path_for(path),
+        &crate::learned::LockPolicy::default(),
+    );
+    held.expect("the test could not take the lock")
+}
+
+fn saved(path: &Path) -> HashMap<String, i64> {
+    match read(path, uid()) {
+        Loaded::Valid(saved) => saved,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn without_the_lock_nothing_is_written_and_the_save_is_retried() {
+    let (_tmp, path) = dir();
+    let mut state = baselined(&path, &["/usr/bin/a"]);
+    let held = hold_lock(&path);
+    let ours = HashMap::from([("/usr/bin/blind".to_string(), T0)]);
+    let refused = write_merged(&path, &ours, uid()).unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::WouldBlock);
+    assert!(
+        !saved(&path).contains_key("/usr/bin/blind"),
+        "written without the lock"
+    );
+
+    state.observe(["/usr/bin/late"], T0 + 1);
+    state.acknowledge(T0 + 2);
+    assert!(
+        !state.sync(),
+        "the contended save was dropped or written blind"
+    );
+    assert!(!saved(&path).contains_key("/usr/bin/late"));
+    drop(held);
+    assert!(state.sync(), "the kept save was not retried");
+    assert!(saved(&path).contains_key("/usr/bin/late"));
+}
+
+#[test]
+fn observing_never_waits_for_a_held_lock() {
+    let (_tmp, path) = dir();
+    let mut state = baselined(&path, &["/usr/bin/a"]);
+    let _held = hold_lock(&path);
+    let started = std::time::Instant::now();
+    state.observe(["/usr/bin/a"], T0 + TOUCH_PERSIST_MS);
+    state.observe(["/usr/bin/late"], T0 + TOUCH_PERSIST_MS);
+    state.acknowledge(T0 + TOUCH_PERSIST_MS + 1);
+    let elapsed = started.elapsed();
+    // The lock policy alone retries for ~0.5 s on the writer's side.
+    assert!(
+        elapsed < std::time::Duration::from_millis(100),
+        "{elapsed:?}"
+    );
+}
+
+#[test]
+fn another_guis_acknowledgement_never_counts_as_this_ones() {
+    use crate::connections::attention::AttentionFacts;
+    let (_tmp, path) = dir();
+    let mut a = baselined(&path, &["/usr/bin/a"]);
+    a.observe(["/usr/bin/x"], T0);
+    assert!(a.is_new("/usr/bin/x"));
+    // GUI B acknowledges X and saves it.
+    let mut b = baselined(&path, &["/usr/bin/a"]);
+    b.observe(["/usr/bin/x"], T0);
+    assert!(b.acknowledge(T0 + 1) && b.sync());
+    assert!(saved(&path).contains_key("/usr/bin/x"));
+    // A's periodic save merges with that file, then its rules refresh.
+    a.observe(["/usr/bin/a"], T0 + TOUCH_PERSIST_MS);
+    assert!(a.sync());
+    assert!(a.is_new("/usr/bin/x"), "X stopped being new in A");
+    let rule = crate::rules::row_store::Rule {
+        name: "snitchwatch-default-x".to_string(),
+        enabled: true,
+        ..Default::default()
+    };
+    let facts = AttentionFacts::new(&[rule], a.seen_paths());
+    let row = snitchwatch_bridge::ws_messages::ConnectionRow {
+        id: "x1".to_string(),
+        process: "x".to_string(),
+        process_path: Some("/usr/bin/x".to_string()),
+        dst_host: "h".to_string(),
+        dst_ip: "10.0.0.1".to_string(),
+        dst_port: 443,
+        protocol: "tcp".to_string(),
+        direction: "outgoing".to_string(),
+        action: Some("allow".to_string()),
+        bytes_sent: 0,
+        bytes_received: 0,
+        started_at_ms: 0,
+        matched_rule: Some("snitchwatch-default-x".to_string()),
+        auto_answer: None,
+        answer_deadline_ms: None,
+        deferred: false,
+        decided_by_default: false,
+    };
+    assert!(
+        !facts.is_handled(&row),
+        "X's rows collapse in A without A's acknowledgement"
+    );
 }

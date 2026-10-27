@@ -115,3 +115,14 @@ returns early on equal filters. The model forces this on
   are in the list "subject to the other filters".
 - A seen file that others may write (mode not 0600), or one in a directory
   that is not ours and 0700, re-baselines with the notice.
+
+## Review fixes, round 2 (2026-10-27)
+- The merged file is never read back into a running session, and
+  `seen_paths` excludes this session's new programs: another GUI's
+  acknowledgement never collapses a program this GUI still flags as new.
+- Without the lock nothing is written: the save stays pending (it is never
+  marked clean) and is retried every 2 s, at the next save and at shutdown.
+- Saves run on a writer thread (coalesced, latest snapshot wins); dropping
+  the model queues the last save and waits at most 1 s, never syncing on
+  the Qt thread.
+- The group counts an update only for a row the store holds.

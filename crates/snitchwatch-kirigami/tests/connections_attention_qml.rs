@@ -180,6 +180,11 @@ Window {
                     probe.expect(probe.shows("pending") && !probe.shows("one") && !probe.shows("two")
                                  && !probe.shows("denied"), "a delta mis-decided a row");
                     probe.expect(model.backgroundCount === 3, "per-row counts: " + model.backgroundCount);
+                    // An update for an id the store does not hold changes nothing.
+                    probe.send({ action: "updateConnectionRows", rows: [
+                        probe.row("ghost", "/usr/sbin/chronyd", "allow", probe.rec)] });
+                    probe.expect(model.backgroundCount === 3 && model.totalCount === 8,
+                                 "a phantom update was counted: " + model.backgroundCount);
                     model.setGroupedMode(true);
                     probe.reconnectWithoutTheRule("grouped");
                     model.setGroupedMode(false);

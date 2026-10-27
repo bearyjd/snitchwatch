@@ -108,7 +108,13 @@ pub(super) fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &Server
                 handled_counts,
                 ..
             } = &mut *rust;
+            let update = matches!(msg, ServerMessage::UpdateConnectionRows { .. });
             for row in rows {
+                // The store ignores an update for an id it does not hold, so
+                // the group must not count one either.
+                if update && store.row_by_id(&row.id).is_none() {
+                    continue;
+                }
                 handled_counts.upsert(store.filter().attention_facts(), row);
             }
         }

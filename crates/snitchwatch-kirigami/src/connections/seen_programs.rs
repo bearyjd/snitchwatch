@@ -144,7 +144,8 @@ fn capped(entries: impl IntoIterator<Item = (String, i64)>) -> impl Iterator<Ite
 /// advisory lock on `<path>.lock` from the read to the replace so another
 /// GUI's write in between is not lost. Returns the merged set. A file that
 /// is not valid is replaced by `ours`. Without the lock (contended too long,
-/// or unsupported) the write goes ahead and the last writer wins.
+/// or unsupported) nothing is written: `WouldBlock`, for a retry, so a racing
+/// writer's acknowledgement is never lost to a blind replace.
 pub fn write_merged(
     path: &Path,
     ours: &HashMap<String, i64>,
@@ -154,11 +155,14 @@ pub fn write_merged(
         crate::private_files::ensure_private_dir(dir)?;
     }
     let lock_path = crate::learned::lock_path_for(path);
-    let (_lock, degraded) =
+    let (lock, _) =
         crate::learned::acquire_lock(&lock_path, &crate::learned::LockPolicy::default());
-    if degraded {
-        tracing::warn!(path = %lock_path.display(), "seen programs: written without the lock");
-    }
+    let Some(_lock) = lock else {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!("{} is not available", lock_path.display()),
+        ));
+    };
     let mut merged = match read(path, uid) {
         Loaded::Valid(theirs) => theirs,
         _ => HashMap::new(),
@@ -184,15 +188,13 @@ pub fn write_merged(
 }
 
 /// Where the seen set lives.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum Backing {
     /// Never read or written (headless tests, demo mode): starts empty and
     /// baselines with the notice, like a first run.
     Memory,
-    File {
-        path: PathBuf,
-        uid: u32,
-    },
+    /// Read once; saved by its own thread (`writer`), never on the Qt thread.
+    File(Option<writer::Writer>),
 }
 
 /// The first-seen state of one Connections model.
@@ -222,7 +224,7 @@ impl SeenPrograms {
     /// Backed by the file at `path`, trusted only if owned by `uid`; read now.
     pub fn persisted(path: PathBuf, uid: u32) -> Self {
         let loaded = read(&path, uid);
-        Self::from_loaded(Backing::File { path, uid }, loaded)
+        Self::from_loaded(Backing::File(writer::Writer::spawn(path, uid)), loaded)
     }
 
     fn from_loaded(backing: Backing, loaded: Loaded) -> Self {
@@ -327,28 +329,34 @@ impl SeenPrograms {
         true
     }
 
-    /// Save the set (never a path new this session: those are not in it).
+    /// Queue a save of the set (never a path new this session: those are
+    /// not in it). The merged file is never read back into the session:
+    /// another GUI's acknowledgement must not count as this one's.
     fn persist(&mut self) {
         self.touched = false;
-        let Backing::File { path, uid } = &self.backing else {
-            self.seen = capped(std::mem::take(&mut self.seen)).collect();
-            return;
-        };
-        match write_merged(path, &self.seen, *uid) {
-            Ok(merged) => self.seen = merged,
-            Err(error) => {
-                tracing::warn!(%error, path = %path.display(), "seen programs: not saved");
-                self.seen = capped(std::mem::take(&mut self.seen)).collect();
-            }
+        self.seen = capped(std::mem::take(&mut self.seen)).collect();
+        if let Backing::File(Some(writer)) = &self.backing {
+            writer.save(self.seen.clone());
         }
     }
 
-    /// Paths seen before. Never one that is new this session: a path is
-    /// flagged only when it is not in the set, and only the acknowledgement,
-    /// which clears every flag, adds a flagged path (a merge with the file
-    /// happens only at the baseline, before any flag, and at that moment).
+    /// Wait for the writer's attempt at the pending save; whether it is
+    /// written (true with no file).
+    #[cfg(test)]
+    pub fn sync(&self) -> bool {
+        match &self.backing {
+            Backing::File(Some(writer)) => writer.sync(),
+            _ => true,
+        }
+    }
+
+    /// Paths seen before, never one that is new in THIS session until it is
+    /// acknowledged here, whatever another GUI has recorded.
     pub fn seen_paths(&self) -> impl Iterator<Item = &str> {
-        self.seen.keys().map(String::as_str)
+        self.seen
+            .keys()
+            .map(String::as_str)
+            .filter(|path| !self.new_this_session.contains(*path))
     }
 
     pub fn is_new(&self, path: &str) -> bool {
@@ -369,7 +377,8 @@ impl SeenPrograms {
     }
 }
 
-/// Shutdown: save last-seen times not yet saved.
+/// Shutdown: queue last-seen times not yet saved; the writer then gets a
+/// bounded wait for its last save (`writer::Writer`'s drop).
 impl Drop for SeenPrograms {
     fn drop(&mut self) {
         if self.touched {
@@ -380,3 +389,4 @@ impl Drop for SeenPrograms {
 
 #[cfg(test)]
 mod tests;
+mod writer;
