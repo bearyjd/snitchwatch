@@ -94,8 +94,9 @@ impl qobject::ConnectionsModel {
             if !self.pending_grouped_msgs.is_empty() {
                 self.as_mut().flush_grouped_messages();
             }
+            let snapshot = matches!(msg, ServerMessage::SetRules { .. });
             self.as_mut().apply_rules_message(&msg);
-            self.after_rules_applied();
+            self.after_rules_applied(snapshot);
             return;
         }
         if matches!(msg, ServerMessage::ClearConnectionRows) {
@@ -172,13 +173,19 @@ impl qobject::ConnectionsModel {
         {
             let mut rust = self.as_mut().rust_mut();
             rust.source_session = source_session;
+            let mut full = false;
             for msg in msgs {
                 for msg in rust.collapse.rewrite(msg) {
                     mirror_into_grouping(&mut rust, &msg);
-                    rust.store.apply(msg);
+                    if rust.store.is_incremental() {
+                        rust.store.apply_incremental(msg);
+                    } else {
+                        full = true;
+                        rust.store.apply(msg);
+                    }
                 }
             }
-            if rust.store.is_filtered() {
+            if full && rust.store.is_filtered() {
                 rust.store.recompute_visible();
             }
             let ConnectionsModelRust {
@@ -255,15 +262,30 @@ impl qobject::ConnectionsModel {
             }
             {
                 let mut rust = self.as_mut().rust_mut();
-                rust.store.apply(msg);
-                if rust.store.is_filtered() {
-                    rust.store.recompute_visible();
+                if rust.store.is_incremental() {
+                    rust.store.apply_incremental(msg);
+                } else {
+                    rust.store.apply(msg);
+                    if rust.store.is_filtered() {
+                        rust.store.recompute_visible();
+                    }
                 }
             }
             self.as_mut().rebuild_grouped_projection();
             unsafe {
                 self.as_mut().end_reset_model();
             }
+        } else if self.store.is_incremental()
+            && matches!(
+                msg,
+                ServerMessage::InsertConnectionRows { .. }
+                    | ServerMessage::UpdateConnectionRows { .. }
+                    | ServerMessage::RemoveConnectionRows { .. }
+            )
+        {
+            // Only the default collapse narrows the list: re-decide just the
+            // changed rows, with ranged signals (0c).
+            self.as_mut().apply_collapsed_delta(msg);
         } else if self.store.is_filtered() {
             // With an active filter the visible→store index mapping shifts in
             // ways that don't map cleanly onto incremental begin/insert/remove

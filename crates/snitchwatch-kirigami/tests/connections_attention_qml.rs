@@ -32,9 +32,16 @@ Window {
     height: 600
     property var failures: []
     property int phase: 0
+    property int resets: 0
+    property int inserts: 0
     readonly property string rec: "snitchwatch-default-chronyd"
 
     ConnectionsModel { id: model }
+    Connections {
+        target: model
+        function onModelReset() { probe.resets++; }
+        function onRowsInserted() { probe.inserts++; }
+    }
     ConnectionsFilterBar {
         id: bar
         width: parent.width
@@ -78,6 +85,23 @@ Window {
         return null;
     }
     function shows(id) { return model.visibleRowIndex(id) >= 0; }
+    // A reconnect whose fresh rules dropped the recommended rule: between the
+    // clear and the new SetRules nothing may collapse on the old rules.
+    function reconnectWithoutTheRule(mode) {
+        probe.send({ action: "clearConnectionRows" });
+        probe.send({ action: "insertConnectionRows", rows: probe.snapshotRows() });
+        probe.expect(model.backgroundCount === 0 && model.matchingCount === model.totalCount,
+                     mode + ": replayed rows collapsed on the old session's rules: "
+                     + model.matchingCount + "/" + model.totalCount);
+        probe.send({ action: "updateRules", rules: [{ name: probe.rec, enabled: true, action: "allow" }] });
+        probe.expect(model.matchingCount === model.totalCount,
+                     mode + ": an UpdateRules restored collapsing before the snapshot");
+        probe.send({ action: "setRules", rules: [{ name: "allow-ntp-host", enabled: true, action: "allow" }] });
+        probe.expect(model.matchingCount === model.totalCount, mode + ": collapsed on a deleted rule");
+        probe.rules(true);
+        probe.expect(model.backgroundCount === 1 && model.matchingCount === model.totalCount - 1,
+                     mode + ": the fresh snapshot did not restore collapsing: " + model.backgroundCount);
+    }
 
     Timer {
         interval: 50
@@ -141,6 +165,25 @@ Window {
                     probe.expect(model.backgroundCount === 3 && !probe.shows("late"),
                                  "acknowledged programs did not collapse: " + model.backgroundCount);
                 } else if (probe.phase === 2) {
+                    probe.reconnectWithoutTheRule("flat");
+                    // A single-row delta while collapsing: ranged, no reset.
+                    const resets = probe.resets, inserts = probe.inserts;
+                    probe.send({ action: "insertConnectionRows", rows: [
+                        probe.row("one", "/usr/sbin/chronyd", "deny", probe.rec)] });
+                    probe.send({ action: "insertConnectionRows", rows: [
+                        probe.row("two", "/usr/sbin/chronyd", "allow", probe.rec)] });
+                    probe.send({ action: "updateConnectionRows", rows: [
+                        probe.row("one", "/usr/sbin/chronyd", "allow", probe.rec)] });
+                    probe.send({ action: "removeConnectionRows", ids: ["denied"] });
+                    probe.expect(probe.resets === resets, "a row delta reset the flat list");
+                    probe.expect(probe.inserts === inserts + 1, "inserted rows: " + (probe.inserts - inserts));
+                    probe.expect(probe.shows("pending") && !probe.shows("one") && !probe.shows("two")
+                                 && !probe.shows("denied"), "a delta mis-decided a row");
+                    probe.expect(model.backgroundCount === 3, "per-row counts: " + model.backgroundCount);
+                    model.setGroupedMode(true);
+                    probe.reconnectWithoutTheRule("grouped");
+                    model.setGroupedMode(false);
+                } else if (probe.phase === 3) {
                     // A disabled rule, then an empty (unknown) list: fail open.
                     probe.rules(false);
                     probe.expect(model.backgroundCount === 0 && probe.shows("handled"),
@@ -154,6 +197,9 @@ Window {
                     full.click();
                     probe.expect(!model.filterNeedsAttention && probe.shows("handled"), "Full list");
                     probe.expect(probe.named(bar, "backgroundToggle").text === "Collapse", "expanded text");
+                    probe.expect(probe.named(bar, "backgroundGroup").visible, "the group hid when expanded");
+                    probe.expect(probe.named(bar, "backgroundSummary").text.indexOf("subject to the other filters") > 0,
+                                 "expanded summary: " + probe.named(bar, "backgroundSummary").text);
                     probe.expect(!probe.named(bar, "showingRow").visible, "showing row while expanded");
                     probe.named(bar, "backgroundToggle").clicked();
                     probe.expect(model.filterNeedsAttention && !full.checked && !probe.shows("handled"),

@@ -133,6 +133,9 @@ pub struct RowStore {
     rows: Vec<ConnectionRow>,
     filter: ConnectionFilter,
     visible: Vec<usize>,
+    /// How many times `visible` was rebuilt from every row (0c's per-row
+    /// path, `incremental`, must not add to it).
+    full_recomputes: usize,
 }
 
 impl RowStore {
@@ -476,6 +479,7 @@ impl RowStore {
             self.visible.clear();
             return;
         }
+        self.full_recomputes += 1;
         self.visible = self
             .rows
             .iter()
@@ -553,6 +557,9 @@ fn coalesce_removals(sorted_indices: &[usize]) -> Vec<ModelOp> {
         })
         .collect()
 }
+
+mod incremental;
+pub use incremental::{RowStep, VisibleChange};
 
 #[cfg(test)]
 mod tests;

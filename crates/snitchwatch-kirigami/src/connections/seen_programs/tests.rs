@@ -252,3 +252,133 @@ fn dismissing_the_notice_clears_it() {
     state.dismiss_notice();
     assert_eq!(state.notice(), "");
 }
+
+#[test]
+fn a_file_others_may_write_or_a_shared_directory_re_baselines() {
+    let (_tmp, path) = dir();
+    baselined(&path, &["/usr/bin/a"]);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o620)).unwrap();
+    assert_eq!(read(&path, uid()), Loaded::Foreign, "group-writable file");
+    let state = baselined(&path, &["/usr/bin/b"]);
+    assert!(
+        state.notice().contains("not a plain file of yours"),
+        "{}",
+        state.notice()
+    );
+    assert_eq!(seen(&state), ["/usr/bin/b"]);
+
+    // The rewrite tightened it; now open the directory instead.
+    assert!(matches!(read(&path, uid()), Loaded::Valid(_)));
+    let parent = path.parent().unwrap();
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        read(&path, uid()),
+        Loaded::Foreign,
+        "world-readable directory"
+    );
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(read(&path, uid()), Loaded::Valid(_)));
+}
+
+#[test]
+fn a_write_waits_for_another_writer_holding_the_lock() {
+    let (_tmp, path) = dir();
+    baselined(&path, &["/usr/bin/a"]);
+    let lock_path = crate::learned::lock_path_for(&path);
+    assert!(lock_path.ends_with("seen-programs.json.lock"));
+    let (held, degraded) =
+        crate::learned::acquire_lock(&lock_path, &crate::learned::LockPolicy::default());
+    assert!(held.is_some() && !degraded);
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer_path = path.clone();
+    let writer = std::thread::spawn(move || {
+        let ours = HashMap::from([("/usr/bin/w".to_string(), T0)]);
+        let merged = write_merged(&writer_path, &ours, uid()).unwrap();
+        done_tx.send(()).unwrap();
+        merged
+    });
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    assert!(
+        done_rx.try_recv().is_err(),
+        "the write did not wait for the lock"
+    );
+    // The other GUI's write lands while it holds the lock ...
+    let other = HashMap::from([("/usr/bin/other".to_string(), T0)]);
+    let body = serde_json::to_vec(&FileBody {
+        version: VERSION,
+        programs: capped(other.into_iter().chain([("/usr/bin/a".to_string(), T0)]))
+            .map(|(path, last_seen_ms)| Entry { path, last_seen_ms })
+            .collect(),
+    })
+    .unwrap();
+    crate::private_files::write_private(&path, &body).unwrap();
+    drop(held);
+    // ... and the waiting write reads it before replacing the file.
+    let merged = writer.join().unwrap();
+    let mut paths: Vec<&str> = merged.keys().map(String::as_str).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["/usr/bin/a", "/usr/bin/other", "/usr/bin/w"]);
+}
+
+#[test]
+fn last_seen_times_persist_debounced_and_on_drop() {
+    let (_tmp, path) = dir();
+    let mut state = baselined(&path, &["/usr/bin/a"]);
+    let on_disk = |path: &Path| match read(path, uid()) {
+        Loaded::Valid(seen) => seen.get("/usr/bin/a").copied(),
+        other => panic!("{other:?}"),
+    };
+    state.observe(["/usr/bin/a"], T0 + 10);
+    assert_eq!(on_disk(&path), Some(T0), "saved again within the debounce");
+    state.observe(["/usr/bin/a"], T0 + TOUCH_PERSIST_MS);
+    assert_eq!(
+        on_disk(&path),
+        Some(T0 + TOUCH_PERSIST_MS),
+        "not saved after the debounce"
+    );
+    state.observe(["/usr/bin/a", "/usr/bin/new"], T0 + TOUCH_PERSIST_MS + 5);
+    drop(state);
+    assert_eq!(
+        on_disk(&path),
+        Some(T0 + TOUCH_PERSIST_MS + 5),
+        "not saved on drop"
+    );
+    let Loaded::Valid(saved) = read(&path, uid()) else {
+        panic!("unreadable")
+    };
+    assert!(
+        !saved.contains_key("/usr/bin/new"),
+        "an unacknowledged program was saved"
+    );
+}
+
+#[test]
+fn a_program_used_in_an_earlier_life_outlives_an_unused_one_at_the_cap() {
+    let (_tmp, path) = dir();
+    let full: HashMap<String, i64> = (0..MAX_SEEN as i64)
+        .map(|i| (format!("/usr/bin/p{i}"), T0 + i))
+        .collect();
+    write_merged(&path, &full, uid()).unwrap();
+    // First life: p0, the oldest entry, is used again.
+    let mut first = baselined(&path, &[]);
+    first.observe(["/usr/bin/p0"], T0 + 1_000_000);
+    drop(first);
+    // Second life: a new program is acknowledged, so one entry must go.
+    let mut second = baselined(&path, &[]);
+    second.observe(["/usr/bin/fresh"], T0 + 2_000_000);
+    assert!(second.acknowledge(T0 + 2_000_000));
+    let Loaded::Valid(saved) = read(&path, uid()) else {
+        panic!("unreadable")
+    };
+    assert_eq!(saved.len(), MAX_SEEN);
+    assert!(
+        saved.contains_key("/usr/bin/p0"),
+        "the recently used program was evicted"
+    );
+    assert!(
+        !saved.contains_key("/usr/bin/p1"),
+        "the least recently used stayed"
+    );
+    assert!(saved.contains_key("/usr/bin/fresh"));
+}

@@ -11,7 +11,7 @@
 //! name; user rules and once-off answers never count. A friendly name is
 //! never an input.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use snitchwatch_bridge::rule_name::CURATED_DEFAULT_RULE_NAME_PREFIX;
 use snitchwatch_bridge::ws_messages::ConnectionRow;
@@ -59,6 +59,69 @@ impl AttentionFacts {
                 .process_path
                 .as_deref()
                 .is_some_and(|path| self.seen.contains(path))
+    }
+}
+
+/// The group's one-line summary figures, kept per row as deltas arrive
+/// (like `grouping::counts`) instead of scanning the store. Kept only while
+/// collapsing is on; [`Self::rebuild`] when the facts or the switch change.
+#[derive(Debug, Default)]
+pub struct HandledCounts {
+    on: bool,
+    /// Handled row id -> its program's path.
+    rows: HashMap<String, String>,
+    /// Handled rows per program path.
+    programs: HashMap<String, usize>,
+}
+
+impl HandledCounts {
+    pub fn rebuild(&mut self, on: bool, facts: Option<&AttentionFacts>, rows: &[ConnectionRow]) {
+        self.clear();
+        self.on = on;
+        for row in rows {
+            self.upsert(facts, row);
+        }
+    }
+
+    pub fn upsert(&mut self, facts: Option<&AttentionFacts>, row: &ConnectionRow) {
+        if !self.on {
+            return;
+        }
+        self.remove(&row.id);
+        if !facts.is_some_and(|facts| facts.is_handled(row)) {
+            return;
+        }
+        let Some(path) = row.process_path.clone() else {
+            return;
+        };
+        *self.programs.entry(path.clone()).or_default() += 1;
+        self.rows.insert(row.id.clone(), path);
+    }
+
+    pub fn remove(&mut self, id: &str) {
+        let Some(path) = self.rows.remove(id) else {
+            return;
+        };
+        if let Some(count) = self.programs.get_mut(&path) {
+            *count -= 1;
+            if *count == 0 {
+                self.programs.remove(&path);
+            }
+        }
+    }
+
+    /// Empty, keeping whether it is on.
+    pub fn clear(&mut self) {
+        self.rows.clear();
+        self.programs.clear();
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn programs(&self) -> usize {
+        self.programs.len()
     }
 }
 

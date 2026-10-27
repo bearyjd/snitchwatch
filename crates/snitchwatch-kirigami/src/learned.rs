@@ -14,6 +14,7 @@ mod classify;
 mod program;
 mod shared;
 mod store;
+pub(crate) use store::{acquire_lock, lock_path_for, LockPolicy};
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};

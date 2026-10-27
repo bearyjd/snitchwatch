@@ -96,3 +96,22 @@ returns early on equal filters. The model forces this on
   "showing N of M", the group row and the notice drive the model.
 - Screenshots via `just kirigami-screenshots` before and after; demo mode seeds
   a recommended rule and an in-memory seen set (never writes the file).
+
+## Review fixes (2026-10-27, /codex on #234)
+- A `ClearConnectionRows` revokes collapsing (empty facts, counts cleared)
+  until the new session's `SetRules`; an `UpdateRules` does not restore it.
+  The seen set and the new-program flags are kept.
+- Writes hold an advisory `flock` on `seen-programs.json.lock` from the read
+  to the replace (`learned::acquire_lock`, shared with `learned/store.rs`);
+  a contended or unsupported lock degrades to last-writer-wins with a log.
+- A program seen before that is seen again has its last-seen time saved at
+  most once a minute and when the model is dropped; unacknowledged programs
+  are never saved.
+- While collapsing is the only narrowing, the flat view re-decides each
+  changed row (`row_store::incremental`, ranged signals, no reset, no
+  re-filter), the grouped path updates `visible` the same way, and the
+  group's figures are kept per row (`attention::HandledCounts`). With the
+  full list showing nothing is counted, and the expanded group says its rows
+  are in the list "subject to the other filters".
+- A seen file that others may write (mode not 0600), or one in a directory
+  that is not ours and 0700, re-baselines with the notice.

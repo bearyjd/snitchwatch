@@ -16,6 +16,7 @@ ColumnLayout {
     readonly property bool collapsing: model ? model.filterNeedsAttention : false
     readonly property int background: model ? model.backgroundCount : 0
     readonly property int programs: model ? model.backgroundPrograms : 0
+    readonly property bool available: model ? model.backgroundAvailable : false
     readonly property int newPrograms: model ? model.newProgramCount : 0
     readonly property string notice: model ? model.baselineNotice : ""
 
@@ -45,7 +46,9 @@ ColumnLayout {
 
     RowLayout {
         objectName: "backgroundGroup"
-        visible: bar.background > 0
+        // Collapsed: only with rows in it. Expanded, it is not counted (no
+        // work while the full list shows), so it stays while rules allow it.
+        visible: bar.collapsing ? bar.background > 0 : bar.available
         Layout.fillWidth: true
         Kirigami.Icon {
             source: bar.collapsing ? "go-next" : "go-down"
@@ -57,12 +60,13 @@ ColumnLayout {
             Layout.fillWidth: true
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
-            text: "Background and system: "
-                  + bar.plural(bar.background, "connection", "connections") + " from "
-                  + bar.plural(bar.programs, "program", "programs")
-                  + (bar.collapsing
-                     ? ", allowed by recommended rules, collapsed here"
-                     : ", allowed by recommended rules, shown in the list")
+            text: bar.collapsing
+                  ? "Background and system: "
+                    + bar.plural(bar.background, "connection", "connections") + " from "
+                    + bar.plural(bar.programs, "program", "programs")
+                    + ", allowed by recommended rules, collapsed here"
+                  : "Background and system: connections allowed by recommended rules are "
+                    + "in the list, subject to the other filters"
         }
         Controls.Button {
             objectName: "backgroundToggle"

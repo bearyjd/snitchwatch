@@ -4,7 +4,11 @@
 //! Two separate things:
 //!   * a persisted, capped set of executable paths seen before, with when
 //!     each was last seen (least recently seen evicted past [`MAX_SEEN`]),
-//!     merged with the file on every write because two GUIs can run;
+//!     merged with the file on every write, under an advisory lock on
+//!     `<file>.lock` (as `learned` does), because two GUIs can run; when a
+//!     program seen before is seen again, its time is saved at most once per
+//!     [`TOUCH_PERSIST_MS`] and when the model goes away, so the least
+//!     recently used one is what gets evicted;
 //!   * an in-memory "new this session until acknowledged" set: after the
 //!     baseline, a path not in the seen set is new until the user marks it
 //!     seen. Only the baseline and that acknowledgement add paths to the
@@ -19,7 +23,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Read};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -31,6 +35,8 @@ pub const SEEN_FILE_NAME: &str = "seen-programs.json";
 /// At most this many paths are kept (least recently seen evicted).
 pub const MAX_SEEN: usize = 5_000;
 const VERSION: u32 = 1;
+/// A program seen again has its last-seen time saved at most this often.
+pub const TOUCH_PERSIST_MS: i64 = 60_000;
 /// 5,000 paths of up to 4 KiB each would be ~20 MiB; real paths are short,
 /// so anything larger than this is not a file this GUI wrote.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -57,7 +63,9 @@ pub enum Loaded {
     Missing,
     /// Not JSON this GUI wrote, or too large.
     Corrupt,
-    /// Another user's file, a symlink, or a hard-linked or special file.
+    /// Another user's file, a symlink, a hard-linked or special file, a
+    /// file others may write, or one in a directory that is not ours and
+    /// private.
     Foreign,
     Unreadable,
 }
@@ -87,7 +95,12 @@ pub fn read(path: &Path, uid: u32) -> Loaded {
     let Ok(meta) = file.metadata() else {
         return Loaded::Unreadable;
     };
-    if !meta.is_file() || meta.uid() != uid || meta.nlink() != 1 {
+    if !meta.is_file()
+        || meta.uid() != uid
+        || meta.nlink() != 1
+        || meta.permissions().mode() & 0o077 != 0
+        || !private_parent(path, uid)
+    {
         return Loaded::Foreign;
     }
     let mut text = String::new();
@@ -107,6 +120,17 @@ pub fn read(path: &Path, uid: u32) -> Loaded {
     }
 }
 
+/// Whether `path`'s directory is ours and closed to everyone else (0700),
+/// as `private_files` makes it.
+fn private_parent(path: &Path, uid: u32) -> bool {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::metadata(parent)
+        .is_ok_and(|meta| meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0)
+}
+
 /// The [`MAX_SEEN`] most recently seen entries (ties by path), newest first.
 fn capped(entries: impl IntoIterator<Item = (String, i64)>) -> impl Iterator<Item = (String, i64)> {
     let mut all: Vec<(String, i64)> = entries.into_iter().collect();
@@ -116,13 +140,25 @@ fn capped(entries: impl IntoIterator<Item = (String, i64)>) -> impl Iterator<Ite
 }
 
 /// Merge `ours` with what `path` holds now (the later sighting wins), cap
-/// it, and write it atomically with owner-only permissions. Returns the
-/// merged set. A file that is not valid is replaced by `ours`.
+/// it, and write it atomically with owner-only permissions, holding the
+/// advisory lock on `<path>.lock` from the read to the replace so another
+/// GUI's write in between is not lost. Returns the merged set. A file that
+/// is not valid is replaced by `ours`. Without the lock (contended too long,
+/// or unsupported) the write goes ahead and the last writer wins.
 pub fn write_merged(
     path: &Path,
     ours: &HashMap<String, i64>,
     uid: u32,
 ) -> io::Result<HashMap<String, i64>> {
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        crate::private_files::ensure_private_dir(dir)?;
+    }
+    let lock_path = crate::learned::lock_path_for(path);
+    let (_lock, degraded) =
+        crate::learned::acquire_lock(&lock_path, &crate::learned::LockPolicy::default());
+    if degraded {
+        tracing::warn!(path = %lock_path.display(), "seen programs: written without the lock");
+    }
     let mut merged = match read(path, uid) {
         Loaded::Valid(theirs) => theirs,
         _ => HashMap::new(),
@@ -171,6 +207,9 @@ pub struct SeenPrograms {
     clear_applied: bool,
     baselined: bool,
     notice: String,
+    /// A program seen before was seen again since the last save.
+    touched: bool,
+    last_persist_ms: i64,
 }
 
 impl Default for SeenPrograms {
@@ -203,6 +242,8 @@ impl SeenPrograms {
             clear_applied: false,
             baselined: false,
             notice: String::new(),
+            touched: false,
+            last_persist_ms: i64::MIN,
         }
     }
 
@@ -235,6 +276,7 @@ impl SeenPrograms {
         for path in present {
             self.seen.insert(path.to_string(), now_ms);
         }
+        self.last_persist_ms = now_ms;
         self.notice = if problem.is_empty() {
             BASELINE_TEXT.to_string()
         } else {
@@ -257,11 +299,16 @@ impl SeenPrograms {
         let mut flagged = false;
         for path in paths {
             if let Some(last) = self.seen.get_mut(path) {
+                self.touched |= *last < now_ms;
                 *last = (*last).max(now_ms);
             } else if !self.new_this_session.contains(path) {
                 self.new_this_session.insert(path.to_string());
                 flagged = true;
             }
+        }
+        if self.touched && now_ms.saturating_sub(self.last_persist_ms) >= TOUCH_PERSIST_MS {
+            self.last_persist_ms = now_ms;
+            self.persist();
         }
         flagged
     }
@@ -275,11 +322,14 @@ impl SeenPrograms {
         for path in std::mem::take(&mut self.new_this_session) {
             self.seen.insert(path, now_ms);
         }
+        self.last_persist_ms = now_ms;
         self.persist();
         true
     }
 
+    /// Save the set (never a path new this session: those are not in it).
     fn persist(&mut self) {
+        self.touched = false;
         let Backing::File { path, uid } = &self.backing else {
             self.seen = capped(std::mem::take(&mut self.seen)).collect();
             return;
@@ -316,6 +366,15 @@ impl SeenPrograms {
 
     pub fn dismiss_notice(&mut self) {
         self.notice.clear();
+    }
+}
+
+/// Shutdown: save last-seen times not yet saved.
+impl Drop for SeenPrograms {
+    fn drop(&mut self) {
+        if self.touched {
+            self.persist();
+        }
     }
 }
 

@@ -140,6 +140,9 @@ pub mod qobject {
         /// for a program seen before: the group's one-line summary.
         #[qproperty(i32, background_count, cxx_name = "backgroundCount")]
         #[qproperty(i32, background_programs, cxx_name = "backgroundPrograms")]
+        /// Whether an enabled recommended rule from the current session's
+        /// rules is known, so rows can collapse at all.
+        #[qproperty(bool, background_available, cxx_name = "backgroundAvailable")]
         /// Programs first seen this session, shown until `markNewProgramsSeen`.
         #[qproperty(i32, new_program_count, cxx_name = "newProgramCount")]
         /// The one-time first-seen baseline notice; empty when none.
@@ -673,8 +676,15 @@ pub struct ConnectionsModelRust {
     background_programs: i32,
     new_program_count: i32,
     baseline_notice: QString,
+    background_available: bool,
     /// First-seen state behind "handled" (0c).
     seen: crate::connections::seen_programs::SeenPrograms,
+    /// The group's figures, per row (0c).
+    handled_counts: crate::connections::attention::HandledCounts,
+    /// Whether this session's rules snapshot has arrived: a clear revokes
+    /// collapsing until the next `SetRules`, so replayed rows are never
+    /// collapsed by the previous session's rules.
+    attention_armed: bool,
     /// The Settings default duration the rule roles are computed with.
     duration: level_rule_actions::DurationCache,
     /// Behind the `retriedCount` role (`retries`), and its test seam.
@@ -721,7 +731,10 @@ impl Default for ConnectionsModelRust {
             background_programs: 0,
             new_program_count: 0,
             baseline_notice: QString::default(),
+            background_available: false,
             seen: Default::default(),
+            handled_counts: Default::default(),
+            attention_armed: false,
             duration: level_rule_actions::DurationCache::default(),
             held_back_rows: HashMap::new(),
             held_back_shown: false,

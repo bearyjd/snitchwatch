@@ -5,18 +5,20 @@
 //! `connections::attention`; this only keeps its facts current and forces
 //! the projection to follow them.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::*;
 use crate::connections::attention::AttentionFacts;
+use crate::connections::row_store::{RowStep, VisibleChange};
 use crate::connections::seen_programs::{SeenPrograms, SEEN_FILE_NAME};
 
 impl qobject::ConnectionsModel {
-    pub(super) fn set_needs_attention(self: Pin<&mut Self>, on: bool) {
+    pub(super) fn set_needs_attention(mut self: Pin<&mut Self>, on: bool) {
         let mut filter = self.store.filter().clone();
         filter.set_needs_attention(on);
-        self.apply_filter(filter);
+        self.as_mut().apply_filter(filter);
+        self.as_mut().rebuild_handled_counts();
+        self.refresh_attention_counts();
     }
 
     pub(super) fn mark_new_programs_seen(mut self: Pin<&mut Self>) {
@@ -42,10 +44,12 @@ impl qobject::ConnectionsModel {
     }
 
     /// A `SetRules`/`UpdateRules` was applied: take the baseline if this is
-    /// the first one after a clear, then re-decide every row.
-    pub(super) fn after_rules_applied(mut self: Pin<&mut Self>) {
+    /// the first one after a clear, then re-decide every row. Only a
+    /// `SetRules` (`snapshot`) restores collapsing after a clear.
+    pub(super) fn after_rules_applied(mut self: Pin<&mut Self>, snapshot: bool) {
         {
             let mut rust = self.as_mut().rust_mut();
+            rust.attention_armed |= snapshot;
             let ConnectionsModelRust { store, seen, .. } = &mut *rust;
             let present = store
                 .rows()
@@ -56,11 +60,17 @@ impl qobject::ConnectionsModel {
         self.refresh_attention_facts();
     }
 
-    /// Rebuild the "handled" facts from the CURRENT rules list and seen set;
-    /// when they changed, recompute the visible rows, so a rule deleted or
-    /// disabled later shows its rows again.
+    /// Rebuild the "handled" facts from the CURRENT rules list and seen set
+    /// (no rules until this session's snapshot arrived); only when they
+    /// changed, recompute the visible rows, so a rule deleted or disabled
+    /// later shows its rows again.
     pub(super) fn refresh_attention_facts(mut self: Pin<&mut Self>) {
-        let facts = AttentionFacts::new(self.level_rules.rules(), self.seen.seen_paths());
+        let rules = if self.attention_armed {
+            self.level_rules.rules()
+        } else {
+            &[]
+        };
+        let facts = AttentionFacts::new(rules, self.seen.seen_paths());
         if self.store.filter().attention_facts() == Some(&facts) {
             self.refresh_attention_counts();
             return;
@@ -79,33 +89,102 @@ impl qobject::ConnectionsModel {
                 self.as_mut().end_reset_model();
             }
         }
+        self.as_mut().rebuild_handled_counts();
         self.as_mut().refresh_filter_state();
         self.refresh_counts();
     }
 
-    /// The group's one-line summary figures, the new-program count and the
-    /// baseline notice.
+    /// Recount the group from every row: only when the facts or the switch
+    /// change. With the full list showing nothing is counted.
+    fn rebuild_handled_counts(mut self: Pin<&mut Self>) {
+        let mut rust = self.as_mut().rust_mut();
+        let ConnectionsModelRust {
+            store,
+            handled_counts,
+            ..
+        } = &mut *rust;
+        let filter = store.filter();
+        handled_counts.rebuild(
+            filter.needs_attention(),
+            filter.attention_facts(),
+            store.rows(),
+        );
+    }
+
+    /// The group's one-line summary figures (kept per row), the new-program
+    /// count, the baseline notice and the filter state a clear may change.
     pub(super) fn refresh_attention_counts(mut self: Pin<&mut Self>) {
-        let (count, programs) = {
-            let filter = self.store.filter();
-            let mut count = 0;
-            let mut programs = HashSet::new();
-            for row in self
-                .store
-                .rows()
-                .iter()
-                .filter(|row| filter.is_handled(row))
-            {
-                count += 1;
-                programs.insert(row.process_path.as_deref());
-            }
-            (count, programs.len() as i32)
-        };
+        let count = self.handled_counts.rows() as i32;
+        let programs = self.handled_counts.programs() as i32;
+        let available = self
+            .store
+            .filter()
+            .attention_facts()
+            .is_some_and(AttentionFacts::collapses_anything);
         let new_programs = self.seen.new_count() as i32;
         let notice = QString::from(self.seen.notice());
         self.as_mut().set_background_count(count);
         self.as_mut().set_background_programs(programs);
+        self.as_mut().set_background_available(available);
         self.as_mut().set_new_program_count(new_programs);
         self.as_mut().set_baseline_notice(notice);
+        self.refresh_filter_state();
+    }
+
+    /// The flat view while only the collapse narrows it: each changed row is
+    /// re-decided alone, behind ranged signals, never a reset.
+    pub(super) fn apply_collapsed_delta(mut self: Pin<&mut Self>, msg: ServerMessage) {
+        match msg {
+            ServerMessage::InsertConnectionRows { rows } => {
+                for row in rows {
+                    let step = self.store.plan_upsert(&row);
+                    self.as_mut()
+                        .signal_step(step, |store| store.commit_upsert(step, row));
+                }
+            }
+            ServerMessage::UpdateConnectionRows { rows } => {
+                for row in rows {
+                    let step = self.store.plan_upsert(&row);
+                    if step.index.is_some() {
+                        self.as_mut()
+                            .signal_step(step, |store| store.commit_upsert(step, row));
+                    }
+                }
+            }
+            ServerMessage::RemoveConnectionRows { ids } => {
+                for id in ids {
+                    if let Some(step) = self.store.plan_remove(&id) {
+                        self.as_mut()
+                            .signal_step(step, |store| store.commit_remove(step));
+                    }
+                }
+            }
+            other => self.as_mut().rust_mut().store.apply_incremental(other),
+        }
+    }
+
+    fn signal_step(mut self: Pin<&mut Self>, step: RowStep, commit: impl FnOnce(&mut RowStore)) {
+        let no_parent = QModelIndex::default();
+        match step.change {
+            VisibleChange::Inserted(at) => unsafe {
+                self.as_mut()
+                    .begin_insert_rows(&no_parent, at as i32, at as i32);
+                commit(&mut self.as_mut().rust_mut().store);
+                self.as_mut().end_insert_rows();
+            },
+            VisibleChange::Removed(at) => unsafe {
+                self.as_mut()
+                    .begin_remove_rows(&no_parent, at as i32, at as i32);
+                commit(&mut self.as_mut().rust_mut().store);
+                self.as_mut().end_remove_rows();
+            },
+            VisibleChange::Changed(at) => {
+                commit(&mut self.as_mut().rust_mut().store);
+                let index = self.index(at as i32, 0, &no_parent);
+                self.as_mut()
+                    .data_changed(&index, &index, &QList::<i32>::default());
+            }
+            VisibleChange::None => commit(&mut self.as_mut().rust_mut().store),
+        }
     }
 }

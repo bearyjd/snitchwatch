@@ -184,3 +184,36 @@ fn with_no_rules_nothing_is_handled_and_nothing_collapses() {
     assert!(!facts.is_handled(&handled_row()));
     assert!(!AttentionFacts::default().is_handled(&handled_row()));
 }
+
+#[test]
+fn handled_counts_follow_each_row_delta() {
+    let facts = facts();
+    let mut counts = HandledCounts::default();
+    counts.upsert(Some(&facts), &handled_row());
+    assert_eq!(counts.rows(), 0, "off until rebuilt on");
+    counts.rebuild(true, Some(&facts), &[handled_row()]);
+    assert_eq!((counts.rows(), counts.programs()), (1, 1));
+    let second = ConnectionRow {
+        id: "r2".to_string(),
+        ..handled_row()
+    };
+    counts.upsert(Some(&facts), &second);
+    counts.upsert(Some(&facts), &second);
+    assert_eq!(
+        (counts.rows(), counts.programs()),
+        (2, 1),
+        "an upsert counts once"
+    );
+    let denied = ConnectionRow {
+        action: Some("deny".to_string()),
+        ..second.clone()
+    };
+    counts.upsert(Some(&facts), &denied);
+    assert_eq!(counts.rows(), 1, "a row that stops being handled leaves");
+    counts.remove("r1");
+    assert_eq!((counts.rows(), counts.programs()), (0, 0));
+    counts.upsert(None, &handled_row());
+    assert_eq!(counts.rows(), 0, "no facts, nothing handled");
+    counts.rebuild(false, Some(&facts), &[handled_row()]);
+    assert_eq!(counts.rows(), 0, "off does no work");
+}

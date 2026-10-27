@@ -254,46 +254,50 @@ fn try_flock(file: &File) -> io::Result<()> {
 }
 
 impl FileBackend {
-    /// The lock, if it can be had: the open lock file (dropping it releases
-    /// the lock) and whether the lock was given up on. Contention is retried
-    /// per the policy; a lock that cannot be opened or is not supported by the
-    /// directory is given up on at once. Never fails: the caller goes on
-    /// without it (last writer wins).
     fn acquire(&self) -> (Option<File>, bool) {
-        let lock_path = self.lock_path();
-        let opened = open_no_follow(
-            &lock_path,
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .mode(0o600),
-        );
-        let Ok(file) = opened else {
-            return (None, true);
-        };
-        if refuse_unless_ours(&lock_path, &file).is_err() {
-            return (None, true);
-        }
-        let attempts = self.policy.attempts.max(1);
-        for attempt in 0..attempts {
-            match try_flock(&file) {
-                Ok(()) => return (Some(file), false),
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    if attempt + 1 < attempts {
-                        std::thread::sleep(self.policy.pause);
-                    }
-                }
-                // Not supported here (or any other failure): do not wait.
-                Err(_) => return (None, true),
-            }
-        }
-        (None, true)
+        acquire_lock(&self.lock_path(), &self.policy)
     }
+}
+
+/// The advisory lock on `lock_path`, if it can be had: the open lock file
+/// (dropping it releases the lock) and whether the lock was given up on.
+/// Contention is retried per `policy`; a lock that cannot be opened or is not
+/// supported by the directory is given up on at once. Never fails: the caller
+/// goes on without it (last writer wins). Also guards
+/// `connections::seen_programs`.
+pub(crate) fn acquire_lock(lock_path: &Path, policy: &LockPolicy) -> (Option<File>, bool) {
+    let opened = open_no_follow(
+        lock_path,
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .mode(0o600),
+    );
+    let Ok(file) = opened else {
+        return (None, true);
+    };
+    if refuse_unless_ours(lock_path, &file).is_err() {
+        return (None, true);
+    }
+    let attempts = policy.attempts.max(1);
+    for attempt in 0..attempts {
+        match try_flock(&file) {
+            Ok(()) => return (Some(file), false),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                if attempt + 1 < attempts {
+                    std::thread::sleep(policy.pause);
+                }
+            }
+            // Not supported here (or any other failure): do not wait.
+            Err(_) => return (None, true),
+        }
+    }
+    (None, true)
 }
 
 impl Backend for FileBackend {

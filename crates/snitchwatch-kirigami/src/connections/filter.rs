@@ -241,6 +241,17 @@ impl ConnectionFilter {
                 .is_some_and(|facts| facts.collapses_anything())
     }
 
+    /// Whether collapsing is the ONLY narrowing in force, so a row delta can
+    /// re-decide just that row (`row_store::incremental`).
+    pub fn narrows_only_by_collapse(&self) -> bool {
+        self.collapses()
+            && self.geo_scope.is_none()
+            && !self.pending_only
+            && !self.denied_only
+            && self.since_ms.is_none()
+            && self.terms.is_empty()
+    }
+
     pub fn needs_attention(&self) -> bool {
         self.needs_attention
     }

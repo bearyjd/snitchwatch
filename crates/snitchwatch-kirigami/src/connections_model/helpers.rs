@@ -103,10 +103,19 @@ pub(super) fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &Server
             // First-seen state (0c): flags only, never visibility.
             let paths = rows.iter().filter_map(|row| row.process_path.as_deref());
             rust.seen.observe(paths, now_ms());
+            let ConnectionsModelRust {
+                store,
+                handled_counts,
+                ..
+            } = &mut *rust;
+            for row in rows {
+                handled_counts.upsert(store.filter().attention_facts(), row);
+            }
         }
         ServerMessage::RemoveConnectionRows { ids } => {
             for id in ids {
                 rust.grouping.remove_row(id);
+                rust.handled_counts.remove(id);
             }
         }
         ServerMessage::MoveConnetionRows { ids } => {
@@ -114,8 +123,15 @@ pub(super) fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &Server
         }
         ServerMessage::ClearConnectionRows => {
             rust.grouping.clear();
-            // A reconnect's clear resets neither the seen set nor the flags.
+            // A reconnect's clear resets neither the seen set nor the flags,
+            // but nothing collapses again until this session's rules arrive:
+            // the previous session's may name a rule deleted meanwhile.
             rust.seen.note_clear_applied();
+            rust.attention_armed = false;
+            rust.store.set_attention_facts(std::sync::Arc::new(
+                crate::connections::attention::AttentionFacts::default(),
+            ));
+            rust.handled_counts.clear();
         }
         _ => {}
     }
