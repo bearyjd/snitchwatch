@@ -152,6 +152,10 @@ absent exactly as the table says.
 - Disabling stops recording at once, via the barrier in H02, and **keeps**
   existing history by default. "Delete history" is a separate, confirmed
   action (H02 preview and token), also offered next to the disable control.
+- **Who may change it.** Per-user bridge: any authenticated client of the
+  user's socket. System bridge: any client authenticated on the GUI socket
+  (`snitchwatch-ui`, `SocketMode=0660`) may enable, disable and clear history;
+  there is no polkit step in v1 (decision 14).
 - If storage is unusable the bridge keeps running, history reports
   `unavailable: <reason>`, and it never retries into another location.
 
@@ -173,7 +177,7 @@ absent exactly as the table says.
     `XDG_STATE_HOME=/var/lib`. History is therefore **owned by the
     `snitchwatch` service account, in a directory only that account (and
     root) can enter**; desktop users cannot open the file, and `snitchwatch-ui`
-    group membership grants access to the bridge socket, not to the file.
+    group membership grants access to the bridge socket (`SocketGroup=snitchwatch-ui`, `SocketMode=0660`), not to the file; the file is 0600 `snitchwatch`.
     The existing system check (`check_system_state_dir`: owned by the service
     account and mode 0700) already applies to the parent; the history
     subdirectory adds the exact-0700 check below.
@@ -633,6 +637,7 @@ inventory, work patterns, and sensitive sites. It is a profile of the user.
 | Same-uid processes (per-user bridge) | **Yes** | 0600 stops other users, not other processes of the user. A same-uid process can also use the socket plus token to read history through the bridge |
 | Any holder of the socket path **and** token (per-user bridge) | **Yes** | History is exposed over the WS exactly as live rows are |
 | Clients allowed on `/run/snitchwatch/bridge.sock` (system bridge: members of `snitchwatch-ui`; the token there is compatibility-only and socket access is the authorization boundary) | **Yes, all users' history** | Decision 1: reads go only through the bridge to clients already authorised for the live stream. This widens how **far back** they can see, not **who** can see connections. Per-uid scoping is deferred, so on a multi-user machine every authorised client sees every user's history |
+| System bridge control: members of `snitchwatch-ui` (decision 14) | **Can enable, disable, clear and read** | Same audience as the live stream and prompts today; no polkit in v1. Membership is the boundary and an admin grants it; a member can erase history, so integrity is not defended against them |
 | Other local users (not in `snitchwatch-ui`; not the service account) | No | System: `/var/lib/snitchwatch` is 0700 `snitchwatch`; per-user: 0700/0600 |
 | root | Yes | Out of scope |
 | Backups of `~` or the host state directory | **Yes** | Long-lived, often off-box. The opt-in text names the bridge-reported path so the user can exclude it |
@@ -775,6 +780,23 @@ Resolved by the owner; each is reflected in the sections named.
     to the D4 allowlist and the threat model. (D4, D7.)
 12. **A stale preview is refused and a fresh one required; clear-all refuses
     if newer rows exist.** (H02, C2.)
+
+13. **System bridge storage, verified from `packaging/system/`.** The unit
+    `snitchwatch-system-bridge.service` runs `User=snitchwatch`,
+    `Group=snitchwatch` (lines 15-16) with `StateDirectory=snitchwatch` and
+    `StateDirectoryMode=0700` (lines 53-54), which is `/var/lib/snitchwatch`.
+    History lives under `/var/lib/snitchwatch/history/`, owned by
+    `snitchwatch`, with a 0600 database file. The GUI socket is
+    `snitchwatch-system-bridge-gui.socket`: `ListenStream=/run/snitchwatch/
+    bridge.sock`, `SocketGroup=snitchwatch-ui`, `SocketMode=0660` (lines
+    7-10). (D3, threat model.)
+14. **Control and read access on the system bridge.** Any client
+    authenticated on the GUI socket, meaning a member of `snitchwatch-ui`, can
+    **enable, disable and clear history, and read it.** This is the same
+    audience that already receives the live stream and can answer prompts. No
+    polkit in v1. **`snitchwatch-ui` membership is the security boundary, and
+    an administrator grants it**; anyone with it can also erase history, so
+    history is not tamper-resistant against them. (D2, H02, threat model.)
 
 ### Remaining implementation-proof obligations (not owner decisions)
 
