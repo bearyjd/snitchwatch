@@ -509,15 +509,31 @@ nothing for disable-and-keep. Enforcement, in this order:
 3. **Close read admission** (D8 gate refuses new queries with `busy`),
    **cancel and join every reader worker, and close every SQLite handle**,
    including the read-only connection.
-4. **Split the queue by scope; do not discard wholesale.** Accepted queued
-   events and pending guards **outside the scope are kept** and re-stamped
-   to the new generation (a retention change keeps what the new retention
-   keeps; a rejected or narrower range delete keeps everything it does not
-   cover). Items **inside the scope** are discarded together with their
-   pending snapshots. **Any accepted item discarded outside an approved scope
-   (for example because it cannot be kept) first gets a durable gap row, and
-   only then is its pin released** (W1): a pin is never released by a
-   discard alone.
+4. **Split the queue by scope; do not discard wholesale.**
+   - *Queued events* outside the scope are kept. Moving them across the
+     boundary does not rewrite anything about how they were accepted: the
+     queue item carries a separate **writer-generation** field, which the
+     writer updates; the item's own acceptance data is immutable.
+   - *Pending guards never change generation.* A guard's acceptance
+     generation and consent (G1) are immutable for its whole life. A guard is
+     therefore never "re-stamped": it settles only if its acceptance
+     generation still equals the current one.
+   - **Disable invalidates every pending guard**, including under
+     disable-and-keep, whose deletion scope is otherwise empty. Each such
+     guard is invalidated, a durable gap row covering its arrival is
+     committed, and its pin is released in the same transaction (W1). A
+     later re-enable under the same consent cannot revive it: its acceptance
+     generation is older, so its outcome is discarded at settlement.
+   - For clear and retention change, guards outside the scope also keep their
+     original acceptance generation; whether they can still settle is decided
+     by G1 against the current generation, so a control operation that
+     increments the generation invalidates the guards it supersedes (each
+     with its durable gap before its pin is released), and operations that
+     must not interrupt recording (a rejected preview) never reach this step.
+   - *Queued events and snapshots inside the scope* are discarded together.
+     Any accepted item discarded outside an approved scope first gets a
+     durable gap row, and only then is its pin released; a pin is never
+     released by a discard alone.
 5. Perform the operation (below) and acknowledge after cleanup.
 6. **Invalidate** any already-produced response and GUI page of an older
    generation: responses carry the generation, the bridge refuses to deliver
@@ -526,6 +542,9 @@ nothing for disable-and-keep. Enforcement, in this order:
 Tests (each with a blocked writer and a non-empty queue):
 - a **retention change** keeps the queued events the new retention keeps,
   discards only those it evicts, and leaves the watermark correct;
+- **disable-and-keep with prompts pending**, then re-enable under the same
+  consent, then settle the old prompts: nothing is written except the gaps
+  committed at disable (no event, no snapshot, no pin left);
 - a **rejected stale preview** leaves the queue, guards, pins and watermark
   exactly as before, and ingestion was never interrupted;
 - an accepted item that must be dropped outside scope leaves a durable gap
