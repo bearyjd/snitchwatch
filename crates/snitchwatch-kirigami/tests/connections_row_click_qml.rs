@@ -47,6 +47,10 @@ Window {
     // waiting, and the remove item's last seen geometry.
     property int waited: 0
     property string lastGeometry: ""
+    // Readiness gating: ticks a phase has been held back, and the last seen
+    // geometry per gated item.
+    property int stalls: 0
+    property var geo: ({})
     property var menuRow: null
     readonly property var liveActions: page.connectionActions
 
@@ -126,13 +130,18 @@ Window {
         }
         return null;
     }
-    function header(level, key) {
+    function headerOrNull(level, key) {
         const list = page.connectionList;
         for (let i = 0; i < list.count; ++i) {
             const item = list.itemAtIndex(i);
             if (item && item.isGroupHeader && item.groupLevel === level && item.groupKey === key)
                 return item;
         }
+        return null;
+    }
+    function header(level, key) {
+        const item = probe.headerOrNull(level, key);
+        if (item) return item;
         throw new Error("missing header " + level + ":" + key);
     }
     function named(item, name) {
@@ -165,16 +174,113 @@ Window {
         probe.expect(probe.liveActions.menu.visible, "right click did not open actions");
         probe.expect(probe.menuRow.expanded === expanded, "right click expanded/collapsed group");
     }
-    function menuItem(name) {
+    function menuItemOrNull(name) {
         for (let i = 0; i < probe.liveActions.menu.count; ++i) {
             const item = probe.liveActions.menu.itemAt(i);
             if (item && item.objectName === name) return item;
         }
+        return null;
+    }
+    function menuItem(name) {
+        const item = probe.menuItemOrNull(name);
+        if (item) return item;
         throw new Error("missing menu action " + name);
     }
     function clickPending(allow) {
         const item = probe.menuItem(allow ? "allowPendingAction" : "denyPendingAction");
         tc.mouseClick(item, item.width / 2, item.height / 2);
+    }
+
+    // Readiness gates. Each returns "" when the phase may run, else what it is
+    // still waiting for. The timer holds the phase back (bounded by
+    // maxStalls) so a click never races popup, layout or model readiness.
+    readonly property int maxStalls: 200
+    // Shown, sized and unmoved since the previous tick for this key.
+    function stable(key, item) {
+        if (!item || !item.visible || !item.enabled || !(item.width > 0) || !(item.height > 0)) {
+            probe.geo[key] = "";
+            return false;
+        }
+        const g = item.mapToItem(null, 0, 0);
+        const geometry = [g.x, g.y, item.width, item.height].join(",");
+        const same = geometry === probe.geo[key];
+        probe.geo[key] = geometry;
+        return same;
+    }
+    // The popup is fully open or fully closed, not mid open/close transition.
+    function popupSettled() {
+        const menu = probe.liveActions.menu;
+        return menu.opened || !menu.visible;
+    }
+    function waitHeader(level, key) {
+        if (!probe.popupSettled()) return "popup transition";
+        const item = probe.headerOrNull(level, key);
+        return probe.stable("h" + level + key, item) ? "" : "header " + level + ":" + key;
+    }
+    function waitLeaf(id) {
+        if (!probe.popupSettled()) return "popup transition";
+        const index = model.visibleRowIndex(id);
+        const item = index >= 0 ? page.connectionList.itemAtIndex(index) : null;
+        return probe.stable("leaf" + id, item) ? "" : "leaf " + id;
+    }
+    // A menu item is clickable once the popup is open and the item is stable.
+    // Phases that assert the menu is open themselves pass lenient=true, so a
+    // dismissed menu still reaches that assertion instead of timing out.
+    function waitMenuItem(name, lenient) {
+        const menu = probe.liveActions.menu;
+        if (!probe.popupSettled()) return "popup transition";
+        if (!menu.visible) return lenient ? "" : "menu open";
+        return probe.stable("m" + name, probe.menuItemOrNull(name)) ? "" : "menu item " + name;
+    }
+    function gate(phase) {
+        switch (phase) {
+        case 2: {
+            const list = probe.findList(page);
+            const ok = list && list.count === 2 && probe.stable("row1", list.itemAtIndex(1));
+            return ok ? "" : "two flat rows";
+        }
+        case 4: return probe.waitHeader(0, "/usr/bin/app");
+        case 5: return probe.waitMenuItem("denyPendingAction", true);
+        case 7: {
+            const wait = probe.waitHeader(1, "example.com");
+            if (wait !== "") return wait;
+            const handle = probe.named(probe.headerOrNull(1, "example.com"), "groupActionsButton");
+            return probe.stable("handle7", handle) ? "" : "Actions handle";
+        }
+        case 8: return probe.waitMenuItem("allowPendingAction", false);
+        case 10: return probe.waitHeader(2, "www.example.com");
+        case 11: return probe.waitMenuItem("denyPendingAction", false);
+        case 13: return probe.waitHeader(1, "example.com");
+        case 14: return probe.waitMenuItem("denyPendingAction", false);
+        case 15: return probe.popupSettled() ? "" : "popup transition";
+        case 17: {
+            const wait = probe.waitHeader(1, "example.com");
+            if (wait !== "") return wait;
+            const handle = probe.named(probe.headerOrNull(1, "example.com"), "groupActionsButton");
+            return probe.stable("handle17", handle) ? "" : "Actions handle";
+        }
+        case 18: return probe.waitMenuItem("allowPendingAction", true);
+        case 20: {
+            const wait = probe.waitHeader(1, "example.com");
+            if (wait !== "") return wait;
+            const domain = probe.headerOrNull(1, "example.com");
+            return domain.ruleButton && probe.stable("rule20", domain.ruleButton.button) ? "" : "rule button";
+        }
+        case 21: return probe.waitMenuItem("denyGroupRuleAction", true);
+        case 23: {
+            const wait = probe.waitHeader(1, "example.com");
+            if (wait !== "") return wait;
+            const domain = probe.headerOrNull(1, "example.com");
+            return domain.ruleButton && probe.stable("rule23", domain.ruleButton.button) ? "" : "rule button";
+        }
+        case 26: return probe.waitLeaf("s:www");
+        case 27: return probe.waitMenuItem("denyPendingAction", true);
+        case 28: return probe.waitLeaf("s:api");
+        case 29: return probe.popupSettled() ? "" : "popup transition";
+        case 30: return probe.waitLeaf("s:api");
+        case 31: return probe.waitMenuItem("groupConnectionsAction", true);
+        default: return "";
+        }
     }
 
     Timer {
@@ -184,6 +290,12 @@ Window {
         onTriggered: {
             let done = false;
             try {
+                const waiting = probe.gate(probe.phase);
+                if (waiting !== "") {
+                    if (++probe.stalls < probe.maxStalls) return;
+                    throw new Error("never ready for " + waiting);
+                }
+                probe.stalls = 0;
                 if (probe.phase === 0) {
                     model.setGroupedMode(false);
                     model.applyServerMessageJson(JSON.stringify({
