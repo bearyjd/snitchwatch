@@ -57,6 +57,14 @@ Window {
         check(status && support && details, "health page labels missing");
         check(support.text.indexOf("/proc and eBPF") >= 0, "both methods not documented");
         check(support.text.indexOf("does not report the active method") >= 0, "active method guessed");
+        // Q04: the monitor line is fixed; no report or About info names a mode.
+        const monitorLine = find(page, "processMonitorReported");
+        const NOT_REPORTED = "Process monitor: not reported by opensnitchd";
+        function checkMonitor(when) {
+            check(monitorLine && monitorLine.visible && monitorLine.text === NOT_REPORTED
+                  && model.monitorStatus === NOT_REPORTED, "monitor line changed " + when);
+        }
+        checkMonitor("at startup");
         // Current bridge cannot report active method. This is healthy for both
         // /proc and eBPF, including daemon fallback from eBPF to /proc.
         report({ status: "unknown" }, { status: "ok" });
@@ -71,6 +79,12 @@ Window {
         check(model.hasProblem && details.text.indexOf("warning: process monitor fallback") >= 0, "monitor warning lost");
         report({ status: "unknown" }, { status: "failed", detail: "firewall stopped" });
         check(model.hasProblem && details.text === "firewall stopped", "firewall failure hidden");
+        model.applyServerMessageJson(JSON.stringify({ action: "setAboutInfo", info: {
+            snitchwatchVersion: "1", opensnitchdVersion: "1.8.0", ebpfCommit: "abc123" } }));
+        report({ status: "ok" }, { status: "ok" });
+        checkMonitor("after an eBPF-capable report and About info");
+        report({ status: "failed", detail: "ebpf modules failed, fallback to proc" }, { status: "ok" });
+        checkMonitor("after a monitor warning");
         console.info("DUAL_MODE_HEALTH_OK");
     }
 }

@@ -116,8 +116,8 @@ Window {
     }
     function checkLabels(view) {
         const expected = {
-            paused: "Allowed once (filtering was paused)",
-            answeredLater: "Allowed once (filtering was paused)",
+            paused: "Allowed once (prompting was paused)",
+            answeredLater: "Allowed once (prompting was paused)",
             other: "allowed",
             waiting: "pending",
             newer: "allowed"

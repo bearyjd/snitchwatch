@@ -10,19 +10,19 @@
 //! counts unanswered packets, not connections: a retry, or the waiting
 //! connection's own retransmit, counts again, so the text counts times.
 
-/// Issue #78 for `holders` prompts holding the slot while filtering is
+/// Issue #78 for `holders` prompts holding the slot while prompting is
 /// paused: the pause can't reach other new connections, which holds under
 /// either default action. Fixed text, so the tray tooltip (rich text) may
 /// show it too.
 pub fn paused_while_waiting(holders: u32) -> String {
     if holders > 1 {
         format!(
-            "Filtering is paused, but {holders} connections are still waiting for your answer. \
+            "Prompting is paused, but {holders} connections are still waiting for your answer. \
              Until you answer them, the pause can't reach other new connections; they usually \
              get the firewall's default action instead."
         )
     } else {
-        "Filtering is paused, but a connection is still waiting for your answer. Until you \
+        "Prompting is paused, but a connection is still waiting for your answer. Until you \
          answer it, the pause can't reach other new connections; they usually get the \
          firewall's default action instead."
             .to_string()
@@ -128,13 +128,13 @@ mod tests {
     fn a_pause_says_it_cant_reach_other_connections() {
         assert_eq!(
             paused_while_waiting(1),
-            "Filtering is paused, but a connection is still waiting for your answer. Until you \
+            "Prompting is paused, but a connection is still waiting for your answer. Until you \
              answer it, the pause can't reach other new connections; they usually get the \
              firewall's default action instead."
         );
         assert_eq!(
             paused_while_waiting(2),
-            "Filtering is paused, but 2 connections are still waiting for your answer. Until \
+            "Prompting is paused, but 2 connections are still waiting for your answer. Until \
              you answer them, the pause can't reach other new connections; they usually get \
              the firewall's default action instead."
         );

@@ -34,7 +34,7 @@ Labs.Menu {
     // A committed background Save must keep its outcome window available.
     property bool windowDismissalAllowed: true
 
-    // Pause only while filtering can be paused, Resume only while it is
+    // Pause only while prompting can be paused, Resume only while it is
     // paused; "reconnect" (DaemonDown) and "default" offer neither.
     readonly property bool canPause: controller.menuLabel === "pause_filtering"
     readonly property bool canResume: controller.menuLabel === "resume_filtering"
@@ -76,8 +76,8 @@ Labs.Menu {
         objectName: "resumeFiltering"
         enabled: trayMenu.canResume
         text: trayMenu.controller.pausedUntil
-            ? "Resume filtering (until " + trayMenu.controller.pausedUntil + ")"
-            : "Resume filtering"
+            ? "Resume prompting (until " + trayMenu.controller.pausedUntil + ")"
+            : "Resume prompting"
         onTriggered: trayMenu.controller.resume()
     }
     Labs.MenuItem {

@@ -504,7 +504,7 @@ fn notice_text(notice: &BridgeNotice) -> Option<(&'static str, String)> {
             "opensnitchd has been unreachable for 30 seconds.".to_string(),
         ),
         BridgeNotice::FilterPauseExpired => (
-            "Snitchwatch — filtering resumed",
+            "Snitchwatch — prompting resumed",
             "Your pause timer expired.".to_string(),
         ),
         BridgeNotice::DenyScopeNarrowed { what, reason, .. } => (

@@ -61,6 +61,7 @@ Window {
         property bool hasProblem: true
         property string statusSummary: "Connection or kernel problem detected"
         property string troubleshootingText: probeWindow.markup
+        property string monitorStatus: "Process monitor: not reported by opensnitchd"
         function recheck() {}
     }
 

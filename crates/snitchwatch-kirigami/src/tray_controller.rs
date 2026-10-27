@@ -8,22 +8,25 @@
 //! The tray icon/menu itself is declared directly in `main.qml`; this
 //! `QObject` only feeds it the tooltip/menu-label strings derived from the
 //! bridge's `TrayState` and `FilterPauseState` by [`crate::tray`]'s pure,
-//! unit-tested functions.
+//! unit-tested functions, plus Q04's firewall and process-monitor lines from
+//! [`crate::tray_health`] (the bridge's `DiagnosticsReport`).
 
 use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
-use cxx_qt_lib::{QDateTime, QString, QTimeZone};
+use cxx_qt_lib::{QDateTime, QString};
 
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 use crate::bridge_runtime::{
-    BridgeHandles, BridgePauseState, BridgeTrayState, ReceivedPauseState, ReceivedPromptSlot,
-    ReceivedTrayState,
+    BridgeHandles, BridgePauseState, ReceivedPauseState, ReceivedPromptSlot, ReceivedTrayState,
 };
 use crate::tray::{
     build_set_filtering_paused_json, derive_menu_label, derive_tooltip_with_slot,
-    live_slot_holders, menu_label_token,
+    live_slot_holders, menu_label_token, startup_tooltip,
 };
+use crate::tray_health::{compose_tooltip, firewall_report};
+use crate::tray_session::{cleanup_job, link_key, watch_sessions, TraySession};
+use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -92,8 +95,11 @@ pub struct TrayControllerRust {
     menu_label: QString,
     paused_until: QString,
     pause_answers_waiting: bool,
-    tray_state: BridgeTrayState,
-    pause_state: BridgePauseState,
+    /// Tray, pause and firewall state, each tagged with its session. Only
+    /// the live session's is shown, so no default claims a connection (Q04).
+    session: TraySession,
+    /// Dropped with the controller, which ends its session watch.
+    _session_watch_stop: Option<oneshot::Sender<()>>,
     /// How many prompts hold the daemon's single slot (issue #78;
     /// `PromptSlot` messages), as of session `slot_session`.
     slot_holders: u32,
@@ -103,12 +109,12 @@ pub struct TrayControllerRust {
 impl Default for TrayControllerRust {
     fn default() -> Self {
         Self {
-            tooltip: QString::from("Snitchwatch — filtering"),
+            tooltip: QString::from(&startup_tooltip()),
             menu_label: QString::from("default"),
             paused_until: QString::default(),
             pause_answers_waiting: false,
-            tray_state: BridgeTrayState::Idle,
-            pause_state: BridgePauseState::NOT_PAUSED,
+            session: TraySession::default(),
+            _session_watch_stop: None,
             slot_holders: 0,
             slot_session: 0,
         }
@@ -116,7 +122,7 @@ impl Default for TrayControllerRust {
 }
 
 impl qobject::TrayController {
-    fn start_bridge_feed(self: Pin<&mut Self>) {
+    fn start_bridge_feed(mut self: Pin<&mut Self>) {
         let (Some(tray_rx), Some(pause_rx), Some(handles)) = (
             crate::bridge_runtime::tray_rx(),
             crate::bridge_runtime::pause_rx(),
@@ -135,10 +141,18 @@ impl qobject::TrayController {
         let initial_handles = handles.clone();
         let _ = qt_thread.queue(move |mut qobject| {
             if initial_handles.is_current_session(initial_tray.connection_id) {
-                qobject.as_mut().rust_mut().tray_state = initial_tray.state;
+                let next = qobject
+                    .rust()
+                    .session
+                    .with_tray(initial_tray.connection_id, initial_tray.state);
+                qobject.as_mut().rust_mut().session = next;
             }
             if initial_handles.is_current_session(initial_pause.connection_id) {
-                qobject.as_mut().rust_mut().pause_state = initial_pause.state;
+                let next = qobject
+                    .rust()
+                    .session
+                    .with_pause(initial_pause.connection_id, initial_pause.state);
+                qobject.as_mut().rust_mut().session = next;
             }
             qobject.refresh();
         });
@@ -149,7 +163,10 @@ impl qobject::TrayController {
             spawn_slot_feed(&handles, qt_thread.clone(), slot_rx);
         }
         spawn_tray_feed(&handles, qt_thread.clone(), tray_rx);
-        spawn_pause_feed(&handles, qt_thread, pause_rx);
+        spawn_pause_feed(&handles, qt_thread.clone(), pause_rx);
+        spawn_diagnostics_feed(&handles, qt_thread.clone());
+        let stop = spawn_session_watch(&handles, qt_thread);
+        self.as_mut().rust_mut()._session_watch_stop = Some(stop);
     }
 }
 
@@ -192,7 +209,11 @@ fn spawn_tray_feed(
             let session_handles = handles.clone();
             let _ = qt_thread.queue(move |mut qobject| {
                 if session_handles.is_current_session(received.connection_id) {
-                    qobject.as_mut().rust_mut().tray_state = received.state;
+                    let next = qobject
+                        .rust()
+                        .session
+                        .with_tray(received.connection_id, received.state);
+                    qobject.as_mut().rust_mut().session = next;
                     qobject.refresh();
                 }
             });
@@ -212,12 +233,81 @@ fn spawn_pause_feed(
             let session_handles = handles.clone();
             let _ = qt_thread.queue(move |mut qobject| {
                 if session_handles.is_current_session(received.connection_id) {
-                    qobject.as_mut().rust_mut().pause_state = received.state;
+                    let next = qobject
+                        .rust()
+                        .session
+                        .with_pause(received.connection_id, received.state);
+                    qobject.as_mut().rust_mut().session = next;
                     qobject.refresh();
                 }
             });
         }
     });
+}
+
+/// The firewall check from every `DiagnosticsReport`, starting with the one
+/// in the snapshot `spawn_feed` requests. Never `RecheckDiagnostics`: it
+/// clears the bridge's stored daemon alerts before reporting.
+fn spawn_diagnostics_feed(handles: &BridgeHandles, qt_thread: TrayThread) {
+    let session_handles = handles.clone();
+    crate::bridge_dispatch::spawn_feed(
+        handles,
+        "TrayController",
+        crate::bridge_dispatch::interests_diagnostics,
+        move |connection_id, msg, _json| {
+            let ServerMessage::DiagnosticsReport { checks } = msg else {
+                return;
+            };
+            let report = firewall_report(checks);
+            let session_handles = session_handles.clone();
+            let _ = qt_thread.queue(move |mut qobject| {
+                if !session_handles.is_current_session(connection_id) {
+                    return;
+                }
+                let session = &qobject.rust().session;
+                let seen = session
+                    .firewall
+                    .observe(connection_id, report, local_now_hh_mm);
+                let next = session.with_firewall(seen);
+                qobject.as_mut().rust_mut().session = next;
+                qobject.refresh();
+            });
+        },
+    );
+}
+
+/// How often the tray checks for a disconnect or a new session. The link has
+/// no change notification; `BridgeFeed`'s banner polls it every second.
+const SESSION_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Forget what a session that's no longer live reported, on the first pass
+/// and on every disconnect or session change, so the tray never shows it as
+/// current (Q04). Each cleanup reads the live session on the Qt thread
+/// (`tray_session::cleanup_job`). Ends when the returned sender is dropped.
+fn spawn_session_watch(handles: &BridgeHandles, qt_thread: TrayThread) -> oneshot::Sender<()> {
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let watch_handles = handles.clone();
+    let job_handles = handles.clone();
+    handles.runtime().spawn(watch_sessions(
+        move || {
+            let (connected, session) = watch_handles.link_generation();
+            link_key(connected, session)
+        },
+        move || {
+            let job_handles = job_handles.clone();
+            let job = cleanup_job(move || job_handles.live_session());
+            qt_thread
+                .queue(move |mut qobject| {
+                    let next = job(&qobject.rust().session);
+                    qobject.as_mut().rust_mut().session = next;
+                    qobject.refresh();
+                })
+                .is_ok()
+        },
+        SESSION_POLL,
+        stop_rx,
+    ));
+    stop_tx
 }
 
 impl qobject::TrayController {
@@ -238,12 +328,27 @@ impl qobject::TrayController {
 
 impl qobject::TrayController {
     fn refresh(mut self: Pin<&mut Self>) {
-        let pause = self.rust().pause_state;
+        let handles = crate::bridge_runtime::handles();
+        let live = |session: Option<u64>| {
+            session.is_some_and(|id| handles.as_ref().is_some_and(|h| h.is_current_session(id)))
+        };
+        let session = self.rust().session.clone();
+        let Some(tray) = session.tray.filter(|t| live(Some(t.session))) else {
+            // Bridge unavailable, or its state not here yet: wait, offer nothing.
+            self.as_mut().set_tooltip(QString::from(&startup_tooltip()));
+            self.as_mut().set_menu_label(QString::from("default"));
+            self.as_mut().set_paused_until(QString::default());
+            self.as_mut().set_pause_answers_waiting(false);
+            return;
+        };
+        let pause = session
+            .pause
+            .filter(|p| live(Some(p.session)))
+            .map_or(BridgePauseState::NOT_PAUSED, |p| p.value);
         let until = match (pause.paused, pause.expires_at_unix_ms) {
             (true, Some(ms)) => local_hh_mm(ms),
             _ => String::new(),
         };
-        let handles = crate::bridge_runtime::handles();
         let session_is_current = handles
             .as_ref()
             .is_some_and(|handles| handles.is_current_session(self.rust().slot_session));
@@ -251,8 +356,12 @@ impl qobject::TrayController {
             .as_ref()
             .is_some_and(|handles| handles.advertises_pause_answers_waiting());
         let holders = live_slot_holders(self.rust().slot_holders, session_is_current);
-        let tooltip = derive_tooltip_with_slot(&self.rust().tray_state, &pause, &until, holders);
-        let label = derive_menu_label(&self.rust().tray_state, &pause);
+        let state_text = derive_tooltip_with_slot(&tray.value, &pause, &until, holders);
+        let firewall = live(Some(session.firewall.session()))
+            .then(|| session.firewall.line())
+            .flatten();
+        let tooltip = compose_tooltip(&state_text, firewall.as_deref());
+        let label = derive_menu_label(&tray.value, &pause);
         self.as_mut().set_tooltip(QString::from(&tooltip));
         self.as_mut()
             .set_menu_label(QString::from(menu_label_token(&label)));
@@ -261,12 +370,41 @@ impl qobject::TrayController {
     }
 }
 
-/// `unix_ms` as a local "HH:MM" time, in the system time zone.
+/// `unix_ms` as a local "HH:MM" time. Qt's local time (`TZ`, else
+/// `/etc/localtime`), as `connections_model::verdict_windows` reads it: not
+/// `QTimeZone::system_time_zone()`, which fell back to UTC in a sandbox whose
+/// `/etc/localtime` is a plain file.
 fn local_hh_mm(unix_ms: u64) -> String {
-    let ms = i64::try_from(unix_ms).unwrap_or(i64::MAX);
-    let time_zone = QTimeZone::system_time_zone();
-    QDateTime::from_msecs_since_epoch(ms, &time_zone)
+    let mut local = QDateTime::current_date_time();
+    local.set_msecs_since_epoch(i64::try_from(unix_ms).unwrap_or(i64::MAX));
+    local.time().format(&QString::from("HH:mm")).to_string()
+}
+
+/// Now, as a local "HH:MM" time.
+fn local_now_hh_mm() -> String {
+    QDateTime::current_date_time()
         .time()
         .format(&QString::from("HH:mm"))
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// "Paused until" and the firewall line's "noticed" time read the same
+    /// local clock (Q04), so one tooltip never mixes UTC and local time.
+    #[test]
+    fn pause_end_and_noticed_times_share_the_local_clock() {
+        let agree = (0..3).any(|_| {
+            let now_ms = u64::try_from(QDateTime::current_msecs_since_epoch()).unwrap();
+            local_hh_mm(now_ms) == local_now_hh_mm()
+        });
+        assert!(
+            agree,
+            "{} vs {}",
+            local_hh_mm(u64::try_from(QDateTime::current_msecs_since_epoch()).unwrap()),
+            local_now_hh_mm()
+        );
+    }
 }
