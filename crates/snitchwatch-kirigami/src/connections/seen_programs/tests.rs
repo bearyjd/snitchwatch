@@ -234,6 +234,49 @@ fn the_set_is_capped_and_the_least_recently_seen_go_first() {
     assert_eq!(back, merged);
 }
 
+/// Issue #240: 5,000 paths of ~1 KiB serialize past the reader's limit.
+/// The writer trims the least recently seen to fit the same budget, so the
+/// file it writes always reads back as valid (no rebaseline next launch).
+#[test]
+fn a_full_set_of_long_paths_fits_the_read_budget_and_reads_back() {
+    let (_tmp, path) = dir();
+    let long = "x".repeat(1_000);
+    let ours: HashMap<String, i64> = (0..MAX_SEEN as i64)
+        .map(|i| (format!("/opt/{long}/p{i:04}"), T0 + i))
+        .collect();
+    let merged = write_merged(&path, &ours, uid()).unwrap();
+    let written = std::fs::metadata(&path).unwrap().len();
+    assert!(written <= MAX_BYTES, "{written} bytes written");
+    assert!(merged.len() < MAX_SEEN, "nothing was trimmed");
+    assert!(
+        merged.len() > MAX_SEEN * 3 / 4,
+        "trimmed far more than needed: {}",
+        merged.len()
+    );
+    // The newest are kept, the oldest go.
+    assert!(merged.contains_key(&format!("/opt/{long}/p{:04}", MAX_SEEN - 1)));
+    assert!(!merged.contains_key(&format!("/opt/{long}/p0000")));
+    let oldest_kept = merged.values().min().copied().unwrap();
+    assert!(ours
+        .iter()
+        .filter(|(_, &t)| t >= oldest_kept)
+        .all(|(p, _)| merged.contains_key(p)));
+    let Loaded::Valid(back) = read(&path, uid()) else {
+        panic!("the GUI's own file was rejected on read")
+    };
+    assert_eq!(back, merged);
+}
+
+#[test]
+fn a_set_within_the_budget_is_written_whole() {
+    let (_tmp, path) = dir();
+    let ours: HashMap<String, i64> = (0..MAX_SEEN as i64)
+        .map(|i| (format!("/usr/bin/p{i}"), T0 + i))
+        .collect();
+    let merged = write_merged(&path, &ours, uid()).unwrap();
+    assert_eq!(merged.len(), MAX_SEEN);
+}
+
 #[test]
 fn a_later_sighting_moves_a_path_to_the_front_of_the_lru() {
     let mut state = SeenPrograms::default();

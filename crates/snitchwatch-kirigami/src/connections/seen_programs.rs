@@ -37,9 +37,11 @@ pub const MAX_SEEN: usize = 5_000;
 const VERSION: u32 = 1;
 /// A program seen again has its last-seen time saved at most this often.
 pub const TOUCH_PERSIST_MS: i64 = 60_000;
-/// 5,000 paths of up to 4 KiB each would be ~20 MiB; real paths are short,
-/// so anything larger than this is not a file this GUI wrote.
-const MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// The file's size budget, shared by the writer and the reader: the writer
+/// drops the least recently seen paths until the file fits, so the reader
+/// can refuse anything larger as not a file this GUI wrote (issue #240:
+/// 5,000 paths of ~1 KiB came to ~5.4 MB).
+pub(crate) const MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 const BASELINE_TEXT: &str = "Baseline recorded: programs seen so far will not be flagged as new; \
                              a program already running at that moment was baselined.";
@@ -174,17 +176,47 @@ pub fn write_merged(
     let programs: Vec<Entry> = capped(merged)
         .map(|(path, last_seen_ms)| Entry { path, last_seen_ms })
         .collect();
-    let body = serde_json::to_vec_pretty(&FileBody {
-        version: VERSION,
-        programs,
-    })
-    .map_err(io::Error::other)?;
+    let body = within_budget(programs)?;
     crate::private_files::write_private(path, &body)?;
     let FileBody { programs, .. } = serde_json::from_slice(&body).map_err(io::Error::other)?;
     Ok(programs
         .into_iter()
         .map(|e| (e.path, e.last_seen_ms))
         .collect())
+}
+
+/// The file body for `programs` (newest first), keeping the longest newest
+/// prefix whose serialization fits [`MAX_BYTES`].
+fn within_budget(mut programs: Vec<Entry>) -> io::Result<Vec<u8>> {
+    let serialize = |programs: &[Entry]| {
+        serde_json::to_vec_pretty(&FileBodyRef {
+            version: VERSION,
+            programs,
+        })
+        .map_err(io::Error::other)
+    };
+    let whole = serialize(&programs)?;
+    if whole.len() as u64 <= MAX_BYTES {
+        return Ok(whole);
+    }
+    // Size grows with the prefix length: find the longest prefix that fits.
+    let (mut fits, mut too_big) = (0, programs.len());
+    while too_big - fits > 1 {
+        let middle = fits + (too_big - fits) / 2;
+        if serialize(&programs[..middle])?.len() as u64 <= MAX_BYTES {
+            fits = middle;
+        } else {
+            too_big = middle;
+        }
+    }
+    programs.truncate(fits);
+    serialize(&programs)
+}
+
+#[derive(Serialize)]
+struct FileBodyRef<'a> {
+    version: u32,
+    programs: &'a [Entry],
 }
 
 /// Where the seen set lives.
