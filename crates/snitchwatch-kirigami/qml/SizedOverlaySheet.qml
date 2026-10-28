@@ -57,6 +57,9 @@ Kirigami.OverlaySheet {
     property real maxSheetHeight: Kirigami.Units.gridUnit * 32
     // Gap kept above the sheet so it never collides with the window chrome.
     property real topGap: Kirigami.Units.gridUnit * 3
+    // Q01: an open sheet takes keyboard focus, so Tab moves inside it and
+    // Escape closes it; closing gives focus back to what had it (Popup).
+    focus: true
 
     // Sheet titles are usually data (process, rule, subscription or profile
     // name). OverlaySheet draws `title` with a default header Heading whose
