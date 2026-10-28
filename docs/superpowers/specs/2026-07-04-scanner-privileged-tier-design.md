@@ -62,6 +62,26 @@ something to reimplement detection logic for) rather than reimplementing
 any of its checks natively. This is the same "delegate, don't reimplement"
 posture the baseline doc already established for `rpm -V`/`rpm-ostree`.
 
+> **Owner decision, 2026-10-28: rootkit scanning stays off for now. This is
+> specific to Bazzite, which is immutable.** `chkrootkit` is not in the
+> Snitchwatch system image, and the scanner reports the `rootkit_signature`
+> check as skipped ("chkrootkit not installed on this host"). That is
+> intended, not a fault.
+>
+> Why: on an rpm-ostree system the way to add it is `rpm-ostree install`,
+> which layers a package on top of the image and needs a reboot. Layered
+> packages are exactly the drift this scanner exists to notice, and they make
+> the machine differ from the image the tower tested. The check is also the
+> weakest of the five: pattern matching with known false positives on modern
+> kernels, on a read-only-root, Secure Boot machine where the integrity
+> checks (kargs, modules, Secure Boot, lockdown) already cover the likelier
+> tampering. Not verified on a real host: that the scanner's strict
+> non-zero-exit handling (#243) accepts `chkrootkit -q`.
+>
+> If it is wanted later, ship it in the image (the tower's decision, so it
+> arrives tested and is not local drift), then confirm on the host that the
+> check runs cleanly under the scanner. Do not layer it on a user's machine.
+
 ## 2. Kernel module/kargs audit — concrete mechanism and expected-state sources
 
 Two distinct sub-checks, each with its own delegated primitive and
