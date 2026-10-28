@@ -645,13 +645,18 @@ fn a_push_never_waits_for_the_lock_the_writer_holds() {
         done_rx.recv().unwrap();
     });
     locked_rx.recv().unwrap();
-    let start = Instant::now();
-    let result = queue.try_push(small_item(1));
-    assert!(
-        start.elapsed() < Duration::from_millis(200),
-        "{:?}",
-        start.elapsed()
-    );
+    // On its own thread with a deadline, so a blocking push fails the test
+    // instead of hanging it.
+    let pusher = queue.clone();
+    let (res_tx, res_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let start = Instant::now();
+        let _ = res_tx.send((pusher.try_push(small_item(1)), start.elapsed()));
+    });
+    let (result, took) = res_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("try_push waited for the lock");
+    assert!(took < Duration::from_millis(200), "{took:?}");
     assert_eq!(result, Err(Dropped));
     assert_eq!(queue.dropped(), 1);
     done_tx.send(()).unwrap();
@@ -747,5 +752,33 @@ fn a_dead_writer_is_visible_to_producers_and_shutdown() {
     assert!(
         writer.shutdown().is_err(),
         "the panic is reported, not discarded"
+    );
+}
+
+#[test]
+fn the_tripwire_leaves_a_record_for_what_commit_adds() {
+    // A budget whose journal limit is just above what one real batch has
+    // written before COMMIT: within `limit`, but not within `limit - 1 record`.
+    let rig = rig_with(16 * MIB, true);
+    let mut probe = *rig.engine.budget();
+    probe.journal_pages = 100;
+    let mut first = Engine::new(open_store(&rig.location).unwrap(), &rig.location, probe).unwrap();
+    let seen = Arc::new(Mutex::new(0));
+    let sink = seen.clone();
+    first.set_observer(Box::new(move |r| *sink.lock().unwrap() = r.journal_bytes));
+    first.insert_batch(&[worst_item(1)]).unwrap();
+    let measured = *seen.lock().unwrap();
+    drop(first);
+    let pages = (measured - 512).div_ceil(JOURNAL_RECORD);
+    let mut tight = *rig.engine.budget();
+    tight.journal_pages = pages;
+    assert!(tight.journal_limit_bytes() >= measured);
+    assert!(tight.journal_limit_bytes() - JOURNAL_RECORD < measured);
+    let mut engine = Engine::new(open_store(&rig.location).unwrap(), &rig.location, tight).unwrap();
+    // Same rows again (a new id each): the journal is the same size.
+    let result = engine.insert_batch(&[worst_item(2)]);
+    assert!(
+        matches!(result, Err(WriteError::BudgetExceeded { .. })),
+        "{result:?}"
     );
 }
