@@ -61,8 +61,9 @@ Window {
         ? durationChoice.effectiveToken : "this_time"
     // False for `armDelayMs` after the row appears; nothing is answerable then.
     property bool armed: false
-    // Keys pressed while not armed and not yet released: a press of one of
+    // Keys pressed (armed or not) and not yet released: a press of one of
     // these (some platforms do not flag the repeats) is not a fresh press.
+    // Kept across re-arming and row replacement; only a real release clears it.
     property var heldKeys: ({})
     // A row answered or dismissed here and not yet resolved by the bridge is
     // not shown again.
@@ -177,7 +178,6 @@ Window {
     onRemembersChanged: alert.arm()
 
     onShownChanged: if (alert.shown) {
-        alert.heldKeys = ({});
         alert.resetFocus();
         alert.arm();
         alert.raise();
@@ -208,11 +208,7 @@ Window {
     // does nothing (and is not passed on). `target` is "deny" when the Deny
     // button has the focus: Return there answers Deny, not Allow.
     function handleKey(key, autoRepeat, target) {
-        if (!alert.armed) {
-            alert.heldKeys[key] = true;
-            return;
-        }
-        if (autoRepeat === true || alert.heldKeys[key] === true) {
+        if (!alert.freshPress(key, autoRepeat)) {
             return;
         }
         if (key === Qt.Key_Return || key === Qt.Key_Enter) {
@@ -220,6 +216,17 @@ Window {
         } else if (key === Qt.Key_Escape) {
             alert.answer("deny");
         }
+    }
+
+    // Records a press of `key` wherever it began (this window's handler, a
+    // choice, a verdict button) and says whether it answers: only a fresh
+    // press does, and only while armed. A press during the delay, an
+    // auto-repeat, and a repeat of a key still down since before a re-arm or a
+    // new row are all "held", whether or not the platform flags the repeat.
+    function freshPress(key, autoRepeat) {
+        const fresh = alert.armed && autoRepeat !== true && alert.heldKeys[key] !== true;
+        alert.heldKeys[key] = true;
+        return fresh;
     }
 
     // A released key is no longer "held since before arming".
@@ -243,11 +250,17 @@ Window {
             alert.handleKey(event.key, event.isAutoRepeat, choice);
             return;
         }
-        if (!alert.armed) {
-            alert.heldKeys[event.key] = true;
-        } else if (event.isAutoRepeat !== true && alert.heldKeys[event.key] !== true) {
+        if (alert.freshPress(event.key, event.isAutoRepeat)) {
             // Not ours to swallow: the button presses and, on release, clicks.
             event.accepted = false;
+        }
+    }
+
+    // The release of a key pressed on a verdict button: the button consumes a
+    // Space release, so it never reaches the window's own handler.
+    function verdictButtonReleased(event) {
+        if (event.isAutoRepeat !== true) {
+            alert.keyReleased(event.key);
         }
     }
 
@@ -359,6 +372,8 @@ Window {
             SegmentedChoice {
                 id: scopeChoice
                 groupName: "Applies to"
+                onKeyDown: (key, autoRepeat) => alert.freshPress(key, autoRepeat)
+                onKeyUp: (key, autoRepeat) => { if (!autoRepeat) alert.keyReleased(key); }
                 Layout.fillWidth: true
                 currentToken: "this_host"
                 model: [
@@ -375,6 +390,8 @@ Window {
             SegmentedChoice {
                 id: durationChoice
                 groupName: "For how long"
+                onKeyDown: (key, autoRepeat) => alert.freshPress(key, autoRepeat)
+                onKeyUp: (key, autoRepeat) => { if (!autoRepeat) alert.keyReleased(key); }
                 Layout.fillWidth: true
                 currentToken: Durations.defaultToken
                 model: alert.remembers ? Durations.all : [Durations.all[0]]
@@ -424,6 +441,7 @@ Window {
                     palette.buttonText: Theme.allow
                     Keys.priority: Keys.BeforeItem
                     Keys.onPressed: event => alert.verdictButtonPressed(event, "allow")
+                    Keys.onReleased: event => alert.verdictButtonReleased(event)
                     onClicked: alert.answer("allow")
                 }
                 Controls.Button {
@@ -438,6 +456,7 @@ Window {
                     palette.buttonText: Theme.deny
                     Keys.priority: Keys.BeforeItem
                     Keys.onPressed: event => alert.verdictButtonPressed(event, "deny")
+                    Keys.onReleased: event => alert.verdictButtonReleased(event)
                     onClicked: alert.answer("deny")
                 }
             }

@@ -14,6 +14,10 @@ Item {
     property string currentToken: ""
     // Names the group for a screen reader: "<groupName>: <label>".
     property string groupName: ""
+    // Every key pressed or released on a choice, for the owner's held-key
+    // bookkeeping (a choice consumes Return and a native Space).
+    signal keyDown(int key, bool autoRepeat)
+    signal keyUp(int key, bool autoRepeat)
     readonly property string effectiveToken: seg.indexOfToken(seg.currentToken) >= 0
         ? seg.currentToken : (seg.model.length > 0 ? seg.model[0].token : "")
 
@@ -47,7 +51,13 @@ Item {
                 onClicked: seg.currentToken = modelData.token
                 // Q01: Return on a focused choice only selects it, as a click
                 // does; it never goes on to the window's Return = Allow.
+                Keys.onReleased: event => seg.keyUp(event.key, event.isAutoRepeat)
                 Keys.onPressed: event => {
+                    // Only keys the choice consumes; the rest reach the owner's
+                    // own handler, which records them.
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+                        seg.keyDown(event.key, event.isAutoRepeat);
+                    }
                     if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
                         event.accepted = true;
                         if (!event.isAutoRepeat) {

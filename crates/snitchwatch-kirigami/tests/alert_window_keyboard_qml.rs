@@ -164,6 +164,23 @@ Window {
                       steps: ["tab:Allow", "press:" + k, "none", "release:" + k, "none", "click:" + (k === "Escape" ? "Escape" : k === "Space" ? "Space" : k)],
                       expect: [k === "Escape" ? D : A] });
         }
+        // A key that BEGAN while armed and is still down (no release) when the
+        // alert re-arms for a replacement row: its unflagged repeats, with no
+        // other press in between, are not an answer (#258 review).
+        for (const [on, k] of [["Allow", "Return"], ["Allow", "Enter"], ["Deny", "Return"], ["Deny", "Enter"],
+                               ["Any host", "Return"], ["Forever", "Enter"]]) {
+            const answers = on === "Allow" || on === "Deny";
+            probe.add(k + " pressed on " + on + " while armed ...", { row: true, steps: ["tab:" + on, "press:" + k],
+                      expect: answers ? [on === "Allow" ? A : D] : [] });
+            probe.add("... unflagged " + k + " repeats on the replacement row", { row: true,
+                      steps: ["press:" + k, "none", "press:" + k, "none", "release:" + k, "none", "click:" + k], expect: [A] });
+        }
+        // Space down on Allow when the offered durations change; unflagged
+        // repeats and the release after the re-arm are not an answer.
+        probe.add("Space pressed on Allow while armed ...", { row: true, steps: ["tab:Allow", "press:Space"] });
+        probe.add("... unflagged Space repeat and release after a duration re-arm", { rearm: true,
+                  steps: ["press:Space", "none", "press:Space", "release:Space", "none", "tab:Allow", "click:Space"],
+                  expect: ["{r}:allow:any_host_on_domain:this_time:true"] });
         probe.add("a repeated Space / Return press is not an answer", { row: true, run: probe.repeats });
     }
     // The native-button guard, with the auto-repeat flag QtTest cannot set.
@@ -177,6 +194,8 @@ Window {
         alert.verdictButtonPressed(enter, "allow");
         probe.expect(enter.accepted === true, "an auto-repeated Return was not swallowed");
         probe.expect(feedStub.submitted.length === 0, "a repeat sent " + JSON.stringify(feedStub.submitted));
+        alert.keyReleased(Qt.Key_Space);
+        alert.keyReleased(Qt.Key_Return);
         const fresh = ev(Qt.Key_Space, false);
         alert.verdictButtonPressed(fresh, "allow");
         probe.expect(fresh.accepted === false, "a fresh Space was not left to the button");

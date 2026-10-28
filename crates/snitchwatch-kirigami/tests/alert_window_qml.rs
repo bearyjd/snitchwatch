@@ -248,6 +248,7 @@ Window {
                     alert.armed = true;
                     probe.expect(alert.rowId === "kernel" && alert.bindable === false
                                  && alert.remembers === false, "unidentified program");
+                    alert.keyReleased(Qt.Key_Return);
                     probe.expect(probe.sent(() => alert.handleKey(Qt.Key_Return))
                                  === '["kernel allow this_host/this_time bindable=false"]',
                                  "unidentified program is answered once");
@@ -347,6 +348,17 @@ fn the_alert_wires_keys_to_the_armed_handler_and_waits_one_second() {
     assert!(
         rest.contains("alert.handleKey(event.key, event.isAutoRepeat)"),
         "Keys.onPressed must call handleKey with isAutoRepeat: {keys}"
+    );
+    // A press is recorded as held wherever it began, armed or not, so that a
+    // repeat after a re-arm or a new row is not an answer: one recorder, used by
+    // the window, the choices and the verdict buttons.
+    assert!(
+        ALERT_QML.contains("function freshPress(key, autoRepeat)")
+            && ALERT_QML
+                .contains("alert.armed && autoRepeat !== true && alert.heldKeys[key] !== true")
+            && ALERT_QML.matches("alert.freshPress(").count() >= 4
+            && !ALERT_QML.contains("alert.heldKeys = ({})"),
+        "held keys must be recorded at every press and survive re-arming"
     );
     // The verdict buttons see the key first and guard it like handleKey.
     assert!(
