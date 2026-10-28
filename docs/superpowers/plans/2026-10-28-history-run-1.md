@@ -153,9 +153,10 @@ not release the run.
 ### Batch 2: primitives and identity
 
 3. **History PR 3: lifecycle primitives, watermark, ledger.** Delivered
-   as halves or whole according to the rule in "Dependencies" (halves 3a/3b
-   while the owner's release after PR 2 is pending; whole only after release or
-   the waiver, and only if 3a has not already shipped). Each half has its own acceptance criteria:
+   as halves or whole according to the rule in "Dependencies" (3a alone while
+   the owner's release after PR 2 is pending; 3b, or a whole PR 3 only if 3a has
+   not already shipped, only after release or the waiver). Each half has its
+   own acceptance criteria:
    - **3a: in-memory primitives (database-free).**
      - *Goal:* generation counter, acceptance-sequence counter, pin registry,
        reader-gate skeleton.
