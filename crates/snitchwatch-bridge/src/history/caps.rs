@@ -1,6 +1,6 @@
 //! S1: the one field-cap table. Every string the history store persists has a
 //! fixed maximum byte length, so the largest possible row, index entry and
-//! snapshot are known from the schema (the S2 page arithmetic builds on it).
+//! snapshot are known from the schema.
 //!
 //! Two layers enforce it, so neither is the only guard: the insert API takes
 //! only the capped types below (a value is cut to its cap, on a UTF-8

@@ -1,5 +1,5 @@
 //! The history writer: one thread, a queue bounded by bytes and count, and
-//! batched transactions sized by [`super::budget`] (S2), eviction of the
+//! batched transactions (S2: the disk bound is [`super::budget`]'s full-journal reserve), eviction of the
 //! oldest events (D5) and incremental vacuum (S4). No `VACUUM`: its
 //! temporary copy cannot fit in `B`.
 //!
@@ -9,11 +9,14 @@
 //! caller. A full queue drops the item and counts it ([`Queue::dropped`]);
 //! turning the counter into a gap row is PR 7.
 //!
-//! **The page budget is enforced before the batch**: [`Engine`] never takes
-//! more than `rows_per_txn` rows (or `vacuum_steps_per_txn` steps) into one
-//! transaction. As a tripwire for a wrong proof, it also checks the size of
-//! the rollback journal just before `COMMIT` and rolls back instead of
-//! committing if it is over the budget ([`WriteError::BudgetExceeded`]).
+//! **The disk bound does not depend on batch sizes**: the main file is capped
+//! at half of `B` and room for a full rollback journal is reserved
+//! ([`super::budget`]). [`Engine`] takes at most `rows_per_txn` rows (or
+//! `vacuum_steps_per_txn` steps) into one transaction only to keep
+//! transactions short. As a tripwire for a broken assumption, it also checks
+//! the size of the rollback journal just before `COMMIT` and rolls back
+//! instead of committing if it is over the full-journal limit
+//! ([`WriteError::BudgetExceeded`]).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -23,7 +26,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, TransactionBehavior};
 
-use super::budget::{Budget, COMMIT_RESERVE_PAGES, JOURNAL_RECORD};
+use super::budget::Budget;
 use super::record::{ensure_snapshot, insert_event, EventRecord, SnapshotRecord};
 use super::{Location, Store};
 
@@ -183,8 +186,8 @@ pub enum WriteError {
     Sqlite(#[from] rusqlite::Error),
     #[error("history write failed: {0}")]
     Io(#[from] std::io::Error),
-    /// The journal was larger than the S2 budget; the transaction was rolled
-    /// back. Means the page-count proof is wrong.
+    /// The journal was larger than a full journal of the main file; the
+    /// transaction was rolled back. Means a journal assumption is broken.
     #[error("a transaction's journal ({journal} bytes) exceeded its budget ({limit})")]
     BudgetExceeded { journal: u64, limit: u64 },
     #[error("a batch of {got} rows is over the {max}-row transaction budget")]
@@ -224,7 +227,7 @@ impl Engine {
         // The main file can never grow past its share of B (S3).
         conn.pragma_update(None, "max_page_count", budget.max_page_count as i64)?;
         // No mid-transaction spill: a spill syncs the journal and starts a
-        // second header, which the page budget does not allow for (J1).
+        // second header, which the full-journal bound does not allow for.
         conn.pragma_update(None, "cache_spill", "OFF")?;
         let spill: i64 = conn.query_row("PRAGMA cache_spill", [], |r| r.get(0))?;
         if spill != 0 {
@@ -293,9 +296,9 @@ impl Engine {
         kind: TxnKind,
         work: impl FnOnce(&Connection) -> Result<u64, WriteError>,
     ) -> Result<TxnReport, WriteError> {
-        // The journal must be within the limit less the one record `COMMIT`
-        // may still add (the change counter on page 1).
-        let limit = self.budget.journal_limit_bytes() - COMMIT_RESERVE_PAGES * JOURNAL_RECORD;
+        // A full journal already has a record for every page `COMMIT` can
+        // still write (page 1 included), so the limit needs no margin.
+        let limit = self.budget.journal_limit_bytes();
         let journal = self.journal.clone();
         let tx = self
             .conn
@@ -341,9 +344,7 @@ impl Engine {
     }
 
     /// Delete the oldest `rows_per_txn` events and, in the same transaction,
-    /// every snapshot that none of the remaining events refers to. Each
-    /// deleted event can orphan at most its own snapshot, so this costs at
-    /// most `rows_per_txn * row_pages` (the same as an insert).
+    /// every snapshot that none of the remaining events refers to.
     pub fn evict_chunk(&mut self) -> Result<TxnReport, WriteError> {
         let n = self.budget.rows_per_txn as i64;
         self.transact(TxnKind::Evict, |conn| {

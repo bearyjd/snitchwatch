@@ -1,6 +1,5 @@
-//! The writer under worst-case rows: page budget per transaction (S2), file
-//! sizes against B (S3), shrink on free (S4), canary scan (S5), a
-//! non-blocking queue, and the fill/depth invariant the S2 proof rests on.
+//! The writer under worst-case rows: the full-journal disk bound (S2, S3),
+//! shrink on free (S4), canary scan (S5) and a non-blocking queue.
 //! Budgets are small (16 MiB) and databases live under the target directory.
 
 use std::net::{IpAddr, Ipv6Addr};
@@ -30,7 +29,7 @@ fn rig(total: u64) -> Rig {
 }
 
 /// `fast`: `synchronous=OFF`, for the tests whose subject is not durability.
-/// The S2 tests use the production setting (FULL), which changes how the
+/// The disk-bound tests use the production setting (FULL), which changes how the
 /// journal is synced.
 fn rig_with(total: u64, fast: bool) -> Rig {
     let root = tempdir();
@@ -135,23 +134,9 @@ fn file_len(path: &std::path::Path) -> u64 {
     std::fs::metadata(path).map_or(0, |m| m.len())
 }
 
-/// The bound a transaction's journal must stay under, from its kind and size.
-fn bound_for(budget: &Budget, r: &TxnReport) -> u64 {
-    let pages = match r.kind {
-        TxnKind::Insert | TxnKind::Evict => budget.pages_for_rows(r.units),
-        TxnKind::Vacuum => budget.fixed_pages + r.units * VACUUM_STEP_PAGES,
-    };
-    JOURNAL_HEADER + pages * JOURNAL_RECORD
-}
-
 fn assert_all_within_budget(rig: &Rig) {
     let budget = *rig.engine.budget();
     for r in rig.reports.lock().unwrap().iter() {
-        assert!(
-            r.journal_bytes <= bound_for(&budget, r),
-            "{r:?} exceeded its derived bound {}",
-            bound_for(&budget, r)
-        );
         assert!(r.journal_bytes <= budget.journal_limit_bytes(), "{r:?}");
     }
 }
@@ -171,7 +156,7 @@ fn churn(rig: &mut Rig, rows: u64, item: impl Fn(u64) -> Item) {
     }
 }
 
-// ---- S2 ---------------------------------------------------------------
+// ---- S2: the full-journal bound ----------------------------------------
 
 #[test]
 fn a_journal_is_a_sector_header_plus_whole_page_records() {
@@ -190,7 +175,7 @@ fn a_journal_is_a_sector_header_plus_whole_page_records() {
 }
 
 #[test]
-fn worst_case_rows_never_modify_more_pages_than_the_budget() {
+fn worst_case_churn_keeps_every_journal_within_the_full_journal_limit() {
     let mut rig = rig(16 * MIB);
     let budget = *rig.engine.budget();
     // Several times the main file's capacity: inserts, evictions, vacuums.
@@ -243,7 +228,7 @@ fn a_transaction_over_the_journal_budget_is_rolled_back_not_committed() {
 // ---- S3 / S4 / S5 -----------------------------------------------------
 
 #[test]
-fn main_file_plus_peak_journal_plus_settings_plus_slack_stays_within_b() {
+fn main_file_plus_peak_journal_plus_settings_stays_within_b() {
     let total = 16 * MIB;
     let mut rig = rig_with(total, true);
     let budget = *rig.engine.budget();
@@ -281,17 +266,14 @@ fn main_file_plus_peak_journal_plus_settings_plus_slack_stays_within_b() {
         .max()
         .unwrap();
     assert!(main_peak <= budget.max_page_count * PAGE);
-    let total_peak = main_peak + journal_peak + settings_peak + budget.slack_bytes;
-    println!("main {main_peak} + journal {journal_peak} + settings {settings_peak} + slack {} = {total_peak} of {total}", budget.slack_bytes);
+    let total_peak = main_peak + journal_peak + settings_peak;
+    println!("main {main_peak} + journal {journal_peak} + settings {settings_peak} = {total_peak} of {total}");
     assert!(total_peak <= total);
 }
 
-#[test]
-fn the_main_file_cannot_grow_past_its_share_even_without_eviction() {
-    // `max_page_count` is the enforcement for S3, not the eviction policy.
-    let mut rig = rig_with(16 * MIB, true);
-    let budget = *rig.engine.budget();
-    let n = budget.rows_per_txn;
+/// Insert worst-case rows, no eviction, until the file refuses to grow.
+fn fill_to_limit(rig: &mut Rig) {
+    let n = rig.engine.budget().rows_per_txn;
     let mut i = 0;
     let failure = loop {
         let batch: Vec<Item> = (i..i + n).map(worst_item).collect();
@@ -302,7 +284,46 @@ fn the_main_file_cannot_grow_past_its_share_even_without_eviction() {
         assert!(i < 100_000, "the file never filled");
     };
     assert!(format!("{failure}").contains("full"), "{failure}");
-    assert!(file_len(&rig.location.db_path()) <= budget.max_page_count * PAGE);
+}
+
+#[test]
+fn the_main_file_never_exceeds_half_of_b_when_filled_to_the_limit() {
+    // `max_page_count` is the enforcement, not the eviction policy.
+    let total = 16 * MIB;
+    let mut rig = rig_with(total, true);
+    let budget = *rig.engine.budget();
+    fill_to_limit(&mut rig);
+    let len = file_len(&rig.location.db_path());
+    assert!(len <= total / 2, "{len} B is over half of {total}");
+    assert!(len <= budget.max_page_count * PAGE);
+    assert!(len >= budget.main_bytes / 100 * 95, "the limit was reached");
+}
+
+#[test]
+fn main_plus_journal_stays_within_b_when_a_transaction_journals_every_page() {
+    // The full-journal case: fill the file, then rewrite all of it in one
+    // transaction (deleting every row zeroes every page: `secure_delete`).
+    let total = 16 * MIB;
+    let mut rig = rig(total);
+    let budget = *rig.engine.budget();
+    fill_to_limit(&mut rig);
+    let journal = rig.location.db_path().with_file_name("history.db-journal");
+    let conn = rig.engine.connection();
+    conn.execute_batch("BEGIN IMMEDIATE; DELETE FROM events; DELETE FROM rules_seen;")
+        .unwrap();
+    let main = file_len(&rig.location.db_path());
+    let journaled = file_len(&journal);
+    conn.execute_batch("ROLLBACK").unwrap();
+    println!("main {main} + journal {journaled} of {total}");
+    assert!(
+        journaled >= main / 10 * 8,
+        "the workload must journal most of the file ({journaled} of {main})"
+    );
+    assert!(journaled <= budget.journal_limit_bytes());
+    assert!(
+        main + journaled + budget.settings_bytes <= total,
+        "main {main} + journal {journaled} + settings is over {total}"
+    );
 }
 
 #[test]
@@ -382,7 +403,6 @@ fn evicting_an_event_removes_its_unreferenced_snapshot_but_keeps_shared_ones() {
             .unwrap()
     };
     assert_eq!(count(&rig), 1);
-    // rows_per_txn may be 2: evict until exactly the first event is gone.
     rig.engine
         .connection()
         .execute("DELETE FROM events WHERE ts_ms = 1000", [])
@@ -473,111 +493,6 @@ fn the_writer_thread_drains_the_queue_and_shuts_down_clean() {
     assert_eq!(rows, 50);
 }
 
-// ---- the proof's invariant, against the real engine --------------------
-
-struct Stat {
-    depth: u64,
-    min_interior_cells: u64,
-    interior_pages: u64,
-}
-
-/// Depth and minimum non-root interior fill of every b-tree, from `dbstat`.
-fn dbstat(conn: &Connection) -> Stat {
-    let mut stat = Stat {
-        depth: 0,
-        min_interior_cells: u64::MAX,
-        interior_pages: 0,
-    };
-    let mut q = conn
-        .prepare("SELECT path, pagetype, ncell FROM dbstat WHERE aggregate = FALSE")
-        .unwrap();
-    let rows = q
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })
-        .unwrap();
-    for row in rows {
-        let (path, kind, cells) = row.unwrap();
-        if kind == "overflow" {
-            continue;
-        }
-        // "/" is a root; "/000+001/" is a child: one segment per level.
-        let depth = path.split('/').filter(|s| !s.is_empty()).count() as u64 + 1;
-        stat.depth = stat.depth.max(depth);
-        if kind == "internal" && depth > 1 {
-            stat.interior_pages += 1;
-            stat.min_interior_cells = stat.min_interior_cells.min(cells as u64);
-        }
-    }
-    stat
-}
-
-#[test]
-fn the_fill_and_depth_invariant_holds_under_inserts_and_random_deletes() {
-    // Many small rows build deep trees; random deletes (not just the oldest)
-    // are the hardest case for fill.
-    let mut rig = rig_with(256 * MIB, true);
-    let n = rig.engine.budget().rows_per_txn;
-    let total = 120_000u64;
-    let mut i = 0;
-    while i < total {
-        let batch: Vec<Item> = (i..(i + n).min(total)).map(small_item).collect();
-        rig.engine.insert_batch(&batch).unwrap();
-        i += n;
-    }
-    let conn = rig.engine.connection();
-    let check = |label: &str| {
-        let s = dbstat(conn);
-        println!(
-            "{label}: depth {} interior pages {} min cells {}",
-            s.depth, s.interior_pages, s.min_interior_cells
-        );
-        assert!(
-            s.depth <= rig.engine.budget().depth,
-            "{label}: depth {}",
-            s.depth
-        );
-        assert!(
-            s.interior_pages == 0 || s.min_interior_cells + 1 >= MIN_FANOUT,
-            "{label}: fanout {}",
-            s.min_interior_cells + 1
-        );
-        s
-    };
-    let s = check("after inserts");
-    assert!(s.interior_pages > 0, "the workload built interior pages");
-    for pct in [50, 70, 90] {
-        conn.execute(
-            "DELETE FROM events WHERE (id * 2654435761) % 100 < ?1",
-            [pct],
-        )
-        .unwrap();
-        check(&format!("after deleting ~{pct}%"));
-    }
-    assert_all_within_budget(&rig);
-}
-
-#[test]
-fn journals_of_full_batches_on_deep_trees_stay_within_the_bound() {
-    let mut rig = rig_with(256 * MIB, true);
-    let n = rig.engine.budget().rows_per_txn;
-    let mut i = 0;
-    while i < 60_000 {
-        let batch: Vec<Item> = (i..(i + n).min(60_000)).map(small_item).collect();
-        rig.engine.insert_batch(&batch).unwrap();
-        i += n;
-    }
-    for _ in 0..40 {
-        rig.engine.evict_chunk().unwrap();
-        rig.engine.vacuum_chunk().unwrap();
-    }
-    assert_all_within_budget(&rig);
-}
-
 // ---- review round 2 ---------------------------------------------------
 
 #[test]
@@ -592,8 +507,9 @@ fn pages_are_never_spilled_mid_transaction_so_the_journal_has_one_header() {
     assert_eq!(spill, 0, "cache_spill must be OFF");
     // A cache far smaller than a batch's dirty pages would force spills.
     conn.pragma_update(None, "cache_size", 5).unwrap();
-    let n = rig.engine.budget().rows_per_txn;
+    let n = 4;
     for k in 0..30 {
+        assert!(rig.engine.make_room().unwrap());
         let batch: Vec<Item> = (0..n).map(|i| worst_item(k * n + i)).collect();
         rig.engine.insert_batch(&batch).unwrap();
     }
@@ -616,8 +532,9 @@ fn with_spilling_on_the_single_header_assumption_is_false() {
     let conn = rig.engine.connection();
     conn.pragma_update(None, "cache_spill", "ON").unwrap();
     conn.pragma_update(None, "cache_size", 5).unwrap();
-    let n = rig.engine.budget().rows_per_txn;
+    let n = 4;
     for k in 0..30 {
+        assert!(rig.engine.make_room().unwrap());
         let batch: Vec<Item> = (0..n).map(|i| worst_item(k * n + i)).collect();
         rig.engine.insert_batch(&batch).unwrap();
     }
@@ -752,33 +669,5 @@ fn a_dead_writer_is_visible_to_producers_and_shutdown() {
     assert!(
         writer.shutdown().is_err(),
         "the panic is reported, not discarded"
-    );
-}
-
-#[test]
-fn the_tripwire_leaves_a_record_for_what_commit_adds() {
-    // A budget whose journal limit is just above what one real batch has
-    // written before COMMIT: within `limit`, but not within `limit - 1 record`.
-    let rig = rig_with(16 * MIB, true);
-    let mut probe = *rig.engine.budget();
-    probe.journal_pages = 100;
-    let mut first = Engine::new(open_store(&rig.location).unwrap(), &rig.location, probe).unwrap();
-    let seen = Arc::new(Mutex::new(0));
-    let sink = seen.clone();
-    first.set_observer(Box::new(move |r| *sink.lock().unwrap() = r.journal_bytes));
-    first.insert_batch(&[worst_item(1)]).unwrap();
-    let measured = *seen.lock().unwrap();
-    drop(first);
-    let pages = (measured - 512).div_ceil(JOURNAL_RECORD);
-    let mut tight = *rig.engine.budget();
-    tight.journal_pages = pages;
-    assert!(tight.journal_limit_bytes() >= measured);
-    assert!(tight.journal_limit_bytes() - JOURNAL_RECORD < measured);
-    let mut engine = Engine::new(open_store(&rig.location).unwrap(), &rig.location, tight).unwrap();
-    // Same rows again (a new id each): the journal is the same size.
-    let result = engine.insert_batch(&[worst_item(2)]);
-    assert!(
-        matches!(result, Err(WriteError::BudgetExceeded { .. })),
-        "{result:?}"
     );
 }
