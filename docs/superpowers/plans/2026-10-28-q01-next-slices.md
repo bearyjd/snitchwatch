@@ -208,9 +208,14 @@ separate surface and stays in slice 6.
   QML in the CI QML runner: `tests/qml/tst_map_camera.qml` (~172, 211-222:
   Tab, Plus, Right, Home) and `tst_map_drilldown.qml` (~192-200: Return
   chooses a popup destination). `map_view_qml.rs` (~131-136) checks names
-  and `activeFocusOnTab`. Add only what is missing: marker activation by
-  Space/Return, Escape closing the popup, and focus restored to the
-  opener. The guard runs with the popup open.
+  and `activeFocusOnTab`. Be exact about what those do NOT prove: the camera
+  test only shows that Tab skips a clipped marker, and the drilldown test
+  forces focus onto the entry before Return, so neither shows that a
+  *visible* marker is reachable by Tab. Add what is missing: **real Tab
+  traversal from the map's entry point to a visible marker, asserting it
+  holds focus, before** marker activation by Space/Return; Escape closing the
+  popup; and focus restored to the opener. The guard runs with the popup
+  open.
 - **Does not cover:** pan and zoom feel, or screen-reader behaviour on a
   canvas-like map.
 
