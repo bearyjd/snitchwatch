@@ -54,7 +54,7 @@ check, and each slice starts by running it.
 
 | Surface | Controls | No name | Keyboard | Runtime probe | Key events |
 |---|---|---|---|---|---|
-| `AlertWindow.qml` (the standalone prompt) | 2 Buttons, 2 `SegmentedChoice` rows (scope, duration) | 0, but the two choice rows have no group name ("Applies to" and "For how long" are separate labels) | Return = Allow, Esc = Deny, after an arming delay and a held-key guard. **Its `FocusScope` accepts every key press**, so Tab never reaches the scope or duration buttons: they are mouse-only. | `alert_window_qml.rs` | none |
+| `AlertWindow.qml` (the standalone prompt) | 2 Buttons, 2 `SegmentedChoice` rows (scope, duration) | 0, but the two choice rows have no group name ("Applies to" and "For how long" are separate labels) | Return = Allow, Esc = Deny, after an arming delay and a held-key guard, all in `handleKey()`. The verdict buttons call `answer()` directly (`onClicked`), which checks arming but **not** held or repeated keys. The `FocusScope` (`keys`) has `Keys.onPressed` that accepts every key, so Tab is probably swallowed before it reaches the choices. **Unverified**: no Tab/Shift+Tab test exists; slice 1's first step records the real behaviour. | `alert_window_qml.rs` | none (it calls `handleKey` directly; a source guard pins `Keys.onPressed`) |
 | `PendingDecisionSheet.qml` (inspector decision) | 2 ComboBoxes, 2 Buttons | 0 (named "Scope: …" / "Duration: …" in #242) | Reachable via the inspector; Tab order unchecked | `sheet_old_bridge_qml.rs`, `verdict_not_remembered_qml.rs`, #242 guard | #242 (focus only) |
 | `MakeRuleSheet.qml` (+ `MakeRuleOutcomes.qml`) | 3 Buttons, 2 ComboBoxes | 2 (both combo boxes) | Overlay sheet; Tab order and Escape unchecked | none | none |
 | `DecideLaterButton.qml` | 1 Button | 0 | Part of the row/inspector Tab order (#242 covers the row) | via #242 | via #242 |
@@ -66,7 +66,7 @@ check, and each slice starts by running it.
 | Surface | Controls | No name | Keyboard | Runtime probe | Key events |
 |---|---|---|---|---|---|
 | `RulesPage.qml` | 7 Buttons, 1 ItemDelegate (rule rows) | 1 | Rows are delegates; arrow/Enter and menu by keyboard unchecked | 10 probes (hits, insights, count hint, …) | none |
-| `RuleEditorSheet.qml` | 4 TextFields, 4 ComboBoxes, 3 Switches, 1 CheckBox, 6 Buttons | 8 (fields and combo boxes labelled only by a neighbouring Label) | Overlay sheet; unchecked | `rule_editor_sheet_qml.rs`, `profile_rules_qml.rs` | none |
+| `RuleEditorSheet.qml` | 4 TextFields, 4 ComboBoxes, 3 Switches, 1 CheckBox, 6 Buttons (static declarations; the condition row repeats at runtime) | 8 unnamed non-text controls: 4 ComboBoxes, 3 Switches, 1 CheckBox. The 4 TextFields are value-bound (name = value) and count separately | Overlay sheet; unchecked | `rule_editor_sheet_qml.rs`, `profile_rules_qml.rs` | none |
 | `RuleSimulatorSheet.qml` | 11 TextFields, 2 ComboBoxes, 2 TextAreas, 1 SpinBox, 1 CheckBox, 2 Buttons | 16 | Overlay sheet; unchecked | `simulate_connection_qml.rs`, `rules_simulator_advanced_qml.rs` | none |
 | `RulesInspectorSheet.qml` | 5 Buttons, 1 Switch | 1 | unchecked | `rules_all_apps_qml.rs`, `rules_insights_qml.rs` | none |
 | `RulesImportSheet.qml` | 2 Buttons, 1 CheckBox | 1 | unchecked | `rules_import_sheet_qml.rs` | none |
@@ -86,17 +86,19 @@ check, and each slice starts by running it.
 | Surface | Controls | No name | Keyboard | Runtime probe | Key events |
 |---|---|---|---|---|---|
 | `RecommendedRulesPage.qml` | 10 Buttons, 1 Switch, 1 ItemDelegate | 2 | unchecked | `recommended_rules_qml.rs`, `recommended_orphans_qml.rs` | none |
-| `ProfilesPage.qml` | 10 Buttons, 3 TextFields, 1 ItemDelegate | 1 (and the 3 fields are value-only) | unchecked | `profile_rules_qml.rs`, `honest_ui_pages_qml.rs` | none |
-| `BlocklistsPage.qml` | 6 Buttons, 1 TextField, 1 ItemDelegate | 1 | unchecked | `blocklists_*_qml.rs` | none |
+| `ProfilesPage.qml` | 10 Buttons, 3 TextFields, 1 ItemDelegate | 2 placeholder-only TextFields (new profile name, network matchers); the rename field is value-bound | unchecked | `profile_rules_qml.rs`, `honest_ui_pages_qml.rs` | none |
+| `BlocklistsPage.qml` | 6 Buttons, 1 TextField, 1 ItemDelegate | 1 placeholder-only TextField (subscribe URL) found by static scan; the lead's count of 2 is not reproduced, so the runtime guard decides | unchecked | `blocklists_*_qml.rs` | none |
 | `DaemonHealthPage.qml` + `DenyStatusSection.qml` | 2 Buttons | 0 | unchecked | `daemon_health_model_qml.rs`, `deny_status_qml.rs` | none |
 | `DiagnosticsPage.qml` | 2 Switches, 2 ComboBoxes, 2 Buttons, 1 TextArea | 4 | unchecked | `honest_ui_external_text_qml.rs` | none |
 | `ScannerPage.qml` | 1 Button | 0 | unchecked | `scanner_*_qml.rs` | none |
 | `GeoPage.qml`, `GeoDatabaseSettings.qml` | 5 Buttons, 1 ItemDelegate | 0 | unchecked | `geo_qml.rs` | none |
 | `TrafficPage.qml` | none interactive | n/a | n/a | `traffic_model_qml.rs` | n/a |
-| `AnalysisExportSheet.qml` | 4 Buttons, 3 CheckBoxes, 3 TextFields, 1 ComboBox, 1 TextArea | 0 static (5 explicit names) | unchecked | none (the export probes drive the controller) | none |
-| `OnboardingPage.qml`, `CuratedGroupsStep.qml`, `SilentModeChoice.qml` (first run) | 5 Buttons, 1 Switch, RadioButtons | 1 | unchecked | `wizard_qml.rs`, `curated_groups_step_qml.rs`, `silent_mode_onboarding_qml.rs` | none |
+| Map on the Connections page: `MapBand.qml` (embedded by `MonitorPane.qml` ~52), `MapView.qml`, `MapMarker.qml`, `MapDestinationsPopup.qml` | band buttons (show/hide, zoom, fit, scope, destinations), markers, popup list with ItemDelegates | band buttons and markers are named (`MapBand.qml` 92-177, `MapMarker.qml:36`); the popup delegate sets no `Accessible.name` and carries text only through a `contentItem` Label | `MapView` handles +, -, Home/0 and arrows; markers have `activeFocusOnTab`; the popup takes Return/Enter and focuses its list on open. Escape and focus restoration unchecked | `map_view_qml.rs` (names and `activeFocusOnTab` only), `map_drilldown_qml.rs`, `map_split_drag_real_qml.rs`, `honest_ui_map_guards.rs` | none (there is no existing map key-event test) |
+| Banners: `LearningBanner.qml` (Stop learning, Review, ~65-73), daemon-health banner Details action (`main.qml` ~435-450), `LearningProgressList.qml` Cancel (~39-42) | 3 Kirigami.Actions, 1 Button | 0 | InlineMessage actions; reachability unchecked | `learning_banner_qml.rs`, `learning_end_qml.rs`, `daemon_health_model_qml.rs` | none |
+| `AnalysisExportSheet.qml` | 4 Buttons, 3 CheckBoxes, 3 TextFields, 1 ComboBox, 1 TextArea | 0 static (5 explicit names) | unchecked | `tests/probes/analysis_export_probe.qml` (~15-76) instantiates and operates the real sheet, plus `analysis_export_qml.rs` and a lifecycle probe | none |
+| `OnboardingPage.qml`, `CuratedGroupsStep.qml`, `SilentModeChoice.qml` (first run) | 6 Buttons (3 + 2 + 1), 1 Switch (repeated per group at runtime), 1 RadioButton declaration, 1 Kirigami.Action (`SilentModeChoice.qml:70`, omitted from the earlier scan) | 1 | unchecked | `wizard_qml.rs`, `curated_groups_step_qml.rs` (opens and checks the real DNS consent dialog, ~164-168), `silent_mode_onboarding_qml.rs` | none |
 | `main.qml` (global drawer, page switching) | 12 Kirigami.Actions | 0 | Opening the drawer and switching pages by keyboard unchecked; no `Shortcut`s | `page_stack_lifecycle_qml.rs` | none |
-| `TrayMenu.qml` | 8 `Qt.labs.platform` MenuItems | 2 static (texts are bound expressions) | A native menu drawn by the desktop shell: not testable headless | `tray_menu_qml.rs` (model only) | n/a |
+| `TrayMenu.qml` | 8 `Qt.labs.platform` MenuItems: 6 actionable, 2 separators (`separator: true`) | 2 static among the actionable items (texts are bound expressions) | A native menu drawn by the desktop shell. Native menu export and D-Bus events are partly headless-testable (`tests/native-tray/`, offscreen, ~28-37); Plasma Wayland input/grab acceptance is not | `tray_menu_qml.rs` (model), `tray_lifecycle_qml.rs`, `tests/native-tray/` (real `TrayMenu.qml`, six exported entries, D-Bus) | none |
 
 ## Slices, in order (each its own small PR)
 
@@ -119,17 +121,42 @@ Each slice:
 - **Scope:** make the scope and duration choices reachable by keyboard, and
   give each choice row a group name, for example "Applies to: This host
   only".
-  - Return/Escape semantics, the arming delay and the held-key guard must
-    not change. Decision point D1 settles what Return does while a choice
-    button has focus.
-- **Tests first:**
-  - Tab and Shift+Tab move through the choice buttons;
-  - Space selects one;
-  - Return and Escape still answer only after arming;
-  - a key held since before arming still does nothing;
-  - the guard covers the window, asserting exact names.
+  - Owner decisions D1 and D2 (below) are resolved: Tab works in the
+    prompt; Return on a choice only selects it.
+  - The arming delay and the held-key guard must not change in effect.
+- **First step: a baseline probe.** Before any change, send real Tab and
+  Shift+Tab to the armed window and record where focus goes. The claim that
+  Tab never reaches the choices is unverified until this runs.
+- **Safety boundary.** `answer()` checks arming only. Held-key and repeat
+  protection lives in `handleKey()`, and the verdict buttons call `answer()`
+  directly. Once children can take focus, native button dispatch (Space,
+  Return, keypad Enter on a focused button) is a new path to a verdict that
+  skips the held-key guard. The slice must close it, or prove it cannot
+  matter.
+- **Tests first** (real press, hold and release via QtTest, not
+  `handleKey` calls):
+  - Space, Return, keypad Enter and Escape on each choice button AND on
+    each verdict button, covering: a key held from before arming, an
+    auto-repeat, and a release then a fresh press;
+  - the same across row replacement (a new row arrives while a key is held)
+    and duration re-arming (`onRemembersChanged`);
+  - every case asserts the exact verdict, scope, duration and submission
+    count; activating a choice submits nothing;
+  - Tab and Shift+Tab visit scope, duration, Allow, Deny in order;
+  - the name guard covers the window and asserts exact names.
+- **Source-wiring guard.** `alert_window_qml.rs` (~331-338) pins that
+  `Keys.onPressed` accepts every key and calls `handleKey`. Any change to
+  key interception must update that guard together with the event tests, in
+  the same commit.
+- **Guard helper ownership.** This slice is already a second consumer of
+  the name guard (Connections is the first). The shared helper
+  `tests/support/a11y_guard.qmlpart` arrives with PR #253. Order: slice 1
+  may merge with a local snippet, then both the Connections test and the
+  Alert test migrate to the helper in slice 2, or the helper is extracted
+  earlier.
 - **Review focus:** no new way to send Allow by accident. Every path to a
-  verdict still goes through `answer()` and the arming check.
+  verdict goes through `answer()` and the arming check, and the held-key
+  guard applies to native button activation too.
 - **Does not cover:** whether the compositor actually focuses the alert
   window. Under Wayland `requestActivate` can be refused; that needs a
   desktop.
@@ -141,28 +168,50 @@ Each slice:
   - Name the two MakeRule combo boxes the way #242 named the decision ones.
   - Escape closes a sheet or dialog without acting, and focus returns to
     whatever opened it.
+- **Also in this slice: the daemon-health banner.** Its Details action
+  (`main.qml` ~435-450) is reached by Tab and fired by keyboard, and
+  focus after navigation lands on the new page.
 - **Tests first:**
   - open each surface from its real trigger;
   - Tab through it and fire with Space;
   - Escape closes it, nothing is sent, and focus returns;
   - the guard runs with each surface open.
-- **Shared helper (extract here).** This is the second page to need the
-  guard's tree walk and its role and name rules. Move them out of
-  `connections_accessible_names_qml.rs` into one QML/JS snippet that each
-  probe pulls in with `include_str!`/`concat!`, for example
-  `tests/support/a11y_guard.js`. Move the readiness `stable()` helper there
+- **Shared helper (migrate here).** Slice 1 is already the second consumer
+  of the guard's tree walk and its role and name rules (see slice 1,
+  ownership). The helper `tests/support/a11y_guard.qmlpart` arrives with
+  PR #253; this slice migrates both `connections_accessible_names_qml.rs`
+  and the Alert test onto it, pulled in with `include_str!`/`concat!`. Move the readiness `stable()` helper there
   too. #242's guard then uses the shared copy, with no behaviour change: its
   mutants must still be killed.
 - **Review focus:** the extraction loses no check; Escape never answers.
 - **Does not cover:** the Connections-page modal sheets, beyond Escape and
   focus return.
 
+### Slice 2b: the map on the Connections page
+The map was excluded from the earlier Q01 plan and from #242; it is
+embedded in `MonitorPane.qml` (~52), so this slice owns it. `GeoPage` is a
+separate surface and stays in slice 6.
+- **Scope:** `MapBand` controls, `MapMarker`, and
+  `MapDestinationsPopup.qml` (~39-45), whose delegate has no text or
+  `Accessible.name` of its own.
+  - Name each popup delegate after its destination and summary.
+  - Keyboard selection of a marker and of a popup entry; Escape closes the
+    popup; focus returns to the control that opened it.
+- **Tests first:** the existing map tests check names and
+  `activeFocusOnTab` only (`map_view_qml.rs` ~131-136); there are no
+  existing map key-event tests to reuse. Add real key events: Tab to a
+  marker, Space/Return selects, the popup opens, Return chooses, Escape
+  closes, focus restored. The guard runs with the popup open.
+- **Does not cover:** pan and zoom feel, or screen-reader behaviour on a
+  canvas-like map.
+
 ### Slice 3: Rules page and its sheets
 - **Scope:** `RulesPage` (rows, menus), `RuleEditorSheet`,
   `RuleSimulatorSheet`, `RulesInspectorSheet`, `RulesImportSheet`.
-  - The editor and simulator have the most unnamed controls: 24 fields,
-    combo boxes and switches that are labelled only by a neighbouring
-    Label. Name each field after its label.
+  - The editor and simulator have the most unnamed controls (the editor's
+    8 are 4 ComboBoxes, 3 Switches and 1 CheckBox; its 4 TextFields are
+    value-bound; the simulator's count comes from the runtime guard) that
+    are labelled only by a neighbouring Label. Name each field after its label.
   - Combo boxes use the "Label: value" pattern, as in #242.
 - **Tests first:**
   - keyboard: rows by arrows, the row menu by the Menu key, the editor by
@@ -171,12 +220,19 @@ Each slice:
   - the guard runs with every sheet open and after a value change.
 - **Review focus:** the Tab order matches the visual order; no field loses
   its existing name; the honest-UI guards stay green.
+- **Existing work.** `origin/feat/q01-rules-keyboard` (commit `dd065b0`,
+  unreviewed, forked from an older main) already holds work for this
+  slice. Rebase it onto main after #253 merges rather than restarting.
 - **Does not cover:** rule import from a file dialog, which is a native
   dialog.
 
 ### Slice 4: learning review
-- **Scope:** the page, its rows, the summary dialog and the start panel.
+- **Scope:** the page, its rows, the summary dialog and the start panel,
+  plus the learning banner (`LearningBanner.qml`: Stop learning and
+  Review) and `LearningProgressList`'s Cancel.
   - Name the length combo box.
+  - Banner actions are reached by Tab and fired by Space/Return, tested
+    with deterministic fixtures. Elapsed-time behaviour stays excluded.
   - Tab reaches Apply only after every extra confirmation, and Return still
     never applies (already tested; keep it).
 - **Tests first:**
@@ -221,7 +277,7 @@ Each slice:
 - **Tests first:**
   - from a fresh window, keys alone reach every page;
   - focus is never left on a destroyed page (`page_stack_lifecycle`).
-- **Does not cover:** the tray menu, which needs a desktop.
+- **Does not cover:** Plasma keyboard and grab behaviour of the tray menu, which needs a desktop.
 
 ## Needs a real desktop (not verifiable headless)
 
@@ -231,7 +287,10 @@ Each slice:
   Breeze style. Headless runs use the Basic style.
 - **High contrast.** Whether text and the non-colour verdict markers stay
   readable in a high-contrast colour scheme.
-- **The tray menu.** A native StatusNotifier/DBus menu drawn by Plasma.
+- **Plasma keyboard and grab behaviour.** Real Plasma Wayland input
+  and compositor-grab acceptance of the tray menu. Export and D-Bus events of
+  the native menu are headless-testable (`tests/native-tray/`, offscreen),
+  and are already tested.
 - **The standalone prompt's activation.** Whether KWin gives the alert
   window keyboard focus when it appears.
 
@@ -260,16 +319,14 @@ Each slice:
 Write down anything Orca says wrongly or skips. Each problem becomes a
 follow-up issue.
 
-## Decision points (the owner is asked before the slice starts)
+## Decision points (D1 and D2 resolved; the owner is asked about the rest before the slice starts)
 
-- **D1, slice 1.** In the standalone prompt, while a scope or duration
-  button has keyboard focus, should Return still mean Allow, or only select
-  that choice?
-  - Recommendation: Return selects the focused choice, and Allow needs
-    Return with focus on Allow, or Return before any Tab.
-  - Either way, Escape stays Deny.
-- **D2, slice 1.** Should Tab be allowed in the prompt at all? Today a
-  keyboard user can only accept the default scope and duration.
+- **D1, slice 1. Resolved by the owner 2026-10-28.** With focus on a
+  scope or duration choice, Return ONLY selects that choice and never sends
+  a verdict. Allow needs focus on Allow, or Return before any Tab. Escape =
+  Deny always.
+- **D2, slice 1. Resolved by the owner 2026-10-28.** Tab works in the
+  prompt: scope, duration, Allow, Deny.
 - **D3, slice 7.** Should there be page shortcuts (for example Ctrl+1…6),
   or only the drawer?
 - **D4, all slices.** Is a value-only name acceptable anywhere, for example
