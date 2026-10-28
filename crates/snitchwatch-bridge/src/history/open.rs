@@ -91,27 +91,79 @@ pub(crate) fn check_dir(dir: &Path, euid: u32) -> Result<(), Unavailable> {
     open_checked(dir, euid).map(drop)
 }
 
+/// Set the mode of the directory at `dir` to 0700 without needing read
+/// permission on it (a umask like 0477 creates it 0300): open it `O_PATH`
+/// (no permission needed, `O_NOFOLLOW`) and `chmod` through
+/// `/proc/self/fd/N`, which names that exact directory, so a swap of the path
+/// afterwards changes nothing.
+fn chmod_dir_700(dir: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(dir.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    // SAFETY: a valid NUL-terminated path; the fd is owned right away.
+    let raw = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a freshly opened descriptor nothing else owns.
+    let handle = unsafe { OwnedFd::from_raw_fd(raw) };
+    let magic = CString::new(format!(
+        "/proc/self/fd/{}",
+        std::os::fd::AsRawFd::as_raw_fd(&handle)
+    ))
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    // SAFETY: a valid NUL-terminated path.
+    if unsafe { libc::chmod(magic.as_ptr(), DIR_MODE) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// The history directory, created 0700 if it isn't there, and checked either
 /// way. The parent (the state directory) must exist; it is never created
 /// here.
 pub(crate) fn ensure_dir(dir: &Path, euid: u32) -> Result<(), Unavailable> {
     match fs::DirBuilder::new().mode(DIR_MODE).create(dir) {
-        Ok(()) => {
-            // `mkdir` applies the umask, which can only narrow the mode;
-            // make it exactly 0700, through a handle to what was created.
-            let handle = fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(dir)
-                .map_err(|e| io_reason("the history directory", dir, &e))?;
-            handle
-                .set_permissions(fs::Permissions::from_mode(DIR_MODE))
-                .map_err(|e| io_reason("the history directory", dir, &e))?;
-        }
+        // `mkdir` applies the umask, which can only narrow the mode (to 0300
+        // under 0477, which can't be reopened to fix): make it exactly 0700.
+        Ok(()) => chmod_dir_700(dir).map_err(|e| io_reason("the history directory", dir, &e))?,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(io_reason("couldn't create the history directory", dir, &e)),
     }
     check_dir(dir, euid)
+}
+
+/// Make each existing SQLite sidecar of `db` exactly 0600, through a handle
+/// opened `O_NOFOLLOW | O_NONBLOCK`. One that isn't a regular file of ours is
+/// left for [`crate::sqlite_file::open_owner_only`] to refuse.
+pub(crate) fn tighten_sidecars(db: &Path) -> Result<(), crate::sqlite_file::OpenError> {
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut name = db.as_os_str().to_owned();
+        name.push(suffix);
+        let sidecar = std::path::PathBuf::from(name);
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&sidecar)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            // A symlink (ELOOP) or anything unreadable: the opener refuses it.
+            Err(_) => continue,
+        };
+        let meta = file.metadata()?;
+        if meta.is_file() && meta.uid() == effective_uid() && meta.mode() & 0o7777 != 0o600 {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    Ok(())
 }
 
 /// The open history database. Only [`super::open_store`] makes one, and only

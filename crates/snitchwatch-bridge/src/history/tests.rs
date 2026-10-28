@@ -370,19 +370,124 @@ fn settings_written_at_every_cap_leave_no_stray_file() {
 
 #[test]
 fn a_failed_settings_write_keeps_the_old_file_and_leaves_no_temp() {
+    // The old file stays in place; the failure comes before the rename (the
+    // directory can't be written to).
     let root = tempdir();
     let state = state_dir(&root);
     let at = location(&state);
     let saved = enable(&at, consent()).unwrap();
     let before = std::fs::read(at.settings_path()).unwrap();
-    // Replace nothing with a directory so the write cannot succeed.
+    std::fs::set_permissions(at.dir(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let changed = Settings {
+        retention_days: 90,
+        ..saved.clone()
+    };
+    let failed = settings::save(&at, &changed).is_err();
+    std::fs::set_permissions(at.dir(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    if euid() == 0 {
+        return; // root ignores directory permissions
+    }
+    assert!(failed);
+    assert_eq!(std::fs::read(at.settings_path()).unwrap(), before);
+    assert_eq!(names(at.dir()), ["settings.json"]);
+    assert_eq!(load_state(&at), State::Enabled(saved));
+}
+
+#[test]
+fn a_settings_file_that_is_a_directory_is_not_replaced() {
+    let root = tempdir();
+    let state = state_dir(&root);
+    let at = location(&state);
+    let saved = enable(&at, consent()).unwrap();
     std::fs::remove_file(at.settings_path()).unwrap();
     std::fs::create_dir(at.settings_path()).unwrap();
     assert!(settings::save(&at, &saved).is_err());
     std::fs::remove_dir(at.settings_path()).unwrap();
-    assert!(names(at.dir()).is_empty());
-    std::fs::write(at.settings_path(), &before).unwrap();
-    assert_eq!(load_state(&at), State::Enabled(saved));
+    assert!(names(at.dir()).is_empty(), "no stray temp file");
+}
+
+// ---- modes of pre-existing files ------------------------------------
+
+#[test]
+fn a_pre_existing_settings_file_is_tightened_to_exactly_0600() {
+    for mode in [0o644, 0o755, 0o4600, 0o640, 0o660] {
+        let root = tempdir();
+        let state = state_dir(&root);
+        let at = location(&state);
+        let saved = enable(&at, consent()).unwrap();
+        std::fs::set_permissions(at.settings_path(), std::fs::Permissions::from_mode(mode))
+            .unwrap();
+        assert_eq!(load_state(&at), State::Enabled(saved), "{mode:o}");
+        assert_eq!(mode_of(&at.settings_path()), 0o600, "{mode:o}");
+    }
+}
+
+#[test]
+fn a_pre_existing_sidecar_is_tightened_before_sqlite_uses_it() {
+    let root = tempdir();
+    let (_, at) = enabled_location(&root);
+    drop(open_store(&at).unwrap());
+    let wal = at.dir().join("history.db-wal");
+    std::fs::write(&wal, b"").unwrap();
+    std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(open_store(&at).unwrap());
+    assert_eq!(mode_of(&wal), 0o600);
+    assert_eq!(mode_of(&at.db_path()), 0o600);
+}
+
+#[test]
+fn a_pre_existing_database_is_tightened_to_0600() {
+    let root = tempdir();
+    let (_, at) = enabled_location(&root);
+    drop(open_store(&at).unwrap());
+    std::fs::set_permissions(at.db_path(), std::fs::Permissions::from_mode(0o666)).unwrap();
+    drop(open_store(&at).unwrap());
+    assert_eq!(mode_of(&at.db_path()), 0o600);
+}
+
+// ---- umask ----------------------------------------------------------
+
+const UMASK_CHILD: &str = "SNITCHWATCH_TEST_UMASK";
+
+/// The work, in a child process whose umask is set: a umask is process-wide
+/// and would race the other tests.
+fn enable_under(umask: u32) {
+    let root = tempdir();
+    let state = state_dir(&root);
+    let at = location(&state);
+    // SAFETY: umask takes an integer and cannot fail.
+    unsafe { libc::umask(umask) };
+    enable(&at, consent()).unwrap();
+    assert_eq!(mode_of(at.dir()), 0o700, "umask {umask:o}");
+    assert_eq!(mode_of(&at.settings_path()), 0o600);
+    drop(open_store(&at).unwrap());
+    assert_eq!(mode_of(&at.db_path()), 0o600);
+    // A later enable works on the same directory.
+    enable(&at, consent()).unwrap();
+}
+
+#[test]
+fn enabling_under_a_umask_that_masks_owner_bits_still_yields_0700() {
+    if let Ok(value) = std::env::var(UMASK_CHILD) {
+        enable_under(u32::from_str_radix(&value, 8).unwrap());
+        return;
+    }
+    for umask in [0o477, 0o277, 0o377, 0o077, 0o000] {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "history::tests::enabling_under_a_umask_that_masks_owner_bits_still_yields_0700",
+                "--test-threads=1",
+            ])
+            .env(UMASK_CHILD, format!("{umask:o}"))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "umask {umask:o}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
 }
 
 // ---- the database ---------------------------------------------------

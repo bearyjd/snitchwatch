@@ -45,6 +45,11 @@ fn one_of(values: &[&str]) -> String {
     quoted.join(", ")
 }
 
+/// Both tables are `STRICT`: with plain column affinity a TEXT value in a BLOB
+/// column is kept as TEXT, and `length()` stops at a NUL, so a "16-byte" hash
+/// could be a megabyte. Strict typing plus the `CHECK`s below is what makes
+/// the S1 caps hold.
+///
 /// The `CREATE` statements of [`SCHEMA_VERSION`]. Every cap of `caps.rs`
 /// appears here as a `CHECK`, from the same constants, so the schema is the
 /// proof that no value can exceed it. Generated once and byte-stable, since
@@ -68,7 +73,7 @@ pub fn schema_sql() -> String {
     repeat_count INTEGER NOT NULL DEFAULT 1 CHECK (repeat_count BETWEEN 1 AND 4294967295),
     src_port INTEGER CHECK (src_port IS NULL OR src_port BETWEEN 0 AND 65535),
     src_ip TEXT {src_ip}
-);
+) STRICT;
 CREATE INDEX events_ts ON events (ts_ms);
 CREATE INDEX events_rule_hash ON events (rule_hash);
 CREATE TABLE rules_seen (
@@ -76,7 +81,7 @@ CREATE TABLE rules_seen (
     rule_hash BLOB NOT NULL UNIQUE CHECK (length(rule_hash) = {hash}),
     snapshot TEXT NOT NULL CHECK (length(CAST(snapshot AS BLOB)) <= {snapshot}),
     first_seen_ms INTEGER NOT NULL
-);
+) STRICT;
 ",
         process_path = text_cap("process_path", PROCESS_PATH),
         dst_host = text_cap("dst_host", DST_HOST),
@@ -107,6 +112,7 @@ fn int(conn: &Connection, pragma: &str) -> Result<i64, Unavailable> {
 /// Open (creating a new file) and verify `path`; the connection comes back
 /// with the per-connection pragmas set.
 pub(crate) fn prepare(path: &Path) -> Result<Connection, Unavailable> {
+    super::open::tighten_sidecars(path).map_err(refuse)?;
     let conn = crate::sqlite_file::open_owner_only(path).map_err(refuse)?;
     let version = int(&conn, "user_version")?;
     if version > SCHEMA_VERSION {
