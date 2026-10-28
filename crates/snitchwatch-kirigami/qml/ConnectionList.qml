@@ -81,6 +81,41 @@ Item {
         keyNavigationEnabled: true
         Keys.onReturnPressed: pane.openCurrent()
         Keys.onEnterPressed: pane.openCurrent()
+        // Q01: the Menu key or Shift+F10 opens a row's actions: the row
+        // whose button has focus (keys bubble up to the list), else the
+        // selected row; nothing with no row. Below the row; closing the menu
+        // gives focus back (Popup).
+        // Focus on the list itself: on the selected row, never on a button
+        // the list's focus scope last held.
+        function focusCurrent() {
+            (list.currentItem || list).forceActiveFocus(Qt.BacktabFocusReason);
+        }
+        function rowOf(item) {
+            for (let it = item; it; it = it.parent) {
+                if (it.parent === list.contentItem) return it;
+            }
+            return null;
+        }
+        Keys.onPressed: event => {
+            const menuKey = event.key === Qt.Key_Menu
+                || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier));
+            // A delegate itself holding the list's focus is not a button in
+            // it: then the selected row counts.
+            const focused = list.Window.activeFocusItem;
+            const inRow = list.rowOf(focused);
+            const row = !menuKey ? null : inRow && inRow !== focused ? inRow : list.currentItem;
+            if (row) {
+                pane.page.connectionActions.open(row, 0, row.height);
+                event.accepted = true;
+            }
+        }
+        // Tab from a selected row goes to its own buttons (a header's
+        // Allow all / Deny all, a pending row's Allow), not the first row's.
+        Keys.onTabPressed: event => {
+            const stop = list.currentItem ? list.currentItem.firstTabStop : null;
+            event.accepted = !!stop && stop.visible && stop.enabled;
+            if (event.accepted) stop.forceActiveFocus(Qt.TabFocusReason);
+        }
 
         // Keep the Rust model's notion of the current selection in sync so its
         // auto-select policy knows whether the user is investigating a row.
