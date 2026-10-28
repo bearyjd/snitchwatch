@@ -20,6 +20,10 @@ Kirigami.ScrollablePage {
     // Injected by main.qml so the controller's lifetime is owned there.
     property ScannerController controller
 
+    // Emitted with the banner text each time a scan ends, alongside the
+    // screen-reader announcement, so the announcement is observable in tests.
+    signal outcomeAnnounced(string message)
+
     // Re-parsed whenever reportJson changes; {} before the first scan runs.
     readonly property var report: {
         if (!page.controller || page.controller.reportJson.length === 0) {
@@ -36,7 +40,15 @@ Kirigami.ScrollablePage {
     Connections {
         target: page.controller
         function onSummaryTextChanged() { page.flickable.contentY = 0; }
-        function onBusyChanged() { page.flickable.contentY = 0; }
+        function onBusyChanged() {
+            page.flickable.contentY = 0;
+            // The banner flips from "Scanning…" to the outcome in place, which
+            // assistive tech does not report on its own.
+            if (!page.controller.busy && summaryBanner.text.length > 0) {
+                summaryBanner.Accessible.announce(summaryBanner.text, Accessible.Polite);
+                page.outcomeAnnounced(summaryBanner.text);
+            }
+        }
     }
 
     // `errorText` includes the scanner's stderr and binary path, so it sits
@@ -72,7 +84,9 @@ Kirigami.ScrollablePage {
         // Outcome of the last attempt, above the sections so it is never
         // below the fold. Counts only; error detail stays in the header.
         Kirigami.InlineMessage {
+            id: summaryBanner
             objectName: "scannerSummary"
+            Accessible.name: text
             Layout.fillWidth: true
             visible: page.controller
                 && (page.controller.busy || page.controller.summaryText.length > 0)
