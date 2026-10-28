@@ -34,12 +34,19 @@ Window {
     property int phase: 0
     property int resets: 0
     property int inserts: 0
+    // What a modelAboutToBeReset observer sees while watching: the collapsed
+    // "handled" row's visible index (-2: the signal never came).
+    property bool watchReset: false
+    property int handledAtAboutToReset: -2
     readonly property string rec: "snitchwatch-default-chronyd"
 
     ConnectionsModel { id: model }
     Connections {
         target: model
         function onModelReset() { probe.resets++; }
+        function onModelAboutToBeReset() {
+            if (probe.watchReset) probe.handledAtAboutToReset = model.visibleRowIndex("handled");
+        }
         function onRowsInserted() { probe.inserts++; }
     }
     ConnectionsFilterBar {
@@ -88,7 +95,18 @@ Window {
     // A reconnect whose fresh rules dropped the recommended rule: between the
     // clear and the new SetRules nothing may collapse on the old rules.
     function reconnectWithoutTheRule(mode) {
+        // Issue #240: observers of modelAboutToBeReset still see the old
+        // projection; the clear's revoked attention facts land inside the
+        // reset bracket, not before it.
+        const before = model.visibleRowIndex("handled");
+        probe.expect(before === -1, mode + ": the handled row is not collapsed before the clear");
+        probe.watchReset = true;
+        probe.handledAtAboutToReset = -2;
         probe.send({ action: "clearConnectionRows" });
+        probe.watchReset = false;
+        probe.expect(probe.handledAtAboutToReset === before,
+                     mode + ": modelAboutToBeReset saw the handled row at "
+                     + probe.handledAtAboutToReset + ", the old projection at " + before);
         probe.send({ action: "insertConnectionRows", rows: probe.snapshotRows() });
         probe.expect(model.backgroundCount === 0 && model.matchingCount === model.totalCount,
                      mode + ": replayed rows collapsed on the old session's rules: "
