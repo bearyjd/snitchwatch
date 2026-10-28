@@ -86,8 +86,16 @@ Window {
         property string rowId: ""
         property string statusText: ""
         property bool busy: false
-        function begin(rowId) { makeController.rowId = rowId; return "req-1"; }
-        function notSent(why) {}
+        // As the real controller: begin() is busy at once, which disables the
+        // focused Allow/Deny button; only a refusal frees it again.
+        function begin(rowId) {
+            if (makeController.busy) return "";
+            makeController.rowId = rowId;
+            makeController.busy = true;
+            return "req-" + (++makeController.requests);
+        }
+        function notSent(why) { makeController.busy = false; makeController.statusText = why; }
+        property int requests: 0
     }
     QtObject {
         id: commands

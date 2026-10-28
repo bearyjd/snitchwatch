@@ -182,6 +182,10 @@ ColumnLayout {
         if (!sheet.controller) {
             return;
         }
+        // Q01: asked before begin(): it makes the controller busy at once,
+        // which disables the focused Allow/Deny button and drops its focus.
+        let focusInForm = false;
+        for (let it = sheet.Window.activeFocusItem; it; it = it.parent) if (it === form) focusInForm = true;
         const requestId = sheet.controller.begin(sheet.rowId);
         if (requestId === "") {
             return;
@@ -197,10 +201,8 @@ ColumnLayout {
             sheet.controller.notSent(problem);
             return;
         }
-        // Q01: hiding the form must not leave its focused button's focus
-        // nowhere: it goes back to "Make a rule…".
-        let focusInForm = false;
-        for (let it = sheet.Window.activeFocusItem; it; it = it.parent) if (it === form) focusInForm = true;
+        // Hiding the form must not leave its focus nowhere: it goes back to
+        // "Make a rule…".
         form.visible = false;
         if (focusInForm) openButton.forceActiveFocus(Qt.TabFocusReason);
     }
