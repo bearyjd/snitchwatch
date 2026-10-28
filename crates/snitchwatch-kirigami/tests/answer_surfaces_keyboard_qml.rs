@@ -59,7 +59,7 @@ Window {
         property bool ok: true
         property var submitted: []
         function submitVerdict(rowId, choice, scope, duration, bindable) {
-            submitted = submitted.concat([rowId + ":" + choice]);
+            submitted = submitted.concat([[rowId, choice, scope, duration, bindable].join(":")]);
             return true;
         }
         function appBoundRulesFor(rowId) { return true; }
@@ -106,7 +106,7 @@ Window {
         function levelRuleDuration() { return "forever"; }
         function levelRuleScopeText(level, program, key) { return "Executable " + program + "; any host; any port; any protocol"; }
         function createLevelRuleForSession(level, program, key, choice, duration, session) {
-            calls = calls.concat([[level, program, key, choice]]);
+            calls = calls.concat([[level, program, key, choice].join(",")]);
             return "";
         }
         function pollLevelRules() {}
@@ -184,18 +184,53 @@ Window {
         return false;
     }
     function dialog() { return rules.confirmDialog; }
+    // Press each key on whatever has focus; `sent()` must stay where it was.
+    function pressSends(keys, sent, what) {
+        const before = JSON.stringify(sent());
+        for (const k of keys) {
+            tc.keyClick(k);
+            probe.expect(JSON.stringify(sent()) === before,
+                         what + ": key " + k + " sent " + JSON.stringify(sent()) + " (was " + before + ")");
+        }
+    }
+    function asked() { return feedStub.submitted; }
+    function made() { return makeModel.calls; }
+    function typed() { return commands.calls; }
+    // Exactly one submission, equal to `expected`.
+    function expectOnly(sent, expected, what) {
+        probe.expect(sent().length === 1 && sent()[0] === expected,
+                     what + ": expected exactly [" + expected + "], got " + JSON.stringify(sent()));
+    }
     function sweepNamed(where, exact) {
         probe.sweep(where);
         for (const name of exact)
             probe.expect(probe.names[name] === true, where + ": no control named '" + name + "'");
     }
 
+    function formControl(name) {
+        return probe.find(make, it => it.objectName === name);
+    }
+    // "" once the opened form's four controls are visible, enabled and still.
+    function formReady() {
+        if (!make.form.visible) return "the Make a rule form visible";
+        const controls = [probe.formControl("makeRuleScope"), probe.formControl("makeRuleDuration"),
+                          probe.find(make.form, it => probe.text(it) === "Allow"),
+                          probe.find(make.form, it => probe.text(it) === "Deny")];
+        const names = ["Scope", "Duration", "Allow", "Deny"];
+        for (let i = 0; i < 4; ++i) {
+            if (!controls[i] || !controls[i].enabled) return "the form's " + names[i] + " enabled";
+            if (!probe.stable("form" + names[i], controls[i])) return "the form's " + names[i] + " to stop moving";
+        }
+        return "";
+    }
+
     function gate(phase) {
         switch (phase) {
         case 1: return banner.armed && probe.stable("deny", probe.find(banner, it => probe.text(it) === "Deny"))
             ? "" : "the armed banner";
-        case 7: case 9: return probe.dialog().opened ? "" : "the confirm dialog open";
-        case 8: return !probe.dialog().visible ? "" : "the confirm dialog closed";
+        case 4: case 5: return probe.formReady();
+        case 8: case 10: return probe.dialog().opened ? "" : "the confirm dialog open";
+        case 9: return !probe.dialog().visible ? "" : "the confirm dialog closed";
         default: return "";
         }
     }
@@ -235,54 +270,94 @@ Window {
                                  "the decision sheet's Tab order is not Scope, Duration, Allow, Deny: " + JSON.stringify(seen));
                     probe.sweepNamed("surfaces", ["Scope: This host only", "Make a rule…", "Allow once", "Review"]);
                 } else if (probe.phase === 2) {
+                    const none = [Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape];
+                    probe.expect(feedStub.submitted.length === 0, "something was sent before any key: " + JSON.stringify(feedStub.submitted));
+                    probe.expect(probe.tabTo("decisionSheet/scopeSelector"), "cannot Tab to the sheet's Scope");
+                    probe.pressSends(none, probe.asked, "Return/Enter/Escape on Scope");
+                    probe.expect(probe.tabTo("decisionSheet/durationSelector"), "cannot Tab to the sheet's Duration");
+                    probe.pressSends(none, probe.asked, "Return/Enter/Escape on Duration");
+                    probe.expect(probe.tabTo("decisionSheet/Allow"), "cannot Tab to the sheet's Allow");
+                    probe.pressSends([Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape], probe.asked, "Return/Enter/Escape on Allow");
                     probe.expect(probe.tabTo("decisionSheet/Deny"), "cannot Tab to the sheet's Deny");
+                    probe.pressSends([Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape], probe.asked, "Return/Enter/Escape on Deny");
                     tc.keyClick(Qt.Key_Space);
-                    probe.expect(feedStub.submitted.indexOf("1:asked:deny") >= 0,
-                                 "Space on Deny sent " + JSON.stringify(feedStub.submitted));
+                    probe.expectOnly(probe.asked, "1:asked:deny:" + decision.scopeSelector.currentValue + ":"
+                                     + decision.durationSelector.currentValue + ":true", "Space on Deny");
+                    feedStub.submitted = [];
+                    probe.expect(probe.tabTo("decisionSheet/Allow"), "cannot Tab back to the sheet's Allow");
+                    tc.keyClick(Qt.Key_Space);
+                    probe.expectOnly(probe.asked, "1:asked:allow:" + decision.scopeSelector.currentValue + ":"
+                                     + decision.durationSelector.currentValue + ":true", "Space on Allow");
                     feedStub.submitted = [];
                 } else if (probe.phase === 3) {
                     probe.expect(probe.tabTo("makeRuleSheet/Make a rule…"), "cannot Tab to Make a rule…");
+                    probe.pressSends([Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape], probe.made, "Return/Enter/Escape on Make a rule…");
+                    probe.expect(!make.form.visible, "Return, Enter or Escape opened the Make a rule form");
                     tc.keyClick(Qt.Key_Space);
                     probe.expect(make.form.visible, "Space did not open the Make a rule form");
-                    probe.expect(probe.inside(probe.focused(), make.form),
-                                 "focus did not move into the form: " + probe.where(probe.focused()));
+                    probe.expect(probe.focused() === probe.formControl("makeRuleScope"),
+                                 "focus did not land on the form's Scope: " + probe.where(probe.focused()));
                 } else if (probe.phase === 4) {
                     probe.sweepNamed("make a rule form", ["Scope: This host only"]);
-                    probe.expect(Object.keys(probe.names).some(n => n.indexOf("Duration: ") === 0
-                                 && probe.inside(probe.find(make, it => it.Accessible && it.Accessible.name === n), make)),
+                    probe.expect(probe.formControl("makeRuleDuration").Accessible.name.indexOf("Duration: ") === 0,
                                  "the form's duration selector has no labelled name");
-                    for (let i = 0; i < 10 && probe.where(probe.focused()) !== "makeRuleSheet/Allow"; ++i)
-                        tc.keyClick(Qt.Key_Tab);
-                    probe.expect(probe.where(probe.focused()) === "makeRuleSheet/Allow", "cannot Tab to the form's Allow");
+                    // Traversal in, through, and out of the form.
+                    const walk = [];
+                    for (let i = 0; i < 4; ++i) { tc.keyClick(Qt.Key_Tab); walk.push(probe.where(probe.focused())); }
+                    probe.expect(JSON.stringify(walk) === JSON.stringify(["makeRuleSheet/makeRuleDuration",
+                                 "makeRuleSheet/Allow", "makeRuleSheet/Deny", "promptSlotBanner/Allow once"]),
+                                 "the form's Tab order is not Scope, Duration, Allow, Deny, then out: " + JSON.stringify(walk));
+                    const none = [Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape];
+                    for (const name of ["Scope", "Duration", "Allow", "Deny"]) {
+                        const at = name === "Scope" ? "makeRuleSheet/makeRuleScope"
+                            : name === "Duration" ? "makeRuleSheet/makeRuleDuration" : "makeRuleSheet/" + name;
+                        probe.expect(probe.tabTo(at), "cannot Tab to the form's " + name);
+                        probe.pressSends(none, probe.made, "Return/Enter/Escape on the form's " + name);
+                        probe.expect(make.form.visible, "a key closed the form from its " + name);
+                    }
+                    probe.expect(probe.where(probe.focused()) === "makeRuleSheet/Deny", "focus is not on the form's Deny");
                     tc.keyClick(Qt.Key_Space);
-                    probe.expect(makeModel.calls.length === 1 && makeModel.calls[0].indexOf("1:putoff:allow:") === 0,
-                                 "Space on Allow made " + JSON.stringify(makeModel.calls));
+                    probe.expectOnly(probe.made, "1:putoff:deny:" + probe.formControl("makeRuleScope").currentValue + ":"
+                                     + probe.formControl("makeRuleDuration").currentValue, "Space on the form's Deny");
                     probe.expect(!make.form.visible && probe.focused() === make.openButton,
                                  "focus did not come back to Make a rule…: " + probe.where(probe.focused()));
-                } else if (probe.phase === 5) {
-                    probe.expect(probe.tabTo("promptSlotBanner/Deny"), "cannot Tab to the banner's Deny");
+                    makeModel.calls = [];
+                    makeController.busy = false;
                     tc.keyClick(Qt.Key_Space);
-                    probe.expect(feedStub.submitted.indexOf("1:held:deny") >= 0,
-                                 "Space on the banner's Deny sent " + JSON.stringify(feedStub.submitted));
+                    probe.expect(make.form.visible, "Space did not reopen the Make a rule form");
+                } else if (probe.phase === 5) {
+                    probe.expect(probe.tabTo("makeRuleSheet/Allow"), "cannot Tab to the form's Allow");
+                    tc.keyClick(Qt.Key_Space);
+                    probe.expectOnly(probe.made, "1:putoff:allow:" + probe.formControl("makeRuleScope").currentValue + ":"
+                                     + probe.formControl("makeRuleDuration").currentValue, "Space on the form's Allow");
+                    probe.expect(!make.form.visible && probe.focused() === make.openButton,
+                                 "focus did not come back to Make a rule…: " + probe.where(probe.focused()));
                 } else if (probe.phase === 6) {
+                    probe.expect(probe.tabTo("promptSlotBanner/Deny"), "cannot Tab to the banner's Deny");
+                    probe.pressSends([Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape], probe.asked, "Return/Enter/Escape on the banner's Deny");
+                    tc.keyClick(Qt.Key_Space);
+                    probe.expectOnly(probe.asked, "1:held:deny:this_host:until_restart:true", "Space on the banner's Deny");
+                } else if (probe.phase === 7) {
                     start.forceActiveFocus();
                     rules.create(0, "/usr/bin/app", "", "app", "allow", "1:");
-                } else if (probe.phase === 7) {
+                } else if (probe.phase === 8) {
                     probe.sweepNamed("confirm dialog", ["Allow any host", "Cancel"]);
                     const seen = [];
                     for (let i = 0; i < 6; ++i) { tc.keyClick(Qt.Key_Tab); seen.push(probe.text(probe.focused())); }
                     probe.expect(seen.indexOf("Allow any host") >= 0 && seen.indexOf("Cancel") >= 0,
                                  "Tab in the dialog never reaches both buttons: " + JSON.stringify(seen));
                     tc.keyClick(Qt.Key_Escape);
-                } else if (probe.phase === 8) {
-                    probe.expect(commands.calls.length === 0, "Escape sent the rule");
+                } else if (probe.phase === 9) {
+                    probe.expect(commands.calls.length === 0, "Escape sent the rule: " + JSON.stringify(commands.calls));
                     probe.expect(probe.focused() === start, "Escape did not give focus back: " + probe.where(probe.focused()));
                     rules.create(0, "/usr/bin/app", "", "app", "allow", "1:");
-                } else if (probe.phase === 9) {
+                } else if (probe.phase === 10) {
                     for (let i = 0; i < 6 && probe.text(probe.focused()) !== "Allow any host"; ++i)
                         tc.keyClick(Qt.Key_Tab);
+                    probe.expect(probe.text(probe.focused()) === "Allow any host", "cannot Tab to Allow any host");
+                    probe.pressSends([Qt.Key_Return, Qt.Key_Enter], probe.typed, "Return/Enter on Allow any host");
                     tc.keyClick(Qt.Key_Space);
-                    probe.expect(commands.calls.length === 1, "Space on Allow any host sent " + JSON.stringify(commands.calls));
+                    probe.expectOnly(probe.typed, "0,/usr/bin/app,,allow", "Space on Allow any host");
                     const bad = Object.keys(probe.missing);
                     probe.expect(bad.length === 0, bad.length + " controls lack a meaningful Accessible.name: "
                         + bad.map(k => k + " (" + probe.missing[k] + ")").join("; "));
