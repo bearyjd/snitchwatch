@@ -62,6 +62,9 @@ fn start_privileged_watchdog_after(timeout: std::time::Duration) -> anyhow::Resu
     if unsafe { libc::setpgid(0, 0) } != 0 && unsafe { libc::getpgrp() } != pid {
         return Err(std::io::Error::last_os_error().into());
     }
+    // Before any primitive runs: orphans of primitives stay below the scanner,
+    // where the watchdog's sweep finds them.
+    scanner_privileged::containment::become_subreaper()?;
     std::thread::spawn(move || {
         std::thread::sleep(timeout);
         notify_watchdog_timeout();
@@ -358,6 +361,9 @@ mod argument_tests {
             // This check child inherits the scanner's group and both pipes. A
             // surviving check would prevent wait_with_output from completing.
             let _ = scanner_privileged::command::run("sleep", &["20"]);
+            // The watchdog kills the check first, so run can return just
+            // before the scanner's own group is killed: wait for that kill.
+            std::thread::sleep(std::time::Duration::from_secs(10));
             panic!("watchdog did not terminate the fixture");
         }
         for mode in ["normal", "full", "closed"] {

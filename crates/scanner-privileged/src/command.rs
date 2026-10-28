@@ -29,10 +29,17 @@ static EXPIRED: AtomicBool = AtomicBool::new(false);
 /// scanner's own group (the lock is only ever held briefly).
 const WATCHDOG_LOCK_WAIT: Duration = Duration::from_millis(100);
 
-/// The root watchdog's kill: the active primitive's group, then the scanner's
-/// own group `own_group` (its process group leader, from `main`).
+/// How long the watchdog sweeps the scanner's descendants before it kills
+/// its own group regardless (a process stuck in the kernel can't die sooner).
+const DESCENDANT_SWEEP: Duration = Duration::from_secs(2);
+
+/// The root watchdog's kill: the active primitive's group, then every
+/// descendant (`containment`: none is skipped for being unregistered, or for
+/// the registry's lock being held), then the scanner's own group `own_group`
+/// (its process group leader and pid, from `main`).
 pub fn expire_watchdog(own_group: i32) {
     kill_active_group();
+    crate::containment::kill_descendants(own_group, DESCENDANT_SWEEP);
     unsafe {
         libc::killpg(own_group, libc::SIGKILL);
     }
@@ -43,6 +50,10 @@ pub fn expire_watchdog(own_group: i32) {
 /// fork, so only a primitive spawned after it is set stalls.
 #[cfg(test)]
 static STALL_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+/// Test only: hold off registering a spawned primitive's pid, as a
+/// descheduled capture thread would.
+#[cfg(test)]
+static DELAY_REGISTRATION: AtomicBool = AtomicBool::new(false);
 
 /// The invocation watchdog also terminates the active primitive's descendants.
 /// Bounded: it never waits more than [`WATCHDOG_LOCK_WAIT`] for the lock.
@@ -187,11 +198,15 @@ fn capture(
         .stderr(Stdio::piped());
     // Isolate check descendants for cleanup; the root watchdog knows this group
     // once the spawn returns. Until then the parent has no pid for the child,
-    // so the child dies with the scanner: PDEATHSIG fires when the forking
-    // thread ends, and `capture` runs synchronously on it and reaps (Guard)
-    // before returning, so that is when the scanner dies. The trusted
-    // primitives are not setuid/setgid or file-capability binaries, whose exec
-    // would clear it.
+    // so it also dies with the scanner: PDEATHSIG fires when the forking
+    // thread ends, and primitives run only on the scanner's main thread, which
+    // lives as long as the process (capture is synchronous and Guard reaps
+    // before it returns). PDEATHSIG is defence in depth, not the containment:
+    // exec of a setuid/setgid or file-capability binary clears it (check that
+    // rpm-ostree, mokutil and chkrootkit are neither on the host), and forked
+    // descendants never inherit it. Either way the watchdog's descendant sweep
+    // (`containment`, the scanner being a subreaper) still kills them, so
+    // losing it fails safe.
     let parent = unsafe { libc::getpid() };
     unsafe {
         command.pre_exec(move || {
@@ -234,6 +249,10 @@ fn capture(
     }
     // Unlocked: a stalled exec handshake must not hold off the watchdog.
     let spawned = command.spawn();
+    #[cfg(test)]
+    if DELAY_REGISTRATION.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_secs(60));
+    }
     let mut state = ACTIVE_GROUP
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
@@ -397,8 +416,11 @@ mod tests {
                 Duration::from_secs(60),
                 None,
             );
-            // The hook never lets the spawn finish; only the watchdog ends this.
-            unsafe { libc::_exit(3) };
+            // Whether or not the sweep ended the spawn (killing the stalled
+            // child fails it), only the watchdog's own-group kill ends this.
+            loop {
+                unsafe { libc::pause() };
+            }
         }
         let mut pipe = [0; 2];
         unsafe {
@@ -474,6 +496,127 @@ mod tests {
         assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
         assert!(stalled > 0, "the stalled child never reported its pid");
         assert!(reaped, "the stalled child {stalled} outlived the scanner");
+    }
+
+    /// Gone, or a zombie waiting for whoever inherited it.
+    fn gone(pid: i32) -> bool {
+        (unsafe { libc::kill(pid, 0) }) != 0
+            || std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| {
+                    stat.rsplit(')')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start()
+                        .starts_with('Z')
+                })
+                .unwrap_or(true)
+    }
+
+    /// A primitive that execs and forks a long-lived helper before the scanner
+    /// has registered its pid: the watchdog fires, and within the bound the
+    /// primitive, its helper (which PDEATHSIG doesn't reach) and the scanner
+    /// are all dead. Twice: the primitive still waiting for its helper, and
+    /// the primitive already gone, the helper orphaned (kept below the scanner
+    /// only by the subreaper). Runs in a child scanner process.
+    #[test]
+    fn a_forked_helper_cannot_outlive_the_watchdog() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD: &str = "SNITCHWATCH_TEST_FORKED_HELPER";
+        const MODE: &str = "SNITCHWATCH_TEST_FORKED_HELPER_MODE";
+        if let Some(pids) = std::env::var_os(CHILD) {
+            let own = unsafe { libc::getpid() };
+            unsafe {
+                assert!(libc::setpgid(0, 0) == 0 || libc::getpgrp() == own);
+            }
+            crate::containment::become_subreaper().unwrap();
+            DELAY_REGISTRATION.store(true, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(500));
+                expire_watchdog(own);
+            });
+            let then = if std::env::var(MODE).unwrap() == "orphan" {
+                "exit 0"
+            } else {
+                "wait"
+            };
+            let script = format!(
+                "sleep 60 & printf '%s %s' $$ $! > {}; {then}",
+                pids.to_str().unwrap()
+            );
+            let _ = capture(
+                Command::new("/usr/bin/sh").args(["-c", &script]),
+                Duration::from_secs(60),
+                None,
+            );
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        for mode in ["wait", "orphan"] {
+            let dir = tempfile::tempdir().unwrap();
+            let pids = dir.path().join("pids");
+            let mut scanner = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "command::tests::a_forked_helper_cannot_outlive_the_watchdog",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, &pids)
+                .env(MODE, mode)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let scanner_pid = scanner.id() as i32;
+            let bound = Duration::from_secs(5);
+            let start = Instant::now();
+            let mut reported: Vec<i32> = Vec::new();
+            let status = loop {
+                if reported.is_empty() {
+                    if let Ok(text) = std::fs::read_to_string(&pids) {
+                        reported = text
+                            .split_whitespace()
+                            .filter_map(|p| p.parse().ok())
+                            .collect();
+                        if reported.len() != 2 {
+                            reported.clear();
+                        }
+                    }
+                }
+                if let Some(status) = scanner.try_wait().unwrap() {
+                    break Some(status);
+                }
+                if start.elapsed() > bound {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let since = Instant::now();
+            while !reported.iter().all(|&pid| gone(pid)) && since.elapsed() < bound {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
+            // Never leak a fixture, whatever failed.
+            unsafe {
+                for &pid in &survivors {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+                libc::kill(-scanner_pid, libc::SIGKILL);
+            }
+            let _ = scanner.wait();
+            let status = status.expect("the watchdog did not terminate the scanner");
+            assert_eq!(status.signal(), Some(libc::SIGKILL), "{mode}: {status:?}");
+            assert_eq!(
+                reported.len(),
+                2,
+                "{mode}: the primitive never reported its pids"
+            );
+            assert!(
+                survivors.is_empty(),
+                "{mode}: outlived the watchdog (primitive, helper): {reported:?}, alive: {survivors:?}"
+            );
+        }
     }
 
     #[test]
