@@ -134,12 +134,53 @@ pub(crate) fn encode(settings: &Settings) -> Result<Vec<u8>, Unavailable> {
     Ok(bytes)
 }
 
+/// Read the settings file through one handle opened `O_NOFOLLOW | O_NONBLOCK`:
+/// a regular file of ours with no other link, at most [`SETTINGS_MAX_BYTES`];
+/// whatever its mode, it is set to exactly 0600 on that handle first.
+fn read_checked(path: &std::path::Path) -> Result<Option<Vec<u8>>, Unavailable> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(bad(e)),
+    };
+    let meta = file.metadata().map_err(bad)?;
+    // SAFETY: geteuid takes no arguments and always succeeds.
+    let euid = unsafe { libc::geteuid() };
+    let facts = crate::sqlite_file::FileFacts {
+        regular: meta.is_file(),
+        uid: meta.uid(),
+        links: meta.nlink(),
+    };
+    if let Some(why) = crate::sqlite_file::file_problem(&facts, euid) {
+        return Err(bad(format!("the file {why}")));
+    }
+    if meta.len() > SETTINGS_MAX_BYTES {
+        return Err(bad("too large"));
+    }
+    if meta.mode() & 0o7777 != 0o600 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(bad)?;
+    }
+    let mut bytes = Vec::new();
+    file.take(SETTINGS_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(bad)?;
+    if bytes.len() as u64 > SETTINGS_MAX_BYTES {
+        return Err(bad("too large"));
+    }
+    Ok(Some(bytes))
+}
+
 /// `None` when there is no settings file (never enabled).
 pub(crate) fn load(location: &Location) -> Result<Option<Settings>, Unavailable> {
-    let bytes = match crate::state_file::read(&location.settings_path(), SETTINGS_MAX_BYTES) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return Ok(None),
-        Err(e) => return Err(bad(e)),
+    let Some(bytes) = read_checked(&location.settings_path())? else {
+        return Ok(None);
     };
     let file: File = serde_json::from_slice(&bytes).map_err(bad)?;
     if file.version != FORMAT_VERSION {

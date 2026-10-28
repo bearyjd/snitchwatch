@@ -230,3 +230,52 @@ fn snapshots_round_trip_and_the_hash_is_unique() {
 fn the_cap_table_matches_the_owner_set_values() {
     assert_eq!((RULE_NAME, PROCESS_PATH, DST_HOST), (256, 4096, 253));
 }
+
+#[test]
+fn column_types_are_enforced_so_no_value_hides_behind_affinity() {
+    // Found in review: with plain affinity, a TEXT "hash" with a NUL after 16
+    // characters passed `length() = 16` while storing a million bytes.
+    let (_keep, store) = store();
+    let c = store.connection();
+    let mut sneaky = b"0123456789abcdef\0".to_vec();
+    sneaky.resize(1_000_017, b'x');
+    let sneaky = String::from_utf8(sneaky).unwrap();
+    let ev = "INSERT INTO events (ts_ms, action, answered_by, rule_hash) VALUES (1, 'allow', 'rule', ?1)";
+    assert!(c.execute(ev, [&sneaky]).is_err(), "text in a BLOB column");
+    let snap = "INSERT INTO rules_seen (rule_hash, snapshot, first_seen_ms) VALUES (?1, '{}', 1)";
+    assert!(
+        c.execute(snap, [&sneaky]).is_err(),
+        "text in rules_seen.rule_hash"
+    );
+    assert!(
+        c.execute(snap, [vec![0u8; RULE_HASH]]).is_ok(),
+        "a real 16-byte blob"
+    );
+    let other = "INSERT INTO events (ts_ms, action, answered_by, process_path) VALUES (1, 'allow', 'rule', ?1)";
+    assert!(
+        c.execute(other, [vec![b'a'; 10]]).is_err(),
+        "a blob in a TEXT column"
+    );
+    for column in ["decided_ts_ms", "dst_port", "src_port", "repeat_count"] {
+        let sql = format!(
+            "INSERT INTO events (ts_ms, action, answered_by, {column}) VALUES (1, 'allow', 'rule', ?1)"
+        );
+        assert!(
+            c.execute(&sql, ["x".repeat(1000)]).is_err(),
+            "text in {column}"
+        );
+    }
+    assert!(c
+        .execute(
+            "INSERT INTO events (ts_ms, action, answered_by) VALUES (?1, 'allow', 'rule')",
+            ["x".repeat(1000)]
+        )
+        .is_err());
+    let ts = "INSERT INTO rules_seen (rule_hash, snapshot, first_seen_ms) VALUES (?1, '{}', ?2)";
+    assert!(c
+        .execute(
+            ts,
+            rusqlite::params![vec![1u8; RULE_HASH], "x".repeat(1000)]
+        )
+        .is_err());
+}
