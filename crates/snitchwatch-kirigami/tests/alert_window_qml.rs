@@ -327,15 +327,33 @@ fn the_alert_wires_keys_to_the_armed_handler_and_waits_one_second() {
         ALERT_QML.contains("property int armDelayMs: 1000"),
         "the input delay is no longer 1000 ms"
     );
+    // The window's handler lets only Tab and Shift+Tab through (the focus
+    // chain, pinned with real keys in alert_window_keyboard_qml.rs); every
+    // other key is accepted and goes to handleKey.
     let keys = ALERT_QML
         .split("Keys.onPressed")
         .nth(1)
-        .and_then(|rest| rest.split('}').next())
+        .and_then(|rest| rest.split("Keys.onReleased").next())
         .expect("AlertWindow.qml has no Keys.onPressed");
+    let (tab, rest) = keys
+        .split_once("event.accepted = true;")
+        .expect("Keys.onPressed must accept the other keys");
     assert!(
-        keys.contains("event.accepted = true")
-            && keys.contains("alert.handleKey(event.key, event.isAutoRepeat)"),
-        "Keys.onPressed must accept every key and call handleKey with isAutoRepeat: {keys}"
+        tab.contains("Qt.Key_Tab")
+            && tab.contains("Qt.Key_Backtab")
+            && tab.contains("event.accepted = false"),
+        "Keys.onPressed must let only Tab and Shift+Tab through: {keys}"
+    );
+    assert!(
+        rest.contains("alert.handleKey(event.key, event.isAutoRepeat)"),
+        "Keys.onPressed must call handleKey with isAutoRepeat: {keys}"
+    );
+    // The verdict buttons see the key first and guard it like handleKey.
+    assert!(
+        ALERT_QML.matches("Keys.priority: Keys.BeforeItem").count() == 2
+            && ALERT_QML.contains("alert.verdictButtonPressed(event, \"allow\")")
+            && ALERT_QML.contains("alert.verdictButtonPressed(event, \"deny\")"),
+        "both verdict buttons must route keys through verdictButtonPressed first"
     );
     let released = ALERT_QML
         .split("Keys.onReleased")

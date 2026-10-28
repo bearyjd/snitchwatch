@@ -65,12 +65,6 @@ Window {
     // Keys pressed while not armed and not yet released: a press of one of
     // these (some platforms do not flag the repeats) is not a fresh press.
     property var heldKeys: ({})
-    // Bumped whenever the alert re-arms, and the value when the Space press
-    // now on a verdict button began: Space is native activation, which fires
-    // on release, so a press that began before a re-arm must not answer.
-    property int armGeneration: 0
-    property int spacePressGeneration: -1
-    property bool ignoreNextClick: false
     // A row answered or dismissed here and not yet resolved by the bridge is
     // not shown again.
     property string handledRowId: ""
@@ -173,7 +167,6 @@ Window {
     }
 
     function arm() {
-        alert.armGeneration++;
         alert.armed = false;
         if (alert.rowId !== "") {
             armTimer.restart();
@@ -255,31 +248,20 @@ Window {
         if (!alert.armed) {
             alert.heldKeys[event.key] = true;
         } else if (event.isAutoRepeat !== true && alert.heldKeys[event.key] !== true) {
-            alert.spacePressGeneration = alert.armGeneration;
             // Not ours to swallow: the button presses and, on release, clicks.
             event.accepted = false;
         }
     }
 
-    // The matching release. A Space press from before the last re-arm must
-    // not click the (possibly different) row now shown.
+    // The matching release: forgets the key, as the window's own handler does
+    // (the button would otherwise consume it). A Space press that began before
+    // a re-arm or a new row cannot click the row now shown: the re-arm
+    // disables the buttons, which cancels the press (pinned by the held-Space
+    // stages of tests/alert_window_keyboard_qml.rs).
     function verdictButtonReleased(event) {
-        if (event.key === Qt.Key_Space && event.isAutoRepeat !== true) {
-            alert.ignoreNextClick = alert.spacePressGeneration !== alert.armGeneration;
-            Qt.callLater(() => { alert.ignoreNextClick = false; });
-        }
         if (event.isAutoRepeat !== true) {
             alert.keyReleased(event.key);
         }
-    }
-
-    // A verdict button's click: a mouse click, or the end of a Space press.
-    function verdictClicked(choice) {
-        if (alert.ignoreNextClick) {
-            alert.ignoreNextClick = false;
-            return;
-        }
-        alert.answer(choice);
     }
 
     Timer {
@@ -456,7 +438,7 @@ Window {
                     Keys.priority: Keys.BeforeItem
                     Keys.onPressed: event => alert.verdictButtonPressed(event, "allow")
                     Keys.onReleased: event => alert.verdictButtonReleased(event)
-                    onClicked: alert.verdictClicked("allow")
+                    onClicked: alert.answer("allow")
                 }
                 Controls.Button {
                     id: denyButton
@@ -471,7 +453,7 @@ Window {
                     Keys.priority: Keys.BeforeItem
                     Keys.onPressed: event => alert.verdictButtonPressed(event, "deny")
                     Keys.onReleased: event => alert.verdictButtonReleased(event)
-                    onClicked: alert.verdictClicked("deny")
+                    onClicked: alert.answer("deny")
                 }
             }
         }
