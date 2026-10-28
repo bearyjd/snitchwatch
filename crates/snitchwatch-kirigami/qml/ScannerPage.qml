@@ -32,6 +32,13 @@ Kirigami.ScrollablePage {
         }
     }
 
+    // A new outcome always lands in view, whatever the scroll position.
+    Connections {
+        target: page.controller
+        function onSummaryTextChanged() { page.flickable.contentY = 0; }
+        function onBusyChanged() { page.flickable.contentY = 0; }
+    }
+
     // `errorText` includes the scanner's stderr and binary path, so it sits
     // in a PlainText label, never in the InlineMessage (issue #51).
     header: ColumnLayout {
@@ -61,6 +68,21 @@ Kirigami.ScrollablePage {
     ColumnLayout {
         width: page.width
         spacing: Kirigami.Units.largeSpacing
+
+        // Outcome of the last attempt, above the sections so it is never
+        // below the fold. Counts only; error detail stays in the header.
+        Kirigami.InlineMessage {
+            objectName: "scannerSummary"
+            Layout.fillWidth: true
+            visible: page.controller
+                && (page.controller.busy || page.controller.summaryText.length > 0)
+            type: page.controller && page.controller.busy ? Kirigami.MessageType.Information
+                : page.controller && page.controller.summaryKind === "error" ? Kirigami.MessageType.Error
+                : page.controller && page.controller.summaryKind === "findings" ? Kirigami.MessageType.Warning
+                : Kirigami.MessageType.Positive
+            text: page.controller && page.controller.busy ? "Scanning…"
+                : page.controller ? page.controller.summaryText : ""
+        }
 
         Controls.Label {
             Layout.fillWidth: true

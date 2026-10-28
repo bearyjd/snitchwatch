@@ -35,6 +35,11 @@ pub mod qobject {
         /// True while a scan is in flight (polkit prompt + the scan itself
         /// can both take real wall-clock time).
         #[qproperty(bool, busy)]
+        /// One line stating the outcome of the last scan attempt (clean,
+        /// findings or failure); empty before the first attempt.
+        #[qproperty(QString, summary_text, cxx_name = "summaryText")]
+        /// "clean", "findings" or "error"; empty before the first attempt.
+        #[qproperty(QString, summary_kind, cxx_name = "summaryKind")]
         type ScannerController = super::ScannerControllerRust;
 
         /// Run one privileged deep scan off the UI thread. Wired to the
@@ -54,6 +59,8 @@ pub struct ScannerControllerRust {
     error_text: QString,
     error_title: QString,
     busy: bool,
+    summary_text: QString,
+    summary_kind: QString,
 }
 
 impl qobject::ScannerController {
@@ -61,13 +68,23 @@ impl qobject::ScannerController {
         if self.busy {
             return;
         }
+        tracing::info!("deep scan requested");
         self.as_mut().set_busy(true);
         self.as_mut().set_error_text(QString::default());
         self.as_mut().set_error_title(QString::default());
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
             let result = crate::scanner::run_deep_scan();
+            match &result {
+                Ok(json) => tracing::info!(report_bytes = json.len(), "deep scan replied: ok"),
+                Err(e) => tracing::warn!(error_title = e.title, "deep scan failed"),
+            }
+            let (kind, summary) = crate::scanner::summarize(&result, &crate::scanner::local_hhmm());
             let _ = qt_thread.queue(move |mut qobject| {
+                qobject
+                    .as_mut()
+                    .set_summary_kind(QString::from(kind.as_str()));
+                qobject.as_mut().set_summary_text(QString::from(&summary));
                 match result {
                     Ok(json) => {
                         qobject.as_mut().set_report_json(QString::from(&json));
