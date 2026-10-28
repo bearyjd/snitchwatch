@@ -1,7 +1,13 @@
 # Sharing connection events with Vigie (opt-in)
 
-Off by default. Nothing here is installed by the image, the system overlay or
-any staging script. Enabling it is an operator step, like the `deny` opt-in.
+Off by default. Enabling it is an operator step, like the `deny` opt-in. The
+Snitchwatch system image (published 2026-10-28 or later, for example
+`ghcr.io/bearyjd/bazzite-tower@sha256:148de52b6590ddb28fc2d7ed71035e7859aa350d7d1e21fa7ad6545d4999b1df`)
+ships the rsyslog packages with every unit **disabled**, and an inert copy of
+this directory's rsyslog config, nftables table and two units in
+`/usr/share/snitchwatch/endpoint-events/`. Nothing listens on 514 or 6514, the
+daemon config has no logger entry, and `opensnitchd-logger.json` is **not**
+shipped: take that one from this repository. Older images ship none of this.
 Design: [`docs/superpowers/specs/2026-10-26-vigie-endpoint-events.md`](../../docs/superpowers/specs/2026-10-26-vigie-endpoint-events.md)
 (#231). Vigie side: bearyjd/vigie-network#21.
 
@@ -172,9 +178,17 @@ never as proof:
 Do this as root, from a checkout of this repository (the merge reads
 `packaging/endpoint-events/opensnitchd-logger.json`).
 
-1. **Install rsyslog.** It isn't in the image. These are the Fedora 44 package
-   names (checked with `dnf repoquery` in the pinned Fedora 44 image,
-   2026-10-26):
+   **Where the files come from.** The commands below say
+   `packaging/endpoint-events/...`, a path in a checkout of this repository.
+   On an image that ships them, use the same file names from
+   `/usr/share/snitchwatch/endpoint-events/` instead (root-owned, 0644, in no
+   unit search path, so nothing runs until you copy a file to the `/etc`
+   locations below). `opensnitchd-logger.json` always comes from a checkout.
+
+1. **Install rsyslog.** Skip this step on an image that already ships the
+   packages (check with `rpm -q rsyslog rsyslog-mmjsonparse rsyslog-gnutls`).
+   Otherwise these are the Fedora 44 package names (checked with
+   `dnf repoquery` in the pinned Fedora 44 image, 2026-10-26):
 
    ```bash
    sudo rpm-ostree install rsyslog rsyslog-mmjsonparse rsyslog-gnutls
