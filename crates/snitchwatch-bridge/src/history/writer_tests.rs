@@ -175,7 +175,7 @@ fn a_journal_is_a_sector_header_plus_whole_page_records() {
     // assumes the larger.
     let header = [512, 4096]
         .into_iter()
-        .find(|h| (r.journal_bytes - h) % JOURNAL_RECORD == 0)
+        .find(|h| (r.journal_bytes - h).is_multiple_of(JOURNAL_RECORD))
         .unwrap_or_else(|| panic!("{r:?} is not header + whole 4104-byte records"));
     assert!(header <= JOURNAL_HEADER);
     assert!(r.journal_bytes > header);
