@@ -18,14 +18,16 @@ This plan records the order and the stop rules; it does not wait for approval.
 ## Stop rules
 
 - Park as a draft after 4 `/codex` rounds that still have a HIGH or CRITICAL.
-- Park anything that needs an unplanned bridge-wire, daemon, image or packaging
-  change, and tell the tower before merging anything that touches
+- Park anything that needs an unplanned bridge, wire, daemon, image or packaging
+  change. The only planned bridge work is the history storage in Batch D (PRs 1
+  and 2, bridge only). Tell the tower before merging anything that touches
   `crates/snitchwatch-bridge`, `crates/scanner-*` or `packaging/`.
 - An unrelated CI failure twice is recorded as a flake and not chased tonight.
 - Never without the owner: staging or rebooting the host, host files, tower refs,
   upstream posts, a force-push (except a lease-guarded rebase), deleting
   worktrees or `dist`, or running anything that needs the owner's admin prompt.
-- Keep `/tmp` below 80%; pause if it fills and delete nothing.
+- Check `/tmp` before every build. At 80% used, pause new builds, say so in the
+  report, and delete nothing.
 
 ## Batch A: close what is open
 
@@ -56,7 +58,10 @@ the page all work, so the cause is not found yet. Without the owner's input, do:
 Per `2026-10-28-q01-next-slices.md`: slice 3 (rebase the pushed work-in-progress
 `feat/q01-rules-keyboard` onto main), then 4 learning review and its banner, 5 list
 pages, 6 status and settings, 7 navigation, plus the map slice 2b. One small PR
-each. Owner decisions in force: Return only selects a focused scope or duration
+each. The plan's open decisions: **D4** (value-only names) and **D5** (high
+contrast) are worked on their stated defaults (no value-only names; high contrast
+belongs to Q02) and flagged in each PR; **D3** (page shortcuts such as Ctrl+1 to
+6) gates **slice 7 only**, which waits for the owner. Owner decisions in force: Return only selects a focused scope or duration
 choice and Escape is always Deny (D1); Tab works in the prompt (D2).
 
 ## Batch D: connection history, run 1
@@ -68,7 +73,11 @@ database-free halves 3a and 4a. Every PR keeps the test that a bridge started
 without history enabled creates no `history/` directory. This batch touches
 `crates/snitchwatch-bridge`, so the tower gets notice before the first merge of
 bridge code. The S2 page-constant result, or its full-journal fallback, is the
-owner's decision and is never merged on a guess.
+owner's decision and is never merged on a guess. **PR 1 also waits for the owner
+on S1:** only `rule_name` 256 B, `process_path` 4096 B and `dst_host` 253 B are
+set. Every other stored string gets a derived cap proposed in the PR, and PR 1
+does not merge until the owner approves those caps (or pre-approves the
+provisional values).
 
 ## Batch E: handoff
 
@@ -79,7 +88,11 @@ SHA-256s, the parked items and why, and send the tower one batched SHA.
 
 - Deep Scan through the admin prompt on the real host, `ujust snitchwatch-deny`
   status and the on/confirm/off trial as root, and closing tower #35.
-- Releasing the history run after PR 2; any S2 fallback.
+- Releasing the history run after PR 2; any S2 fallback; approving the extra S1
+  field caps before PR 1 merges.
+- Q01 slice 7 (D3: page shortcuts), and the desktop acceptance checks that cannot
+  run headless: what Orca reads aloud, focus rings and contrast, the tray menu by
+  keyboard, and the allow/deny prompt getting focus from the compositor.
 - The tower's decisions: hash-pinning the scanner files, the worktree cleanup list,
   #133 and #134, and adding chkrootkit to the image (currently left off, Bazzite
   being immutable).
