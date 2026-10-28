@@ -107,6 +107,16 @@ batch.
     Tests: fresh install and upgrade default to off; restart reloads enabled
     state, retention and consent; a stale GUI preference never turns recording
     on; clear-all recreation keeps the settings file;
+  - **the settings file is inside the disk budget, not beside it:** S1's
+    field-cap table covers it too. Every settings and consent field has a
+    fixed maximum length (including the consent record's text/version and the
+    timestamps), so the file has a known maximum size; writes are atomic
+    (write a temporary file, then rename), so the **peak footprint is twice
+    that maximum** while the replacement exists. That peak is reserved inside
+    B, taken from the 10% slack share without eating the required slack
+    (S3), and the implementation must show the arithmetic. Test: a settings
+    file at every field cap, written atomically, never exceeds the reserved
+    footprint and leaves no stray temporary file after a failed write;
   - system mode resolves to `/var/lib/snitchwatch/history/`, user mode to the
     user state dir, using fact structs;
   - nothing is created while history is disabled;
@@ -130,7 +140,9 @@ batch.
   with a blocked writer and a timed `AskRule`); worst-case rows (all fields at
   cap) through insert, eviction and incremental vacuum never modify more pages
   per transaction than the budget; main file + peak journal + slack <= B under
-  the same workload; freed space shrinks the file without a full `VACUUM`;
+  the same workload **with the settings file at its maximum and its atomic
+  replacement in flight counted in the same measurement**; freed space shrinks
+  the file without a full `VACUUM`;
   `secure_delete` canary scan after deletes.
 - **Lands:** S2, S3, S4, S5 (except clear-all recreation, PR 10), D5 insert path.
 - **Proof obligation discharged:** **S2.** The implementation must prove the
@@ -437,8 +449,19 @@ batch.
   history persists on disk until deleted. The supported procedure is: disable
   history, then perform the confirmed "Delete history" action, then remove the
   GUI; if the GUI is already gone, stop the bridge and remove only the
-  `history/` subdirectory (`/var/lib/snitchwatch/history/` or the per-user
-  `…/snitchwatch/history/`). **Never delete the whole shared state directory**:
+  `history/` subdirectory. The stop step is mode-specific because of socket
+  activation:
+  - **System bridge:** both packaged sockets
+    (`snitchwatch-system-bridge-grpc.socket` and
+    `snitchwatch-system-bridge-gui.socket`) can restart the service, so a
+    daemon reconnect could start an enabled writer in the middle of the
+    delete. Order: stop both sockets **and** the service; check they stay
+    stopped (`systemctl is-active` on all three); delete only
+    `/var/lib/snitchwatch/history/`; then restore on purpose, with recording
+    disabled (the settings file is part of the removed directory, so history
+    comes back off).
+  - **Per-user bridge:** there is only a service (no socket units): stop it,
+    confirm it is stopped, remove `…/snitchwatch/history/`, start it again. **Never delete the whole shared state directory**:
   it also holds blocklists, profiles and curated state.
 - **Review focus:** that no unit hardening is loosened.
 
