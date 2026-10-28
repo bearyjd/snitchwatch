@@ -11,9 +11,8 @@
 // * Duration: `Durations.all`, preselected from the Settings default.
 // * Return = Allow, Esc = Deny (Esc from every focus position). Tab and
 //   Shift+Tab walk the scope choices, the duration choices, Allow, then Deny;
-//   Return on a focused choice only selects it, and Return on Deny does
-//   nothing. Every key and click is ignored for
-//   `armDelayMs` after the alert appears, after it moves on to the next row,
+//   Return on a focused choice only selects it, and Return on the focused
+//   Deny answers Deny. Every key and click is ignored for `armDelayMs` after the alert appears, after it moves on to the next row,
 //   and when what it offers changes under the pointer (the durations appear
 //   or vanish with the scope), so a keystroke or click meant for another
 //   window or layout cannot answer it. A key held down across the arming
@@ -207,7 +206,7 @@ Window {
     // Return = Allow, Esc = Deny; every other key, any key before the alert
     // is armed, an auto-repeat, and a key still held from before it was armed,
     // does nothing (and is not passed on). `target` is "deny" when the Deny
-    // button has the focus: Return there is not Allow.
+    // button has the focus: Return there answers Deny, not Allow.
     function handleKey(key, autoRepeat, target) {
         if (!alert.armed) {
             alert.heldKeys[key] = true;
@@ -217,9 +216,7 @@ Window {
             return;
         }
         if (key === Qt.Key_Return || key === Qt.Key_Enter) {
-            if (target !== "deny") {
-                alert.answer("allow");
-            }
+            alert.answer(target === "deny" ? "deny" : "allow");
         } else if (key === Qt.Key_Escape) {
             alert.answer("deny");
         }
@@ -231,11 +228,12 @@ Window {
     }
 
     // A key pressed with a verdict button ("allow" or "deny") focused. Runs
-    // before the button's own handling (`Keys.BeforeItem`), so Space, which a
-    // button turns into a click on release, passes the same guards as
-    // `handleKey`: not before arming, not an auto-repeat, not a key held since
-    // before arming. Return, Enter and Esc take the `handleKey` route; Tab
-    // moves the focus; anything else is swallowed, as everywhere in the window.
+    // before the button's own handling (`Keys.BeforeItem`, the default), so
+    // Space, which a button turns into a click on release, passes the same
+    // guards as `handleKey`: not before arming, not an auto-repeat, not a key
+    // held since before arming. Return, Enter and Esc take the `handleKey`
+    // route; Tab moves the focus; anything else is swallowed, as everywhere in
+    // the window.
     function verdictButtonPressed(event, choice) {
         if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
             return;
@@ -250,17 +248,6 @@ Window {
         } else if (event.isAutoRepeat !== true && alert.heldKeys[event.key] !== true) {
             // Not ours to swallow: the button presses and, on release, clicks.
             event.accepted = false;
-        }
-    }
-
-    // The matching release: forgets the key, as the window's own handler does
-    // (the button would otherwise consume it). A Space press that began before
-    // a re-arm or a new row cannot click the row now shown: the re-arm
-    // disables the buttons, which cancels the press (pinned by the held-Space
-    // stages of tests/alert_window_keyboard_qml.rs).
-    function verdictButtonReleased(event) {
-        if (event.isAutoRepeat !== true) {
-            alert.keyReleased(event.key);
         }
     }
 
@@ -437,7 +424,6 @@ Window {
                     palette.buttonText: Theme.allow
                     Keys.priority: Keys.BeforeItem
                     Keys.onPressed: event => alert.verdictButtonPressed(event, "allow")
-                    Keys.onReleased: event => alert.verdictButtonReleased(event)
                     onClicked: alert.answer("allow")
                 }
                 Controls.Button {
@@ -452,7 +438,6 @@ Window {
                     palette.buttonText: Theme.deny
                     Keys.priority: Keys.BeforeItem
                     Keys.onPressed: event => alert.verdictButtonPressed(event, "deny")
-                    Keys.onReleased: event => alert.verdictButtonReleased(event)
                     onClicked: alert.answer("deny")
                 }
             }

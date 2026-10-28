@@ -132,8 +132,8 @@ Window {
         probe.add("Space on Allow", { row: true, steps: ["tab:Allow", "click:Space"], expect: [A] });
         probe.add("Escape on Allow", { row: true, steps: ["tab:Allow", "click:Escape"], expect: [D] });
         probe.add("Space on Deny", { row: true, steps: ["tab:Deny", "click:Space"], expect: [D] });
-        probe.add("Return/Enter on Deny never allow", { row: true,
-                  steps: ["tab:Deny", "click:Return", "click:Enter", "none", "click:Escape"], expect: [D] });
+        probe.add("Return on Deny", { row: true, steps: ["tab:Deny", "click:Return"], expect: [D] });
+        probe.add("Enter on Deny", { row: true, steps: ["tab:Deny", "click:Enter"], expect: [D] });
         // Return before any Tab is still Allow; Space on nothing is nothing.
         // (The previous row left the focus on Deny: a new row starts fresh.)
         probe.add("Return before any Tab", { row: true, steps: ["click:Space", "none", "click:Return"], expect: [A],
