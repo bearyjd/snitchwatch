@@ -52,6 +52,7 @@ Window {
     property int stalls: 0
     readonly property int maxStalls: 200
     property var order: []
+    readonly property var keyOf: ({ Return: Qt.Key_Return, Enter: Qt.Key_Enter, Space: Qt.Key_Space, Escape: Qt.Key_Escape })
     // @a11y-guard
 
     QtObject {
@@ -208,6 +209,11 @@ Window {
             probe.expect(probe.names[name] === true, where + ": no control named '" + name + "'");
     }
 
+    // Phases 10-21: per key, open (wait closed), act (wait opened), check (wait closed).
+    function dialogGate(phase) {
+        if ((phase - 10) % 3 === 1) return probe.dialog().opened ? "" : "the confirm dialog open";
+        return !probe.dialog().visible ? "" : "the confirm dialog closed";
+    }
     function formControl(name) {
         return probe.find(make, it => it.objectName === name);
     }
@@ -230,8 +236,10 @@ Window {
         case 1: return banner.armed && probe.stable("deny", probe.find(banner, it => probe.text(it) === "Deny"))
             ? "" : "the armed banner";
         case 4: case 5: return probe.formReady();
-        case 8: case 10: case 12: return probe.dialog().opened ? "" : "the confirm dialog open";
-        case 9: case 11: return !probe.dialog().visible ? "" : "the confirm dialog closed";
+        case 8: case 23: return probe.dialog().opened ? "" : "the confirm dialog open";
+        case 9: case 22: return !probe.dialog().visible ? "" : "the confirm dialog closed";
+        case 10: case 11: case 12: case 13: case 14: case 15: case 16: case 17: case 18: case 19: case 20: case 21:
+            return probe.dialogGate(phase);
         default: return "";
         }
     }
@@ -356,22 +364,35 @@ Window {
                 } else if (probe.phase === 9) {
                     probe.expect(commands.calls.length === 0, "Escape sent the rule: " + JSON.stringify(commands.calls));
                     probe.expect(probe.focused() === start, "Escape did not give focus back: " + probe.where(probe.focused()));
-                    rules.create(0, "/usr/bin/app", "", "app", "allow", "1:");
-                } else if (probe.phase === 10) {
-                    for (let i = 0; i < 6 && probe.text(probe.focused()) !== "Cancel"; ++i)
-                        tc.keyClick(Qt.Key_Tab);
-                    probe.expect(probe.text(probe.focused()) === "Cancel", "cannot Tab to Cancel");
-                    // Return / Enter may or may not act on Cancel; either way nothing is sent.
-                    probe.pressSends([Qt.Key_Return, Qt.Key_Enter], probe.typed, "Return/Enter on Cancel");
-                    if (probe.dialog().visible) {
-                        probe.expect(probe.text(probe.focused()) === "Cancel", "focus left Cancel: " + probe.where(probe.focused()));
-                        tc.keyClick(Qt.Key_Space);
+                } else if (probe.phase >= 10 && probe.phase < 22) {
+                    // Each key on Cancel gets its own freshly opened dialog:
+                    // open, Tab to Cancel (focus asserted), press, close.
+                    const k = ["Return", "Enter", "Escape", "Space"][Math.floor((probe.phase - 10) / 3)];
+                    const sub = (probe.phase - 10) % 3;
+                    if (sub === 0) {
+                        rules.create(0, "/usr/bin/app", "", "app", "allow", "1:");
+                    } else if (sub === 1) {
+                        for (let i = 0; i < 6 && probe.text(probe.focused()) !== "Cancel"; ++i)
+                            tc.keyClick(Qt.Key_Tab);
+                        probe.expect(probe.text(probe.focused()) === "Cancel", k + ": cannot Tab to Cancel (at " + probe.where(probe.focused()) + ")");
+                        probe.expect(probe.dialog().visible, k + ": the dialog is not open");
+                        tc.keyClick(probe.keyOf[k]);
+                        probe.expect(commands.calls.length === 0, k + " on Cancel sent " + JSON.stringify(commands.calls));
+                        if (k === "Space" || k === "Escape") {
+                            probe.expect(!probe.dialog().opened, k + " on Cancel did not close the dialog");
+                        } else if (probe.dialog().visible) {
+                            // Return/Enter may leave it open: focus must still be on Cancel.
+                            probe.expect(probe.text(probe.focused()) === "Cancel", k + ": focus left Cancel: " + probe.where(probe.focused()));
+                            tc.keyClick(Qt.Key_Escape);
+                        }
+                    } else {
+                        probe.expect(commands.calls.length === 0, k + " on Cancel sent " + JSON.stringify(commands.calls));
+                        probe.expect(!probe.dialog().visible, k + ": the dialog is still open");
                     }
-                    probe.expect(commands.calls.length === 0, "Cancel sent " + JSON.stringify(commands.calls));
-                } else if (probe.phase === 11) {
+                } else if (probe.phase === 22) {
                     probe.expect(commands.calls.length === 0, "Cancel sent " + JSON.stringify(commands.calls));
                     rules.create(0, "/usr/bin/app", "", "app", "allow", "1:");
-                } else if (probe.phase === 12) {
+                } else if (probe.phase === 23) {
                     for (let i = 0; i < 6 && probe.text(probe.focused()) !== "Allow any host"; ++i)
                         tc.keyClick(Qt.Key_Tab);
                     probe.expect(probe.text(probe.focused()) === "Allow any host", "cannot Tab to Allow any host");
