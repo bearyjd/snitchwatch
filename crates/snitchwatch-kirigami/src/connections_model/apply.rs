@@ -177,6 +177,7 @@ impl qobject::ConnectionsModel {
             for msg in msgs {
                 for msg in rust.collapse.rewrite(msg) {
                     mirror_into_grouping(&mut rust, &msg);
+                    revoke_attention(&mut rust, &msg);
                     if rust.store.is_incremental() {
                         rust.store.apply_incremental(msg);
                     } else {
@@ -262,6 +263,7 @@ impl qobject::ConnectionsModel {
             }
             {
                 let mut rust = self.as_mut().rust_mut();
+                revoke_attention(&mut rust, &msg);
                 if rust.store.is_incremental() {
                     rust.store.apply_incremental(msg);
                 } else {
@@ -298,6 +300,7 @@ impl qobject::ConnectionsModel {
             }
             {
                 let mut rust = self.as_mut().rust_mut();
+                revoke_attention(&mut rust, &msg);
                 rust.store.apply(msg);
                 rust.store.recompute_visible();
             }
@@ -315,6 +318,7 @@ impl qobject::ConnectionsModel {
                     unsafe {
                         self.as_mut().begin_reset_model();
                     }
+                    revoke_attention(&mut self.as_mut().rust_mut(), &other);
                     self.as_mut().rust_mut().store.apply(other);
                     unsafe {
                         self.as_mut().end_reset_model();
