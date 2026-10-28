@@ -80,7 +80,7 @@ impl qobject::ScannerController {
                 Err(e) => tracing::warn!(error_title = e.title, "deep scan failed"),
             }
             let (kind, summary) = crate::scanner::summarize(&result, &crate::scanner::local_hhmm());
-            let _ = qt_thread.queue(move |mut qobject| {
+            let queued = qt_thread.queue(move |mut qobject| {
                 qobject
                     .as_mut()
                     .set_summary_kind(QString::from(kind.as_str()));
@@ -97,7 +97,14 @@ impl qobject::ScannerController {
                     }
                 }
                 qobject.as_mut().set_busy(false);
+                tracing::info!(
+                    summary_kind = kind.as_str(),
+                    "deep scan outcome applied to the UI"
+                );
             });
+            if let Err(error) = queued {
+                tracing::error!(%error, "deep scan finished but the result could not be delivered to the UI");
+            }
         });
     }
 }
