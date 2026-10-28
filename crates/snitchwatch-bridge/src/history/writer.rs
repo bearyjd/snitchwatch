@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, TransactionBehavior};
 
-use super::budget::Budget;
+use super::budget::{Budget, COMMIT_RESERVE_PAGES, JOURNAL_RECORD};
 use super::record::{ensure_snapshot, insert_event, EventRecord, SnapshotRecord};
 use super::{Location, Store};
 
@@ -42,26 +42,26 @@ pub struct Item {
 }
 
 impl Item {
-    /// What the item counts for against the queue's byte bound: its text
-    /// plus a fixed allowance for the rest.
+    /// What the item counts for against the queue's byte bound, conservatively:
+    /// twice the inline size of `Item` (the deque holds spare slots, at most
+    /// as many again as are used) plus the capacity of every owned
+    /// allocation.
     pub fn queue_bytes(&self) -> usize {
-        const FIXED: usize = 192;
         let e = &self.event;
-        FIXED
-            + e.process_path.as_ref().map_or(0, |v| v.as_str().len())
-            + e.dst_host.as_ref().map_or(0, |v| v.as_str().len())
-            + e.rule_name.as_ref().map_or(0, |v| v.as_str().len())
-            + self
-                .snapshot
-                .as_ref()
-                .map_or(0, |s| s.snapshot.as_str().len() + 64)
+        2 * std::mem::size_of::<Item>()
+            + e.process_path.as_ref().map_or(0, |v| v.allocated())
+            + e.dst_host.as_ref().map_or(0, |v| v.allocated())
+            + e.protocol.as_ref().map_or(0, |v| v.allocated())
+            + e.rule_name.as_ref().map_or(0, |v| v.allocated())
+            + e.rule_class.as_ref().map_or(0, |v| v.allocated())
+            + self.snapshot.as_ref().map_or(0, |s| s.snapshot.allocated())
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Dropped;
 
-struct Inner {
+pub(crate) struct Inner {
     items: VecDeque<Item>,
     bytes: usize,
     closed: bool,
@@ -96,10 +96,20 @@ impl Queue {
     }
 
     /// Queue `item`, or drop and count it when either bound would be
-    /// exceeded or the queue is closed. Never waits for the writer.
+    /// exceeded, the queue is closed, or the lock is busy. **Never waits**:
+    /// the lock is taken with `try_lock`, because the writer holds it while it
+    /// drains a batch and a producer on a verdict path must not stall behind
+    /// that. Contention costs one dropped (and counted) event.
     pub fn try_push(&self, item: Item) -> Result<(), Dropped> {
         let size = item.queue_bytes();
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = match self.inner.try_lock() {
+            Ok(inner) => inner,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                return Err(Dropped);
+            }
+        };
         if inner.closed
             || inner.items.len() >= self.max_count
             || inner.bytes + size > self.max_bytes
@@ -113,6 +123,11 @@ impl Queue {
         drop(inner);
         self.ready.notify_one();
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lock_for_test(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Items dropped because the queue was full or closed.
@@ -208,6 +223,15 @@ impl Engine {
         let conn = store.into_connection();
         // The main file can never grow past its share of B (S3).
         conn.pragma_update(None, "max_page_count", budget.max_page_count as i64)?;
+        // No mid-transaction spill: a spill syncs the journal and starts a
+        // second header, which the page budget does not allow for (J1).
+        conn.pragma_update(None, "cache_spill", "OFF")?;
+        let spill: i64 = conn.query_row("PRAGMA cache_spill", [], |r| r.get(0))?;
+        if spill != 0 {
+            return Err(WriteError::Io(std::io::Error::other(
+                "cache_spill could not be turned off",
+            )));
+        }
         let mut journal = location.db_path().into_os_string();
         journal.push("-journal");
         Ok(Self {
@@ -216,6 +240,22 @@ impl Engine {
             journal: journal.into(),
             observer: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_journal_path_for_test(&mut self, path: PathBuf) {
+        self.journal = path;
+    }
+
+    /// Size of the rollback journal: 0 only when there is none, which is what
+    /// a transaction that has written no page looks like; any other failure
+    /// to measure it is an error, never "empty".
+    fn journal_len(journal: &std::path::Path) -> Result<u64, WriteError> {
+        match std::fs::metadata(journal) {
+            Ok(meta) => Ok(meta.len()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(WriteError::Io(e)),
+        }
     }
 
     pub fn set_observer(&mut self, observer: Observer) {
@@ -253,12 +293,15 @@ impl Engine {
         kind: TxnKind,
         work: impl FnOnce(&Connection) -> Result<u64, WriteError>,
     ) -> Result<TxnReport, WriteError> {
-        let limit = self.budget.journal_limit_bytes();
+        // The journal must be within the limit less the one record `COMMIT`
+        // may still add (the change counter on page 1).
+        let limit = self.budget.journal_limit_bytes() - COMMIT_RESERVE_PAGES * JOURNAL_RECORD;
+        let journal = self.journal.clone();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let units = work(&tx)?;
-        let journal_bytes = std::fs::metadata(&self.journal).map_or(0, |m| m.len());
+        let journal_bytes = Self::journal_len(&journal)?;
         if journal_bytes > limit {
             drop(tx); // rolls back
             return Err(WriteError::BudgetExceeded {
@@ -367,55 +410,94 @@ impl Engine {
     }
 
     /// Drain `queue` once: make room, then insert one batch. `Ok(0)` when
-    /// idle. Errors leave the items lost (the caller counts them).
+    /// idle. On error the popped items are lost; [`Writer`] counts them.
     pub fn run_once(&mut self, queue: &Queue, wait: Duration) -> Result<usize, WriteError> {
         let batch = queue.pop_batch(self.budget.rows_per_txn as usize, wait);
         if batch.is_empty() {
             return Ok(0);
         }
+        self.write_batch(&batch)?;
+        Ok(batch.len())
+    }
+
+    /// Make room (evicting and vacuuming within the page budget), then insert
+    /// `batch`, at most `rows_per_txn` items.
+    pub fn write_batch(&mut self, batch: &[Item]) -> Result<(), WriteError> {
         if !self.make_room()? {
             return Err(WriteError::Sqlite(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
                 Some("history is over its disk budget".into()),
             )));
         }
-        self.insert_batch(&batch)?;
-        Ok(batch.len())
+        self.insert_batch(batch)?;
+        Ok(())
     }
 }
 
 /// The writer thread and its queue.
+///
+/// A batch that fails to write (a full disk budget, an I/O error, a tripped
+/// budget) is **lost**: its events are counted in [`Writer::lost_events`], not
+/// in [`Queue::dropped`] (which counts only events refused at the door).
+/// Eviction transactions that committed before the failed insert stay
+/// committed: they are independent, and the oldest events they removed were
+/// already due to go (the `evicted` gap row that records them is PR 7). When
+/// the worker thread ends for any reason, by shutdown or a panic, the queue
+/// is closed, so producers see their events dropped and counted rather than
+/// queued for nobody.
 pub struct Writer {
     queue: Arc<Queue>,
     failed: Arc<AtomicU64>,
+    lost: Arc<AtomicU64>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Closes the queue when the worker ends, however it ends.
+struct CloseOnExit(Arc<Queue>);
+
+impl Drop for CloseOnExit {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
+/// The worker panicked.
+#[derive(Debug, thiserror::Error)]
+#[error("the history writer thread panicked")]
+pub struct WriterPanicked;
+
 impl Writer {
-    pub fn spawn(mut engine: Engine, queue: Arc<Queue>) -> Self {
+    pub fn spawn(mut engine: Engine, queue: Arc<Queue>) -> std::io::Result<Self> {
         let failed = Arc::new(AtomicU64::new(0));
-        let (q, f) = (queue.clone(), failed.clone());
+        let lost = Arc::new(AtomicU64::new(0));
+        let (q, f, l) = (queue.clone(), failed.clone(), lost.clone());
         let handle = std::thread::Builder::new()
             .name("history-writer".into())
             .spawn(move || {
+                let _closer = CloseOnExit(q.clone());
                 while !q.is_closed_and_empty() {
-                    match engine.run_once(&q, Duration::from_millis(200)) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            f.fetch_add(1, Ordering::Relaxed);
-                            tracing::error!(error = %e, "history write failed");
-                            // Back off so a persistent failure doesn't spin.
-                            std::thread::sleep(Duration::from_millis(500));
-                        }
+                    let batch = q.pop_batch(
+                        engine.budget().rows_per_txn as usize,
+                        Duration::from_millis(200),
+                    );
+                    if batch.is_empty() {
+                        continue;
+                    }
+                    if let Err(e) = engine.write_batch(&batch) {
+                        f.fetch_add(1, Ordering::Relaxed);
+                        l.fetch_add(batch.len() as u64, Ordering::Relaxed);
+                        tracing::error!(error = %e, lost = batch.len(), "history write failed");
+                        // Back off so a persistent failure doesn't spin.
+                        std::thread::sleep(Duration::from_millis(500));
                     }
                 }
-            })
-            .expect("spawn the history writer thread");
-        Self {
+            })?;
+        Ok(Self {
             queue,
             failed,
+            lost,
             handle: Some(handle),
-        }
+        })
     }
 
     pub fn queue(&self) -> &Arc<Queue> {
@@ -427,11 +509,17 @@ impl Writer {
         self.failed.load(Ordering::Relaxed)
     }
 
+    /// Events that were popped and then lost to a failed write.
+    pub fn lost_events(&self) -> u64 {
+        self.lost.load(Ordering::Relaxed)
+    }
+
     /// Stop accepting items, write what is queued, and join the thread.
-    pub fn shutdown(mut self) {
+    pub fn shutdown(mut self) -> Result<(), WriterPanicked> {
         self.queue.close();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+        match self.handle.take() {
+            Some(handle) => handle.join().map_err(|_| WriterPanicked),
+            None => Ok(()),
         }
     }
 }

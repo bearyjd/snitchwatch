@@ -65,6 +65,11 @@ impl<const CAP: usize> Capped<CAP> {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Bytes the string has allocated (its capacity, not its length).
+    pub fn allocated(&self) -> usize {
+        self.0.capacity()
+    }
 }
 
 impl<const CAP: usize> std::fmt::Debug for Capped<CAP> {
@@ -92,6 +97,10 @@ impl Snapshot {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn allocated(&self) -> usize {
+        self.0.capacity()
     }
 }
 

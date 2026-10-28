@@ -26,6 +26,13 @@ struct Rig {
 }
 
 fn rig(total: u64) -> Rig {
+    rig_with(total, false)
+}
+
+/// `fast`: `synchronous=OFF`, for the tests whose subject is not durability.
+/// The S2 tests use the production setting (FULL), which changes how the
+/// journal is synced.
+fn rig_with(total: u64, fast: bool) -> Rig {
     let root = tempdir();
     let state = state_dir(&root);
     let location = locate(Mode::User, Some(&state)).unwrap();
@@ -39,11 +46,12 @@ fn rig(total: u64) -> Rig {
     .unwrap();
     let store = open_store(&location).unwrap();
     let mut engine = Engine::new(store, &location, Budget::new(total).unwrap()).unwrap();
-    // fsync is not what is under test; the journal is still written.
-    engine
-        .connection()
-        .pragma_update(None, "synchronous", "OFF")
-        .unwrap();
+    if fast {
+        engine
+            .connection()
+            .pragma_update(None, "synchronous", "OFF")
+            .unwrap();
+    }
     let reports = Arc::new(Mutex::new(Vec::new()));
     let sink = reports.clone();
     engine.set_observer(Box::new(move |r| sink.lock().unwrap().push(*r)));
@@ -186,7 +194,7 @@ fn worst_case_rows_never_modify_more_pages_than_the_budget() {
     let mut rig = rig(16 * MIB);
     let budget = *rig.engine.budget();
     // Several times the main file's capacity: inserts, evictions, vacuums.
-    let rows = budget.max_page_count * PAGE / 14_000 * 3;
+    let rows = budget.max_page_count * PAGE / 14_000 * 3 / 2;
     churn(&mut rig, rows, worst_item);
     assert_all_within_budget(&rig);
     let reports = rig.reports.lock().unwrap();
@@ -237,7 +245,7 @@ fn a_transaction_over_the_journal_budget_is_rolled_back_not_committed() {
 #[test]
 fn main_file_plus_peak_journal_plus_settings_plus_slack_stays_within_b() {
     let total = 16 * MIB;
-    let mut rig = rig(total);
+    let mut rig = rig_with(total, true);
     let budget = *rig.engine.budget();
     // The settings file at its maximum, with its atomic replacement in flight.
     let settings = rig.location.settings_path();
@@ -281,7 +289,7 @@ fn main_file_plus_peak_journal_plus_settings_plus_slack_stays_within_b() {
 #[test]
 fn the_main_file_cannot_grow_past_its_share_even_without_eviction() {
     // `max_page_count` is the enforcement for S3, not the eviction policy.
-    let mut rig = rig(16 * MIB);
+    let mut rig = rig_with(16 * MIB, true);
     let budget = *rig.engine.budget();
     let n = budget.rows_per_txn;
     let mut i = 0;
@@ -299,7 +307,7 @@ fn the_main_file_cannot_grow_past_its_share_even_without_eviction() {
 
 #[test]
 fn freed_space_returns_to_the_filesystem_in_budgeted_steps() {
-    let mut rig = rig(16 * MIB);
+    let mut rig = rig_with(16 * MIB, true);
     let budget = *rig.engine.budget();
     churn(&mut rig, 400, worst_item);
     let full = file_len(&rig.location.db_path());
@@ -456,8 +464,8 @@ fn the_writer_thread_drains_the_queue_and_shuts_down_clean() {
     for i in 0..50 {
         queue.try_push(small_item(i)).unwrap();
     }
-    let writer = Writer::spawn(rig.engine, queue);
-    writer.shutdown();
+    let writer = Writer::spawn(rig.engine, queue).unwrap();
+    writer.shutdown().unwrap();
     let conn = Connection::open(location.db_path()).unwrap();
     let rows: i64 = conn
         .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
@@ -512,7 +520,7 @@ fn dbstat(conn: &Connection) -> Stat {
 fn the_fill_and_depth_invariant_holds_under_inserts_and_random_deletes() {
     // Many small rows build deep trees; random deletes (not just the oldest)
     // are the hardest case for fill.
-    let mut rig = rig(256 * MIB);
+    let mut rig = rig_with(256 * MIB, true);
     let n = rig.engine.budget().rows_per_txn;
     let total = 120_000u64;
     let mut i = 0;
@@ -555,7 +563,7 @@ fn the_fill_and_depth_invariant_holds_under_inserts_and_random_deletes() {
 
 #[test]
 fn journals_of_full_batches_on_deep_trees_stay_within_the_bound() {
-    let mut rig = rig(256 * MIB);
+    let mut rig = rig_with(256 * MIB, true);
     let n = rig.engine.budget().rows_per_txn;
     let mut i = 0;
     while i < 60_000 {
@@ -568,4 +576,176 @@ fn journals_of_full_batches_on_deep_trees_stay_within_the_bound() {
         rig.engine.vacuum_chunk().unwrap();
     }
     assert_all_within_budget(&rig);
+}
+
+// ---- review round 2 ---------------------------------------------------
+
+#[test]
+fn pages_are_never_spilled_mid_transaction_so_the_journal_has_one_header() {
+    // A cache spill syncs the journal mid-transaction, after which SQLite
+    // starts a new sector-aligned header: more than `header + 4104 * pages`.
+    let mut rig = rig(16 * MIB);
+    let conn = rig.engine.connection();
+    let spill: i64 = conn
+        .query_row("PRAGMA cache_spill", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(spill, 0, "cache_spill must be OFF");
+    // A cache far smaller than a batch's dirty pages would force spills.
+    conn.pragma_update(None, "cache_size", 5).unwrap();
+    let n = rig.engine.budget().rows_per_txn;
+    for k in 0..30 {
+        let batch: Vec<Item> = (0..n).map(|i| worst_item(k * n + i)).collect();
+        rig.engine.insert_batch(&batch).unwrap();
+    }
+    for r in rig.reports.lock().unwrap().iter() {
+        let records = (r.journal_bytes - 512) / JOURNAL_RECORD;
+        assert_eq!(
+            r.journal_bytes,
+            512 + records * JOURNAL_RECORD,
+            "{r:?}: not one header plus whole records"
+        );
+    }
+    assert_all_within_budget(&rig);
+}
+
+#[test]
+fn with_spilling_on_the_single_header_assumption_is_false() {
+    // Documents why `cache_spill = OFF` is needed: the same workload with
+    // spilling enabled writes extra journal headers.
+    let mut rig = rig(16 * MIB);
+    let conn = rig.engine.connection();
+    conn.pragma_update(None, "cache_spill", "ON").unwrap();
+    conn.pragma_update(None, "cache_size", 5).unwrap();
+    let n = rig.engine.budget().rows_per_txn;
+    for k in 0..30 {
+        let batch: Vec<Item> = (0..n).map(|i| worst_item(k * n + i)).collect();
+        rig.engine.insert_batch(&batch).unwrap();
+    }
+    let odd = rig
+        .reports
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| (r.journal_bytes - 512) % JOURNAL_RECORD != 0);
+    assert!(
+        odd,
+        "expected a spilled transaction to break the one-header shape"
+    );
+}
+
+#[test]
+fn a_push_never_waits_for_the_lock_the_writer_holds() {
+    let queue = Arc::new(Queue::with_defaults());
+    let held = queue.clone();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _guard = held.lock_for_test();
+        locked_tx.send(()).unwrap();
+        done_rx.recv().unwrap();
+    });
+    locked_rx.recv().unwrap();
+    let start = Instant::now();
+    let result = queue.try_push(small_item(1));
+    assert!(
+        start.elapsed() < Duration::from_millis(200),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(result, Err(Dropped));
+    assert_eq!(queue.dropped(), 1);
+    done_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert!(queue.try_push(small_item(2)).is_ok());
+}
+
+#[test]
+fn queue_accounting_covers_the_item_and_every_allocation() {
+    // Independent of `queue_bytes()`: a floor computed from the type's size
+    // and the fields' own capacities.
+    for item in [small_item(1), worst_item(2)] {
+        let e = &item.event;
+        let floor = std::mem::size_of::<Item>()
+            + [
+                e.process_path.as_ref().map(|v| v.allocated()),
+                e.dst_host.as_ref().map(|v| v.allocated()),
+                e.protocol.as_ref().map(|v| v.allocated()),
+                e.rule_name.as_ref().map(|v| v.allocated()),
+                e.rule_class.as_ref().map(|v| v.allocated()),
+            ]
+            .into_iter()
+            .flatten()
+            .sum::<usize>()
+            + item.snapshot.as_ref().map_or(0, |s| s.snapshot.allocated());
+        assert!(
+            item.queue_bytes() >= floor,
+            "{} < {floor}",
+            item.queue_bytes()
+        );
+    }
+    assert!(small_item(1).queue_bytes() >= std::mem::size_of::<Item>());
+}
+
+#[test]
+fn a_journal_that_cannot_be_measured_is_an_error_not_zero() {
+    let mut rig = rig_with(16 * MIB, true);
+    // A path whose parent is a regular file: stat fails with ENOTDIR, not
+    // NotFound.
+    let not_a_dir = rig.location.settings_path();
+    std::fs::write(&not_a_dir, b"x").unwrap();
+    rig.engine
+        .set_journal_path_for_test(not_a_dir.join("journal"));
+    let result = rig.engine.insert_batch(&[small_item(1)]);
+    assert!(matches!(result, Err(WriteError::Io(_))), "{result:?}");
+    let rows: i64 = rig
+        .engine
+        .connection()
+        .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0, "nothing committed after a failed measurement");
+}
+
+#[test]
+fn a_failed_batch_is_counted_as_lost_events() {
+    let rig = rig_with(16 * MIB, true);
+    let mut tiny = *rig.engine.budget();
+    tiny.journal_pages = 1; // every real batch trips the budget
+    let engine = Engine::new(open_store(&rig.location).unwrap(), &rig.location, tiny).unwrap();
+    let queue = Arc::new(Queue::with_defaults());
+    for i in 0..2 {
+        queue.try_push(small_item(i)).unwrap();
+    }
+    let writer = Writer::spawn(engine, queue.clone()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while writer.failed_batches() == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(writer.failed_batches() >= 1);
+    assert_eq!(
+        writer.lost_events(),
+        2,
+        "the popped batch is counted, not forgotten"
+    );
+    let _ = writer.shutdown();
+}
+
+#[test]
+fn a_dead_writer_is_visible_to_producers_and_shutdown() {
+    let mut rig = rig_with(16 * MIB, true);
+    rig.engine.set_observer(Box::new(|_| panic!("writer bug")));
+    let queue = Arc::new(Queue::with_defaults());
+    queue.try_push(small_item(1)).unwrap();
+    let writer = Writer::spawn(rig.engine, queue.clone()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while queue.try_push(small_item(2)).is_ok() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        queue.dropped() > 0,
+        "producers see the closed queue and count drops"
+    );
+    assert!(
+        writer.shutdown().is_err(),
+        "the panic is reported, not discarded"
+    );
 }

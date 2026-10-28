@@ -10,16 +10,27 @@
 //! (`libsqlite3-sys` 0.30.1, the one `rusqlite` 0.32 builds).
 //!
 //! **J1. The rollback journal holds one record per distinct pre-existing page
-//! written.** `pager_write` journals a page the first time it is modified
-//! only if `pgno <= dbOrigSize`; a page past the original end of file is not
-//! journaled, and a page already journaled is not journaled again. So
-//! `journal bytes <= JOURNAL_HEADER + 4104 * (distinct pages modified)`.
-//! (Record = 4-byte page number + 4096 + 4-byte checksum; the header is
-//! one sector: 512 bytes under the unix VFS's default
+//! written, and one header.** `pager_write` journals a page the first time it
+//! is modified only if `pgno <= dbOrigSize`; a page past the original end of
+//! file is not journaled, and a page already journaled is not journaled
+//! again. A *second* header would be appended if the journal were synced in
+//! the middle of the transaction, which happens when the page cache spills a
+//! dirty page (`syncJournal(..., 1)` from `pagerStress`, after which the next
+//! record starts at a new sector-aligned header). So the engine sets
+//! **`PRAGMA cache_spill = OFF`** and verifies it: the only sync is the one at
+//! commit, after the last record. Then
+//! `journal bytes <= HEADER + 4104 * (distinct pages modified)`; the record
+//! is a 4-byte page number + 4096 + a 4-byte checksum, and the header is one
+//! sector: 512 bytes under the unix VFS's default
 //! `SQLITE_IOCAP_POWERSAFE_OVERWRITE` (`setSectorSize`), at most
-//! `SQLITE_DEFAULT_SECTOR_SIZE` = 4096 otherwise, which is what is assumed. `writer_tests.rs` checks both sizes against
-//! the real journal file.) The journal mode is DELETE (`schema.rs`), so there
-//! is no WAL.
+//! `SQLITE_DEFAULT_SECTOR_SIZE` = 4096 otherwise, which is what is assumed.
+//! The journal mode is DELETE (`schema.rs`), so there is no WAL. **Cost of
+//! no-spill: memory.** All dirty pages stay in the cache until commit, at
+//! most `journal_pages` of them (about `B/8` bytes: 32 MiB at 256 MiB, 2 MiB
+//! at 16 MiB). `writer_tests.rs` checks the journal shape with
+//! `synchronous=FULL` (the production setting) and a 5-page cache that would
+//! force spills, and shows the same workload breaking the one-header shape
+//! with spilling on.
 //!
 //! **J2. Pages one B-tree operation modifies.** Let `d` be the tree's depth.
 //! An insert or delete modifies the leaf, then `balance()` climbs: at each
@@ -29,9 +40,11 @@
 //! `6d + 1` pages. Each page allocated or freed also writes the first
 //! freelist trunk page (`freePage2`, `allocateBtreePage`: page 1 and the
 //! ptrmap are counted separately below); a tree operation allocates or frees
-//! at most `2d + 1` pages, so `8d + 2` pages in all (`PER_TREE_OP`).
-//! `secure_delete` makes a freed page be written (zeroed), but it is a page
-//! already counted as an old sibling or an overflow page.
+//! at most `2d + 1` pages, so `8d + 2` pages in all (`PER_TREE_OP`). The
+//! trees touched are: the `events` table, `events_ts`, `events_rule_hash`
+//! (three paths) and for the snapshot the `rules_seen` table and its UNIQUE
+//! index (two). `secure_delete` makes a freed page be written (zeroed), but
+//! it is a page already counted as an old sibling or an overflow page.
 //!
 //! **J3. Overflow pages.** A cell whose payload exceeds `maxLocal = U - 35`
 //! keeps at least `minLocal = (U-12)*32/255 - 23 = 489` bytes locally and the
@@ -40,28 +53,35 @@
 //! [`MAX_EVENT_PAYLOAD`]) is 4830 bytes: 2 overflow pages as a safe upper
 //! bound; a `rules_seen` row (8 KiB snapshot): 2 as well.
 //!
-//! **J4. Depth.** `max_page_count` caps the file, so a tree has at most
-//! `max_page_count` pages. Let `F` be the minimum number of children of a
-//! non-root interior page. A root has at least 2 children, so a tree of depth
-//! `d >= 2` has at least `2 * F^(d-2)` leaves, hence `d <= 2 + log_F(P/2)`.
-//! `F` comes from the **fill invariant**: `balance()` (`sqlite3.c` ~79558)
-//! leaves a modified page alone only if it has no overflow cell and
-//! `nFree * 3 <= usableSize * 2`, i.e. it is at least one third full; a page
-//! that is fuller than that is rebalanced with up to two siblings, whose
-//! output pages (`balance_nonroot`, ~78995-79060: left-packed, then the last
-//! page is levelled against its left neighbour) are each at least about half
-//! full when there is more than one, and at least the sum of the siblings
-//! (each at least a third full) when they merge into one. By induction every
-//! non-root page of every tree is at least a third full. The largest
-//! interior cell of our trees is 34 bytes with its pointer (the 16-byte
-//! `rule_hash` index: 4 child + 1 length + 27 key + 2 pointer), so a
-//! non-root interior page holds at least `(4096/3 - 12)/34 = 39` cells, 40
-//! children. **`F = 32` is used**, a margin under 40. `writer_tests.rs`
-//! checks the invariant against the real engine with `dbstat` under a
-//! worst-case workload (depth and minimum interior fill), and the budget
-//! against the real journal size on every transaction. **This invariant is
-//! argued from the SQLite source, not machine-checked; it is the one step to
-//! attack in review.**
+//! **J4. Depth.** Only the **interior** pages matter for depth, so the
+//! argument is about them alone. It is not true that every page is a third
+//! full: `balance_quick` puts a single cell on a new rightmost table leaf, and
+//! redistribution can leave sparse leaves; leaf fill is not used.
+//! Let `F` be the minimum number of children of a non-root interior page.
+//! Claim: `F >= 40` for these trees, and `F = 32` is used. Induction over
+//! operations, on interior pages only: (a) *growth*: `balance_deeper` copies
+//! the root into a new child and balances it, so the new root has 2+ children
+//! and the pages below come from `balance_nonroot`; (b) *contraction*:
+//! `balance_shallower` only fires when the root has no cells and pulls up its
+//! single child; (c) *redistribution*: `balance_nonroot` over an interior
+//! level packs cells left to right up to the usable space and then levels the
+//! last page against its left neighbour (~78995-79060), so with two or more
+//! output pages each holds at least about half a page less one cell, and when
+//! the siblings merge into one page that page holds their combined cells,
+//! each sibling having been (by the hypothesis) above the `balance()`
+//! threshold (`nFree * 3 <= usableSize * 2`, a third full) or the page being
+//! repaired; (d) `BTREE_BULKLOAD` (which packs differently) is used only by
+//! `CREATE INDEX`/`VACUUM`, never by the writer. The interior cells are small
+//! (the largest, in the 16-byte `rule_hash` indexes, is 34 bytes with its
+//! pointer), so a third of a 4096-byte page is at least `(4096/3 - 12)/34 =
+//! 39` cells, 40 children; 32 leaves margin for rounding. A root has at
+//! least 2 children, so a tree of depth `d >= 2` has at least `2 * F^(d-2)`
+//! leaf pages, and since the file has at most `max_page_count` pages,
+//! `d <= 2 + log_F(max_page_count / 2)`. For 256 MiB `max_page_count` is
+//! 50,788 and depth 5 would need `2 * 32^3 = 65,536` leaves, so `d <= 4`;
+//! this uses only interior fan-out. `writer_tests.rs` checks the interior
+//! fill and the depth with `dbstat` under inserts and random deletes. **The
+//! interior fill invariant is argued from the source, not machine-checked.**
 //!
 //! **J5. Global terms, counted once per transaction:** page 1 (change
 //! counter, freelist head), and the pointer-map pages: with `auto_vacuum`,
@@ -71,14 +91,16 @@
 //!
 //! **J6. One incremental-vacuum step** (`incrVacuumStep`, `bCommit = 0`)
 //! removes the last page from the file: if free, it is taken off the
-//! freelist (the page and a trunk are written); otherwise it is relocated
-//! (`relocatePage`): the destination page, the page that points to it (a
-//! parent, or the previous overflow page), and a trunk page; its children's
-//! ptrmap entries are in J5. At most 6 pages; [`VACUUM_STEP_PAGES`] = 8.
+//! freelist (the page and the trunk it hangs from are written); otherwise it
+//! is relocated (`relocatePage`): the destination page (which replaces the
+//! last page), the page that points to it (a parent, or the previous overflow
+//! page), and the trunk page before the destination on the freelist and the
+//! trunk after it; its children's ptrmap entries are in J5. At most 6 pages;
+//! [`VACUUM_STEP_PAGES`] = 8 leaves two for replacement and a preceding trunk.
 //!
 //! Hence one transaction of `n` rows (insert with its snapshot, or the
 //! eviction of an event with its orphaned snapshot, which costs the same)
-//! modifies at most `1 + ptrmap + n * ROW_PAGES` distinct pages, and a
+//! modifies at most `1 + ptrmap + n * ROW_PAGES` distinct pages (and the budget keeps [`COMMIT_RESERVE_PAGES`] more free for commit), and a
 //! vacuum transaction of `k` steps at most `1 + ptrmap + k * 8`. The writer
 //! picks the largest `n` / `k` that keeps that within the journal share.
 //!
@@ -101,6 +123,9 @@ pub const JOURNAL_RECORD: u64 = 4 + PAGE + 4;
 
 /// Minimum children of a non-root interior page that the proof uses (J4).
 pub const MIN_FANOUT: u64 = 32;
+/// Pages kept free of the journal for work `COMMIT` itself does after the
+/// writer's last look (the change counter on page 1 is written at commit).
+pub const COMMIT_RESERVE_PAGES: u64 = 1;
 /// Pages per B-tree level that one balance can write (J2).
 const PER_LEVEL: u64 = 6;
 
@@ -203,7 +228,7 @@ impl Budget {
         let event = 3 * tree + overflow_pages(MAX_EVENT_PAYLOAD) * 2;
         let snapshot = 2 * tree + overflow_pages(MAX_SNAPSHOT_PAYLOAD) * 2;
         let row_pages = event + snapshot;
-        let usable = journal_pages.saturating_sub(fixed_pages);
+        let usable = journal_pages.saturating_sub(fixed_pages + COMMIT_RESERVE_PAGES);
         let rows_per_txn = usable / row_pages;
         let vacuum_steps_per_txn = usable / VACUUM_STEP_PAGES;
         if rows_per_txn == 0 {

@@ -33,14 +33,23 @@ fn a_transaction_of_the_chosen_size_fits_the_journal_and_one_more_row_does_not()
         let budget = Budget::new(b).unwrap();
         let n = budget.rows_per_txn;
         assert!(n >= 1);
-        assert!(budget.pages_for_rows(n) <= budget.journal_pages, "{b}");
         assert!(
-            budget.pages_for_rows(n + 1) > budget.journal_pages,
+            budget.pages_for_rows(n) + COMMIT_RESERVE_PAGES <= budget.journal_pages,
+            "{b}"
+        );
+        assert!(
+            budget.pages_for_rows(n + 1) + COMMIT_RESERVE_PAGES > budget.journal_pages,
             "{b}: not maximal"
         );
         let steps = budget.vacuum_steps_per_txn;
-        assert!(budget.fixed_pages + steps * VACUUM_STEP_PAGES <= budget.journal_pages);
-        assert!(budget.fixed_pages + (steps + 1) * VACUUM_STEP_PAGES > budget.journal_pages);
+        assert!(
+            budget.fixed_pages + steps * VACUUM_STEP_PAGES + COMMIT_RESERVE_PAGES
+                <= budget.journal_pages
+        );
+        assert!(
+            budget.fixed_pages + (steps + 1) * VACUUM_STEP_PAGES + COMMIT_RESERVE_PAGES
+                > budget.journal_pages
+        );
     }
 }
 
