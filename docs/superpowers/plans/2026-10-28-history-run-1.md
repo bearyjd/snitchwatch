@@ -82,11 +82,16 @@ page budget. Read literally:
 
 So: **PR 3 (durable half) and PR 4 (persistence half) depend on PR 2.** The
 parent plan lists them as single PRs. **Contingency, for the owner to approve
-with this plan:** until PR 2 is merged (it is under review, or parked), PR 3 and
-PR 4 are delivered only as their independent halves (3a, 4a), each as its own
-PR, and 3b and 4b wait for the owner (decision point 1). Once PR 2 is merged
-and the owner has released the run (or granted the waiver), 3b and 4b follow;
-the halves are not merged back.
+with this plan:**
+
+**One rule for halves and whole PRs (used everywhere in this plan):** while
+the owner's release after PR 2 is pending, the halves ship separately and only
+the independent halves (3a, 4a) ship. A **whole** PR 3 or PR 4 is allowed only
+after the owner's release, or the owner's explicit acceptance of the
+successful-S2 waiver (decision point 1), **and only if that PR's independent
+half has not already shipped**. If it has, the dependent half ships as 3b / 4b
+instead; the halves are never merged back together. A merged PR 2 alone does
+not release the run.
 
 ## Order of work
 
@@ -147,9 +152,10 @@ the halves are not merged back.
 
 ### Batch 2: primitives and identity
 
-3. **History PR 3: lifecycle primitives, watermark, ledger.** Delivered as
-   two halves when PR 2 is not yet merged or is parked, otherwise as one PR
-   (see "Dependencies"). Each half has its own acceptance criteria:
+3. **History PR 3: lifecycle primitives, watermark, ledger.** Delivered
+   as halves or whole according to the rule in "Dependencies" (halves 3a/3b
+   while the owner's release after PR 2 is pending; whole only after release or
+   the waiver, and only if 3a has not already shipped). Each half has its own acceptance criteria:
    - **3a: in-memory primitives (database-free).**
      - *Goal:* generation counter, acceptance-sequence counter, pin registry,
        reader-gate skeleton.
@@ -183,8 +189,10 @@ the halves are not merged back.
        ledger can never lose a gap silently.
      - *Merge condition:* green CI, `/codex` clean; PR 2 merged.
 
-4. **History PR 4: event-time rule identity.** Two halves when PR 2 is not yet
-   merged or is parked, otherwise one PR:
+4. **History PR 4: event-time rule identity.** Halves or whole
+   according to the rule in "Dependencies" (4a alone while the owner's release
+   after PR 2 is pending; whole only after release or the waiver, and only if
+   4a has not already shipped; otherwise 4b follows 4a):
    - **4a: pure rule identity (database-free).**
      - *Goal:* recursive-allowlist redaction, canonical encoding, rule hash
        including `Operator.sensitive`, `rule_class`, the qualifier flags.
@@ -246,8 +254,9 @@ are **not** part of this run, so nothing is duplicated.
      parked as a draft; 3b and 4b wait.
 2. **Any field cap the owner has not set** (S1) is proposed in the PR, not
    merged as a guess.
-3. **The split** (3a/3b, 4a/4b) is approved with this plan; without it, PR 3
-   and PR 4 are parked whole while PR 2 is parked or awaiting review.
+3. **The split** (3a/3b, 4a/4b) and the halves-versus-whole rule in
+   "Dependencies" are approved with this plan; without that approval, PR 3 and
+   PR 4 are parked entirely until the owner releases the run.
 
 ## Out of scope and why
 
