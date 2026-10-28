@@ -74,14 +74,19 @@ Kirigami.ScrollablePage {
         Kirigami.InlineMessage {
             objectName: "scannerSummary"
             Layout.fillWidth: true
-            visible: page.controller
-                && (page.controller.busy || page.controller.summaryText.length > 0)
-            type: page.controller && page.controller.busy ? Kirigami.MessageType.Information
-                : page.controller && page.controller.summaryKind === "error" ? Kirigami.MessageType.Error
+            visible: page.controller && page.controller.summaryText.length > 0
+            type: page.controller && page.controller.summaryKind === "error" ? Kirigami.MessageType.Error
                 : page.controller && page.controller.summaryKind === "findings" ? Kirigami.MessageType.Warning
                 : Kirigami.MessageType.Positive
-            text: page.controller && page.controller.busy ? "Scanning…"
-                : page.controller ? page.controller.summaryText : ""
+            text: page.controller ? page.controller.summaryText : ""
+        }
+        // Shown alongside the previous outcome, which stays until this scan completes.
+        Kirigami.InlineMessage {
+            objectName: "scannerBusy"
+            Layout.fillWidth: true
+            visible: page.controller && page.controller.busy
+            type: Kirigami.MessageType.Information
+            text: "Scanning…"
         }
 
         Controls.Label {
