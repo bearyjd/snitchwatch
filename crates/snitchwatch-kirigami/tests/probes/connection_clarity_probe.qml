@@ -15,6 +15,11 @@ Window {
     property string host: "<img src=x> & host.example"
     property string ip: "2001:db8::cafe"
     property var snapshot: null
+    // Readiness gating (the #237 pattern): ticks a step has been held back,
+    // and the last seen geometry per gated item.
+    property int stalls: 0
+    readonly property int maxStalls: 200
+    property var geo: ({})
     QtObject {
         id: feed
         property bool ok: true
@@ -71,6 +76,43 @@ Window {
             const d=page.connectionList.itemAtIndex(i); if (d && d.rowId === id) return d;
         }
         throw new Error("missing delegate " + id);
+    }
+    function delegateOrNull(id) {
+        for (let i=0; i<page.connectionList.count; ++i) {
+            const d=page.connectionList.itemAtIndex(i); if (d && d.rowId === id) return d;
+        }
+        return null;
+    }
+    // Shown, enabled, sized and unmoved since the previous tick for this key.
+    function stable(key, item) {
+        if (!item || !item.visible || !item.enabled || !(item.width > 0) || !(item.height > 0)) {
+            geo[key] = "";
+            return false;
+        }
+        const g = item.mapToItem(null, 0, 0);
+        const geometry = [g.x, g.y, item.width, item.height].join(",");
+        const same = geometry === geo[key];
+        geo[key] = geometry;
+        return same;
+    }
+    // What each step needs before it may run: delegates by row id, the
+    // captured menu open, or the first row being a group header.
+    readonly property var needs: ({ 1: ["a"], 3: ["menu", "b"], 4: ["missing"], 7: ["zero"],
+        10: ["pending"], 12: ["decision"], 13: ["header"], 14: ["ip-only"] })
+    // "" when step `n` may run, else what it is still waiting for.
+    function waitingFor(n) {
+        for (const need of needs[n] || []) {
+            if (need === "menu") {
+                const menu = page.connectionActions.menu;
+                if (!menu.opened || !stable("menu", menu.contentItem)) return "the captured menu";
+            } else if (need === "header") {
+                const group = page.connectionList.itemAtIndex(0);
+                if (!(group && group.isGroupHeader) || !stable("header", group)) return "a group header";
+            } else if (!stable(need, delegateOrNull(need))) {
+                return "delegate " + need;
+            }
+        }
+        return "";
     }
     function checkCopy(name, value, root) {
         const button = find(root || page, name);
@@ -280,7 +322,13 @@ Window {
                 else console.warn("CONNECTION_CLARITY_PROBE_DONE");
                 Qt.quit(); return;
             }
-            try { steps[step](); } catch(e) { failures.push("step " + step + ": " + e); }
+            const waiting = waitingFor(step);
+            if (waiting !== "" && ++stalls < maxStalls) return;
+            stalls = 0;
+            if (waiting !== "") failures.push("step " + step + " never ready for " + waiting);
+            else {
+                try { steps[step](); } catch(e) { failures.push("step " + step + ": " + e); }
+            }
             ++step;
         }
     }
