@@ -82,14 +82,14 @@ page budget. Read literally:
 | PR 4b persistence (`rules_seen`, snapshot caps, snapshot-only eviction, same-transaction cleanup) | **PR 2** | Writes through the writer and must fit S2's budget |
 
 So: **PR 3 (durable half) and PR 4 (persistence half) depend on PR 2.** The
-parent plan lists them as single PRs. **Contingency, for the owner to approve
-with this plan:**
+parent plan lists them as single PRs. **Contingency, approved by the owner
+with this plan (2026-10-28):**
 
 **One rule for halves and whole PRs (used everywhere in this plan):** while
 the owner's release after PR 2 is pending, the halves ship separately and only
 the independent halves (3a, 4a) ship. A **whole** PR 3 or PR 4 is allowed only
-after the owner's release, or the owner's explicit acceptance of the
-successful-S2 waiver (decision point 1), **and only if that PR's independent
+after the owner's release (the S2 waiver was declined, so there is no
+other route), **and only if that PR's independent
 half has not already shipped**. If it has, the dependent half ships as 3b / 4b
 instead; the halves are never merged back together. A merged PR 2 alone does
 not release the run.
@@ -156,7 +156,7 @@ not release the run.
 3. **History PR 3: lifecycle primitives, watermark, ledger.** Delivered
    as halves or whole according to the rule in "Dependencies" (3a alone while
    the owner's release after PR 2 is pending; 3b, or a whole PR 3 only if 3a has
-   not already shipped, only after release or the waiver). Each half has its
+   not already shipped, only after the owner's release). Each half has its
    own acceptance criteria:
    - **3a: in-memory primitives (database-free).**
      - *Goal:* generation counter, acceptance-sequence counter, pin registry,
@@ -193,7 +193,7 @@ not release the run.
 
 4. **History PR 4: event-time rule identity.** Halves or whole
    according to the rule in "Dependencies" (4a alone while the owner's release
-   after PR 2 is pending; whole only after release or the waiver, and only if
+   after PR 2 is pending; whole only after the owner's release, and only if
    4a has not already shipped; otherwise 4b follows 4a):
    - **4a: pure rule identity (database-free).**
      - *Goal:* recursive-allowlist redaction, canonical encoding, rule hash
