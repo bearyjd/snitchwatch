@@ -1,0 +1,355 @@
+//! Q01 slice 2: the main window's answer surfaces by keyboard alone, with
+//! REAL key events (QtTest `keyClick`), and every control named (the shared
+//! runtime guard, `tests/support/a11y_guard.qmlpart`, with Qt's
+//! accessibility layer on):
+//!   * the decision sheet: Tab goes Scope, Duration, Allow, Deny; Space on
+//!     Deny answers;
+//!   * Make a rule: Space on "Make a rule…" opens the form and puts focus in
+//!     it; Tab to Allow, Space makes the rule, and focus comes back to the
+//!     button;
+//!   * the prompt-slot banner: Tab reaches each of its actions once armed;
+//!     Space on Deny answers;
+//!   * the rule confirm dialog: Tab reaches its confirm and Cancel; Escape
+//!     closes it without sending and gives focus back; Space confirms.
+//!
+//! Each phase waits on a readiness gate (#237). Run headless with
+//! `QT_QPA_PLATFORM=offscreen`.
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
+
+#[allow(unused_imports)]
+use snitchwatch_kirigami::bridge_bindings as _;
+
+mod common;
+use common::{capture_stderr, init_headless_qt_env};
+
+#[path = "../src/accessibility_test.rs"]
+mod accessibility;
+
+const PROBE_URL: &str = "qrc:/answer_surfaces_probe.qml";
+const DONE_MARKER: &str = "ANSWER_SURFACES_PROBE_DONE";
+
+/// The shared guard helpers, spliced in at the `// @a11y-guard` line.
+const GUARD: &str = include_str!("support/a11y_guard.qmlpart");
+
+const QML: &str = r#"
+import QtQuick
+import QtQuick.Window
+import QtQuick.Layouts
+import QtQuick.Controls as Controls
+import QtTest
+import com.snitchwatch.shell
+
+Window {
+    id: probe
+    visible: true
+    width: 900
+    height: 1400
+    property var failures: []
+    property int phase: 0
+    property int stalls: 0
+    readonly property int maxStalls: 200
+    property var order: []
+    // @a11y-guard
+
+    QtObject {
+        id: feedStub
+        property bool ok: true
+        property var submitted: []
+        function submitVerdict(rowId, choice, scope, duration, bindable) {
+            submitted = submitted.concat([rowId + ":" + choice]);
+            return true;
+        }
+        function appBoundRulesFor(rowId) { return true; }
+        function decideLater(rowId) { return true; }
+        function decideLaterFor(rowId) { return true; }
+    }
+    QtObject {
+        id: statusStub
+        property bool supported: true
+        property bool held: false
+        property string rowId: "1:held"
+        property string text: "app has been waiting for your answer for 12 s."
+    }
+    QtObject {
+        id: makeModel
+        property var calls: []
+        function makeRule(rowId, choice, scope, duration, requestId) {
+            calls = calls.concat([rowId + ":" + choice + ":" + scope + ":" + duration]);
+            return "";
+        }
+    }
+    QtObject {
+        id: makeController
+        property string rowId: ""
+        property string statusText: ""
+        property bool busy: false
+        function begin(rowId) { makeController.rowId = rowId; return "req-1"; }
+        function notSent(why) {}
+    }
+    QtObject {
+        id: commands
+        property var calls: []
+        signal modelReset()
+        signal levelRuleFinished(int level, string program, string key, int ending, string status)
+        function currentSourceSession() { return "1:"; }
+        function levelRuleDuration() { return "forever"; }
+        function levelRuleScopeText(level, program, key) { return "Executable " + program + "; any host; any port; any protocol"; }
+        function createLevelRuleForSession(level, program, key, choice, duration, session) {
+            calls = calls.concat([[level, program, key, choice]]);
+            return "";
+        }
+        function pollLevelRules() {}
+    }
+    ConnectionsModel { id: connModel }
+
+    ColumnLayout {
+        width: parent.width
+        Controls.Button { id: start; text: "Start here" }
+        PendingDecisionSheet {
+            id: decision
+            objectName: "decisionSheet"
+            Layout.fillWidth: true
+            rowId: "1:asked"
+            process: "app"
+            host: "example.com"
+            remoteIp: "93.184.216.34"
+            bindableProcessPath: true
+            appBoundRules: true
+            bridgeFeed: feedStub
+        }
+        MakeRuleSheet {
+            id: make
+            objectName: "makeRuleSheet"
+            Layout.fillWidth: true
+            rowId: "1:putoff"
+            model: makeModel
+            controller: makeController
+            bindableProcessPath: true
+        }
+        PromptSlotBanner {
+            id: banner
+            objectName: "promptSlotBanner"
+            Layout.fillWidth: true
+            status: statusStub
+            model: connModel
+            bridgeFeed: feedStub
+            armDelayMs: 200
+        }
+        LevelRuleActions { id: rules; objectName: "levelRules"; model: commands; Layout.fillWidth: true }
+    }
+    TestCase { id: tc; name: "answers"; when: false }
+
+    function expect(ok, what) { if (!ok) probe.failures.push(what); }
+    function focused() { return probe.activeFocusItem; }
+    function text(item) { return item && item.text !== undefined ? String(item.text) : ""; }
+    function inside(item, ancestor) {
+        for (let it = item; it; it = it.parent) if (it === ancestor) return true;
+        return false;
+    }
+    // Where the focus is: "<surface>/<text or objectName>".
+    function where(item) {
+        const owner = [decision, make, banner, rules].find(s => probe.inside(item, s));
+        const label = probe.text(item) || (item ? item.objectName : "") || String(item);
+        return (owner ? owner.objectName : "window") + "/" + label;
+    }
+    // Tab from `start` through the window once, recording where focus goes.
+    function tabRound() {
+        start.forceActiveFocus();
+        const seen = [];
+        for (let i = 0; i < 40; ++i) {
+            tc.keyClick(Qt.Key_Tab);
+            if (probe.focused() === start) break;
+            seen.push(probe.where(probe.focused()));
+        }
+        return seen;
+    }
+    // Tab from `start` until focus is on `target` ("<surface>/<text>").
+    function tabTo(target) {
+        start.forceActiveFocus();
+        for (let i = 0; i < 40; ++i) {
+            tc.keyClick(Qt.Key_Tab);
+            if (probe.where(probe.focused()) === target) return true;
+        }
+        return false;
+    }
+    function dialog() { return rules.confirmDialog; }
+    function sweepNamed(where, exact) {
+        probe.sweep(where);
+        for (const name of exact)
+            probe.expect(probe.names[name] === true, where + ": no control named '" + name + "'");
+    }
+
+    function gate(phase) {
+        switch (phase) {
+        case 1: return banner.armed && probe.stable("deny", probe.find(banner, it => probe.text(it) === "Deny"))
+            ? "" : "the armed banner";
+        case 7: case 9: return probe.dialog().opened ? "" : "the confirm dialog open";
+        case 8: return !probe.dialog().visible ? "" : "the confirm dialog closed";
+        default: return "";
+        }
+    }
+
+    Timer {
+        interval: 100
+        running: true
+        repeat: true
+        onTriggered: {
+            let done = false;
+            try {
+                const waiting = probe.gate(probe.phase);
+                if (waiting !== "") {
+                    if (++probe.stalls < probe.maxStalls) return;
+                    throw new Error("phase " + probe.phase + " never ready for " + waiting);
+                }
+                probe.stalls = 0;
+                if (probe.phase === 0) {
+                    probe.requestActivate();
+                    connModel.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [
+                        { id: "1:held", process: "app", processPath: "/usr/bin/app", dstHost: "example.com",
+                          dstIp: "93.184.216.34", dstPort: 443, protocol: "tcp", direction: "outgoing",
+                          action: null, bytesSent: 0, bytesReceived: 0, startedAtMs: 0, matchedRule: null }] }));
+                    statusStub.held = true;
+                } else if (probe.phase === 1) {
+                    const seen = probe.tabRound();
+                    probe.order = seen;
+                    const at = n => seen.indexOf(n);
+                    for (const n of ["decisionSheet/Allow", "decisionSheet/Deny", "makeRuleSheet/Make a rule…",
+                                     "promptSlotBanner/Allow once", "promptSlotBanner/Deny",
+                                     "promptSlotBanner/Decide later", "promptSlotBanner/Review"])
+                        probe.expect(at(n) >= 0, "Tab never reaches " + n + ": " + JSON.stringify(seen));
+                    const scope = seen.findIndex(n => n.indexOf("decisionSheet/") === 0 && n.indexOf("scopeSelector") > 0);
+                    const duration = seen.findIndex(n => n.indexOf("decisionSheet/") === 0 && n.indexOf("durationSelector") > 0);
+                    probe.expect(scope >= 0 && scope < duration && duration < at("decisionSheet/Allow")
+                                 && at("decisionSheet/Allow") < at("decisionSheet/Deny"),
+                                 "the decision sheet's Tab order is not Scope, Duration, Allow, Deny: " + JSON.stringify(seen));
+                    probe.sweepNamed("surfaces", ["Scope: This host only", "Make a rule…", "Allow once", "Review"]);
+                } else if (probe.phase === 2) {
+                    probe.expect(probe.tabTo("decisionSheet/Deny"), "cannot Tab to the sheet's Deny");
+                    tc.keyClick(Qt.Key_Space);
+                    probe.expect(feedStub.submitted.indexOf("1:asked:deny") >= 0,
+                                 "Space on Deny sent " + JSON.stringify(feedStub.submitted));
+                    feedStub.submitted = [];
+                } else if (probe.phase === 3) {
+                    probe.expect(probe.tabTo("makeRuleSheet/Make a rule…"), "cannot Tab to Make a rule…");
+                    tc.keyClick(Qt.Key_Space);
+                    probe.expect(make.form.visible, "Space did not open the Make a rule form");
+                    probe.expect(probe.inside(probe.focused(), make.form),
+                                 "focus did not move into the form: " + probe.where(probe.focused()));
+                } else if (probe.phase === 4) {
+                    probe.sweepNamed("make a rule form", ["Scope: This host only"]);
+                    probe.expect(Object.keys(probe.names).some(n => n.indexOf("Duration: ") === 0
+                                 && probe.inside(probe.find(make, it => it.Accessible && it.Accessible.name === n), make)),
+                                 "the form's duration selector has no labelled name");
+                    for (let i = 0; i < 10 && probe.where(probe.focused()) !== "makeRuleSheet/Allow"; ++i)
+                        tc.keyClick(Qt.Key_Tab);
+                    probe.expect(probe.where(probe.focused()) === "makeRuleSheet/Allow", "cannot Tab to the form's Allow");
+                    tc.keyClick(Qt.Key_Space);
+                    probe.expect(makeModel.calls.length === 1 && makeModel.calls[0].indexOf("1:putoff:allow:") === 0,
+                                 "Space on Allow made " + JSON.stringify(makeModel.calls));
+                    probe.expect(!make.form.visible && probe.focused() === make.openButton,
+                                 "focus did not come back to Make a rule…: " + probe.where(probe.focused()));
+                } else if (probe.phase === 5) {
+                    probe.expect(probe.tabTo("promptSlotBanner/Deny"), "cannot Tab to the banner's Deny");
+                    tc.keyClick(Qt.Key_Space);
+                    probe.expect(feedStub.submitted.indexOf("1:held:deny") >= 0,
+                                 "Space on the banner's Deny sent " + JSON.stringify(feedStub.submitted));
+                } else if (probe.phase === 6) {
+                    start.forceActiveFocus();
+                    rules.create(0, "/usr/bin/app", "", "app", "allow", "1:");
+                } else if (probe.phase === 7) {
+                    probe.sweepNamed("confirm dialog", ["Allow any host", "Cancel"]);
+                    const seen = [];
+                    for (let i = 0; i < 6; ++i) { tc.keyClick(Qt.Key_Tab); seen.push(probe.text(probe.focused())); }
+                    probe.expect(seen.indexOf("Allow any host") >= 0 && seen.indexOf("Cancel") >= 0,
+                                 "Tab in the dialog never reaches both buttons: " + JSON.stringify(seen));
+                    tc.keyClick(Qt.Key_Escape);
+                } else if (probe.phase === 8) {
+                    probe.expect(commands.calls.length === 0, "Escape sent the rule");
+                    probe.expect(probe.focused() === start, "Escape did not give focus back: " + probe.where(probe.focused()));
+                    rules.create(0, "/usr/bin/app", "", "app", "allow", "1:");
+                } else if (probe.phase === 9) {
+                    for (let i = 0; i < 6 && probe.text(probe.focused()) !== "Allow any host"; ++i)
+                        tc.keyClick(Qt.Key_Tab);
+                    tc.keyClick(Qt.Key_Space);
+                    probe.expect(commands.calls.length === 1, "Space on Allow any host sent " + JSON.stringify(commands.calls));
+                    const bad = Object.keys(probe.missing);
+                    probe.expect(bad.length === 0, bad.length + " controls lack a meaningful Accessible.name: "
+                        + bad.map(k => k + " (" + probe.missing[k] + ")").join("; "));
+                    done = true;
+                }
+                probe.phase++;
+            } catch (e) {
+                probe.failures.push("phase " + probe.phase + " threw: " + e);
+                done = true;
+            }
+            if (done) {
+                stop();
+                try {
+                    if (probe.failures.length > 0) {
+                        throw new Error("answer surfaces probe: " + probe.failures.join("; "));
+                    }
+                    console.warn("ANSWER_SURFACES_PROBE_DONE");
+                } finally {
+                    Qt.quit();
+                }
+            }
+        }
+    }
+}
+"#;
+
+#[test]
+fn the_answer_surfaces_work_by_keyboard_and_name_every_control() {
+    init_headless_qt_env();
+    std::env::remove_var("SNITCHWATCH_DEMO");
+
+    let mut app = QGuiApplication::new();
+    // As an assistive technology would; Controls fill in their accessible
+    // role and name only then.
+    assert!(
+        accessibility::ffi::activate_accessibility(),
+        "Qt's accessibility layer did not turn on"
+    );
+    let mut engine = QQmlApplicationEngine::new();
+    let root_ok = Arc::new(AtomicBool::new(false));
+    let guard = engine.as_mut().map(|engine| {
+        let root_ok = root_ok.clone();
+        engine.on_object_created(move |_engine, obj, _url| {
+            // SAFETY: pointer only tested for null, never dereferenced.
+            root_ok.store(!obj.is_null(), Ordering::SeqCst);
+        })
+    });
+
+    let captured = capture_stderr(|| {
+        if let Some(engine) = engine.as_mut() {
+            let qml = QML.replace("    // @a11y-guard\n", GUARD);
+            engine.load_data(&QByteArray::from(qml.as_str()), &QUrl::from(PROBE_URL));
+        }
+        if let Some(app) = app.as_mut() {
+            app.exec();
+        }
+    });
+    drop(guard);
+
+    assert!(
+        root_ok.load(Ordering::SeqCst),
+        "probe root was null:\n{captured}"
+    );
+    let bad: Vec<&str> = captured
+        .lines()
+        .filter(|line| line.contains(PROBE_URL) || line.contains("TypeError"))
+        .filter(|line| !line.contains(DONE_MARKER))
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "answer surfaces probe failed:\n{}",
+        bad.join("\n")
+    );
+    assert!(
+        captured.contains(DONE_MARKER),
+        "probe never finished; stderr:\n{captured}"
+    );
+}

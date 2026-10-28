@@ -69,7 +69,11 @@ ColumnLayout {
         visible: sheet.bindableProcessPath && !form.visible
         text: "Make a rule…"
         icon.name: "list-add"
-        onClicked: form.visible = true
+        // Q01: the button hides as the form opens; focus goes into the form.
+        onClicked: {
+            form.visible = true;
+            scopeBox.forceActiveFocus(Qt.TabFocusReason);
+        }
     }
 
     Controls.Label {
@@ -94,7 +98,9 @@ ColumnLayout {
             }
             Controls.ComboBox {
                 id: scopeBox
+                objectName: "makeRuleScope"
                 Layout.fillWidth: true
+                Accessible.name: "Scope: " + displayText
                 textRole: "label"
                 valueRole: "token"
                 model: [
@@ -112,7 +118,9 @@ ColumnLayout {
             }
             Controls.ComboBox {
                 id: durationBox
+                objectName: "makeRuleDuration"
                 Layout.fillWidth: true
+                Accessible.name: "Duration: " + displayText
                 textRole: "label"
                 valueRole: "token"
                 // `Durations.remembered`: a once-only answer can't be added
@@ -189,6 +197,11 @@ ColumnLayout {
             sheet.controller.notSent(problem);
             return;
         }
+        // Q01: hiding the form must not leave its focused button's focus
+        // nowhere: it goes back to "Make a rule…".
+        let focusInForm = false;
+        for (let it = sheet.Window.activeFocusItem; it; it = it.parent) if (it === form) focusInForm = true;
         form.visible = false;
+        if (focusInForm) openButton.forceActiveFocus(Qt.TabFocusReason);
     }
 }
