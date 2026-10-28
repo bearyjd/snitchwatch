@@ -299,9 +299,12 @@ fn an_oversized_settings_file_is_refused() {
     let state = state_dir(&root);
     let at = location(&state);
     enable(&at, consent()).unwrap();
-    let big = vec![b' '; settings::SETTINGS_MAX_BYTES as usize + 1];
+    // Valid JSON (padded with whitespace), so only the size rule can refuse it.
+    let mut big = settings::encode(&Settings::default()).unwrap();
+    big.resize(settings::SETTINGS_MAX_BYTES as usize + 1, b' ');
     crate::state_file::write(&at.settings_path(), &big).unwrap();
-    unavailable(load_state(&at));
+    let reason = unavailable(load_state(&at));
+    assert!(reason.contains("too large"), "{reason}");
 }
 
 #[test]
@@ -518,6 +521,21 @@ fn a_database_with_an_extra_table_or_trigger_is_refused() {
     {
         let conn = rusqlite::Connection::open(at.db_path()).unwrap();
         conn.execute_batch("CREATE TABLE extra (x);").unwrap();
+    }
+    assert!(open_store(&at).is_err());
+}
+
+#[test]
+fn a_same_sized_but_different_schema_is_refused() {
+    // Same object names and count, but an index on another column: only the
+    // `CREATE` text comparison catches it.
+    let root = tempdir();
+    let (_, at) = enabled_location(&root);
+    drop(open_store(&at).unwrap());
+    {
+        let conn = rusqlite::Connection::open(at.db_path()).unwrap();
+        conn.execute_batch("DROP INDEX events_ts; CREATE INDEX events_ts ON events (dst_host);")
+            .unwrap();
     }
     assert!(open_store(&at).is_err());
 }
