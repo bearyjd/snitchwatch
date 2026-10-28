@@ -65,10 +65,7 @@ fn start_privileged_watchdog_after(timeout: std::time::Duration) -> anyhow::Resu
     std::thread::spawn(move || {
         std::thread::sleep(timeout);
         notify_watchdog_timeout();
-        scanner_privileged::command::kill_active_group();
-        unsafe {
-            libc::killpg(pid, libc::SIGKILL);
-        }
+        scanner_privileged::command::expire_watchdog(pid);
     });
     Ok(())
 }
