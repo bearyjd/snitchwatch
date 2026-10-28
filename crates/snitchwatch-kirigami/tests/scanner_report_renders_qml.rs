@@ -44,23 +44,34 @@ Window {{
     ScannerController {{ id: controller }}
     property var page: null
     property int ticks: 0
-    property var seen: []
 
-    // Every item below `root`, through ordinary children and Flickable content.
-    function walk(root, out) {{
-        if (!root) return out;
+    // Every item below `root` once (a contentItem can also be a child), through
+    // ordinary children and Flickable content.
+    function walk(root, out, seenItems) {{
+        if (!root || seenItems.has(root)) return out;
+        seenItems.add(root);
         out.push(root);
         const kids = [];
         if (root.children) for (let i = 0; i < root.children.length; ++i) kids.push(root.children[i]);
         if (root.contentItem && root.contentItem !== root) kids.push(root.contentItem);
-        for (const k of kids) walk(k, out);
+        for (const k of kids) walk(k, out, seenItems);
         return out;
     }}
+    // `visible` is already effective (false when any ancestor is hidden); also
+    // require real size, so a laid-out-but-collapsed item does not count as drawn.
+    function drawn(i) {{ return i.visible && i.width > 0 && i.height > 0; }}
     function texts() {{
-        return walk(page, []).filter(i => i.objectName === "scannerFindingPath").map(i => i.text);
+        return walk(page, [], new Set())
+            .filter(i => i.objectName === "scannerFindingPath" && drawn(i)).map(i => i.text);
     }}
     function headings() {{
-        return walk(page, []).filter(i => typeof i.level === "number" && typeof i.text === "string").map(i => i.text);
+        return walk(page, [], new Set())
+            .filter(i => typeof i.level === "number" && typeof i.text === "string" && drawn(i))
+            .map(i => i.text);
+    }}
+    function report(state, detail) {{
+        console.warn("SCANNER_RENDER_RESULT state=" + state + " " + detail);
+        Qt.quit();
     }}
 
     Component.onCompleted: {{
@@ -73,12 +84,20 @@ Window {{
         interval: 100; running: true; repeat: true
         onTriggered: {{
             ticks += 1;
-            const t = texts(), h = headings();
-            if (t.length === 4 || ticks > 50) {{
-                console.warn("SCANNER_RENDER_RESULT findings=" + JSON.stringify(t) + " headings=" + JSON.stringify(h));
-                Qt.quit();
+            try {{
+                const t = texts(), h = headings();
+                if (t.length === 4) {{
+                    report("ready", "findings=" + JSON.stringify(t) + " headings=" + JSON.stringify(h));
+                }}
+            }} catch (e) {{
+                report("error", String(e));
             }}
         }}
+    }}
+    // Independent of the polling above, so nothing can leave the event loop running.
+    Timer {{
+        interval: 8000; running: true
+        onTriggered: report("timeout", "findings=" + JSON.stringify(texts()) + " headings=" + JSON.stringify(headings()))
     }}
 }}
 "#,
@@ -113,6 +132,10 @@ Window {{
         .lines()
         .find(|l| l.contains("SCANNER_RENDER_RESULT"))
         .unwrap_or_else(|| panic!("probe never reported: {captured}"));
+    assert!(
+        line.contains("state=ready"),
+        "report was not drawn in time: {line}"
+    );
     for expected in [
         "Secure Boot is currently enabled",
         "kernel lockdown is currently",
