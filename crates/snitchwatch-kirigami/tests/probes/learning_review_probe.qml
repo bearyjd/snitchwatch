@@ -344,6 +344,44 @@ Window {
         win.plainTextShowing("2 added");
     }
 
+    // Readiness gating (the #237 pattern): each stage waits until what it
+    // checks exists, is shown and enabled, and its geometry held for a tick.
+    property int stage: 1
+    property int stalls: 0
+    readonly property int maxStalls: 200
+    property var geo: ({})
+    function stable(key, item) {
+        if (!item || !item.visible || !item.enabled || !(item.width > 0) || !(item.height > 0)) {
+            win.geo[key] = "";
+            return false;
+        }
+        const g = item.mapToItem(null, 0, 0);
+        const geometry = [g.x, g.y, item.width, item.height].join(",");
+        const same = geometry === win.geo[key];
+        win.geo[key] = geometry;
+        return same;
+    }
+    // "" when the page checks may run, else what they still wait for.
+    function pageWaiting() {
+        if (win.failure !== "") return "";
+        if (!win.page || !win.narrow) return "the two pages";
+        const boxes = win.checkBoxes();
+        if (boxes.length !== 5) return "5 tick boxes (have " + boxes.length + ")";
+        for (let i = 0; i < boxes.length; i++) {
+            if (!win.stable("box" + i, boxes[i])) return "tick box " + i;
+        }
+        for (const name of ["learningButtonFlow", "learningStartFlow"]) {
+            const hits = win.collect(win.narrow, item => item.objectName === name);
+            if (hits.length !== 1 || !win.stable(name, hits[0])) return "narrow " + name;
+        }
+        return "";
+    }
+    // "" when the progress rows (a ListView's delegates) are drawn.
+    function progressWaiting() {
+        const rows = win.collect(win.page, item => item.text === "Refused: " + win.markup);
+        return rows.length > 0 && win.stable("progress", rows[0]) ? "" : "the progress rows";
+    }
+
     // The progress rows are a ListView: its delegates exist a moment later.
     function checkProgressRows() {
         win.plainTextShowing(win.markup);
@@ -368,39 +406,39 @@ Window {
             } catch (e) {
                 win.failure = String(e);
             } finally {
-                checkTimer.start();
+                stepTimer.start();
             }
         }
     }
 
+    // Stage 1 checks the pages, stage 2 the progress rows; each runs once
+    // its gate passes, or fails naming what it waited for.
     Timer {
-        id: checkTimer
-        interval: 400
-        repeat: false
+        id: stepTimer
+        interval: 100
+        repeat: true
         onTriggered: {
+            const waiting = win.stage === 1 ? win.pageWaiting() : win.progressWaiting();
+            if (waiting !== "" && ++win.stalls < win.maxStalls) return;
+            stop();
             try {
-                if (win.failure !== "") throw new Error("learning review: " + win.failure);
-                win.checkRealController();
-                win.checkNarrow();
-                win.checkPage();
-                progressTimer.start();
+                if (waiting !== "") throw new Error("learning review: stage " + win.stage + " never ready for " + waiting);
+                if (win.stage === 1) {
+                    if (win.failure !== "") throw new Error("learning review: " + win.failure);
+                    win.checkRealController();
+                    win.checkNarrow();
+                    win.checkPage();
+                    win.stage = 2;
+                    win.stalls = 0;
+                    start();
+                    return;
+                }
+                win.checkProgressRows();
+                console.warn("LEARNING_REVIEW_PROBE_DONE");
+                Qt.quit();
             } catch (e) {
                 Qt.quit();
                 throw e;
-            }
-        }
-    }
-
-    Timer {
-        id: progressTimer
-        interval: 200
-        repeat: false
-        onTriggered: {
-            try {
-                win.checkProgressRows();
-                console.warn("LEARNING_REVIEW_PROBE_DONE");
-            } finally {
-                Qt.quit();
             }
         }
     }
