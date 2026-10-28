@@ -1,7 +1,8 @@
 # Connection history: implementation plan (r17)
 
-Status: **PROPOSED, awaiting owner approval.** No code is authorized by this
-plan. Parent: the approved design
+Status: **Approved by the owner, 2026-10-28.** Each PR still follows the
+workflow (TDD, `/codex`, merge on green) and stops at the decision points
+below. Parent: the approved design
 [`specs/2026-10-27-connection-history-design.md`](../specs/2026-10-27-connection-history-design.md)
 (merged as `6587523`; owner decisions 1-14 are in its "Owner decisions"
 section). This plan does not reopen those decisions. Main was at `6587523`
@@ -113,8 +114,8 @@ batch.
     timestamps), so the file has a known maximum size; writes are atomic
     (write a temporary file, then rename), so the **peak footprint is twice
     that maximum** while the replacement exists. That peak is reserved inside
-    B, taken from the 10% slack share without eating the required slack
-    (S3), and the implementation must show the arithmetic. Test: a settings
+    B by reducing the main-file capacity; the 10% slack share stays wholly
+    unallocated (S3). The implementation must show the arithmetic. Test: a settings
     file at every field cap, written atomically, never exceeds the reserved
     footprint and leaves no stray temporary file after a failed write;
   - system mode resolves to `/var/lib/snitchwatch/history/`, user mode to the
@@ -139,9 +140,10 @@ batch.
 - **Tests first:** queue full drops and counts (never blocks a verdict, proven
   with a blocked writer and a timed `AskRule`); worst-case rows (all fields at
   cap) through insert, eviction and incremental vacuum never modify more pages
-  per transaction than the budget; main file + peak journal + slack <= B under
-  the same workload **with the settings file at its maximum and its atomic
-  replacement in flight counted in the same measurement**; freed space shrinks
+  per transaction than the budget; main file + peak journal + settings peak +
+  0.1B (unallocated slack) <= B under the same workload, **with the settings
+  file at its maximum and its atomic replacement in flight counted in the same
+  measurement**; freed space shrinks
   the file without a full `VACUUM`;
   `secure_delete` canary scan after deletes.
 - **Lands:** S2, S3, S4, S5 (except clear-all recreation, PR 10), D5 insert path.
