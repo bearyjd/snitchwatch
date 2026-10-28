@@ -123,6 +123,10 @@ pub struct Store {
 impl Store {
     /// The connection: `secure_delete` on, `journal_mode` DELETE, layout
     /// verified. The writer (PR 2) is its only user.
+    pub(crate) fn into_connection(self) -> rusqlite::Connection {
+        self.conn
+    }
+
     pub fn connection(&self) -> &rusqlite::Connection {
         &self.conn
     }
