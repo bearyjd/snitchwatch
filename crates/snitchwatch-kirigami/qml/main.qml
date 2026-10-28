@@ -651,11 +651,7 @@ Kirigami.ApplicationWindow {
     }
     Component {
         id: aboutPageComponent
-        AboutPage {
-            // The daemon version the Traffic model already receives.
-            daemonConnected: trafficModel.statsReceived
-            daemonVersion: trafficModel.daemonVersion
-        }
+        AboutPage { daemonConnected: trafficModel.statsReceived; daemonVersion: trafficModel.daemonVersion }
     }
     // A new prompt does NOT raise this window. The alert (AlertHost.qml ->
     // AlertWindow.qml) is its own window, independent of this one: in "Ask me"

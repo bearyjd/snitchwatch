@@ -103,6 +103,7 @@ pub const ALL_QML: &[(&str, &str)] = &[
         "RuleScopePreview.qml",
         include_str!("../../qml/RuleScopePreview.qml"),
     ),
+    ("AboutPage.qml", include_str!("../../qml/AboutPage.qml")),
     ("AlertHost.qml", include_str!("../../qml/AlertHost.qml")),
     ("AlertWindow.qml", include_str!("../../qml/AlertWindow.qml")),
     (
