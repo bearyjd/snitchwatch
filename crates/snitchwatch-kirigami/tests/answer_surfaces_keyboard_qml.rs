@@ -63,7 +63,8 @@ Window {
             return true;
         }
         function appBoundRulesFor(rowId) { return true; }
-        function decideLater(rowId) { return true; }
+        // Recorded in the same list: no key may send either.
+        function decideLater(rowId) { submitted = submitted.concat(["later:" + rowId]); return true; }
         function decideLaterFor(rowId) { return true; }
     }
     QtObject {
@@ -77,7 +78,7 @@ Window {
         id: makeModel
         property var calls: []
         function makeRule(rowId, choice, scope, duration, requestId) {
-            calls = calls.concat([rowId + ":" + choice + ":" + scope + ":" + duration]);
+            calls = calls.concat([[rowId, choice, scope, duration, requestId].join(":")]);
             return "";
         }
     }
@@ -106,7 +107,7 @@ Window {
         function levelRuleDuration() { return "forever"; }
         function levelRuleScopeText(level, program, key) { return "Executable " + program + "; any host; any port; any protocol"; }
         function createLevelRuleForSession(level, program, key, choice, duration, session) {
-            calls = calls.concat([[level, program, key, choice].join(",")]);
+            calls = calls.concat([[level, program, key, choice, duration, session].join(",")]);
             return "";
         }
         function pollLevelRules() {}
@@ -229,8 +230,8 @@ Window {
         case 1: return banner.armed && probe.stable("deny", probe.find(banner, it => probe.text(it) === "Deny"))
             ? "" : "the armed banner";
         case 4: case 5: return probe.formReady();
-        case 8: case 10: return probe.dialog().opened ? "" : "the confirm dialog open";
-        case 9: return !probe.dialog().visible ? "" : "the confirm dialog closed";
+        case 8: case 10: case 12: return probe.dialog().opened ? "" : "the confirm dialog open";
+        case 9: case 11: return !probe.dialog().visible ? "" : "the confirm dialog closed";
         default: return "";
         }
     }
@@ -318,7 +319,7 @@ Window {
                     probe.expect(probe.where(probe.focused()) === "makeRuleSheet/Deny", "focus is not on the form's Deny");
                     tc.keyClick(Qt.Key_Space);
                     probe.expectOnly(probe.made, "1:putoff:deny:" + probe.formControl("makeRuleScope").currentValue + ":"
-                                     + probe.formControl("makeRuleDuration").currentValue, "Space on the form's Deny");
+                                     + probe.formControl("makeRuleDuration").currentValue + ":req-1", "Space on the form's Deny");
                     probe.expect(!make.form.visible && probe.focused() === make.openButton,
                                  "focus did not come back to Make a rule…: " + probe.where(probe.focused()));
                     makeModel.calls = [];
@@ -329,10 +330,15 @@ Window {
                     probe.expect(probe.tabTo("makeRuleSheet/Allow"), "cannot Tab to the form's Allow");
                     tc.keyClick(Qt.Key_Space);
                     probe.expectOnly(probe.made, "1:putoff:allow:" + probe.formControl("makeRuleScope").currentValue + ":"
-                                     + probe.formControl("makeRuleDuration").currentValue, "Space on the form's Allow");
+                                     + probe.formControl("makeRuleDuration").currentValue + ":req-2", "Space on the form's Allow");
                     probe.expect(!make.form.visible && probe.focused() === make.openButton,
                                  "focus did not come back to Make a rule…: " + probe.where(probe.focused()));
                 } else if (probe.phase === 6) {
+                    for (const name of ["Allow once", "Decide later", "Review"]) {
+                        probe.expect(probe.tabTo("promptSlotBanner/" + name), "cannot Tab to the banner's " + name);
+                        probe.pressSends([Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape], probe.asked,
+                                         "Return/Enter/Escape on the banner's " + name);
+                    }
                     probe.expect(probe.tabTo("promptSlotBanner/Deny"), "cannot Tab to the banner's Deny");
                     probe.pressSends([Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape], probe.asked, "Return/Enter/Escape on the banner's Deny");
                     tc.keyClick(Qt.Key_Space);
@@ -352,12 +358,27 @@ Window {
                     probe.expect(probe.focused() === start, "Escape did not give focus back: " + probe.where(probe.focused()));
                     rules.create(0, "/usr/bin/app", "", "app", "allow", "1:");
                 } else if (probe.phase === 10) {
+                    for (let i = 0; i < 6 && probe.text(probe.focused()) !== "Cancel"; ++i)
+                        tc.keyClick(Qt.Key_Tab);
+                    probe.expect(probe.text(probe.focused()) === "Cancel", "cannot Tab to Cancel");
+                    // Return / Enter may or may not act on Cancel; either way nothing is sent.
+                    probe.pressSends([Qt.Key_Return, Qt.Key_Enter], probe.typed, "Return/Enter on Cancel");
+                    if (probe.dialog().visible) {
+                        probe.expect(probe.text(probe.focused()) === "Cancel", "focus left Cancel: " + probe.where(probe.focused()));
+                        tc.keyClick(Qt.Key_Space);
+                    }
+                    probe.expect(commands.calls.length === 0, "Cancel sent " + JSON.stringify(commands.calls));
+                } else if (probe.phase === 11) {
+                    probe.expect(commands.calls.length === 0, "Cancel sent " + JSON.stringify(commands.calls));
+                    rules.create(0, "/usr/bin/app", "", "app", "allow", "1:");
+                } else if (probe.phase === 12) {
                     for (let i = 0; i < 6 && probe.text(probe.focused()) !== "Allow any host"; ++i)
                         tc.keyClick(Qt.Key_Tab);
                     probe.expect(probe.text(probe.focused()) === "Allow any host", "cannot Tab to Allow any host");
+                    probe.expect(probe.dialog().visible, "the dialog closed before any key");
                     probe.pressSends([Qt.Key_Return, Qt.Key_Enter], probe.typed, "Return/Enter on Allow any host");
                     tc.keyClick(Qt.Key_Space);
-                    probe.expectOnly(probe.typed, "0,/usr/bin/app,,allow", "Space on Allow any host");
+                    probe.expectOnly(probe.typed, "0,/usr/bin/app,,allow,forever,1:", "Space on Allow any host");
                     const bad = Object.keys(probe.missing);
                     probe.expect(bad.length === 0, bad.length + " controls lack a meaningful Accessible.name: "
                         + bad.map(k => k + " (" + probe.missing[k] + ")").join("; "));
