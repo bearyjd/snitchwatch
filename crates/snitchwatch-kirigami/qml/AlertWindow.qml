@@ -9,7 +9,10 @@
 //   bridge can bind a rule to the program (#44) and, for the host scopes, its
 //   session advertised app-bound rules (#72); otherwise only "Once".
 // * Duration: `Durations.all`, preselected from the Settings default.
-// * Return = Allow, Esc = Deny. Every key and click is ignored for
+// * Return = Allow, Esc = Deny (Esc from every focus position). Tab and
+//   Shift+Tab walk the scope choices, the duration choices, Allow, then Deny;
+//   Return on a focused choice only selects it, and Return on Deny does
+//   nothing. Every key and click is ignored for
 //   `armDelayMs` after the alert appears, after it moves on to the next row,
 //   and when what it offers changes under the pointer (the durations appear
 //   or vanish with the scope), so a keystroke or click meant for another
@@ -62,6 +65,12 @@ Window {
     // Keys pressed while not armed and not yet released: a press of one of
     // these (some platforms do not flag the repeats) is not a fresh press.
     property var heldKeys: ({})
+    // Bumped whenever the alert re-arms, and the value when the Space press
+    // now on a verdict button began: Space is native activation, which fires
+    // on release, so a press that began before a re-arm must not answer.
+    property int armGeneration: 0
+    property int spacePressGeneration: -1
+    property bool ignoreNextClick: false
     // A row answered or dismissed here and not yet resolved by the bridge is
     // not shown again.
     property string handledRowId: ""
@@ -136,13 +145,35 @@ Window {
             && alert.bridgeFeed.appBoundRulesFor(alert.rowId) === true;
         if (changed) {
             alert.nowMs = Date.now();
+            alert.resetFocus();
             scopeChoice.currentToken = "this_host";
             durationChoice.currentToken = Durations.defaultToken;
             alert.arm();
         }
     }
 
+    // A new row (or the alert coming back) starts with the focus off the
+    // buttons, so Return is the default Allow again and a stale focus on Deny
+    // or a choice cannot carry over to a prompt about something else.
+    function resetFocus() {
+        alert.dropFocus(content);
+        keys.forceActiveFocus();
+    }
+
+    // Takes the focus off every item under `item` (the focus a hidden window
+    // remembers is not its `activeFocusItem`).
+    function dropFocus(item) {
+        for (let i = 0; i < item.children.length; ++i) {
+            const child = item.children[i];
+            if (child.focus) {
+                child.focus = false;
+            }
+            alert.dropFocus(child);
+        }
+    }
+
     function arm() {
+        alert.armGeneration++;
         alert.armed = false;
         if (alert.rowId !== "") {
             armTimer.restart();
@@ -155,6 +186,7 @@ Window {
 
     onShownChanged: if (alert.shown) {
         alert.heldKeys = ({});
+        alert.resetFocus();
         alert.arm();
         alert.raise();
         // Return/Esc need the keyboard focus; a compositor may still refuse.
@@ -181,8 +213,9 @@ Window {
 
     // Return = Allow, Esc = Deny; every other key, any key before the alert
     // is armed, an auto-repeat, and a key still held from before it was armed,
-    // does nothing (and is not passed on).
-    function handleKey(key, autoRepeat) {
+    // does nothing (and is not passed on). `target` is "deny" when the Deny
+    // button has the focus: Return there is not Allow.
+    function handleKey(key, autoRepeat, target) {
         if (!alert.armed) {
             alert.heldKeys[key] = true;
             return;
@@ -191,7 +224,9 @@ Window {
             return;
         }
         if (key === Qt.Key_Return || key === Qt.Key_Enter) {
-            alert.answer("allow");
+            if (target !== "deny") {
+                alert.answer("allow");
+            }
         } else if (key === Qt.Key_Escape) {
             alert.answer("deny");
         }
@@ -200,6 +235,51 @@ Window {
     // A released key is no longer "held since before arming".
     function keyReleased(key) {
         delete alert.heldKeys[key];
+    }
+
+    // A key pressed with a verdict button ("allow" or "deny") focused. Runs
+    // before the button's own handling (`Keys.BeforeItem`), so Space, which a
+    // button turns into a click on release, passes the same guards as
+    // `handleKey`: not before arming, not an auto-repeat, not a key held since
+    // before arming. Return, Enter and Esc take the `handleKey` route; Tab
+    // moves the focus; anything else is swallowed, as everywhere in the window.
+    function verdictButtonPressed(event, choice) {
+        if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+            return;
+        }
+        event.accepted = true;
+        if (event.key !== Qt.Key_Space) {
+            alert.handleKey(event.key, event.isAutoRepeat, choice);
+            return;
+        }
+        if (!alert.armed) {
+            alert.heldKeys[event.key] = true;
+        } else if (event.isAutoRepeat !== true && alert.heldKeys[event.key] !== true) {
+            alert.spacePressGeneration = alert.armGeneration;
+            // Not ours to swallow: the button presses and, on release, clicks.
+            event.accepted = false;
+        }
+    }
+
+    // The matching release. A Space press from before the last re-arm must
+    // not click the (possibly different) row now shown.
+    function verdictButtonReleased(event) {
+        if (event.key === Qt.Key_Space && event.isAutoRepeat !== true) {
+            alert.ignoreNextClick = alert.spacePressGeneration !== alert.armGeneration;
+            Qt.callLater(() => { alert.ignoreNextClick = false; });
+        }
+        if (event.isAutoRepeat !== true) {
+            alert.keyReleased(event.key);
+        }
+    }
+
+    // A verdict button's click: a mouse click, or the end of a Space press.
+    function verdictClicked(choice) {
+        if (alert.ignoreNextClick) {
+            alert.ignoreNextClick = false;
+            return;
+        }
+        alert.answer(choice);
     }
 
     Timer {
@@ -234,6 +314,11 @@ Window {
         focus: true
 
         Keys.onPressed: event => {
+            // Tab and Shift+Tab are the window's focus chain, not ours.
+            if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                event.accepted = false;
+                return;
+            }
             event.accepted = true;
             alert.handleKey(event.key, event.isAutoRepeat);
         }
@@ -304,6 +389,7 @@ Window {
             }
             SegmentedChoice {
                 id: scopeChoice
+                groupName: "Applies to"
                 Layout.fillWidth: true
                 currentToken: "this_host"
                 model: [
@@ -319,6 +405,7 @@ Window {
             }
             SegmentedChoice {
                 id: durationChoice
+                groupName: "For how long"
                 Layout.fillWidth: true
                 currentToken: Durations.defaultToken
                 model: alert.remembers ? Durations.all : [Durations.all[0]]
@@ -349,27 +436,42 @@ Window {
                     + " s, the firewall's default action applies."
             }
 
-            RowLayout {
+            // Allow is declared first so that Tab reaches Allow, then Deny;
+            // Deny is still drawn on the left.
+            GridLayout {
                 Layout.fillWidth: true
-                spacing: Theme.spacingSmall
+                rows: 1
+                columnSpacing: Theme.spacingSmall
 
-                Controls.Button {
-                    id: denyButton
-                    objectName: "alertDeny"
-                    Layout.fillWidth: true
-                    text: "Deny"
-                    icon.name: "edit-delete-remove"
-                    palette.buttonText: Theme.deny
-                    onClicked: alert.answer("deny")
-                }
                 Controls.Button {
                     id: allowButton
                     objectName: "alertAllow"
+                    Layout.row: 0
+                    Layout.column: 1
                     Layout.fillWidth: true
+                    Layout.preferredWidth: 1
                     text: "Allow"
                     icon.name: "dialog-ok-apply"
                     palette.buttonText: Theme.allow
-                    onClicked: alert.answer("allow")
+                    Keys.priority: Keys.BeforeItem
+                    Keys.onPressed: event => alert.verdictButtonPressed(event, "allow")
+                    Keys.onReleased: event => alert.verdictButtonReleased(event)
+                    onClicked: alert.verdictClicked("allow")
+                }
+                Controls.Button {
+                    id: denyButton
+                    objectName: "alertDeny"
+                    Layout.row: 0
+                    Layout.column: 0
+                    Layout.fillWidth: true
+                    Layout.preferredWidth: 1
+                    text: "Deny"
+                    icon.name: "edit-delete-remove"
+                    palette.buttonText: Theme.deny
+                    Keys.priority: Keys.BeforeItem
+                    Keys.onPressed: event => alert.verdictButtonPressed(event, "deny")
+                    Keys.onReleased: event => alert.verdictButtonReleased(event)
+                    onClicked: alert.verdictClicked("deny")
                 }
             }
         }

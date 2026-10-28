@@ -12,6 +12,8 @@ Item {
 
     property var model: []
     property string currentToken: ""
+    // Names the group for a screen reader: "<groupName>: <label>".
+    property string groupName: ""
     readonly property string effectiveToken: seg.indexOfToken(seg.currentToken) >= 0
         ? seg.currentToken : (seg.model.length > 0 ? seg.model[0].token : "")
 
@@ -40,8 +42,19 @@ Item {
                 Layout.preferredWidth: 1
                 text: modelData.label
                 highlighted: modelData.token === seg.effectiveToken
+                Accessible.name: seg.groupName !== "" ? seg.groupName + ": " + modelData.label : modelData.label
                 Accessible.checked: highlighted
                 onClicked: seg.currentToken = modelData.token
+                // Q01: Return on a focused choice only selects it, as a click
+                // does; it never goes on to the window's Return = Allow.
+                Keys.onPressed: event => {
+                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                        event.accepted = true;
+                        if (!event.isAutoRepeat) {
+                            seg.currentToken = modelData.token;
+                        }
+                    }
+                }
             }
         }
     }
