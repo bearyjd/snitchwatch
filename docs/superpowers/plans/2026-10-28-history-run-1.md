@@ -1,7 +1,8 @@
 # History run 1, 2026-10-28
 
-Status: **PROPOSED, awaiting owner approval.** No code starts until the owner
-approves this plan. Main was at `a05c1b4` when it was written. Parent plan:
+Status: **Approved by the owner, 2026-10-28, without the S2 waiver.** The run
+starts only when the owner starts it, and always stops after PR 2 for owner
+review. Main was at `a05c1b4` when it was written. Parent plan:
 [`2026-10-28-connection-history-implementation.md`](2026-10-28-connection-history-implementation.md)
 (approved and merged). Design:
 [`specs/2026-10-27-connection-history-design.md`](../specs/2026-10-27-connection-history-design.md).
@@ -81,14 +82,14 @@ page budget. Read literally:
 | PR 4b persistence (`rules_seen`, snapshot caps, snapshot-only eviction, same-transaction cleanup) | **PR 2** | Writes through the writer and must fit S2's budget |
 
 So: **PR 3 (durable half) and PR 4 (persistence half) depend on PR 2.** The
-parent plan lists them as single PRs. **Contingency, for the owner to approve
-with this plan:**
+parent plan lists them as single PRs. **Contingency, approved by the owner
+with this plan (2026-10-28):**
 
 **One rule for halves and whole PRs (used everywhere in this plan):** while
 the owner's release after PR 2 is pending, the halves ship separately and only
 the independent halves (3a, 4a) ship. A **whole** PR 3 or PR 4 is allowed only
-after the owner's release, or the owner's explicit acceptance of the
-successful-S2 waiver (decision point 1), **and only if that PR's independent
+after the owner's release (the S2 waiver was declined, so there is no
+other route), **and only if that PR's independent
 half has not already shipped**. If it has, the dependent half ships as 3b / 4b
 instead; the halves are never merged back together. A merged PR 2 alone does
 not release the run.
@@ -155,7 +156,7 @@ not release the run.
 3. **History PR 3: lifecycle primitives, watermark, ledger.** Delivered
    as halves or whole according to the rule in "Dependencies" (3a alone while
    the owner's release after PR 2 is pending; 3b, or a whole PR 3 only if 3a has
-   not already shipped, only after release or the waiver). Each half has its
+   not already shipped, only after the owner's release). Each half has its
    own acceptance criteria:
    - **3a: in-memory primitives (database-free).**
      - *Goal:* generation counter, acceptance-sequence counter, pin registry,
@@ -192,7 +193,7 @@ not release the run.
 
 4. **History PR 4: event-time rule identity.** Halves or whole
    according to the rule in "Dependencies" (4a alone while the owner's release
-   after PR 2 is pending; whole only after release or the waiver, and only if
+   after PR 2 is pending; whole only after the owner's release, and only if
    4a has not already shipped; otherwise 4b follows 4a):
    - **4a: pure rule identity (database-free).**
      - *Goal:* recursive-allowlist redaction, canonical encoding, rule hash
@@ -246,9 +247,10 @@ are **not** part of this run, so nothing is duplicated.
    result in the PR (the proof, or the measured numbers and the fallback
    question), then does only work that does not depend on PR 2 (3a, 4a), and
    reports.
-   - **WAIVER (owner option, accept or reject when approving this plan):** *If
-     S2 is proved, the run may continue to 3b and 4b without a stop; a fallback
-     or an unproved S2 always stops.*
+   - **WAIVER: declined by the owner, 2026-10-28.** *(Proposed text, not in
+     force: if S2 is proved, the run may continue to 3b and 4b without a stop.)*
+     The run therefore always stops after PR 2, proved or not, and waits for the
+     owner's release.
    - If S2 cannot be proved, the full-journal fallback (reserve a
      full-database rollback journal; main-file share at most half of the
      budget) is an owner decision because it halves the usable cache. PR 2 is
