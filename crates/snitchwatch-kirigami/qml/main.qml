@@ -448,6 +448,11 @@ Kirigami.ApplicationWindow {
             Kirigami.Action {
                 text: "Details"
                 onTriggered: nav.replaceMain(daemonHealthPageComponent)
+            },
+            Kirigami.Action {
+                text: "About"
+                icon.name: "help-about"
+                onTriggered: nav.replaceMain(aboutPageComponent)
             }
         ]
     }
@@ -642,6 +647,14 @@ Kirigami.ApplicationWindow {
         DaemonHealthPage {
             model: daemonHealthModel
             denyStatus: denyStatusModel
+        }
+    }
+    Component {
+        id: aboutPageComponent
+        AboutPage {
+            // The daemon version the Traffic model already receives.
+            daemonConnected: trafficModel.statsReceived
+            daemonVersion: trafficModel.daemonVersion
         }
     }
     // A new prompt does NOT raise this window. The alert (AlertHost.qml ->

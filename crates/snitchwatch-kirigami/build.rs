@@ -9,6 +9,7 @@
 use cxx_qt_build::{CxxQtBuilder, QmlFile, QmlModule};
 
 fn main() {
+    build_identity();
     let builder = CxxQtBuilder::new_qml_module(
         QmlModule::new("com.snitchwatch.shell")
             // `Theme.qml` is a `pragma Singleton`; it needs the qmldir
@@ -94,6 +95,7 @@ fn main() {
                 "qml/ScannerPage.qml",
                 "qml/DaemonHealthPage.qml",
                 "qml/DenyStatusSection.qml",
+                "qml/AboutPage.qml",
             ]),
     )
     .qt_module("Widgets")
@@ -129,7 +131,8 @@ fn main() {
     .file("src/scanner_controller.rs")
     .file("src/learning_review_controller.rs")
     .file("src/daemon_health_model.rs")
-    .file("src/deny_status_model.rs");
+    .file("src/deny_status_model.rs")
+    .file("src/about_model.rs");
     // SAFETY: only add the crate-owned header directory; preserve builder flags.
     unsafe {
         builder.cc_builder(|cc| {
@@ -140,7 +143,79 @@ fn main() {
     .build();
     println!("cargo:rerun-if-changed=include/application.h");
     println!("cargo:rerun-if-changed=include/clipboard.h");
+    println!("cargo:rerun-if-changed=include/qt_runtime.h");
     println!("cargo:rerun-if-changed=tests/support/clipboard_native.h");
     println!("cargo:rerun-if-changed=tests/support/delegate_incubation.h");
     println!("cargo:rerun-if-changed=tests/support/accessibility.h");
+}
+
+/// Records which source this binary was built from, as `rustc-env` constants
+/// for `src/about.rs`. Never fails the build: a source tarball (the Flatpak
+/// build) has no `.git`, so the commit then comes from
+/// `SNITCHWATCH_BUILD_COMMIT`, else is left empty ("not recorded").
+fn build_identity() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    println!("cargo:rerun-if-env-changed=SNITCHWATCH_BUILD_COMMIT");
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+    // Only trust git when the checkout root is ours; a tarball unpacked inside
+    // some unrelated repository must not record that repository's commit.
+    let root = manifest.join("../..");
+    let git = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let mut commit = String::new();
+    let mut dirty = false;
+    if root.join(".git").exists() {
+        if let Some(head) = git(&["rev-parse", "HEAD"]).filter(|c| is_commit_id(c)) {
+            commit = head;
+            // Submodule noise (an untracked tooling dir) is not a change here.
+            dirty = git(&[
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+                "--ignore-submodules",
+            ])
+            .is_some_and(|s| !s.is_empty());
+            // Re-run when HEAD or the branch it names moves. A dirty flag can
+            // go stale until the next rebuild; that is accepted.
+            if let Some(path) = git(&["rev-parse", "--path-format=absolute", "--git-path", "HEAD"])
+            {
+                println!("cargo:rerun-if-changed={path}");
+            }
+            if let Some(r) = git(&["symbolic-ref", "-q", "HEAD"]) {
+                if let Some(path) = git(&["rev-parse", "--path-format=absolute", "--git-path", &r])
+                {
+                    println!("cargo:rerun-if-changed={path}");
+                }
+            }
+        }
+    }
+    if commit.is_empty() {
+        if let Ok(env) = std::env::var("SNITCHWATCH_BUILD_COMMIT") {
+            let env = env.trim();
+            if is_commit_id(env) {
+                commit = env.to_string();
+            }
+        }
+    }
+    println!("cargo:rustc-env=SNITCHWATCH_BUILD_COMMIT_RESOLVED={commit}");
+    println!(
+        "cargo:rustc-env=SNITCHWATCH_BUILD_DIRTY={}",
+        u8::from(dirty)
+    );
+}
+
+/// A hex object id (SHA-1 or SHA-256 length); anything else is not recorded.
+fn is_commit_id(s: &str) -> bool {
+    (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
