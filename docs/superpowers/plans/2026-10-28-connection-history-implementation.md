@@ -55,18 +55,26 @@ breaking the guard locally and showing the named test fail.
 PR1 storage+schema+caps -> PR2 writer+page budget -> PR3 pins/watermark/ledger
    -> PR4 rule identity -> PR5 daemon-event capture+admission
    -> PR6 prompt guard+correlation -> PR7 gap causes
-   -> PR8 retention+eviction -> PR9 control gate
-   -> PR10 reader+limits -> PR11 wire+capability
+   -> PR8 retention+eviction -> PR9 reader+limits
+   -> PR10 control gate -> PR11 wire+capability
    -> PR12 GUI opt-in -> PR13 GUI view -> PR14 R05 "why" panel
    -> PR15 packaging, runbook, tower notice
 ```
 
+**Integration tests are assigned to the first PR that contains both real
+sides.** Shared lifecycle primitives (the generation counter, the
+acceptance-sequence counter, the pin registry, and a reader-registry/admission
+gate skeleton) land in PR 3, so earlier PRs test against real primitives
+without the later control gate. The reader (PR 9) precedes the control gate
+(PR 10) so the control gate can be tested against real active readers. The
+end-to-end "clear / disable-and-re-enable while prompts are pending" test is
+in PR 10, where the guard (PR 6) and the real control gate both exist.
 PR 4 sits before capture because captured events need `rule_hash`. PR 7 follows
 both capture paths because it reuses their loss accounting. PRs 12-14 need
 PR 11. PR 15 can start after PR 11 and must land before the image that ships
 the feature.
 
-Notice to the tower: PR 11 changes the **WS wire protocol**, PR 15 changes
+Notice to the tower: PR 6 (row shape) and PR 11 change the **WS wire protocol**, PR 15 changes
 **packaging**, and any PR that changes the bridge binary needs a new bridge
 build in the next image. PR 1-10 change the bridge (dormant) and need no
 tower action until the image is rebuilt; the tower is told once per merged
@@ -87,7 +95,18 @@ batch.
     (0755, wrong owner, symlink, non-directory all make history
     `unavailable`);
   - the database opens only through `sqlite_file::open_owner_only`, file mode
-    0600, unsafe `-journal/-wal/-shm` sidecars refused, newer schema refused;
+    0600, unsafe `-journal/-wal/-shm` sidecars refused;
+  - **schema version policy:** `require_known_schema` checks schema objects,
+    not version numbers, so history adds a real version check (`PRAGMA
+    user_version`): a newer version is refused (`unavailable: newer schema`),
+    an older one is migrated explicitly; both tested;
+  - **bridge-authoritative consent and settings:** the enabled flag, the
+    consent record and the retention settings live in a small bridge-owned
+    0600 settings file in the history directory (outside `history.db`, so they
+    survive clear-all recreation), created only when the user enables history.
+    Tests: fresh install and upgrade default to off; restart reloads enabled
+    state, retention and consent; a stale GUI preference never turns recording
+    on; clear-all recreation keeps the settings file;
   - system mode resolves to `/var/lib/snitchwatch/history/`, user mode to the
     user state dir, using fact structs;
   - nothing is created while history is disabled;
@@ -113,7 +132,7 @@ batch.
   per transaction than the budget; main file + peak journal + slack <= B under
   the same workload; freed space shrinks the file without a full `VACUUM`;
   `secure_delete` canary scan after deletes.
-- **Lands:** S2, S3, S4, S5 (except clear-all recreation, PR 9), D5 insert path.
+- **Lands:** S2, S3, S4, S5 (except clear-all recreation, PR 10), D5 insert path.
 - **Proof obligation discharged:** **S2.** The implementation must prove the
   worst-case pages-per-row constant from the schema and caps (indexes,
   snapshot rows, orphan cleanup) and encode it as the transaction budget.
@@ -125,8 +144,10 @@ batch.
 
 ## PR 3: pins, watermark, sessions, ledger
 
-- **Goal:** the acceptance-sequence counter, the pin registry, the durable
-  coverage watermark, the session ledger, and the bounded gap/session ledger.
+- **Goal:** the shared lifecycle primitives (generation counter,
+  acceptance-sequence counter, pin registry, reader-registry/admission gate
+  skeleton), the durable coverage watermark, the session ledger, and the
+  bounded gap/session ledger.
 - **Touches:** `history/pins.rs`, `history/ledger.rs`, `history/session.rs`.
   Bridge only.
 - **Tests first:** kill -9 with (a) a queued event, (b) a pending prompt,
@@ -179,6 +200,9 @@ batch.
   default-applied traffic produce the standing "not observable" labels.
 - **Lands:** D4 allowlist, D5 admission, the per-process byte share, D1
   coverage table behaviour.
+- **Verdict-latency test:** with the writer blocked and then with the queue
+  full, `mock_opensnitchd` drives an `AskRule` through a real bridge and the
+  prompt/verdict completes within its normal bound (repeated in PR 6 and PR 11).
 - **Review focus:** that the hook adds no latency to verdicts; quota fairness.
 
 ## PR 6: prompt outcome guard and correlation
@@ -188,25 +212,37 @@ batch.
   acceptance, and exact prompt-to-event correlation.
 - **Touches:** `history/guard.rs`; `grpc_server.rs`, `grpc_server/replies.rs`,
   `grpc_server/answer_wait.rs` (hook sites); the **row/wire shape carries
-  `src_ip` and `src_port`** (additive, omitted when absent). **Bridge, and an
-  additive WS field; tell the tower with PR 11.**
+  `src_ip` and `src_port`** (additive, omitted when absent). **This PR is a
+  WS wire/row-shape change: the tower is notified when it merges.** Every
+  consumer is updated in the same PR: Kirigami builds exhaustive
+  `ConnectionRow` literals (for example `demo.rs`), and default-member CI
+  excludes Kirigami, so the PR must also run `cargo build -p
+  snitchwatch-kirigami` and the headless kirigami tests, plus `just check`
+  (which passes `--workspace`).
 - **Tests first (with `mock_opensnitchd`):** interactive allow, deny,
   `FilterPaused` and `NoAnswer` each record exactly one event; terminal
-  `Status` errors and cancellation record one event; **G1:** clear, and
-  disable then re-enable, while prompts are pending: after they settle nothing
-  from before is written except the gaps committed at disable (immutable
-  acceptance generation, no re-stamp); correlation: equal `src_ip`, `src_port`
+  `Status` errors and cancellation record one event; **the last authenticated
+  GUI disconnecting while a prompt waits** (`answer_wait.rs`), including a race
+  with an already-settled verdict: exactly one outcome, with the correct pin
+  release and no orphan snapshot; **G1 at unit level:** the guard captures
+  consent and generation at acceptance and discards a stale outcome when the
+  generation primitive (PR 3) is bumped directly by the test (immutable
+  acceptance generation, no re-stamp); the end-to-end clear and
+  disable-then-re-enable test waits for PR 10; **old/new payload fixtures:**
+  a row without the new fields still parses, a row with them round-trips;
+  the verdict-latency test of PR 5 repeated with the guard hooks in place;
+  correlation: equal `src_ip`, `src_port`
   and the rest of the key merge; missing fields or an ambiguous match keep
   both events flagged `possible-duplicate`; **collision test:** same
   executable, same source port, protocol and destination, different source IPs
   are never merged.
-- **Lands:** **G1**, the D7 capture path, `answered_by` table (`gui` is labelled
+- **Lands:** **G1** (unit level; end-to-end in PR 10), the D7 capture path, `answered_by` table (`gui` is labelled
   "answered in GUI (may be silent mode)"; no protocol provenance change).
 - **Proof obligation discharged:** **correlation uniqueness.** The
   implementation must prove that `src_ip`, `src_port`, protocol, destination
   and process path identify one live socket inside the settlement window, or
-  keep events flagged. **Decision point 2:** confirm the stored `src_ip`
-  field with the owner (design decision 11 precision) before this PR merges.
+  keep events flagged. (Storing `src_ip` was confirmed by the owner under
+  design decision 11; it is not a gate here.)
 - **Review focus:** the guard drop paths (every exit records an outcome), and
   that a pending guard pins the watermark.
 
@@ -239,7 +275,31 @@ batch.
 - **Lands:** D5 eviction, S4 in operation. **Review focus:** that eviction never
   deletes unrelated files and never grows past the budget.
 
-## PR 9: the control gate (clear, preview, disable, delete)
+## PR 9: the reader and its limits
+
+- **Goal:** a read-only connection via a **new validated read-only opener**
+  (`open_owner_only_readonly`: same checks as `open_owner_only`, no create, no
+  chmod, `query_only=ON`), keyset paging, byte-bounded pages, the bridge-wide
+  admission gate and response slots, cancellation, generation tagging, and
+  the D8 deadline semantics: a **2 s per-query deadline that returns the
+  partial result with a cursor** (not the cache export's 10 s deadline); a
+  query is **cancelled when a replacement query arrives or the client
+  disconnects**.
+- **Touches:** `snitchwatch-bridge/src/sqlite_file.rs` (new function),
+  `history/reader.rs`. Bridge only.
+- **Tests first:** the opener refuses what the writer opener refuses and never
+  creates or changes a file; 200-row and 256 KiB caps; at most 2 queries
+  bridge-wide with `busy` refusals; a cancelled worker holds its permit until it
+  exits (pattern of `bridge-cli/src/analysis_export.rs`); reads never block a
+  verdict (timed with a long query running); deadline expiry returns a partial
+  page plus a usable cursor; a replacement query and a disconnect each cancel
+  the previous one; a **slow-consumer test** shows the response stays bounded
+  (byte cap, bounded slot) when the client reads slowly. These are exercised
+  again through the real WS path in PR 11.
+- **Lands:** **D8**, the read side of C1. **Review focus:** permit lifetimes and
+  lock ownership.
+
+## PR 10: the control gate (clear, preview, disable, delete)
 
 - **Goal:** the barrier for disable, clear, delete, range delete and
   retention change: validate-before-destruct, generation increment, reader
@@ -255,27 +315,26 @@ batch.
   mid-query when clear arrives is closed before unlink and delivers no deleted
   row afterwards; stale pages after clear are dropped; clear refuses if newer
   rows exist (C2); clear recreates the file and leaves no journal growth.
+  Added matrix, each asserting "a rejected operation leaves everything
+  unchanged; a successful one deletes exactly its scope":
+  - **preview expiry** (a token older than 60 s is refused);
+  - **retention changing the previewed set** between preview and confirm;
+  - **coalescing raising `repeat_count` without a new max id** (checksum
+    catches it);
+  - **S5 canary scan** of the database and sidecars after clear;
+  - **same-transaction orphan-snapshot cleanup** for range delete and limit
+    reduction;
+  - **real active readers** (PR 9 exists) during clear, disable and retention
+    change;
+  - **end-to-end G1:** clear, and disable then re-enable, while prompts are
+    pending (guards from PR 6): after they settle nothing from before is
+    written except the gaps committed at disable;
+  - settings and consent survive clear-all recreation (PR 1 file).
 - **Lands:** **C1, C2**, H02, owner decisions 10 and 12 (keep-on-disable;
   stale preview refused).
 - **Review focus:** the ordering of the barrier steps and the "no pin released
   by discard alone" rule. This is the highest-risk PR; it gets two `/codex`
   passes (design and security) as the history design did.
-
-## PR 10: the reader and its limits
-
-- **Goal:** a read-only connection via a **new validated read-only opener**
-  (`open_owner_only_readonly`: same checks as `open_owner_only`, no create, no
-  chmod, `query_only=ON`), keyset paging, byte-bounded pages, the bridge-wide
-  admission gate and response slots, cancellation, generation tagging.
-- **Touches:** `snitchwatch-bridge/src/sqlite_file.rs` (new function),
-  `history/reader.rs`. Bridge only.
-- **Tests first:** the opener refuses what the writer opener refuses and never
-  creates or changes a file; 200-row and 256 KiB caps; at most 2 queries
-  bridge-wide with `busy` refusals; a cancelled worker holds its permit until it
-  exits (pattern of `bridge-cli/src/analysis_export.rs`); reads never block a
-  verdict (timed with a long query running).
-- **Lands:** **D8**, the read side of C1. **Review focus:** permit lifetimes and
-  lock ownership.
 
 ## PR 11: WS messages and capability
 
@@ -290,7 +349,16 @@ batch.
   authorisation: in **system mode, only a client on the GUI socket**
   (`snitchwatch-ui`, per decision 14) can enable, disable, clear and read;
   per-user mode behaves as today; no history control is reachable
-  unauthenticated; stale-generation responses refused.
+  unauthenticated; stale-generation responses refused; restart reloads the
+  bridge-authoritative enabled/retention/consent state;
+  **non-blocking routing (verdict latency):** the bridge consumes inbound WS
+  messages in a sequential pump (`bridge-cli/src/lib.rs`), so history messages
+  must be handed to a separate bounded task and never awaited there. Test with
+  `mock_opensnitchd` and a real WS client: block the history work (a long
+  query, a held clear barrier, a blocked writer, a full queue), submit a
+  verdict, and prove the `AskRule` completes **before** the history work is
+  released; the D8 deadline, cancellation and slow-consumer cases of PR 9 are
+  re-run through the WS path.
 - **Lands:** the externally visible surface of C1/C2/D8 and decisions 1 and 14.
   **Review focus (security pass):** the authorisation boundary and message
   validation.
@@ -353,8 +421,25 @@ batch.
 - **Touches:** `docs/packaging/`, `packaging/system/` only if the check shows a
   change is needed (then **packaging and image change: tell the tower**),
   `just package-check`.
-- **Tests first:** `package-check` assertions that the unit keeps
-  `StateDirectoryMode=0700` and the socket stays `0660`/`snitchwatch-ui`.
+- **Tests first (the system-unit contract gate):** `package-check` assertions
+  that the unit keeps `ProtectSystem=strict`, `StateDirectory=snitchwatch`,
+  `StateDirectoryMode=0700`, `ReadWritePaths=/run/snitchwatch-auth` and no
+  other writable path, and that the socket stays `SocketMode=0660` with
+  `SocketGroup=snitchwatch-ui`.
+- **Tower acceptance step (precise):** on a real system-bridge host, with
+  hardening unchanged, enable history, write events, read them back through the
+  GUI, restart the bridge, and read again; the files appear under
+  `/var/lib/snitchwatch/history/` owned by `snitchwatch` (0700 directory,
+  0600 files) via `StateDirectory`, and the unit still has
+  `ReadWritePaths=/run/snitchwatch-auth` only.
+- **Removal and uninstall (documented):** removing the Flatpak GUI does **not**
+  stop recording: the host bridge keeps writing history while enabled, and the
+  history persists on disk until deleted. The supported procedure is: disable
+  history, then perform the confirmed "Delete history" action, then remove the
+  GUI; if the GUI is already gone, stop the bridge and remove only the
+  `history/` subdirectory (`/var/lib/snitchwatch/history/` or the per-user
+  `…/snitchwatch/history/`). **Never delete the whole shared state directory**:
+  it also holds blocklists, profiles and curated state.
 - **Review focus:** that no unit hardening is loosened.
 
 ---
@@ -366,7 +451,7 @@ batch.
   full-journal fallback; decision point 1.
 - **Capture hooks on the verdict path (PR 5, 6).** Any added latency or lock
   ownership is a regression. Mitigation: timed tests with a blocked writer.
-- **Control-gate complexity (PR 9).** Most review findings so far were in this
+- **Control-gate complexity (PR 10).** Most review findings so far were in this
   area. Mitigation: its own two-pass review and mutation checks for each step.
 - **Wire compatibility (PR 6, 11).** Older GUIs and bridges. Mitigation:
   additive fields, a capability flag, "unavailable" rather than empty.
@@ -390,12 +475,10 @@ stays cache-only); H03 filters, H05 baselines, H08 digests, Q07 tuning.
 
 1. After PR 2: the S2 result. Proven constant, or switch to the full-journal
    fallback (changes the usable cache size).
-2. Before PR 6 merges: confirm storing `src_ip` (low sensitivity, but a new
-   stored field) for exact correlation.
-3. Before PR 12 merges: the exact opt-in text, because it is the consent
+2. Before PR 12 merges: the exact opt-in text, because it is the consent
    record.
-4. Any S1 field cap beyond the three the owner set.
-5. If any PR turns out to need a daemon, image or unplanned wire change beyond
+3. Any S1 field cap beyond the three the owner set.
+4. If any PR turns out to need a daemon, image or unplanned wire change beyond
    those listed: stop and park, per the repo's stop rules.
 
 ## Approval requested
