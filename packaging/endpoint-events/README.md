@@ -1,13 +1,16 @@
 # Sharing connection events with Vigie (opt-in)
 
 Off by default. Enabling it is an operator step, like the `deny` opt-in. The
-Snitchwatch system image (published 2026-10-28 or later, for example
-`ghcr.io/bearyjd/bazzite-tower@sha256:148de52b6590ddb28fc2d7ed71035e7859aa350d7d1e21fa7ad6545d4999b1df`)
-ships the rsyslog packages with every unit **disabled**, and an inert copy of
+Snitchwatch system image built from the tower's accepted source `f5a18d28` or
+later (the first such image is
+`ghcr.io/bearyjd/bazzite-tower@sha256:148de52b6590ddb28fc2d7ed71035e7859aa350d7d1e21fa7ad6545d4999b1df`,
+published 2026-10-28; check `rpm -q rsyslog` and the `/usr/share` directory on
+yours) ships the rsyslog packages with every unit **disabled**, and an inert copy of
 this directory's rsyslog config, nftables table and two units in
 `/usr/share/snitchwatch/endpoint-events/`. Nothing listens on 514 or 6514, the
 daemon config has no logger entry, and `opensnitchd-logger.json` is **not**
-shipped: take that one from this repository. Older images ship none of this.
+shipped: take that one from this repository. Images from before that source
+ship none of this.
 Design: [`docs/superpowers/specs/2026-10-26-vigie-endpoint-events.md`](../../docs/superpowers/specs/2026-10-26-vigie-endpoint-events.md)
 (#231). Vigie side: bearyjd/vigie-network#21.
 
@@ -433,7 +436,8 @@ sudo rmdir /etc/pki/snitchwatch-endpoint-events
 sudo rm -f /etc/opensnitchd/rules/endpoint-events-rsyslog-to-vigie.json   # if you added it
 ```
 
-Finally the packages, if nothing else uses them:
+Finally, only if you layered the packages yourself in step 1 (an image that
+ships them has nothing to uninstall), and nothing else uses them:
 
 ```bash
 sudo rpm-ostree uninstall rsyslog rsyslog-mmjsonparse rsyslog-gnutls   # then reboot
