@@ -59,7 +59,7 @@ check, and each slice starts by running it.
 | `MakeRuleSheet.qml` (+ `MakeRuleOutcomes.qml`) | 3 Buttons, 2 ComboBoxes | 2 (both combo boxes) | Overlay sheet; Tab order and Escape unchecked | none | none |
 | `DecideLaterButton.qml` | 1 Button | 0 | Part of the row/inspector Tab order (#242 covers the row) | via #242 | via #242 |
 | `PromptSlotBanner.qml` | 4 Kirigami.Actions | 0 | InlineMessage actions; reachability unchecked | `prompt_slot_banner_qml.rs`, `deferred_rows_qml.rs` | none |
-| `DnsConsentDialog.qml` | 2 Buttons | 0 | Dialog; default button and Escape unchecked | none | none |
+| `DnsConsentDialog.qml` | 2 Buttons | 0 | Dialog; default button and Escape unchecked | `curated_groups_step_qml.rs:166-168` opens and checks the real consent dialog | none (key-event coverage is absent) |
 
 ### Rules
 
@@ -86,19 +86,19 @@ check, and each slice starts by running it.
 | Surface | Controls | No name | Keyboard | Runtime probe | Key events |
 |---|---|---|---|---|---|
 | `RecommendedRulesPage.qml` | 10 Buttons, 1 Switch, 1 ItemDelegate | 2 | unchecked | `recommended_rules_qml.rs`, `recommended_orphans_qml.rs` | none |
-| `ProfilesPage.qml` | 10 Buttons, 3 TextFields, 1 ItemDelegate | 2 placeholder-only TextFields (new profile name, network matchers); the rename field is value-bound | unchecked | `profile_rules_qml.rs`, `honest_ui_pages_qml.rs` | none |
-| `BlocklistsPage.qml` | 6 Buttons, 1 TextField, 1 ItemDelegate | 1 placeholder-only TextField (subscribe URL) found by static scan; the lead's count of 2 is not reproduced, so the runtime guard decides | unchecked | `blocklists_*_qml.rs` | none |
+| `ProfilesPage.qml` | 10 Buttons, 3 TextFields, 1 ItemDelegate | 2 unnamed declarations: the new-profile-name TextField (placeholder only) and the row ItemDelegate (:176). The rename and network-matchers fields (:314) are value-bound | unchecked | `profile_rules_qml.rs`, `honest_ui_pages_qml.rs` | none |
+| `BlocklistsPage.qml` | 6 Buttons, 1 TextField, 1 ItemDelegate | 2 unnamed declarations: the subscription URL TextField (:99, placeholder only) and the row ItemDelegate (:295) | unchecked | `blocklists_*_qml.rs` | none |
 | `DaemonHealthPage.qml` + `DenyStatusSection.qml` | 2 Buttons | 0 | unchecked | `daemon_health_model_qml.rs`, `deny_status_qml.rs` | none |
 | `DiagnosticsPage.qml` | 2 Switches, 2 ComboBoxes, 2 Buttons, 1 TextArea | 4 | unchecked | `honest_ui_external_text_qml.rs` | none |
 | `ScannerPage.qml` | 1 Button | 0 | unchecked | `scanner_*_qml.rs` | none |
 | `GeoPage.qml`, `GeoDatabaseSettings.qml` | 5 Buttons, 1 ItemDelegate | 0 | unchecked | `geo_qml.rs` | none |
 | `TrafficPage.qml` | none interactive | n/a | n/a | `traffic_model_qml.rs` | n/a |
-| Map on the Connections page: `MapBand.qml` (embedded by `MonitorPane.qml` ~52), `MapView.qml`, `MapMarker.qml`, `MapDestinationsPopup.qml` | band buttons (show/hide, zoom, fit, scope, destinations), markers, popup list with ItemDelegates | band buttons and markers are named (`MapBand.qml` 92-177, `MapMarker.qml:36`); the popup delegate sets no `Accessible.name` and carries text only through a `contentItem` Label | `MapView` handles +, -, Home/0 and arrows; markers have `activeFocusOnTab`; the popup takes Return/Enter and focuses its list on open. Escape and focus restoration unchecked | `map_view_qml.rs` (names and `activeFocusOnTab` only), `map_drilldown_qml.rs`, `map_split_drag_real_qml.rs`, `honest_ui_map_guards.rs` | none (there is no existing map key-event test) |
+| Map on the Connections page: `MapBand.qml` (embedded by `MonitorPane.qml` ~52), `MapView.qml`, `MapMarker.qml`, `MapDestinationsPopup.qml` | band buttons (show/hide, zoom, fit, scope, destinations), markers, popup list with ItemDelegates | band buttons and markers are named (`MapBand.qml` 92-177, `MapMarker.qml:36`); the popup delegate sets no `Accessible.name` and carries text only through a `contentItem` Label | `MapView` handles +, -, Home/0 and arrows; markers have `activeFocusOnTab`; the popup takes Return/Enter and focuses its list on open. Escape and focus restoration unchecked | `map_view_qml.rs` (names and `activeFocusOnTab`), `map_drilldown_qml.rs`, `map_split_drag_real_qml.rs`, `honest_ui_map_guards.rs`, and the CI QML runner's `tests/qml/tst_map_camera.qml` and `tst_map_drilldown.qml` | `tst_map_camera.qml:172,211-222` (real Tab, Plus, Right, Home on production QML); `tst_map_drilldown.qml:192-200` (Return chooses a popup destination). Marker activation, Escape and focus restoration have none |
 | Banners: `LearningBanner.qml` (Stop learning, Review, ~65-73), daemon-health banner Details action (`main.qml` ~435-450), `LearningProgressList.qml` Cancel (~39-42) | 3 Kirigami.Actions, 1 Button | 0 | InlineMessage actions; reachability unchecked | `learning_banner_qml.rs`, `learning_end_qml.rs`, `daemon_health_model_qml.rs` | none |
 | `AnalysisExportSheet.qml` | 4 Buttons, 3 CheckBoxes, 3 TextFields, 1 ComboBox, 1 TextArea | 0 static (5 explicit names) | unchecked | `tests/probes/analysis_export_probe.qml` (~15-76) instantiates and operates the real sheet, plus `analysis_export_qml.rs` and a lifecycle probe | none |
 | `OnboardingPage.qml`, `CuratedGroupsStep.qml`, `SilentModeChoice.qml` (first run) | 6 Buttons (3 + 2 + 1), 1 Switch (repeated per group at runtime), 1 RadioButton declaration, 1 Kirigami.Action (`SilentModeChoice.qml:70`, omitted from the earlier scan) | 1 | unchecked | `wizard_qml.rs`, `curated_groups_step_qml.rs` (opens and checks the real DNS consent dialog, ~164-168), `silent_mode_onboarding_qml.rs` | none |
 | `main.qml` (global drawer, page switching) | 12 Kirigami.Actions | 0 | Opening the drawer and switching pages by keyboard unchecked; no `Shortcut`s | `page_stack_lifecycle_qml.rs` | none |
-| `TrayMenu.qml` | 8 `Qt.labs.platform` MenuItems: 6 actionable, 2 separators (`separator: true`) | 2 static among the actionable items (texts are bound expressions) | A native menu drawn by the desktop shell. Native menu export and D-Bus events are partly headless-testable (`tests/native-tray/`, offscreen, ~28-37); Plasma Wayland input/grab acceptance is not | `tray_menu_qml.rs` (model), `tray_lifecycle_qml.rs`, `tests/native-tray/` (real `TrayMenu.qml`, six exported entries, D-Bus) | none |
+| `TrayMenu.qml` | 8 `Qt.labs.platform` MenuItems: 6 actionable, 2 separators (`separator: true`) | 0 unnamed actionable entries (all six have non-empty text bindings; the two textless declarations are separators) | A native menu drawn by the desktop shell. Native menu export and D-Bus events are partly headless-testable (`tests/native-tray/`, offscreen, ~28-37); Plasma Wayland input/grab acceptance is not | `tray_menu_qml.rs` (model), `tray_lifecycle_qml.rs`, `tests/native-tray/` (real `TrayMenu.qml`, six exported entries, D-Bus) | none |
 
 ## Slices, in order (each its own small PR)
 
@@ -134,7 +134,14 @@ Each slice:
   skips the held-key guard. The slice must close it, or prove it cannot
   matter.
 - **Tests first** (real press, hold and release via QtTest, not
-  `handleKey` calls):
+  `handleKey` calls; existing tests call `handleKey()` directly):
+  - Pre-Tab path (proves D1's "Return before any Tab"): with the initial
+    focus on the `FocusScope`, a real Return gives exactly one Allow and a
+    real Escape exactly one Deny, asserting the payload (row, verdict,
+    scope, duration). Also: before arming nothing is sent; a key held from
+    before arming, an auto-repeat, and a release then a fresh press behave
+    as in the held-key guard. Disabling the initial Return or weakening its
+    held-key protection must fail one of these (mutants);
   - Space, Return, keypad Enter and Escape on each choice button AND on
     each verdict button, covering: a key held from before arming, an
     auto-repeat, and a release then a fresh press;
@@ -197,11 +204,13 @@ separate surface and stays in slice 6.
   - Name each popup delegate after its destination and summary.
   - Keyboard selection of a marker and of a popup entry; Escape closes the
     popup; focus returns to the control that opened it.
-- **Tests first:** the existing map tests check names and
-  `activeFocusOnTab` only (`map_view_qml.rs` ~131-136); there are no
-  existing map key-event tests to reuse. Add real key events: Tab to a
-  marker, Space/Return selects, the popup opens, Return chooses, Escape
-  closes, focus restored. The guard runs with the popup open.
+- **Tests first:** reuse the existing key-event tests that load production
+  QML in the CI QML runner: `tests/qml/tst_map_camera.qml` (~172, 211-222:
+  Tab, Plus, Right, Home) and `tst_map_drilldown.qml` (~192-200: Return
+  chooses a popup destination). `map_view_qml.rs` (~131-136) checks names
+  and `activeFocusOnTab`. Add only what is missing: marker activation by
+  Space/Return, Escape closing the popup, and focus restored to the
+  opener. The guard runs with the popup open.
 - **Does not cover:** pan and zoom feel, or screen-reader behaviour on a
   canvas-like map.
 
