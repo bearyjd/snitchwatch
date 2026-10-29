@@ -33,17 +33,20 @@ Window {
     width: 900; height: 700
     property var announced: []
     property int step: 0
+    property var page: null
     ScannerController { id: scanner }
-    // Destroying and recreating the page stands in for navigating away/back.
-    Loader {
-        id: pageLoader
-        anchors.fill: parent
-        active: true
-        sourceComponent: ScannerPage {
+    Item { id: holder; anchors.fill: parent }
+    Component {
+        id: pageComponent
+        ScannerPage {
             controller: scanner
             onOutcomeAnnounced: message => root.announced = root.announced.concat([message])
         }
     }
+    // Same shape as StackNav.createPage: built parentless, attached afterwards.
+    function createParentless() { root.page = pageComponent.createObject(null, {}); }
+    function attach() { root.page.parent = holder; }
+    function drop() { if (root.page) { root.page.destroy(); root.page = null; } }
     function find(item, name) {
         if (item.objectName === name) return item;
         for (let child of item.children) { let result = find(child, name); if (result) return result; }
@@ -54,41 +57,56 @@ Window {
         console.warn(error ? "SCANNER_A11Y_FAILED: " + error : "SCANNER_A11Y_COMPLETE");
         Qt.quit();
     }
-    // Each step starts a real scan (missing-binary preflight failure) and
+    // Each step starts real scans (missing-binary preflight failure) and
     // continues once the worker has reported back.
     function advance() {
         try {
             if (root.step === 0) {
-                // (a) the scan finishes while the page does not exist
-                pageLoader.active = false;
+                // (a) the page goes away mid-scan; the scan finishes without it
+                createParentless(); attach();
+                expect(root.announced.length === 0, "announced before any scan");
                 scanner.runScan();
+                drop();
                 root.step = 1;
             } else if (root.step === 1) {
                 expect(root.announced.length === 0, "announced with no page alive");
                 expect(scanner.summaryText.length > 0, "no outcome");
                 const outcome = scanner.summaryText;
-                pageLoader.active = true;
+                createParentless();
+                expect(root.announced.length === 0, "announced from a detached page");
+                attach();
                 expect(root.announced.length === 1 && root.announced[0] === outcome,
-                       "outcome finished off-page was not announced exactly once on return");
+                       "outcome finished off-page was not announced exactly once on attach");
                 // (b) later revisits do not repeat a stale summary
-                pageLoader.active = false;
-                pageLoader.active = true;
-                pageLoader.active = false;
-                pageLoader.active = true;
+                drop(); createParentless(); attach();
+                drop(); createParentless(); attach();
                 expect(root.announced.length === 1, "stale summary re-announced on revisit");
                 // (c) page alive: the busy -> false path announces once
-                const banner = root.find(pageLoader.item, "scannerSummary");
+                const banner = root.find(root.page, "scannerSummary");
                 expect(!!banner, "summary banner missing");
                 scanner.runScan();
                 expect(banner.Accessible.name === "Scanning…", "busy banner name is '" + banner.Accessible.name + "'");
                 expect(root.announced.length === 1, "announced while busy");
                 root.step = 2;
-            } else {
-                const banner = root.find(pageLoader.item, "scannerSummary");
+            } else if (root.step === 2) {
+                const banner = root.find(root.page, "scannerSummary");
                 expect(root.announced.length === 2 && root.announced[1] === scanner.summaryText,
                        "live completion not announced exactly once");
                 expect(banner.Accessible.name === scanner.summaryText,
                        "outcome banner name is '" + banner.Accessible.name + "'");
+                // An unannounced outcome, then a new scan: the old one is dropped.
+                drop();
+                scanner.runScan();
+                root.step = 3;
+            } else if (root.step === 3) {
+                scanner.runScan();
+                createParentless(); attach();
+                expect(scanner.busy, "second scan should be running");
+                expect(root.announced.length === 2, "old outcome announced while a new scan is busy");
+                root.step = 4;
+            } else {
+                expect(root.announced.length === 3 && root.announced[2] === scanner.summaryText,
+                       "new scan's outcome not announced exactly once");
                 finish(null);
                 return;
             }

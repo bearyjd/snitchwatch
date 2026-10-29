@@ -49,7 +49,9 @@ Kirigami.ScrollablePage {
     // The banner flips from "Scanning…" to the outcome in place, which
     // assistive tech does not report on its own. The controller owns the
     // not-yet-announced outcome, so a scan that finished while this page was
-    // not alive is announced when it is next created, and never twice.
+    // not alive is announced once the new page is attached to a window (pages
+    // are built parentless and attached afterwards, see StackNav), never from
+    // a detached item, and never twice.
     function announcePendingOutcome() {
         if (!page.controller) return;
         const message = page.controller.takePendingOutcome();
@@ -57,7 +59,8 @@ Kirigami.ScrollablePage {
         summaryBanner.Accessible.announce(message, Accessible.Polite);
         page.outcomeAnnounced(message);
     }
-    Component.onCompleted: page.announcePendingOutcome()
+    readonly property bool attached: visible && Window.window !== null
+    onAttachedChanged: if (attached) page.announcePendingOutcome()
 
     // `errorText` includes the scanner's stderr and binary path, so it sits
     // in a PlainText label, never in the InlineMessage (issue #51).

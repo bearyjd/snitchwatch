@@ -82,6 +82,8 @@ impl qobject::ScannerController {
             return;
         }
         tracing::info!("deep scan requested");
+        // An outcome nobody heard must not be announced over the new scan.
+        self.as_mut().rust_mut().pending_outcome = QString::default();
         self.as_mut().set_busy(true);
         self.as_mut().set_error_text(QString::default());
         self.as_mut().set_error_title(QString::default());
