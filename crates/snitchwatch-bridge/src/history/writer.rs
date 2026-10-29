@@ -19,7 +19,7 @@
 //! ([`WriteError::BudgetExceeded`]).
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -46,12 +46,13 @@ pub struct Item {
 
 impl Item {
     /// What the item counts for against the queue's byte bound, conservatively:
-    /// twice the inline size of `Item` (the deque holds spare slots, at most
-    /// as many again as are used) plus the capacity of every owned
+    /// four times the inline size of `Item` (a deque holds at most
+    /// `max(4, 2 * len)` slots: its first allocation is 4, and the queue
+    /// shrinks it to twice its length on every pop) plus the capacity of every owned
     /// allocation.
     pub fn queue_bytes(&self) -> usize {
         let e = &self.event;
-        2 * std::mem::size_of::<Item>()
+        4 * std::mem::size_of::<Item>()
             + e.process_path.as_ref().map_or(0, |v| v.allocated())
             + e.dst_host.as_ref().map_or(0, |v| v.allocated())
             + e.protocol.as_ref().map_or(0, |v| v.allocated())
@@ -242,9 +243,46 @@ pub struct TxnReport {
 
 pub type Observer = Box<dyn FnMut(&TxnReport) + Send>;
 
+/// `Ok` only for the rollback-journal mode the disk bound assumes. SQLite
+/// answers a mode it could not switch to (WAL under a reader, or MEMORY/OFF on
+/// a database that forces it) with the mode it kept, not an error.
+pub(crate) fn require_delete_mode(mode: String) -> Result<(), WriteError> {
+    if mode.eq_ignore_ascii_case("delete") {
+        Ok(())
+    } else {
+        Err(WriteError::JournalMode(mode))
+    }
+}
+
+/// Whether `file` is exactly a name `state_file::temp_path` generates for the
+/// settings file `name`: `.<name>.<pid>.<16 lower-hex digits>.tmp`. Returns
+/// the pid.
+fn settings_temp_pid(name: &str, file: &str) -> Option<u32> {
+    let rest = file
+        .strip_prefix('.')?
+        .strip_prefix(name)?
+        .strip_prefix('.')?;
+    let rest = rest.strip_suffix(".tmp")?;
+    let (pid, unique) = rest.split_once('.')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let hex16 = unique.len() == 16
+        && unique
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if digits(pid) && hex16 {
+        pid.parse().ok()
+    } else {
+        None
+    }
+}
+
 /// Remove temp files that an interrupted settings save left in the history
 /// directory (`state_file::temp_path` names them `.<file>.<pid>.<rand>.tmp`),
-/// so the settings reserve of two files is the true worst case.
+/// so the settings reserve of two files is the true worst case. Only exact
+/// generated names, only regular files (a link is never followed), and never a
+/// file of a live process (this one included): that one may be a save in
+/// flight, whose rename would fail if its temp file vanished. A recycled pid
+/// at worst keeps a stale file until the next open.
 fn remove_settings_leftovers(location: &Location) -> Result<(), WriteError> {
     let settings = location.settings_path();
     let Some(name) = settings
@@ -253,14 +291,17 @@ fn remove_settings_leftovers(location: &Location) -> Result<(), WriteError> {
     else {
         return Ok(());
     };
-    let prefix = format!(".{name}.");
     let Some(dir) = settings.parent() else {
         return Ok(());
     };
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let file = entry.file_name().to_string_lossy().into_owned();
-        if file.starts_with(&prefix) && file.ends_with(".tmp") && !entry.file_type()?.is_dir() {
+        let Some(pid) = settings_temp_pid(&name, &file) else {
+            continue;
+        };
+        let alive = pid == std::process::id() || Path::new("/proc").join(pid.to_string()).exists();
+        if !alive && std::fs::symlink_metadata(entry.path())?.is_file() {
             std::fs::remove_file(entry.path())?;
         }
     }
@@ -327,11 +368,7 @@ impl Engine {
         let mode: String = self
             .conn
             .query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))?;
-        if mode.eq_ignore_ascii_case("delete") {
-            Ok(())
-        } else {
-            Err(WriteError::JournalMode(mode))
-        }
+        require_delete_mode(mode)
     }
 
     #[cfg(test)]

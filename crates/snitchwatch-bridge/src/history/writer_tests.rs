@@ -416,7 +416,7 @@ fn evicting_an_event_removes_its_unreferenced_snapshot_but_keeps_shared_ones() {
 #[test]
 fn a_full_queue_drops_and_counts_without_blocking() {
     // No writer is draining: the same as a writer stuck in a slow disk.
-    let queue = Queue::new(64 * 1024, 100);
+    let queue = Queue::new(4 * MIB as usize, 100);
     let start = Instant::now();
     let mut dropped = 0;
     for i in 0..10_000 {
@@ -742,18 +742,34 @@ fn spawn_puts_a_switched_connection_back_in_delete_mode() {
 }
 
 #[test]
-fn leftover_settings_temp_files_are_removed_when_the_writer_opens() {
+fn stale_settings_temp_files_are_removed_when_the_writer_opens() {
     let rig = rig_with(16 * MIB, true);
     let settings = rig.location.settings_path();
     let dir = settings.parent().unwrap().to_path_buf();
-    let mut leftovers = Vec::new();
-    for k in 0..20 {
-        let p = dir.join(format!(".settings.json.{k}.{k:016x}.tmp"));
-        std::fs::write(&p, vec![b' '; 4096]).unwrap();
-        leftovers.push(p);
+    // A pid far above pid_max: no such process.
+    let stale: Vec<_> = (0..20)
+        .map(|k| dir.join(format!(".settings.json.4000000000.{k:016x}.tmp")))
+        .collect();
+    for p in &stale {
+        std::fs::write(p, vec![b' '; 4096]).unwrap();
     }
-    let other = dir.join("keep.txt");
-    std::fs::write(&other, b"x").unwrap();
+    let me = std::process::id();
+    let active = dir.join(format!(".settings.json.{me}.{:016x}.tmp", 7));
+    let live_other = dir.join(".settings.json.1.0000000000000001.tmp");
+    let not_ours = [
+        ".settings.json.backup.tmp",
+        ".settings.json.4000000000.XYZ.tmp",
+        ".settings.json.4000000000.00000000000000001.tmp",
+        ".settings.json.4000000000.0000000000000001.tmp.bak",
+        "settings.json.4000000000.0000000000000001.tmp",
+        "keep.txt",
+    ]
+    .map(|n| dir.join(n));
+    for p in [&active, &live_other].into_iter().chain(&not_ours) {
+        std::fs::write(p, b"x").unwrap();
+    }
+    let link = dir.join(".settings.json.4000000000.00000000000000aa.tmp");
+    std::os::unix::fs::symlink(other_target(&dir), &link).unwrap();
     let before = std::fs::read(&settings).unwrap();
     let _again = Engine::new(
         open_store(&rig.location).unwrap(),
@@ -761,14 +777,87 @@ fn leftover_settings_temp_files_are_removed_when_the_writer_opens() {
         Budget::new(16 * MIB).unwrap(),
     )
     .unwrap();
-    assert!(leftovers.iter().all(|p| !p.exists()), "temp files remain");
-    assert!(other.exists(), "unrelated files are left alone");
+    assert!(stale.iter().all(|p| !p.exists()), "stale temp files remain");
+    assert!(
+        active.exists(),
+        "this process's temp file may be a save in flight"
+    );
+    assert!(
+        live_other.exists(),
+        "a live process's temp file is left alone"
+    );
+    for p in &not_ours {
+        assert!(p.exists(), "{p:?} is not a generated temp name");
+    }
+    assert!(link.symlink_metadata().is_ok(), "a link is never removed");
+    assert!(other_target(&dir).exists(), "and never followed");
     assert_eq!(std::fs::read(&settings).unwrap(), before);
+}
+
+fn other_target(dir: &std::path::Path) -> std::path::PathBuf {
+    let p = dir.join("link-target.txt");
+    std::fs::write(&p, b"t").unwrap();
+    p
+}
+
+#[test]
+fn a_save_in_flight_keeps_its_temp_file_when_a_writer_opens() {
+    let rig = rig_with(16 * MIB, true);
+    let location = rig.location.clone();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let current = super::settings::load(&location).unwrap().unwrap();
+    let loc = location.clone();
+    let saver = std::thread::spawn(move || {
+        let mut n = 0;
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) && n < 400 {
+            super::settings::save(&loc, &current).expect("save raced with the sweep");
+            n += 1;
+        }
+    });
+    for _ in 0..20 {
+        let _e = Engine::new(
+            open_store(&location).unwrap(),
+            &location,
+            Budget::new(16 * MIB).unwrap(),
+        )
+        .unwrap();
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    saver.join().unwrap();
+}
+
+#[test]
+fn a_mode_sqlite_kept_is_refused() {
+    for mode in ["wal", "memory", "off", "truncate"] {
+        assert!(
+            matches!(
+                require_delete_mode(mode.to_string()),
+                Err(WriteError::JournalMode(_))
+            ),
+            "{mode}"
+        );
+    }
+    assert!(require_delete_mode("delete".into()).is_ok());
+    assert!(require_delete_mode("DELETE".into()).is_ok());
+}
+
+#[test]
+fn a_tiny_byte_limit_covers_the_deques_real_first_allocation() {
+    let item = small_item(1);
+    let limit = item.queue_bytes();
+    let queue = Queue::new(limit, 100);
+    queue.try_push(item).unwrap();
+    let (_, cap) = queue.retained_for_test();
+    assert!(
+        cap * std::mem::size_of::<Item>() <= limit,
+        "retained {cap} slots"
+    );
 }
 
 #[test]
 fn a_drained_queue_gives_its_backing_allocation_back() {
-    let queue = Queue::with_defaults();
+    let queue = Queue::new(64 * MIB as usize, 4096);
     for i in 0..3000 {
         queue.try_push(small_item(i)).unwrap();
     }
