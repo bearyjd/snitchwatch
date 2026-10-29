@@ -9,11 +9,11 @@ fn oldest_tracks_add_and_release_in_any_order() {
     let b = r.add(10).unwrap();
     let c = r.add(30).unwrap();
     assert_eq!(r.oldest(), Some(10));
-    r.release(a).unwrap();
+    r.release(&a).unwrap();
     assert_eq!(r.oldest(), Some(10));
-    r.release(b).unwrap();
+    r.release(&b).unwrap();
     assert_eq!(r.oldest(), Some(30));
-    r.release(c).unwrap();
+    r.release(&c).unwrap();
     assert_eq!(r.oldest(), None);
     assert!(r.is_empty());
 }
@@ -23,9 +23,9 @@ fn equal_arrival_times_are_distinct_pins() {
     let r = PinRegistry::new();
     let a = r.add(5).unwrap();
     let b = r.add(5).unwrap();
-    r.release(a).unwrap();
+    r.release(&a).unwrap();
     assert_eq!(r.oldest(), Some(5), "b still pins 5");
-    r.release(b).unwrap();
+    r.release(&b).unwrap();
     assert_eq!(r.oldest(), None);
 }
 
@@ -34,14 +34,26 @@ fn double_and_unknown_release_are_errors_not_panics() {
     let r = PinRegistry::new();
     let a = r.add(1).unwrap();
     let keep = r.add(2).unwrap();
-    r.release(a).unwrap();
-    assert_eq!(r.release(a), Err(PinError::Unknown));
+    r.release(&a).unwrap();
+    assert_eq!(r.release(&a), Err(PinError::Unknown));
     assert_eq!(r.oldest(), Some(2), "the failed release changed nothing");
-    let other = PinRegistry::new();
-    let foreign = other.add(9).unwrap();
-    let _ = other.add(9).unwrap();
-    r.release(keep).unwrap();
-    assert_eq!(r.release(foreign), Err(PinError::Unknown));
+    r.release(&keep).unwrap();
+}
+
+#[test]
+fn a_handle_from_another_registry_cannot_release_a_live_pin() {
+    // Both registries issue id 0 while A's pin is still live.
+    let a = PinRegistry::new();
+    let b = PinRegistry::new();
+    let live = a.add(10).unwrap();
+    let foreign = b.add(20).unwrap();
+    assert_eq!(a.release(&foreign), Err(PinError::Foreign));
+    assert_eq!(a.oldest(), Some(10), "A's pin and watermark are untouched");
+    assert_eq!(a.watermark(100), 10);
+    assert_eq!(b.release(&live), Err(PinError::Foreign));
+    assert_eq!(b.oldest(), Some(20));
+    a.release(&live).unwrap();
+    b.release(&foreign).unwrap();
 }
 
 #[test]
@@ -51,7 +63,7 @@ fn watermark_is_min_of_commit_and_oldest_pin() {
     let p = r.add(40).unwrap();
     assert_eq!(r.watermark(100), 40);
     assert_eq!(r.watermark(30), 30, "never later than the commit");
-    r.release(p).unwrap();
+    r.release(&p).unwrap();
     assert_eq!(r.watermark(100), 100);
 }
 
@@ -84,7 +96,7 @@ fn concurrent_add_release_leaves_consistent_registry() {
                 for i in 0..500 {
                     let id = r.add(t * 1000 + i).unwrap();
                     assert!(r.oldest().unwrap() <= t * 1000 + i);
-                    r.release(id).unwrap();
+                    r.release(&id).unwrap();
                 }
             })
         })
@@ -94,7 +106,7 @@ fn concurrent_add_release_leaves_consistent_registry() {
     }
     assert_eq!(r.len(), 1);
     assert_eq!(r.oldest(), Some(-1));
-    r.release(keeper).unwrap();
+    r.release(&keeper).unwrap();
     assert!(r.is_empty());
 }
 
@@ -103,11 +115,11 @@ fn a_poisoned_lock_is_recovered() {
     let r = Arc::new(PinRegistry::new());
     let r2 = Arc::clone(&r);
     let _ = std::thread::spawn(move || {
-        let _g = r2.0.lock().unwrap();
+        let _g = r2.inner.lock().unwrap();
         panic!("poison");
     })
     .join();
     let id = r.add(3).unwrap();
     assert_eq!(r.oldest(), Some(3));
-    r.release(id).unwrap();
+    r.release(&id).unwrap();
 }

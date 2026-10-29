@@ -4,18 +4,30 @@
 //! "release in the same transaction" half is PR 3b.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-/// Opaque pin handle. Ids are never reused, so a stale handle is always
-/// detected as unknown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PinId(u64);
+/// Source of per-registry identities, so a handle only works on the registry
+/// that issued it.
+static NEXT_REGISTRY: AtomicU64 = AtomicU64::new(0);
+
+/// Opaque pin handle: not `Clone`, fields private, only [`PinRegistry::add`]
+/// builds one. It carries its registry's identity; ids are never reused, so a
+/// stale handle is always detected as unknown.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PinId {
+    registry: u64,
+    id: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PinError {
-    /// Released twice, or never issued by this registry.
+    /// Released twice (this registry issued it, but it is no longer live).
     #[error("unknown pin")]
     Unknown,
+    /// Issued by a different registry. Nothing was released.
+    #[error("pin belongs to another registry")]
+    Foreign,
     /// More than `u64::MAX` pins were issued.
     #[error("pin ids exhausted")]
     Exhausted,
@@ -24,41 +36,68 @@ pub enum PinError {
 #[derive(Debug, Default)]
 struct Inner {
     next_id: u64,
-    arrival_by_id: BTreeMap<PinId, i64>,
+    arrival_by_id: BTreeMap<u64, i64>,
     /// `(arrival, id)`, so the first element is the oldest pin.
-    by_arrival: BTreeSet<(i64, PinId)>,
+    by_arrival: BTreeSet<(i64, u64)>,
 }
 
-#[derive(Debug, Default)]
-pub struct PinRegistry(Mutex<Inner>);
+#[derive(Debug)]
+pub struct PinRegistry {
+    registry: u64,
+    inner: Mutex<Inner>,
+}
+
+impl Default for PinRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PinRegistry {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_inner(Inner::default())
+    }
+
+    fn with_inner(inner: Inner) -> Self {
+        Self {
+            // Wraps only after 2^64 registries.
+            registry: NEXT_REGISTRY.fetch_add(1, Ordering::Relaxed),
+            inner: Mutex::new(inner),
+        }
     }
 
     // Every mutation is two infallible map operations, so a poisoned lock
     // never guards a half-updated state; recover it.
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Records a pin that arrived at `arrival_ms`.
     pub fn add(&self, arrival_ms: i64) -> Result<PinId, PinError> {
         let mut inner = self.lock();
         let next = inner.next_id.checked_add(1).ok_or(PinError::Exhausted)?;
-        let id = PinId(inner.next_id);
+        let id = inner.next_id;
         inner.next_id = next;
         inner.arrival_by_id.insert(id, arrival_ms);
         inner.by_arrival.insert((arrival_ms, id));
-        Ok(id)
+        Ok(PinId {
+            registry: self.registry,
+            id,
+        })
     }
 
-    /// Releases a pin. A second release, or a foreign id, is an error.
-    pub fn release(&self, id: PinId) -> Result<(), PinError> {
+    /// Releases a pin. A second release is `Unknown`, a handle from another
+    /// registry is `Foreign`; either way nothing changes.
+    pub fn release(&self, pin: &PinId) -> Result<(), PinError> {
+        if pin.registry != self.registry {
+            return Err(PinError::Foreign);
+        }
         let mut inner = self.lock();
-        let arrival = inner.arrival_by_id.remove(&id).ok_or(PinError::Unknown)?;
-        inner.by_arrival.remove(&(arrival, id));
+        let arrival = inner
+            .arrival_by_id
+            .remove(&pin.id)
+            .ok_or(PinError::Unknown)?;
+        inner.by_arrival.remove(&(arrival, pin.id));
         Ok(())
     }
 
@@ -82,10 +121,10 @@ impl PinRegistry {
 
     #[cfg(test)]
     pub(crate) fn with_next_id(next_id: u64) -> Self {
-        Self(Mutex::new(Inner {
+        Self::with_inner(Inner {
             next_id,
             ..Inner::default()
-        }))
+        })
     }
 }
 
