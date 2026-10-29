@@ -19,8 +19,11 @@ const REPORT: &str = r#"{"scan_id":5,"new":[],"still_outstanding":[],"resolved":
 "skipped":[{"check":"file_drift","reason":"r"},{"check":"rootkit_signature","reason":"r"}]}"#;
 
 static CALLS: AtomicUsize = AtomicUsize::new(0);
+/// Scans the probe has acknowledged as busy (it GETs the ack server below).
+static ACKED: AtomicUsize = AtomicUsize::new(0);
 
-/// Call 1 fails at once; later calls take 600 ms and succeed.
+/// Call 1 fails at once; each later call succeeds only after the probe has
+/// seen it busy, so a slow UI tick cannot miss the in-flight state.
 struct FakeBroker;
 
 #[zbus::interface(name = "org.snitchwatch.Scanner1")]
@@ -29,7 +32,12 @@ impl FakeBroker {
         if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
             return ("failed".into(), "boom".into());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while ACKED.load(Ordering::SeqCst) < CALLS.load(Ordering::SeqCst) - 1
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         ("ok".into(), REPORT.into())
     }
 }
@@ -46,6 +54,23 @@ fn start_private_bus() -> std::process::Child {
         .unwrap();
     std::env::set_var("DBUS_SESSION_BUS_ADDRESS", address.trim());
     daemon
+}
+
+/// Tiny HTTP endpoint the QML probe GETs to acknowledge "I saw it busy".
+fn serve_acks() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ack listener");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            use std::io::{Read, Write};
+            let mut stream = stream;
+            let mut buf = [0u8; 512];
+            let _ = stream.read(&mut buf);
+            ACKED.fetch_add(1, Ordering::SeqCst);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+    });
+    port
 }
 
 fn serve_fake_broker() {
@@ -105,6 +130,11 @@ Window {
         Qt.quit();
     }
     function check(cond, what) { if (!cond) throw new Error(what); }
+    function ack() {
+        const x = new XMLHttpRequest();
+        x.open("GET", "http://127.0.0.1:@ACK_PORT@/ack");
+        x.send();
+    }
     function focusRun() { const b = named("scannerRunButton"); b.forceActiveFocus(); return b; }
     Timer {
         interval: 100; running: true; repeat: true
@@ -116,6 +146,8 @@ Window {
                 } else if (step === 1 && !controller.busy && controller.errorTitle !== "") {
                     failTitle = controller.errorTitle; failSummary = controller.summaryText;
                     check(failSummary.indexOf("did not complete") >= 0, "no failure summary: " + failSummary);
+                    check(visibleNamed("scannerSummary") && named("scannerSummary").text === failSummary,
+                          "failure summary not rendered");
                     check(visibleNamed("scannerStatusMessage"), "error header not visible");
                     focusRun(); tc.mouseClick(named("scannerRunButton"));   // scan 2 starts (slow)
                     step = 2; waited = 0;
@@ -125,9 +157,13 @@ Window {
                     check(controller.summaryText === failSummary, "summary wiped at scan start");
                     check(visibleNamed("scannerStatusMessage"), "error header hidden while scanning");
                     check(visibleNamed("scannerBusy"), "no Scanning... indicator");
+                    // And as rendered text, not just controller state.
+                    check(visibleNamed("scannerSummary") && named("scannerSummary").text === failSummary,
+                          "rendered summary replaced while scanning: " + (named("scannerSummary") && named("scannerSummary").text));
                     // Activations while busy must not start more scans.
                     focusRun(); tc.keyClick(Qt.Key_Return); tc.keyClick(Qt.Key_Space);
                     tc.mouseClick(named("scannerRunButton"));
+                    ack();                                  // let scan 2 finish
                     step = 3; waited = 0;
                 } else if (step === 3 && !controller.busy) {
                     check(controller.errorTitle === "", "error not cleared by success");
@@ -136,6 +172,7 @@ Window {
                     focusRun(); tc.keyClick(Qt.Key_Space);  // after completion: scan 3
                     step = 4; waited = 0;
                 } else if (step === 4 && controller.busy) {
+                    ack();                                  // let scan 3 finish
                     step = 5; waited = 0;
                 } else if (step === 5 && !controller.busy) {
                     report("done", "");
@@ -154,6 +191,7 @@ fn failures_stay_until_the_next_outcome_and_activation_starts_one_scan() {
     init_headless_qt_env();
     let mut daemon = start_private_bus();
     serve_fake_broker();
+    let ack_port = serve_acks();
     force_transport_for_tests(Transport::Broker);
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
@@ -167,7 +205,7 @@ fn failures_stay_until_the_next_outcome_and_activation_starts_one_scan() {
     let captured = capture_stderr(|| {
         if let Some(engine) = engine.as_mut() {
             engine.load_data(
-                &QByteArray::from(QML),
+                &QByteArray::from(QML.replace("@ACK_PORT@", &ack_port.to_string()).as_str()),
                 &QUrl::from("qrc:/inline_sticky_probe.qml"),
             );
         }

@@ -69,7 +69,11 @@ ColumnLayout {
         visible: sheet.bindableProcessPath && !form.visible
         text: "Make a rule…"
         icon.name: "list-add"
-        onClicked: form.visible = true
+        // Q01: the button hides as the form opens; focus goes into the form.
+        onClicked: {
+            form.visible = true;
+            scopeBox.forceActiveFocus(Qt.TabFocusReason);
+        }
     }
 
     Controls.Label {
@@ -94,7 +98,9 @@ ColumnLayout {
             }
             Controls.ComboBox {
                 id: scopeBox
+                objectName: "makeRuleScope"
                 Layout.fillWidth: true
+                Accessible.name: "Scope: " + displayText
                 textRole: "label"
                 valueRole: "token"
                 model: [
@@ -112,7 +118,9 @@ ColumnLayout {
             }
             Controls.ComboBox {
                 id: durationBox
+                objectName: "makeRuleDuration"
                 Layout.fillWidth: true
+                Accessible.name: "Duration: " + displayText
                 textRole: "label"
                 valueRole: "token"
                 // `Durations.remembered`: a once-only answer can't be added
@@ -174,6 +182,10 @@ ColumnLayout {
         if (!sheet.controller) {
             return;
         }
+        // Q01: asked before begin(): it makes the controller busy at once,
+        // which disables the focused Allow/Deny button and drops its focus.
+        let focusInForm = false;
+        for (let it = sheet.Window.activeFocusItem; it; it = it.parent) if (it === form) focusInForm = true;
         const requestId = sheet.controller.begin(sheet.rowId);
         if (requestId === "") {
             return;
@@ -189,6 +201,9 @@ ColumnLayout {
             sheet.controller.notSent(problem);
             return;
         }
+        // Hiding the form must not leave its focus nowhere: it goes back to
+        // "Make a rule…".
         form.visible = false;
+        if (focusInForm) openButton.forceActiveFocus(Qt.TabFocusReason);
     }
 }

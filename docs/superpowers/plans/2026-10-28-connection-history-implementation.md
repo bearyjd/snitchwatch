@@ -19,8 +19,9 @@ Rules this plan inherits from the design, stated once:
   socket group). Every PR that touches the writer, storage or control path
   tests `BridgeMode::System` as well as `BridgeMode::User`.
 - **"Implementation must prove", never a guessed number.** S1 field caps beyond
-  the three the owner set, the S2 per-row page constant, and src_ip/src_port
-  correlation uniqueness are proof obligations assigned to named PRs below.
+  the three the owner set and src_ip/src_port
+  correlation uniqueness are proof obligations (the S2 per-row page constant was
+  declined 2026-10-28 in favour of the full-journal fallback) assigned to named PRs below.
 
 ## How every PR ships
 
@@ -135,26 +136,23 @@ batch.
 ## PR 2: the writer and the page budget
 
 - **Goal:** one writer thread, bounded queue (bytes and count), batched
-  transactions with a hard page budget, incremental vacuum.
+  transactions, incremental vacuum, and the full-journal disk bound.
 - **Touches:** `history/writer.rs`, `history/budget.rs`. Bridge only.
 - **Tests first:** queue full drops and counts (never blocks a verdict, proven
-  with a blocked writer and a timed `AskRule`); worst-case rows (all fields at
-  cap) through insert, eviction and incremental vacuum never modify more pages
-  per transaction than the budget; main file + peak journal + settings peak +
-  0.1B (unallocated slack) <= B under the same workload, **with the settings
-  file at its maximum and its atomic replacement in flight counted in the same
+  with a blocked writer and a timed `AskRule`); the main file never exceeds B/2 when filled to the limit with worst-case
+  rows (all fields at cap), and main file + a full journal + settings peak <= B
+  when one transaction journals every page, **with the settings file at its
+  maximum and its atomic replacement in flight counted in the same
   measurement**; freed space shrinks
   the file without a full `VACUUM`;
   `secure_delete` canary scan after deletes.
 - **Lands:** S2, S3, S4, S5 (except clear-all recreation, PR 10), D5 insert path.
-- **Proof obligation discharged:** **S2.** The implementation must prove the
-  worst-case pages-per-row constant from the schema and caps (indexes,
-  snapshot rows, orphan cleanup) and encode it as the transaction budget.
-  **Decision point 1:** if it cannot be proved, switch to the design's
-  fallback (reserve a full-database rollback journal; main-file share at most
-  half of the budget) and ask the owner before PR 3.
-- **Review focus:** that the budget is enforced before commit, not measured
-  after; arithmetic reviewed against the schema, not against a test fixture.
+- **S2 resolved (owner, 2026-10-28):** the per-row page proof was declined as
+  unproved; the full-journal fallback is used (reserve a full-database
+  rollback journal; main-file share at most half of the budget). There is no
+  per-row page constant or per-transaction row-count derivation.
+- **Review focus:** that the cap and the journal reserve add up to at most B
+  with no fill-invariant argument; `cache_spill=OFF` verified on open.
 
 ## PR 3: pins, watermark, sessions, ledger
 
@@ -498,8 +496,8 @@ stays cache-only); H03 filters, H05 baselines, H08 digests, Q07 tuning.
 
 ## Decision points where the owner is asked again
 
-1. After PR 2: the S2 result. Proven constant, or switch to the full-journal
-   fallback (changes the usable cache size).
+1. After PR 2: S2 is decided (2026-10-28): the full-journal fallback, which
+   halves the usable cache size. Review of the PR 2 implementation remains.
 2. Before PR 12 merges: the exact opt-in text, because it is the consent
    record.
 3. Any S1 field cap beyond the three the owner set.
