@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::logging::open_no_follow;
+use crate::logging::{open_no_follow, open_settled, REPLACED_RETRIES};
 
 /// The file under `paths::config_dir()`.
 pub const SEEN_FILE_NAME: &str = "seen-programs.json";
@@ -88,7 +88,17 @@ impl Loaded {
 /// Read `path`, trusting it only if it is a regular file owned by `uid`
 /// with one link.
 pub fn read(path: &Path, uid: u32) -> Loaded {
-    let mut file = match open_no_follow(path, std::fs::OpenOptions::new().read(true)) {
+    read_with(path, uid, REPLACED_RETRIES, &mut || {})
+}
+
+/// [`read`] with the retry cap and the [`open_settled`] hook. A save
+/// replaces the file by rename, so a file that comes up with zero links is
+/// reopened; one that keeps being replaced is `Unreadable`, not `Foreign`.
+fn read_with(path: &Path, uid: u32, tries: u32, after_open: &mut dyn FnMut()) -> Loaded {
+    let opened = open_settled(tries, after_open, || {
+        open_no_follow(path, std::fs::OpenOptions::new().read(true))
+    });
+    let mut file = match opened {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Loaded::Missing,
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Loaded::Foreign,

@@ -160,8 +160,20 @@ fn previous_path(path: &Path) -> PathBuf {
 /// it is a regular file of ours with no other hard link, made 0600 first.
 /// Anything else at `path` is left for [`open_log`] to refuse.
 fn keep_previous(path: &Path) -> std::io::Result<()> {
+    keep_previous_with(path, REPLACED_RETRIES, &mut || {})
+}
+
+/// [`keep_previous`] with the retry cap and the [`open_settled`] hook.
+fn keep_previous_with(
+    path: &Path,
+    tries: u32,
+    after_open: &mut dyn FnMut(),
+) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let old = match open_no_follow(path, std::fs::OpenOptions::new().read(true)) {
+    let opened = open_settled(tries, after_open, || {
+        open_no_follow(path, std::fs::OpenOptions::new().read(true))
+    });
+    let old = match opened {
         Ok(old) => old,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
@@ -173,17 +185,24 @@ fn keep_previous(path: &Path) -> std::io::Result<()> {
 
 /// Open this run's log at `path`, owner-only and empty: see the module doc.
 fn open_log(path: &Path) -> std::io::Result<File> {
+    open_log_with(path, REPLACED_RETRIES, &mut || {})
+}
+
+/// [`open_log`] with the retry cap and the [`open_settled`] hook.
+fn open_log_with(path: &Path, tries: u32, after_open: &mut dyn FnMut()) -> std::io::Result<File> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     if let Some(dir) = path.parent() {
         crate::private_files::ensure_private_dir(dir)?;
     }
-    let file = open_no_follow(
-        path,
-        std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600),
-    )?;
+    let file = open_settled(tries, after_open, || {
+        open_no_follow(
+            path,
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .mode(0o600),
+        )
+    })?;
     refuse_unless_ours(path, &file)?;
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     file.set_len(0)?;
@@ -200,6 +219,37 @@ pub(crate) fn open_no_follow(
     options
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
+}
+
+/// How often a file that is replaced under us is reopened.
+pub(crate) const REPLACED_RETRIES: u32 = 16;
+
+/// The text of the error [`open_settled`] gives up with.
+pub(crate) const KEEPS_BEING_REPLACED: &str = "keeps being replaced while it is opened";
+
+/// `open`, retried while the file it opened has zero links: a writer
+/// replaced it by rename just after the open, so that handle is the old
+/// file and a `links != 1` check would call it a hard link. Fails closed
+/// after `tries` (`InvalidData`, [`KEEPS_BEING_REPLACED`]). `after_open` runs
+/// after each open and before the link count is read (tests replace the file
+/// by hand there). The caller checks the file it gets.
+pub(crate) fn open_settled(
+    tries: u32,
+    after_open: &mut dyn FnMut(),
+    mut open: impl FnMut() -> std::io::Result<File>,
+) -> std::io::Result<File> {
+    use std::os::unix::fs::MetadataExt;
+    for _ in 0..tries {
+        let file = open()?;
+        after_open();
+        if file.metadata()?.nlink() != 0 {
+            return Ok(file);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        KEEPS_BEING_REPLACED,
+    ))
 }
 
 /// What matters about a log file, from its handle.
@@ -251,3 +301,7 @@ pub(crate) fn effective_uid() -> u32 {
 #[cfg(test)]
 #[path = "logging/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "logging/replace_tests.rs"]
+pub(crate) mod replace_tests;
