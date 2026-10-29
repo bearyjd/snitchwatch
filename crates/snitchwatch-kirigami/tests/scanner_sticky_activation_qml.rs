@@ -42,21 +42,32 @@ impl FakeBroker {
     }
 }
 
-fn start_private_bus() -> std::process::Child {
-    let mut daemon = Command::new("dbus-daemon")
-        .args(["--session", "--nofork", "--print-address=1"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("dbus-daemon is needed for the click-path test");
+/// Kills and reaps the private bus however the test ends (panic included).
+struct PrivateBus(std::process::Child);
+
+impl Drop for PrivateBus {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn start_private_bus() -> PrivateBus {
+    let mut daemon = PrivateBus(
+        Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("dbus-daemon is needed for the click-path test"),
+    );
     let mut address = String::new();
-    BufReader::new(daemon.stdout.take().unwrap())
+    BufReader::new(daemon.0.stdout.take().unwrap())
         .read_line(&mut address)
         .unwrap();
     std::env::set_var("DBUS_SESSION_BUS_ADDRESS", address.trim());
     daemon
 }
 
-/// Tiny HTTP endpoint the QML probe GETs to acknowledge "I saw it busy".
 fn serve_acks() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ack listener");
     let port = listener.local_addr().unwrap().port();
@@ -189,7 +200,7 @@ Window {
 #[test]
 fn failures_stay_until_the_next_outcome_and_activation_starts_one_scan() {
     init_headless_qt_env();
-    let mut daemon = start_private_bus();
+    let _daemon = start_private_bus();
     serve_fake_broker();
     let ack_port = serve_acks();
     force_transport_for_tests(Transport::Broker);
@@ -216,8 +227,6 @@ fn failures_stay_until_the_next_outcome_and_activation_starts_one_scan() {
         }
     });
     drop(guard);
-    let _ = daemon.kill();
-    let _ = daemon.wait();
     assert!(
         root_ok.load(Ordering::SeqCst),
         "page failed to load: {captured}"
