@@ -14,7 +14,7 @@ use build_commit::{is_commit_id, is_directive_safe_path};
 
 fn main() {
     build_identity();
-    let builder = CxxQtBuilder::new_qml_module(
+    let mut builder = CxxQtBuilder::new_qml_module(
         QmlModule::new("com.snitchwatch.shell")
             // `Theme.qml` is a `pragma Singleton`; it needs the qmldir
             // `singleton` flag, so it is declared as a `QmlFile`.
@@ -111,7 +111,6 @@ fn main() {
     .file("src/clipboard_native_test.rs")
     .file("src/delegate_incubation_test.rs")
     .file("src/accessibility_test.rs")
-    .file("src/key_repeat_test.rs")
     .file("src/bridge_bindings.rs")
     .file("src/bridge_feed.rs")
     .file("src/connections_model.rs")
@@ -139,6 +138,12 @@ fn main() {
     .file("src/daemon_health_model.rs")
     .file("src/deny_status_model.rs")
     .file("src/about_model.rs");
+    // The auto-repeat key filter exists only for tests: it is compiled and
+    // linked solely under the `test-seams` feature (the self dev-dependency),
+    // never into a shipped build. Guarded by tests/test_seams_gate_guard.rs.
+    if std::env::var_os("CARGO_FEATURE_TEST_SEAMS").is_some() {
+        builder = builder.file("src/key_repeat_test.rs");
+    }
     // SAFETY: only add the crate-owned header directory; preserve builder flags.
     unsafe {
         builder.cc_builder(|cc| {

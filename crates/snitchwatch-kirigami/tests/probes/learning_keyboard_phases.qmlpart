@@ -87,9 +87,9 @@
             probe.expect(probe.names[name] === true, where + ": no control named '" + name + "'");
     }
     // Space on a consequential button: quiet keys, held keys, then once.
-    function exercise(what, target, guarded, fired) {
+    function exercise(what, target, guarded, fired, quietKeys) {
         probe.expect(probe.tabTo(target), what + ": cannot Tab to " + target + " (at " + probe.where(probe.focused()) + ")");
-        probe.quietOn(what);
+        probe.quietOn(what, quietKeys);
         if (guarded) {
             probe.heldOn(what, Qt.Key_Space);
             probe.heldOn(what + " (Return)", Qt.Key_Return);
@@ -105,6 +105,19 @@
         probe.expect(probe.snapshot() === before, what + ": acted before the release");
         tc.keyRelease(Qt.Key_Space);
         probe.expect(fired(), what + ": Space did not act exactly once: " + probe.snapshot());
+    }
+
+    // Return and Enter fire a banner button once on a fresh press; a held one
+    // (auto-repeat) fires nothing.
+    function returnFires(what, target, count) {
+        probe.expect(probe.tabTo(target), what + ": cannot Tab to " + target);
+        for (const k of [Qt.Key_Return, Qt.Key_Enter]) {
+            probe.heldOn(what + " (held " + k + ")", k);
+            probe.expect(probe.where(probe.focused()) === target, what + ": focus left " + target);
+            const n = count();
+            tc.keyClick(k);
+            probe.expect(count() === n + 1, what + ": key " + k + " did not act exactly once (" + n + " -> " + count() + ")");
+        }
     }
 
     function rowsReady() {
@@ -275,9 +288,11 @@
                 probe.expect(seen.indexOf(n) >= 0, "Tab never reaches " + n + ": " + JSON.stringify(seen));
             probe.sweepNamed("learning banner", ["Stop learning", "Review"]);
             ctl.calls = [];
-            probe.exercise("banner Stop learning", "banner/Stop learning", true, () => set.stops === 1);
-            probe.exercise("banner Review", "banner/Review", false, () => probe.reviews === 1);
-            probe.exercise("panel Stop learning", "page/Stop learning", true, () => set.stops === 2);
+            probe.exercise("banner Stop learning", "banner/Stop learning", true, () => set.stops === 1, [Qt.Key_Escape]);
+            probe.exercise("banner Review", "banner/Review", true, () => probe.reviews === 1, [Qt.Key_Escape]);
+            probe.returnFires("banner Stop learning", "banner/Stop learning", () => set.stops);
+            probe.returnFires("banner Review", "banner/Review", () => probe.reviews);
+            probe.exercise("panel Stop learning", "page/Stop learning", true, () => set.stops === 4);
             ctl.applying = true;
             ctl.progressJson = JSON.stringify({ state: "running", summary: "1 of 3 added", rows: [{ label: "a", status: "added" }] });
             break;

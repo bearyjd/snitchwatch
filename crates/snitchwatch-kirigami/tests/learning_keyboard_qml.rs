@@ -7,7 +7,8 @@
 //!     confirmation; Return/Enter never apply; Escape discards;
 //!   * a key still held (auto-repeat, held across the dialog opening or the
 //!     rows being replaced) never applies, ticks, stops or cancels;
-//!   * the banner's Stop learning / Review and the batch's Cancel.
+//!   * the banner's Stop learning / Review (Space or a fresh Return/Enter,
+//!     never a held one) and the batch's Cancel (Space only).
 //!
 //! Auto-repeats are real: `tests/support/key_repeat.h` re-sends a key given
 //! `Qt.GroupSwitchModifier` flagged as an auto-repeat. Each phase waits on a
