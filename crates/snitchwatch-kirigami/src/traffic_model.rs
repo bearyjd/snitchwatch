@@ -67,6 +67,22 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "resetDaemonStats"]
         fn reset_daemon_stats(self: Pin<&mut TrafficModel>);
+
+        /// Tell the model whether the daemon is reported down. Rule: daemon
+        /// statistics are stored only while the daemon is not reported down.
+        /// Going down clears what was stored; statistics that arrive while
+        /// down are dropped, so a callback queued before the drop can never
+        /// bring a stale version back, whatever order the health and
+        /// statistics feeds deliver in. Recovery needs no reset: statistics
+        /// that arrive after the recovery report are stored. A recovery
+        /// Ping that raced ahead of its report is dropped and the version
+        /// returns with the next statistics message (the daemon pings
+        /// periodically); that brief "not connected" is chosen over ever
+        /// showing a stale version, since statistics carry no sequence to
+        /// tell the two apart.
+        #[qinvokable]
+        #[cxx_name = "setDaemonDown"]
+        fn set_daemon_down(self: Pin<&mut TrafficModel>, down: bool);
     }
 
     impl cxx_qt::Threading for TrafficModel {}
@@ -91,6 +107,7 @@ pub struct TrafficModelRust {
     current_in_label: QString,
     current_out_label: QString,
     stats_received: bool,
+    daemon_down: bool,
     daemon_version: QString,
     uptime_secs: i32,
     stat_connections: i32,
@@ -110,6 +127,7 @@ impl Default for TrafficModelRust {
             current_in_label: QString::from("--"),
             current_out_label: QString::from("--"),
             stats_received: false,
+            daemon_down: false,
             daemon_version: QString::from(""),
             uptime_secs: 0,
             stat_connections: 0,
@@ -179,6 +197,13 @@ impl qobject::TrafficModel {
         self.as_mut().set_daemon_version(QString::default());
     }
 
+    pub fn set_daemon_down(mut self: Pin<&mut Self>, down: bool) {
+        self.as_mut().rust_mut().daemon_down = down;
+        if down {
+            self.reset_daemon_stats();
+        }
+    }
+
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
         match serde_json::from_str::<ServerMessage>(&json.to_string()) {
             Ok(msg) => self.apply_server_message(msg),
@@ -213,6 +238,9 @@ impl qobject::TrafficModel {
 impl qobject::TrafficModel {
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
         if let Some(stats) = stats_display_from_message(&msg) {
+            if self.rust().daemon_down {
+                return;
+            }
             self.as_mut()
                 .set_daemon_version(QString::from(stats.daemon_version.as_str()));
             self.as_mut().set_uptime_secs(stats.uptime_secs);

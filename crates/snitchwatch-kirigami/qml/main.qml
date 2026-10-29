@@ -140,7 +140,7 @@ Kirigami.ApplicationWindow {
         target: bridgeFeed
         function onOkChanged() { if (!bridgeFeed.ok) { curatedDefaultsModel.resetBridgeSession(); trafficModel.resetDaemonStats(); } }
     }
-    Connections { target: daemonHealthModel; function onDaemonDownChanged() { trafficModel.resetDaemonStats(); } }
+    Connections { target: daemonHealthModel; function onDaemonDownChanged() { trafficModel.setDaemonDown(daemonHealthModel.daemonDown); } }
 
     // First-run onboarding wizard (Task 12). Owns daemon-detection state; the
     // onboarding page itself is pushed/popped below based on `state`.

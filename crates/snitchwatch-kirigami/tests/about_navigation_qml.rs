@@ -98,6 +98,39 @@ QtObject {
         stats();
         check(shown() === "1.8.0", "after flapping, fresh statistics show '" + shown() + "'");
 
+        // Recovery Ping ahead of the recovery report: dropped while still
+        // down, so "not connected" only until the next statistics message.
+        report(false);
+        stats();
+        report(true);
+        check(shown() === "not connected", "a pre-recovery Ping showed '" + shown() + "'");
+        stats();
+        check(shown() === "1.8.0", "the next statistics after recovery show '" + shown() + "'");
+        // ...and statistics after the recovery report are kept, with no later reset.
+        report(true);
+        check(shown() === "1.8.0", "a repeated recovery report cleared '" + shown() + "'");
+
+        // Startup: statistics before any health report, then the daemon is
+        // reported down; and a down report before any statistics.
+        const first = component.createObject(null, {});
+        first.daemonRefs.stats.applyServerMessageJson(JSON.stringify({
+            action: "daemonStatistics", daemonVersion: "1.8.0", uptime: 1, rules: 1,
+            connections: 1, ignored: 0, accepted: 1, dropped: 0, ruleHits: 1, ruleMisses: 0
+        }));
+        check(first.daemonRefs.stats.statsReceived, "startup statistics were not stored");
+        first.daemonRefs.health.applyServerMessageJson(JSON.stringify({ action: "diagnosticsReport",
+            checks: [{ kind: "daemon_reachable", status: { status: "failed", detail: "down" } }] }));
+        check(!first.daemonRefs.stats.statsReceived && first.daemonRefs.stats.daemonVersion === "",
+              "a first down report left the earlier version");
+        const second = component.createObject(null, {});
+        second.daemonRefs.health.applyServerMessageJson(JSON.stringify({ action: "diagnosticsReport",
+            checks: [{ kind: "daemon_reachable", status: { status: "failed", detail: "down" } }] }));
+        second.daemonRefs.stats.applyServerMessageJson(JSON.stringify({
+            action: "daemonStatistics", daemonVersion: "1.8.0", uptime: 1, rules: 1,
+            connections: 1, ignored: 0, accepted: 1, dropped: 0, ruleHits: 1, ruleMisses: 0
+        }));
+        check(!second.daemonRefs.stats.statsReceived, "statistics were stored while down at startup");
+
         // Losing the bridge link forgets it too.
         main.bridgeFeedRef.ok = false;
         check(shown() === "not connected", "after bridge loss shows '" + shown() + "'");
