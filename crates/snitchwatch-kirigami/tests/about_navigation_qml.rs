@@ -78,6 +78,18 @@ QtObject {
         stats();
         check(shown() === "not connected", "a late statistics callback revived '" + shown() + "'");
         check(page.about.reportText.indexOf("1.8.0") < 0, "the copy report carries the stale version");
+        // The Traffic page's counters are not identity: they keep advancing
+        // while the daemon is flagged down.
+        main.daemonRefs.stats.applyServerMessageJson(JSON.stringify({
+            action: "daemonStatistics", daemonVersion: "1.8.0", uptime: 77, rules: 9,
+            connections: 99, ignored: 0, accepted: 55, dropped: 4, ruleHits: 33, ruleMisses: 2
+        }));
+        const t = main.daemonRefs.stats;
+        check(t.uptimeSecs === 77 && t.statConnections === 99 && t.statAccepted === 55
+              && t.statDropped === 4 && t.statRuleHits === 33 && t.statRuleMisses === 2 && t.statRules === 9,
+              "counters froze while down: " + [t.uptimeSecs, t.statConnections, t.statAccepted].join());
+        check(shown() === "not connected" && t.daemonVersion === "" && !t.statsReceived,
+              "counter updates leaked the daemon identity");
         report(false);
         check(shown() === "not connected", "a repeated down report left '" + shown() + "'");
         report(true);

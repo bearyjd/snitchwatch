@@ -238,11 +238,13 @@ impl qobject::TrafficModel {
 impl qobject::TrafficModel {
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
         if let Some(stats) = stats_display_from_message(&msg) {
-            if self.rust().daemon_down {
-                return;
+            // Only the daemon's identity is gated while it is reported down;
+            // the counters and uptime keep advancing for the Traffic page.
+            let identity_ok = !self.rust().daemon_down;
+            if identity_ok {
+                self.as_mut()
+                    .set_daemon_version(QString::from(stats.daemon_version.as_str()));
             }
-            self.as_mut()
-                .set_daemon_version(QString::from(stats.daemon_version.as_str()));
             self.as_mut().set_uptime_secs(stats.uptime_secs);
             self.as_mut().set_stat_connections(stats.stat_connections);
             self.as_mut().set_stat_accepted(stats.stat_accepted);
@@ -250,7 +252,9 @@ impl qobject::TrafficModel {
             self.as_mut().set_stat_rule_hits(stats.stat_rule_hits);
             self.as_mut().set_stat_rule_misses(stats.stat_rule_misses);
             self.as_mut().set_stat_rules(stats.stat_rules);
-            self.as_mut().set_stats_received(true);
+            if identity_ok {
+                self.as_mut().set_stats_received(true);
+            }
             return;
         }
 
