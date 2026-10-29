@@ -24,6 +24,8 @@ Kirigami.ScrollablePage {
 
     ListView {
         id: list
+        // One Tab stop, then arrows between the rows; named, since it is a stop even when empty.
+        Accessible.name: "Countries by connections"
         model: page.model && page.model.dbAvailable ? page.model : null
         reuseItems: true
         header: ColumnLayout {
@@ -79,6 +81,8 @@ Kirigami.ScrollablePage {
             id: row
             width: ListView.view ? ListView.view.width : implicitWidth
             hoverEnabled: false
+            Accessible.name: row.countryName + ": " + row.total + " connections, allowed "
+                + row.allowed + ", denied " + row.denied + ", pending " + row.pending
 
             required property string countryCode
             required property string countryName

@@ -138,7 +138,7 @@ Kirigami.Page {
             Layout.alignment: Qt.AlignHCenter
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Button {
+            GuardedButton {
                 text: "Start daemon"
                 icon.name: "media-playback-start"
                 visible: page.controller && (page.controller.state === "unitInactive"
