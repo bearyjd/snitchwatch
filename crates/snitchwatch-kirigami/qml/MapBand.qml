@@ -84,7 +84,7 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        Controls.ToolButton {
+        GuardedToolButton {
             id: chevronButton
             // A text glyph, so it shows without an icon theme (QML cannot
             // tell whether a theme icon will actually render).
@@ -113,7 +113,7 @@ ColumnLayout {
                 : band.countryCount + (band.countryCount === 1 ? " country" : " countries")
                     + (map.hierarchy.available ? " · "+map.hierarchy.ips.length+" observed IPs" : "")
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapZoomOut"
             text: "−"
             visible: !MapBandState.collapsed
@@ -121,7 +121,7 @@ ColumnLayout {
             Accessible.name: "Zoom out"
             onClicked: map.camera.zoomAt(1 / 1.5, map.width / 2, map.height / 2)
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapZoomIn"
             text: "+"
             visible: !MapBandState.collapsed
@@ -129,14 +129,14 @@ ColumnLayout {
             Accessible.name: "Zoom in"
             onClicked: map.camera.zoomAt(1.5, map.width / 2, map.height / 2)
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapFit"
             text: "Fit"
             visible: !MapBandState.collapsed
             Accessible.name: "Fit world map"
             onClicked: map.camera.reset()
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             id: countriesButton
             text: "Places"
             icon.name: "view-list-details"
@@ -151,14 +151,14 @@ ColumnLayout {
         visible: !MapBandState.collapsed
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapWorldScope"
             text: "World"
             enabled: map.activeGeoScope.kind !== ""
             Accessible.name: "Clear geographic scope; preserve search"
             onClicked: map.clearScope()
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapScopeBack"
             text: "‹ Back"
             enabled: map.activeGeoScope.kind !== ""
@@ -168,10 +168,11 @@ ColumnLayout {
         Controls.Label {
             Layout.fillWidth: true
             text: map.activeGeoScope.kind === "" ? "Countries → cities → observed IPs" : map.activeGeoScope.name
+            Accessible.name: "Geographic scope: " + map.activeGeoScope.name
             textFormat: Text.PlainText
             elide: Text.ElideRight
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapDestinations"
             text: "Destinations ("+map.scopeNodes.length+")"
             Accessible.name: "List destinations, including local, unknown and unavailable locations"
