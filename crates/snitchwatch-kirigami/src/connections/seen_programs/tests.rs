@@ -608,4 +608,12 @@ mod replaced {
         assert_eq!(loaded, Loaded::Unreadable);
         assert_eq!(calls, 5);
     }
+
+    #[test]
+    fn a_rename_after_the_accepting_fstat_is_not_foreign() {
+        use crate::logging::replace_tests::OnCheck;
+        let (_d, path) = seen_file();
+        let loaded = read_with(&path, uid(), 4, &mut OnCheck(|| replace(&path, NEW, 0o600)));
+        assert_eq!(loaded, Loaded::Valid(HashMap::new()));
+    }
 }

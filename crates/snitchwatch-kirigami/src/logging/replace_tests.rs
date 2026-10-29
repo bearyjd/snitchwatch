@@ -43,7 +43,7 @@ fn error_of<T>(r: std::io::Result<T>) -> String {
 fn zero_links_then_a_valid_replacement_is_used() {
     let (_d, path) = setup();
     let mut calls = 0;
-    let file = open_settled(
+    let (file, meta) = open_settled(
         4,
         &mut || {
             calls += 1;
@@ -56,7 +56,7 @@ fn zero_links_then_a_valid_replacement_is_used() {
     .unwrap();
     assert_eq!(calls, 2);
     assert_eq!(file.metadata().unwrap().len(), 3);
-    assert!(refuse_unless_ours(&path, &file).is_ok());
+    assert!(refuse_unless_ours_meta(&path, &meta).is_ok());
 }
 
 #[test]
@@ -64,7 +64,7 @@ fn zero_links_then_an_unsafe_replacement_is_refused_by_the_ownership_check() {
     // A FIFO in place of the file is not a regular file.
     let (_d, path) = setup();
     let mut first = true;
-    let file = open_settled(
+    let (_, meta) = open_settled(
         4,
         &mut || {
             if std::mem::take(&mut first) {
@@ -77,7 +77,7 @@ fn zero_links_then_an_unsafe_replacement_is_refused_by_the_ownership_check() {
         || open_read(&path),
     )
     .unwrap();
-    let error = error_of(refuse_unless_ours(&path, &file));
+    let error = error_of(refuse_unless_ours_meta(&path, &meta));
     assert!(error.contains("isn't a regular file"), "{error}");
 }
 
@@ -85,7 +85,7 @@ fn zero_links_then_an_unsafe_replacement_is_refused_by_the_ownership_check() {
 fn zero_links_then_a_hard_linked_replacement_is_refused() {
     let (d, path) = setup();
     let mut first = true;
-    let file = open_settled(
+    let (_, meta) = open_settled(
         4,
         &mut || {
             if std::mem::take(&mut first) {
@@ -96,7 +96,7 @@ fn zero_links_then_a_hard_linked_replacement_is_refused() {
         || open_read(&path),
     )
     .unwrap();
-    let error = error_of(refuse_unless_ours(&path, &file));
+    let error = error_of(refuse_unless_ours_meta(&path, &meta));
     assert!(error.contains("hard link"), "{error}");
 }
 
@@ -161,4 +161,23 @@ fn the_log_paths_use_a_valid_replacement() {
     })
     .unwrap();
     assert_eq!(file.metadata().unwrap().len(), 0);
+}
+
+/// A hook for the window after the accepting `fstat`.
+pub(crate) struct OnCheck<F>(pub(crate) F);
+
+impl<F: FnMut()> Hooks for OnCheck<F> {
+    fn after_check(&mut self) {
+        (self.0)();
+    }
+}
+
+#[test]
+fn a_rename_after_the_accepting_fstat_is_not_a_hard_link() {
+    // The caller validates from the snapshot, never a second fstat (which
+    // would now see zero links).
+    let (_d, path) = setup();
+    keep_previous_with(&path, 4, &mut OnCheck(|| replace(&path, b"x", 0o600))).unwrap();
+    let (_d, path) = setup();
+    open_log_with(&path, 4, &mut OnCheck(|| replace(&path, b"x", 0o600))).unwrap();
 }
