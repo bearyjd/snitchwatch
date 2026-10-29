@@ -4699,7 +4699,7 @@ dependencies = [
 
 [[package]]
 name = "snitchwatch-kirigami"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "addr",
  "anyhow",

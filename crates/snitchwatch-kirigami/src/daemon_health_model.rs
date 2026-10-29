@@ -16,6 +16,17 @@ fn has_problem(checks: &[DiagnosticCheck]) -> bool {
         .any(|c| matches!(c.status, CheckStatus::Failed { .. }))
 }
 
+/// True only when the report says opensnitchd is unreachable (a `Failed`
+/// `DaemonReachable` check). Absent or `Unknown` is NOT down: an older bridge
+/// that sends no such check keeps showing what the statistics feed reports.
+/// The bridge's watchdog pushes a fresh report the moment opensnitchd drops,
+/// so this goes true while the bridge link itself stays up.
+fn daemon_down(checks: &[DiagnosticCheck]) -> bool {
+    checks.iter().any(|c| {
+        c.kind == CheckKind::DaemonReachable && matches!(c.status, CheckStatus::Failed { .. })
+    })
+}
+
 /// Joins every failed check's troubleshooting detail, one per line. Empty
 /// string when nothing has failed.
 fn troubleshooting_text(checks: &[DiagnosticCheck]) -> String {
@@ -72,6 +83,9 @@ pub mod qobject {
         #[qml_element]
         /// True if any check in the latest report failed.
         #[qproperty(bool, has_problem, cxx_name = "hasProblem")]
+        /// True only while the latest report explicitly says opensnitchd is
+        /// unreachable; false when reachable, unknown or not yet reported.
+        #[qproperty(bool, daemon_down, cxx_name = "daemonDown")]
         /// One-line human-readable summary of overall health.
         #[qproperty(QString, status_summary, cxx_name = "statusSummary")]
         /// Joined troubleshooting detail for every failed check, empty when
@@ -106,6 +120,7 @@ pub mod qobject {
 /// Rust-side state for [`qobject::DaemonHealthModel`].
 pub struct DaemonHealthModelRust {
     has_problem: bool,
+    daemon_down: bool,
     status_summary: QString,
     troubleshooting_text: QString,
     monitor_status: QString,
@@ -115,6 +130,7 @@ impl Default for DaemonHealthModelRust {
     fn default() -> Self {
         Self {
             has_problem: false,
+            daemon_down: false,
             status_summary: QString::from(SUMMARY_PENDING),
             troubleshooting_text: QString::default(),
             monitor_status: QString::from(crate::tray_health::MONITOR_NOT_REPORTED),
@@ -132,6 +148,7 @@ impl qobject::DaemonHealthModel {
         };
         let mut this = self;
         this.as_mut().set_has_problem(has_problem(&checks));
+        this.as_mut().set_daemon_down(daemon_down(&checks));
         this.as_mut()
             .set_status_summary(QString::from(&status_summary(&checks)));
         this.as_mut()
@@ -181,6 +198,29 @@ impl qobject::DaemonHealthModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reachable_check(status: CheckStatus) -> DiagnosticCheck {
+        DiagnosticCheck {
+            kind: CheckKind::DaemonReachable,
+            status,
+        }
+    }
+
+    #[test]
+    fn daemon_down_only_on_an_explicit_failed_daemon_check() {
+        assert!(daemon_down(&[reachable_check(CheckStatus::Failed {
+            detail: "down".to_string()
+        })]));
+        assert!(!daemon_down(&[reachable_check(CheckStatus::Ok)]));
+        assert!(!daemon_down(&[reachable_check(CheckStatus::Unknown)]));
+        assert!(!daemon_down(&[]), "no report is unknown, not down");
+        assert!(!daemon_down(&[DiagnosticCheck {
+            kind: CheckKind::FirewallRunning,
+            status: CheckStatus::Failed {
+                detail: "x".to_string()
+            },
+        }]));
+    }
 
     #[test]
     fn derive_status_summary_ok_when_all_checks_pass() {

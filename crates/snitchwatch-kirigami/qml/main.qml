@@ -53,6 +53,7 @@ Kirigami.ApplicationWindow {
     // need explicitly named root properties to inject these objects without
     // accidentally self-binding a same-named page property.
     property var bridgeFeedRef: bridgeFeed
+    property var daemonRefs: ({ stats: trafficModel, health: daemonHealthModel })
     // Exposed for the headless probe (tests/honest_ui_main_banner_qml.rs).
     property alias bridgeStatusLabel: bridgeStatusLabel
 
@@ -137,8 +138,9 @@ Kirigami.ApplicationWindow {
 
     Connections {
         target: bridgeFeed
-        function onOkChanged() { if (!bridgeFeed.ok) curatedDefaultsModel.resetBridgeSession(); }
+        function onOkChanged() { if (!bridgeFeed.ok) { curatedDefaultsModel.resetBridgeSession(); trafficModel.resetDaemonStats(); } }
     }
+    Connections { target: daemonHealthModel; function onDaemonDownChanged() { trafficModel.setDaemonDown(daemonHealthModel.daemonDown); } }
 
     // First-run onboarding wizard (Task 12). Owns daemon-detection state; the
     // onboarding page itself is pushed/popped below based on `state`.
@@ -644,6 +646,10 @@ Kirigami.ApplicationWindow {
             denyStatus: denyStatusModel
         }
     }
+    Component {
+        id: aboutPageComponent
+        AboutPage { daemonConnected: bridgeFeed.ok && !daemonHealthModel.daemonDown && trafficModel.statsReceived; daemonVersion: trafficModel.daemonVersion }
+    }
     // A new prompt does NOT raise this window. The alert (AlertHost.qml ->
     // AlertWindow.qml) is its own window, independent of this one: in "Ask me"
     // it asks whether this window is shown or hidden to the tray (if the alert
@@ -781,6 +787,11 @@ Kirigami.ApplicationWindow {
                 text: "Daemon Health"
                 icon.name: "dialog-warning"
                 onTriggered: nav.replaceMain(daemonHealthPageComponent)
+            },
+            Kirigami.Action {
+                text: "About"
+                icon.name: "help-about"
+                onTriggered: nav.replaceMain(aboutPageComponent)
             }
         ]
     }
