@@ -287,6 +287,10 @@ pub const ALL_QML: &[(&str, &str)] = &[
         include_str!("../../qml/GuardedSwitch.qml"),
     ),
     (
+        "GuardedRadioButton.qml",
+        include_str!("../../qml/GuardedRadioButton.qml"),
+    ),
+    (
         "GeoDatabaseSettings.qml",
         include_str!("../../qml/GeoDatabaseSettings.qml"),
     ),

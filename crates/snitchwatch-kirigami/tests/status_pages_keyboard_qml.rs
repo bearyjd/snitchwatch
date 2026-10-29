@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
+use snitchwatch_kirigami::scanner::{force_transport_for_tests, run_deep_scan_via, Transport};
 
 #[allow(unused_imports)]
 use snitchwatch_kirigami::bridge_bindings as _;
@@ -39,6 +40,55 @@ const DONE_MARKER: &str = "STATUS_PAGES_PROBE_DONE";
 /// The shared guard helpers, spliced in at the `// @a11y-guard` line.
 const GUARD: &str = include_str!("support/a11y_guard.qmlpart");
 const QML: &str = include_str!("probes/status_pages_probe.qml");
+
+/// A one-node IPv4 MaxMind DB that puts every address starting with a 0 bit
+/// (8.8.8.8, 1.1.1.1) in the United States: what an installed system database
+/// would do to the fixture addresses.
+fn us_country_mmdb() -> Vec<u8> {
+    let string = |s: &str| [&[0x40 | s.len() as u8][..], s.as_bytes()].concat();
+    let map =
+        |entries: &[Vec<u8>]| [&[0xE0 | (entries.len() / 2) as u8][..], &entries.concat()].concat();
+    let uint = |kind: u8, value: u32| match value {
+        0 => vec![kind << 5],
+        v => vec![kind << 5 | 1, v as u8],
+    };
+    let data = map(&[
+        string("country"),
+        map(&[
+            string("iso_code"),
+            string("US"),
+            string("names"),
+            map(&[string("en"), string("United States")]),
+        ]),
+    ]);
+    let metadata = map(&[
+        string("binary_format_major_version"),
+        uint(5, 2),
+        string("binary_format_minor_version"),
+        uint(5, 0),
+        string("build_epoch"),
+        vec![1, 2, 1],
+        string("database_type"),
+        string("GeoLite2-Country"),
+        string("description"),
+        map(&[]),
+        string("ip_version"),
+        uint(5, 4),
+        string("languages"),
+        vec![0, 4],
+        string("node_count"),
+        uint(6, 1),
+        string("record_size"),
+        uint(5, 24),
+    ]);
+    // One node: bit 0 -> the data record (node_count + 16 + offset 0), bit 1 -> none.
+    let mut db = vec![0, 0, 17, 0, 0, 1];
+    db.extend([0u8; 16]);
+    db.extend(data);
+    db.extend(b"\xAB\xCD\xEFMaxMind.com");
+    db.extend(metadata);
+    db
+}
 
 /// The exact Tab itinerary of each view, as accessible names; each ends back
 /// at the start button (or, for the dialog, at the control it began on).
@@ -96,8 +146,46 @@ fn the_status_and_first_run_pages_work_by_keyboard_and_name_every_control() {
         std::fs::create_dir_all(&path).unwrap();
         std::env::set_var(var, &path);
     }
-    // No polkit: the scan fails its preflight on a missing binary.
-    std::env::set_var("SNITCHWATCH_SCANNER_BIN", host.path().join("not-installed"));
+    // No polkit and no host broker: the scan is forced onto the native
+    // transport with a missing binary (a preflight failure), because the
+    // detection would otherwise pick the real session-bus broker inside a
+    // Flatpak. The session bus is pointed at a socket that is not there, and
+    // both paths must fail locally.
+    let missing = host.path().join("not-installed");
+    std::env::set_var("SNITCHWATCH_SCANNER_BIN", &missing);
+    std::env::set_var(
+        "DBUS_SESSION_BUS_ADDRESS",
+        format!("unix:path={}", host.path().join("no-bus").display()),
+    );
+    force_transport_for_tests(Transport::Native(missing.clone()));
+    assert!(
+        run_deep_scan_via(Transport::Native(missing)).is_err(),
+        "a scan with the scanner binary missing must fail locally"
+    );
+    assert!(
+        run_deep_scan_via(Transport::Broker).is_err(),
+        "the probe could reach a real session bus"
+    );
+    // Hermetic GeoIP: a Country database sits in the default search location
+    // (a temporary home and data dir), yet the explicit override names a file
+    // that is not a database, so no address is classified into a country.
+    let database = host.path().join("data/snitchwatch");
+    std::fs::create_dir_all(&database).unwrap();
+    let fixture = us_country_mmdb();
+    std::fs::write(database.join("GeoLite2-Country.mmdb"), &fixture).unwrap();
+    std::env::set_var("HOME", host.path());
+    let reader = maxminddb::Reader::from_source(fixture).expect("the fixture is a valid database");
+    let found: maxminddb::geoip2::Country = reader
+        .lookup("8.8.8.8".parse().unwrap())
+        .unwrap()
+        .decode()
+        .unwrap()
+        .expect("the fixture database classifies 8.8.8.8");
+    assert_eq!(found.country.iso_code, Some("US"));
+    let not_a_database = host.path().join("not-a-database.mmdb");
+    std::fs::write(&not_a_database, b"not a database").unwrap();
+    std::env::set_var("SNITCHWATCH_GEOIP_DB", &not_a_database);
+    std::env::remove_var("SNITCHWATCH_GEOIP_CITY_DB");
     // `systemctl` is a stub that records its arguments and fails.
     let bin = host.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();

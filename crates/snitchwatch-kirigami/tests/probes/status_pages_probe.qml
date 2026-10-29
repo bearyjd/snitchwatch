@@ -24,6 +24,7 @@ Window {
     property var itineraries: ({})
     property bool dismissed: false
     property bool finished: false
+    property var expected: ({})
     // @a11y-guard
 
     // Replaced by the Rust test: where the stubs live.
@@ -306,13 +307,22 @@ Window {
         { gate: () => probe.pageReady(), run: () => {
             probe.expectItinerary("silent mode", @@SILENT_ITINERARY@@);
             probe.sweepNamed("silent mode", ["Ask me (alerts)", "Allow and record", "Deny and record", "Continue"]);
-            // Choosing a radio by keyboard only selects it.
-            probe.expect(probe.tabTo("Deny and record"), "cannot Tab to Deny and record");
-            probe.quietOn("Deny and record", () => settingsCtl.silentMode);
-            probe.page.selected = "allow";
-            tc.keyClick(Qt.Key_Space);
-            probe.expect(probe.page.selected === "deny", "Space did not select Deny and record: " + probe.page.selected);
-            probe.expect(settingsCtl.silentMode === "", "selecting a mode saved it: " + settingsCtl.silentMode);
+            // The first-run default is the recommended mode, nothing saved.
+            probe.expect(probe.page.selected === "allow", "the default selection is " + probe.page.selected);
+            probe.expect(settingsCtl.silentMode === "", "a mode was saved before Continue: " + settingsCtl.silentMode);
+            // Each radio: a held Space changes neither the pending selection
+            // nor the saved one; a fresh Space selects it and saves nothing.
+            const pending = () => probe.page.selected + "|" + settingsCtl.silentMode;
+            for (const [token, name, other] of [["off", "Ask me (alerts)", "allow"],
+                                                ["allow", "Allow and record", "off"],
+                                                ["deny", "Deny and record", "allow"]]) {
+                probe.expect(probe.tabTo(name), "cannot Tab to " + name);
+                probe.page.selected = other;
+                probe.quietOn(name, pending);
+                tc.keyClick(Qt.Key_Space);
+                probe.expect(probe.page.selected === token, "Space did not select " + name + ": " + probe.page.selected);
+                probe.expect(settingsCtl.silentMode === "", "selecting a mode saved it: " + settingsCtl.silentMode);
+            }
         } },
         { gate: () => probe.page.denyWarningBox.visible ? probe.pageReady() : "the deny warning", run: () => {
             probe.expectItinerary("silent mode with the deny warning", @@SILENT_DENY_ITINERARY@@);
@@ -359,30 +369,45 @@ Window {
             probe.expect(probe.n("finished") === 0, "Return or Enter finished the step");
         } },
         // The two selectors that save a policy: a held key never walks through the choices.
-        { gate: () => "", run: () => { probe.mount(diagC); } },
+        // Duration starts at a middle entry (so Up and Down both mean something).
+        { gate: () => "", run: () => { settingsCtl.chooseDefaultDuration("for_5_minutes"); } },
+        { gate: () => (!settingsCtl.busy && settingsCtl.defaultDuration === "for_5_minutes") ? "" : "the duration saved",
+          run: () => { probe.mount(diagC); } },
         { gate: () => (probe.pageReady() === "" && !settingsCtl.busy) ? "" : "the diagnostics page", run: () => {
+            const saved = {};
             for (const objectName of ["silentModeBox", "defaultDurationBox"]) {
                 const box = probe.byName(objectName);
                 const name = box.Accessible.name;
                 box.activated.connect(() => probe.bump(objectName));
                 probe.expect(probe.tabTo(name), name + ": cannot Tab to it");
                 const index = box.currentIndex;
+                probe.expect(index > 0 && index < box.count - 1, name + ": starts at index " + index + " of " + box.count);
                 for (const key of [Qt.Key_Down, Qt.Key_Up, Qt.Key_Home, Qt.Key_End, Qt.Key_Space, Qt.Key_Return]) {
                     probe.heldFromBefore(key);
                     probe.expect(probe.n(objectName) === 0 && box.currentIndex === index && !box.popup.visible,
                                  name + ": a held key " + key + " acted (" + probe.n(objectName) + " choices, index "
                                  + box.currentIndex + ", popup " + box.popup.visible + ")");
                 }
-                // One arrow held down: it steps at most once.
+                // One arrow held down: a fresh press steps once, the repeats not at all.
                 tc.keyPress(Qt.Key_Down);
                 for (let i = 0; i < 3; ++i) {
                     tc.keyRelease(Qt.Key_Down, probe.repeat);
                     tc.keyPress(Qt.Key_Down, probe.repeat);
                 }
                 tc.keyRelease(Qt.Key_Down);
-                probe.expect(probe.n(objectName) <= 1 && box.currentIndex <= index + 1,
-                             name + ": a held Down chose " + probe.n(objectName) + " times, to index " + box.currentIndex);
+                probe.expect(probe.n(objectName) === 1 && box.currentIndex === index + 1,
+                             name + ": a held Down chose " + probe.n(objectName) + " times, to index " + box.currentIndex
+                             + " (expected exactly one, to " + (index + 1) + ")");
+                saved[objectName] = box.model[index + 1].token;
             }
+            probe.expected = saved;
+        } },
+        { gate: () => (!settingsCtl.busy && settingsCtl.silentMode === probe.expected.silentModeBox
+                       && settingsCtl.defaultDuration === probe.expected.defaultDurationBox) ? "" : "the two choices saved",
+          run: () => {
+            probe.expect(settingsCtl.silentMode === probe.expected.silentModeBox, "silent mode saved as " + settingsCtl.silentMode);
+            probe.expect(settingsCtl.defaultDuration === probe.expected.defaultDurationBox,
+                         "default duration saved as " + settingsCtl.defaultDuration);
         } },
         // the export dialog, in a stub controller with a preview ready.
         { gate: () => "", run: () => { sheet.open(); } },

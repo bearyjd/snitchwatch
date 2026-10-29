@@ -63,6 +63,7 @@ fn main() {
                 "qml/PromptSlotBanner.qml",
                 "qml/GuardedButton.qml",
                 "qml/GuardedSwitch.qml",
+                "qml/GuardedRadioButton.qml",
                 "qml/LearningBanner.qml",
                 "qml/LearningReviewPage.qml",
                 "qml/LearningReviewRow.qml",

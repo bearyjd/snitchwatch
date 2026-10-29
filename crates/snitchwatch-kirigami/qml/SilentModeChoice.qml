@@ -42,7 +42,7 @@ ColumnLayout {
             Layout.fillWidth: true
             spacing: 0
 
-            Controls.RadioButton {
+            GuardedRadioButton {
                 objectName: "silentMode-" + modelData.token
                 Layout.fillWidth: true
                 text: modelData.label
