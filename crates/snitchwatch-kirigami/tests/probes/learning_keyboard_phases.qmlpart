@@ -1,0 +1,345 @@
+    readonly property var quiet: [Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape]
+    readonly property var noEscape: [Qt.Key_Return, Qt.Key_Enter]
+    property var lastTab: []
+
+    function expect(ok, what) { if (!ok) probe.failures.push(what); }
+    function focused() { return probe.activeFocusItem; }
+    function label(item) {
+        if (!item) return "nothing";
+        const name = item.Accessible ? String(item.Accessible.name || "") : "";
+        return name || (item.text !== undefined ? String(item.text) : "") || item.objectName || String(item);
+    }
+    function inside(item, ancestor) {
+        for (let it = item; it; it = it.parent) if (it === ancestor) return true;
+        return false;
+    }
+    function where(item) {
+        const surface = !item ? "nothing"
+            : probe.inside(item, page.summaryDialog.contentItem) ? "dialog"
+            : probe.inside(item, banner) ? "banner" : probe.inside(item, page) ? "page" : "window";
+        return surface + "/" + probe.label(item);
+    }
+    function collect(root, pred, out) {
+        out = out || [];
+        if (!root) return out;
+        if (pred(root)) out.push(root);
+        const kids = root.children || [];
+        for (let i = 0; i < kids.length; ++i) probe.collect(kids[i], pred, out);
+        return out;
+    }
+    function boxes() { return probe.collect(page, it => (it.objectName || "").indexOf("tick-") === 0); }
+    function byName(name) { return probe.find(page, it => it.objectName === name); }
+    function inDialog(name) { return probe.find(page.summaryDialog.contentItem, it => it.objectName === name); }
+    function dialogButton(text) {
+        return probe.find(page.summaryDialog.contentItem, it => it.text === text || (it.Accessible && it.Accessible.name === text && it.clicked));
+    }
+    function stops() { return probe.collect(probe.contentItem, it => it.text === "Stop learning" && it.clicked && it.visible); }
+    // Everything a stray key could change.
+    function snapshot() { return JSON.stringify([ctl.calls, set.stops, set.started, probe.reviews]); }
+    function applied() { return ctl.calls.filter(c => c === "apply").length; }
+
+    // Tab from `start` (or on from here) until focus is on `target`.
+    function tabTo(target, here) {
+        if (!here) start.forceActiveFocus();
+        for (let i = 0; i < 60; ++i) {
+            if (probe.where(probe.focused()) === target) return true;
+            tc.keyClick(Qt.Key_Tab);
+        }
+        return probe.where(probe.focused()) === target;
+    }
+    // The focus chain from `start` once round, or n Tabs from here.
+    function tabRound() {
+        start.forceActiveFocus();
+        const seen = [];
+        for (let i = 0; i < 60; ++i) {
+            tc.keyClick(Qt.Key_Tab);
+            if (probe.focused() === start) break;
+            seen.push(probe.where(probe.focused()));
+        }
+        return seen;
+    }
+    function tabsHere(n) {
+        const seen = [];
+        for (let i = 0; i < n; ++i) { tc.keyClick(Qt.Key_Tab); seen.push(probe.where(probe.focused())); }
+        return seen;
+    }
+    // These keys do nothing to what is focused.
+    function quietOn(what, keys) {
+        const before = probe.snapshot();
+        for (const k of keys || probe.quiet) {
+            tc.keyClick(k);
+            probe.expect(probe.snapshot() === before, what + ": key " + k + " changed " + probe.snapshot());
+        }
+    }
+    // A key held by someone else (or auto-repeating) never acts on the focus.
+    function heldOn(what, key) {
+        const before = probe.snapshot();
+        tc.keyPress(key, probe.repeat);
+        tc.keyPress(key, probe.repeat);
+        tc.keyRelease(key, probe.repeat);
+        probe.expect(probe.snapshot() === before, what + ": an auto-repeat changed " + probe.snapshot());
+        tc.keyRelease(key);
+        probe.expect(probe.snapshot() === before, what + ": the release of a held key changed " + probe.snapshot());
+    }
+    function sweepNamed(where, exact) {
+        probe.sweep(where);
+        for (const name of exact)
+            probe.expect(probe.names[name] === true, where + ": no control named '" + name + "'");
+    }
+    // Space on a consequential button: quiet keys, held keys, then once.
+    function exercise(what, target, guarded, fired, quietKeys) {
+        probe.expect(probe.tabTo(target), what + ": cannot Tab to " + target + " (at " + probe.where(probe.focused()) + ")");
+        probe.quietOn(what, quietKeys);
+        if (guarded) {
+            probe.heldOn(what, Qt.Key_Space);
+            probe.heldOn(what + " (Return)", Qt.Key_Return);
+        }
+        probe.expect(probe.where(probe.focused()) === target, what + ": focus left " + target + ": " + probe.where(probe.focused()));
+        const before = probe.snapshot();
+        // Held down on it: the platform's repeats are a release and a press.
+        tc.keyPress(Qt.Key_Space);
+        for (let i = 0; guarded && i < 2; ++i) {
+            tc.keyRelease(Qt.Key_Space, probe.repeat);
+            tc.keyPress(Qt.Key_Space, probe.repeat);
+        }
+        probe.expect(probe.snapshot() === before, what + ": acted before the release");
+        tc.keyRelease(Qt.Key_Space);
+        probe.expect(fired(), what + ": Space did not act exactly once: " + probe.snapshot());
+    }
+
+    // Return and Enter fire a banner button once on a fresh press; a held one
+    // (auto-repeat) fires nothing.
+    function returnFires(what, target, count) {
+        probe.expect(probe.tabTo(target), what + ": cannot Tab to " + target);
+        for (const k of [Qt.Key_Return, Qt.Key_Enter]) {
+            probe.heldOn(what + " (held " + k + ")", k);
+            probe.expect(probe.where(probe.focused()) === target, what + ": focus left " + target);
+            const n = count();
+            tc.keyClick(k);
+            probe.expect(count() === n + 1, what + ": key " + k + " did not act exactly once (" + n + " -> " + count() + ")");
+        }
+    }
+
+    function rowsReady() {
+        const b = probe.boxes();
+        if (b.length !== 5) return "five tick boxes (have " + b.length + ")";
+        for (let i = 0; i < b.length; ++i)
+            if (!probe.stable("box" + i, b[i])) return "box " + i + " to stop moving";
+        const combo = probe.find(page, it => it.objectName === "" && it.model !== undefined && it.currentIndex !== undefined);
+        return combo && probe.stable("combo", combo) ? "" : "the length combo box";
+    }
+    function dialogReady() {
+        const d = page.summaryDialog;
+        if (!d.opened) return "the summary dialog open";
+        const apply = d.applyButton, go = probe.dialogButton("Go back"), extra = probe.inDialog("extra-0");
+        return probe.stable("apply", apply) && probe.stable("go", go) && probe.stable("extra", extra) ? "" : "the dialog to stop moving";
+    }
+    function gate(phase) {
+        switch (phase) {
+        case 1: case 11: return probe.rowsReady();
+        case 2: { const r = probe.byName("learningReviewButton"); return r && r.enabled && probe.stable("review", r) ? "" : "Review enabled"; }
+        case 3: case 5: case 7: case 9: return probe.dialogReady();
+        case 4: case 6: case 8: case 10: return !page.summaryDialog.visible ? "" : "the summary dialog closed";
+        case 12: return probe.stops().length === 2 && probe.stops().every((s, i) => probe.stable("stop" + i, s))
+            && probe.find(banner, it => it.text === "Review") && probe.stable("rev", probe.find(banner, it => it.text === "Review"))
+            ? "" : "the banner and panel Stop learning";
+        case 13: { const c = probe.find(page, it => it.text === "Cancel" && it.clicked); return c && c.visible && probe.stable("cancel", c) ? "" : "Cancel"; }
+        default: return "";
+        }
+    }
+
+    function run(phase) {
+        const box = i => probe.boxes()[i];
+        const reviewButton = () => probe.byName("learningReviewButton");
+        switch (phase) {
+        case 0:
+            probe.requestActivate();
+            // The seam works: a marked key arrives flagged as an auto-repeat.
+            start.forceActiveFocus();
+            tc.keyPress(Qt.Key_Space, probe.repeat);
+            probe.expect(probe.lastRepeat === true, "the auto-repeat seam sends no auto-repeat");
+            tc.keyRelease(Qt.Key_Space, probe.repeat);
+            tc.keyClick(Qt.Key_Space);
+            probe.expect(probe.lastRepeat === false, "a plain key arrived as an auto-repeat");
+            ctl.calls = [];
+            break;
+        case 1: {
+            const seen = probe.tabRound();
+            probe.lastTab = seen;
+            const expected = ["page/For how long: 24 hours (default)", "page/I understand that everything is allowed once while learning runs",
+                "page/Select suggested", "page/Refresh", "page/Delete the recorded list",
+                "page/Allow any destination: a (/tmp/a), name unverified", "page/Block this program: a (/tmp/a), name unverified",
+                "page/Allow only these destinations: app (/usr/bin/app)", "page/Allow any destination: app (/usr/bin/app)",
+                "page/Block this program: app (/usr/bin/app)"];
+            probe.expect(JSON.stringify(seen) === JSON.stringify(expected), "page Tab order: " + JSON.stringify(seen));
+            probe.sweepNamed("review page", ["For how long: 24 hours (default)", "Select suggested"]);
+            // Space ticks and unticks a box; the other keys do nothing.
+            probe.expect(probe.tabTo("page/Allow any destination: a (/tmp/a), name unverified"), "cannot Tab to the first box");
+            probe.quietOn("a tick box");
+            tc.keyClick(Qt.Key_Space);
+            probe.expect(ctl.calls[ctl.calls.length - 1] === "tick:path:/tmp/a:allow-any" && ctl.tickCount === 1,
+                         "Space did not tick: " + JSON.stringify(ctl.calls));
+            probe.expect(probe.where(probe.focused()).indexOf("page/Allow any destination: a") === 0,
+                         "focus left the ticked box: " + probe.where(probe.focused()));
+            tc.keyClick(Qt.Key_Space);
+            probe.expect(ctl.calls[ctl.calls.length - 1] === "tick:path:/tmp/a:", "Space did not untick: " + JSON.stringify(ctl.calls));
+            tc.keyClick(Qt.Key_Space);
+            probe.expect(ctl.tickCount === 1, "the box is not ticked");
+            break;
+        }
+        case 2:
+            probe.expect(probe.tabTo("page/Review the ticked choices"), "cannot Tab to Review the ticked choices");
+            probe.quietOn("Review the ticked choices");
+            tc.keyClick(Qt.Key_Space);
+            probe.expect(ctl.calls.filter(c => c === "prepare").length === 1, "Space on Review did not prepare once: " + JSON.stringify(ctl.calls));
+            break;
+        case 3: {
+            probe.expect(probe.where(probe.focused()) === "window/These rules will be added" || probe.where(probe.focused()).indexOf("dialog/") === 0,
+                         "focus is not in the opened dialog: " + probe.where(probe.focused()));
+            probe.sweepNamed("summary dialog", ["Confirm: a: blocks need care. I understand.", "Go back", "Apply 3 rules"]);
+            const before = probe.tabsHere(6);
+            probe.expect(before.indexOf("dialog/Apply 3 rules") < 0, "Tab reached Apply before any confirmation: " + JSON.stringify(before));
+            probe.expect(probe.tabTo("dialog/Confirm: a: blocks need care. I understand.", true), "cannot Tab to the first confirmation");
+            tc.keyClick(Qt.Key_Space);
+            probe.expect(ctl.confirmed[0] === true && ctl.confirmed[1] === false, "Space did not confirm the first: " + JSON.stringify(ctl.confirmed));
+            probe.expect(probe.where(probe.focused()).indexOf("dialog/Confirm") === 0, "focus left the confirmation: " + probe.where(probe.focused()));
+            const half = probe.tabsHere(6);
+            probe.expect(half.indexOf("dialog/Apply 3 rules") < 0, "Tab reached Apply with one confirmation missing: " + JSON.stringify(half));
+            probe.expect(probe.tabTo("dialog/Confirm: app: any destination. I understand.", true), "cannot Tab to the second confirmation");
+            tc.keyClick(Qt.Key_Space);
+            probe.expect(ctl.confirmed[1] === true, "Space did not confirm the second");
+            const next = probe.tabsHere(2);
+            probe.expect(JSON.stringify(next) === JSON.stringify(["dialog/Go back", "dialog/Apply 3 rules"]),
+                         "after the last confirmation Tab is not Go back, Apply: " + JSON.stringify(next));
+            probe.expect(probe.where(probe.focused()) === "dialog/Apply 3 rules", "cannot Tab to Apply");
+            probe.quietOn("Apply", probe.noEscape);
+            probe.expect(probe.applied() === 0, "a key applied");
+            tc.keyClick(Qt.Key_Escape);
+            probe.expect(ctl.calls[ctl.calls.length - 1] === "discard" && probe.applied() === 0, "Escape did not just discard: " + JSON.stringify(ctl.calls));
+            break;
+        }
+        case 4:
+            probe.expect(probe.where(probe.focused()) === "page/Review the ticked choices",
+                         "focus did not return to Review the ticked choices: " + probe.where(probe.focused()));
+            ctl.autoConfirm = true;
+            tc.keyClick(Qt.Key_Space);
+            break;
+        case 5: {
+            // Apply is enabled: a held or repeating key never applies; one Space does.
+            probe.expect(probe.tabTo("dialog/Apply 3 rules", true) || probe.tabTo("dialog/Apply 3 rules"), "cannot Tab to Apply");
+            probe.quietOn("Apply", probe.noEscape);
+            probe.heldOn("Apply (Space)", Qt.Key_Space);
+            probe.heldOn("Apply (Return)", Qt.Key_Return);
+            probe.heldOn("Apply (Enter)", Qt.Key_Enter);
+            probe.expect(probe.applied() === 0, "a held key applied: " + JSON.stringify(ctl.calls));
+            tc.keyPress(Qt.Key_Space);
+            tc.keyPress(Qt.Key_Space, probe.repeat);
+            tc.keyPress(Qt.Key_Space, probe.repeat);
+            probe.expect(probe.applied() === 0, "Apply fired before the release");
+            tc.keyRelease(Qt.Key_Space);
+            probe.expect(probe.applied() === 1, "Space on Apply did not apply exactly once: " + JSON.stringify(ctl.calls));
+            break;
+        }
+        case 6: case 8:
+            // A key held while the dialog opens never applies.
+            probe.heldSummaryKey = phase === 6 ? Qt.Key_Space : Qt.Key_Return;
+            ctl.calls = [];
+            probe.expect(probe.tabTo("page/Review the ticked choices"), "cannot Tab to Review");
+            tc.keyPress(probe.heldSummaryKey);
+            ctl.prepareSummary();
+            break;
+        case 7: case 9:
+            probe.expect(probe.tabTo("dialog/Apply 3 rules", true) || probe.tabTo("dialog/Apply 3 rules"), "cannot Tab to Apply");
+            tc.keyPress(probe.heldSummaryKey, probe.repeat);
+            tc.keyPress(probe.heldSummaryKey, probe.repeat);
+            tc.keyRelease(probe.heldSummaryKey);
+            probe.expect(probe.applied() === 0, "a key held across the dialog opening applied: " + JSON.stringify(ctl.calls));
+            tc.keyClick(Qt.Key_Escape);
+            break;
+        case 10: {
+            // The rows are replaced while a key is down on a box.
+            ctl.calls = [];
+            probe.expect(probe.tabTo("page/Allow any destination: app (/usr/bin/app)"), "cannot Tab to a box");
+            tc.keyPress(Qt.Key_Space);
+            ctl.rowsJson = JSON.stringify(probe.rows.slice().reverse().map(r => Object.assign({}, r)));
+            break;
+        }
+        case 11: {
+            const before = probe.snapshot();
+            tc.keyPress(Qt.Key_Space, probe.repeat);
+            tc.keyRelease(Qt.Key_Space);
+            tc.keyClick(Qt.Key_Return);
+            probe.expect(probe.snapshot() === before, "a key held across the rows being replaced changed " + probe.snapshot());
+            probe.expect(probe.applied() === 0, "a stray key applied");
+            // Start learning needs the tick; Delete asks before it deletes.
+            probe.expect(probe.tabTo("page/I understand that everything is allowed once while learning runs"), "cannot Tab to the understood box");
+            tc.keyClick(Qt.Key_Space);
+            probe.exercise("Start learning", "page/Start learning", true, () => set.started.length === 1 && set.started[0] === 24);
+            probe.expect(probe.tabTo("page/Delete the recorded list"), "cannot Tab to Delete");
+            tc.keyClick(Qt.Key_Space);
+            probe.exercise("Yes, delete", "page/Yes, delete the recorded list", true, () => ctl.calls.filter(c => c === "clear").length === 1);
+            set.learningEndsMs = Date.now() + 3600000;
+            set.learningActive = true;
+            break;
+        }
+        case 12: {
+            const seen = probe.tabRound();
+            for (const n of ["banner/Stop learning", "banner/Review", "page/Stop learning"])
+                probe.expect(seen.indexOf(n) >= 0, "Tab never reaches " + n + ": " + JSON.stringify(seen));
+            probe.sweepNamed("learning banner", ["Stop learning", "Review"]);
+            ctl.calls = [];
+            probe.exercise("banner Stop learning", "banner/Stop learning", true, () => set.stops === 1, [Qt.Key_Escape]);
+            probe.exercise("banner Review", "banner/Review", true, () => probe.reviews === 1, [Qt.Key_Escape]);
+            probe.returnFires("banner Stop learning", "banner/Stop learning", () => set.stops);
+            probe.returnFires("banner Review", "banner/Review", () => probe.reviews);
+            probe.exercise("panel Stop learning", "page/Stop learning", true, () => set.stops === 4);
+            ctl.applying = true;
+            ctl.progressJson = JSON.stringify({ state: "running", summary: "1 of 3 added", rows: [{ label: "a", status: "added" }] });
+            break;
+        }
+        case 13: {
+            probe.sweepNamed("batch progress", ["Cancel"]);
+            probe.exercise("Cancel", "page/Cancel", true, () => ctl.calls.filter(c => c === "cancel").length === 1);
+            probe.expect(probe.applied() === 0, "something applied");
+            const bad = Object.keys(probe.missing);
+            probe.expect(bad.length === 0, bad.length + " controls lack a meaningful Accessible.name: "
+                         + bad.map(k => k + " (" + probe.missing[k] + ")").join("; "));
+            return true;
+        }
+        }
+        return false;
+    }
+    property int heldSummaryKey: 0
+
+    Timer {
+        interval: 100
+        running: true
+        repeat: true
+        onTriggered: {
+            let done = false;
+            try {
+                const waiting = probe.gate(probe.phase);
+                if (waiting !== "") {
+                    if (++probe.stalls < probe.maxStalls) return;
+                    throw new Error("phase " + probe.phase + " never ready for " + waiting);
+                }
+                probe.stalls = 0;
+                done = probe.run(probe.phase);
+                probe.phase++;
+            } catch (e) {
+                probe.failures.push("phase " + probe.phase + " threw: " + e);
+                done = true;
+            }
+            if (done) {
+                stop();
+                try {
+                    if (probe.failures.length > 0) {
+                        throw new Error("learning keyboard probe: " + probe.failures.join("; "));
+                    }
+                    console.warn("LEARNING_KEYBOARD_PROBE_DONE");
+                } finally {
+                    Qt.quit();
+                }
+            }
+        }
+    }

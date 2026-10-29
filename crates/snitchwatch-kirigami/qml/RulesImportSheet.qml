@@ -101,6 +101,7 @@ SizedOverlaySheet {
                 Layout.fillWidth: true
                 Controls.CheckBox {
                     objectName: "importTick"
+                    Accessible.name: "Import rule: " + change.row.displayName
                     checked: !!sheet.ticks[change.row.name]
                     enabled: !!sheet.controller && !sheet.controller.applying
                              && !sheet.controller.applied

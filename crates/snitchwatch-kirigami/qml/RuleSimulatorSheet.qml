@@ -178,6 +178,7 @@ SizedOverlaySheet {
                 id: simProcessPath
                 objectName: "simProcessPath"
                 Kirigami.FormData.label: "Process path"
+                Accessible.name: Kirigami.FormData.label
                 placeholderText: "/usr/bin/curl"
                 Layout.fillWidth: true
             }
@@ -185,6 +186,7 @@ SizedOverlaySheet {
                 id: simHost
                 objectName: "simHost"
                 Kirigami.FormData.label: "Destination host"
+                Accessible.name: Kirigami.FormData.label
                 placeholderText: "github.com"
                 enabled: !simHostEmpty.checked
                 Layout.fillWidth: true
@@ -198,6 +200,7 @@ SizedOverlaySheet {
                 id: simPort
                 objectName: "simPort"
                 Kirigami.FormData.label: "Destination port"
+                Accessible.name: Kirigami.FormData.label
                 from: 0
                 to: 65535
                 value: 443
@@ -206,6 +209,7 @@ SizedOverlaySheet {
                 id: simProtocol
                 objectName: "simProtocol"
                 Kirigami.FormData.label: "Protocol"
+                Accessible.name: Kirigami.FormData.label + ": " + displayText
                 textRole: "label"
                 valueRole: "value"
                 // opensnitchd names IPv6 flows tcp6/udp6/...; a rule for `tcp`
@@ -247,19 +251,33 @@ SizedOverlaySheet {
                 Controls.TextArea {
                     id: simParentPaths
                     Kirigami.FormData.label: "Parent programs"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "One path per line, nearest first"
+                    // Q01: Tab leaves the box (it would otherwise type a tab
+                    // character and trap the keyboard); one path per line
+                    // needs only Return.
+                    Keys.onTabPressed: function (event) {
+                        nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocusReason);
+                        event.accepted = true;
+                    }
+                    Keys.onBacktabPressed: function (event) {
+                        nextItemInFocusChain(false).forceActiveFocus(Qt.BacktabFocusReason);
+                        event.accepted = true;
+                    }
                     Layout.fillWidth: true
                     Layout.preferredHeight: Kirigami.Units.gridUnit * 4
                 }
                 Controls.TextField {
                     id: simCommand
                     Kirigami.FormData.label: "Command line"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "/usr/bin/curl -s https://github.com"
                     Layout.fillWidth: true
                 }
                 Controls.TextField {
                     id: simPid
                     Kirigami.FormData.label: "Process ID"
+                    Accessible.name: Kirigami.FormData.label
                     validator: IntValidator { bottom: 0; top: 2147483647 }
                     Layout.fillWidth: true
                 }
@@ -267,6 +285,7 @@ SizedOverlaySheet {
                     id: simUid
                     objectName: "simUid"
                     Kirigami.FormData.label: "User ID"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "1000"
                     validator: IntValidator { bottom: 0; top: 2147483647 }
                     Layout.fillWidth: true
@@ -275,7 +294,19 @@ SizedOverlaySheet {
                     id: simEnv
                     objectName: "simEnv"
                     Kirigami.FormData.label: "Environment"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "NAME=value, one per line"
+                    // Q01: Tab leaves the box (it would otherwise type a tab
+                    // character and trap the keyboard); one path per line
+                    // needs only Return.
+                    Keys.onTabPressed: function (event) {
+                        nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocusReason);
+                        event.accepted = true;
+                    }
+                    Keys.onBacktabPressed: function (event) {
+                        nextItemInFocusChain(false).forceActiveFocus(Qt.BacktabFocusReason);
+                        event.accepted = true;
+                    }
                     Layout.fillWidth: true
                     Layout.preferredHeight: Kirigami.Units.gridUnit * 4
                 }
@@ -289,12 +320,14 @@ SizedOverlaySheet {
                 Controls.TextField {
                     id: simSrcIp
                     Kirigami.FormData.label: "Source IP"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "192.168.1.10"
                     Layout.fillWidth: true
                 }
                 Controls.TextField {
                     id: simSrcPort
                     Kirigami.FormData.label: "Source port"
+                    Accessible.name: Kirigami.FormData.label
                     validator: IntValidator { bottom: 0; top: 65535 }
                     Layout.fillWidth: true
                 }
@@ -302,18 +335,21 @@ SizedOverlaySheet {
                     id: simDestIp
                     objectName: "simDestIp"
                     Kirigami.FormData.label: "Destination IP"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "93.184.216.34"
                     Layout.fillWidth: true
                 }
                 Controls.TextField {
                     id: simIfaceIn
                     Kirigami.FormData.label: "Inbound interface"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "eth0"
                     Layout.fillWidth: true
                 }
                 Controls.TextField {
                     id: simIfaceOut
                     Kirigami.FormData.label: "Outbound interface"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "eth0"
                     Layout.fillWidth: true
                 }
@@ -321,6 +357,7 @@ SizedOverlaySheet {
                     id: simChecksums
                     objectName: "simChecksums"
                     Kirigami.FormData.label: "Checksums"
+                    Accessible.name: Kirigami.FormData.label + ": " + displayText
                     // Parallel to `modes`, which is what the simulator reads.
                     readonly property var modes: ["unknown", "off", "on", "on-none"]
                     model: ["Unknown", "Off", "On, program's MD5 below",
@@ -329,6 +366,7 @@ SizedOverlaySheet {
                 Controls.TextField {
                     id: simMd5
                     Kirigami.FormData.label: "Program MD5"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "Leave blank if unknown"
                     enabled: simChecksums.currentIndex === 2
                     Layout.fillWidth: true

@@ -98,8 +98,9 @@ ColumnLayout {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.largeSpacing
 
-                Controls.Switch {
+                GuardedSwitch {
                     objectName: "groupSwitch-" + groupRow.modelData.id
+                    Accessible.name: groupRow.modelData.title
                     Layout.alignment: Qt.AlignTop
                     enabled: step.usable
                         && (!groupRow.modelData.isBroad || groupRow.modelData.isOn
@@ -134,6 +135,7 @@ ColumnLayout {
                         objectName: "groupDetails-" + groupRow.modelData.id
                         flat: true
                         text: groupRow.expanded ? "Hide details" : "Details"
+                        Accessible.name: text + " for " + groupRow.modelData.title
                         onClicked: groupRow.expanded = !groupRow.expanded
                     }
                     Repeater {

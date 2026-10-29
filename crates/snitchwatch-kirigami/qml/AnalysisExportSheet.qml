@@ -119,7 +119,7 @@ Controls.Dialog {
                     Layout.fillWidth: true
                     enabled: !sheet.controller.saving
                     model: ["All application identities", "Exact process path", "Missing process path category"]
-                    Accessible.name: "Export application selector"
+                    Accessible.name: "Export application: " + displayText
                     onActivated: sheet.changedFilters()
                 }
                 Controls.TextField {
@@ -149,6 +149,7 @@ Controls.Dialog {
                             required property string modelData
                             objectName: "analysisExportVerdict-" + modelData
                             text: modelData
+                            Accessible.name: "Verdict " + modelData
                             checked: true
                             enabled: verdictEnabled.checked && !sheet.controller.saving
                             onToggled: sheet.changedFilters()
@@ -204,7 +205,7 @@ Controls.Dialog {
                     if (filters !== null) sheet.controller.requestExport(filters);
                 }
             }
-            Controls.Button {
+            GuardedButton {
                 objectName: "analysisExportSave"
                 text: sheet.controller.saving ? "Saving…" : "Save privately"
                 enabled: sheet.controller.previewReady && sheet.controller.available && !sheet.controller.saving
