@@ -253,6 +253,17 @@ SizedOverlaySheet {
                     Kirigami.FormData.label: "Parent programs"
                     Accessible.name: Kirigami.FormData.label
                     placeholderText: "One path per line, nearest first"
+                    // Q01: Tab leaves the box (it would otherwise type a tab
+                    // character and trap the keyboard); one path per line
+                    // needs only Return.
+                    Keys.onTabPressed: function (event) {
+                        nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocusReason);
+                        event.accepted = true;
+                    }
+                    Keys.onBacktabPressed: function (event) {
+                        nextItemInFocusChain(false).forceActiveFocus(Qt.BacktabFocusReason);
+                        event.accepted = true;
+                    }
                     Layout.fillWidth: true
                     Layout.preferredHeight: Kirigami.Units.gridUnit * 4
                 }
@@ -285,6 +296,17 @@ SizedOverlaySheet {
                     Kirigami.FormData.label: "Environment"
                     Accessible.name: Kirigami.FormData.label
                     placeholderText: "NAME=value, one per line"
+                    // Q01: Tab leaves the box (it would otherwise type a tab
+                    // character and trap the keyboard); one path per line
+                    // needs only Return.
+                    Keys.onTabPressed: function (event) {
+                        nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocusReason);
+                        event.accepted = true;
+                    }
+                    Keys.onBacktabPressed: function (event) {
+                        nextItemInFocusChain(false).forceActiveFocus(Qt.BacktabFocusReason);
+                        event.accepted = true;
+                    }
                     Layout.fillWidth: true
                     Layout.preferredHeight: Kirigami.Units.gridUnit * 4
                 }

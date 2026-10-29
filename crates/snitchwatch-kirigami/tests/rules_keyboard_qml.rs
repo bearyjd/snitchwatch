@@ -32,6 +32,19 @@ const DONE_MARKER: &str = "RULES_KEYBOARD_PROBE_DONE";
 /// The shared guard helpers, spliced in at the `// @a11y-guard` line.
 const GUARD: &str = include_str!("support/a11y_guard.qmlpart");
 
+const ITINERARIES: &str = r#"
+    readonly property var itinInspector: ["Close", "Enabled", "Edit…", "Delete rule"]
+    readonly property var itinEditor: ["Close", "Name", "Suggest", "Action: Deny", "Lasts: Custom time", "Time", "On",
+        "Description", "Condition 1: Process: Program path", "Condition 1 matches: is", "Condition 1 value",
+        "Remove condition 1", "Condition 1: match upper and lower case exactly", "Add condition",
+        "Hide advanced options", "Decide first", "Don't log", "Cancel", "Save"]
+    readonly property var itinSimulator: ["Close", "Process path", "Destination host",
+        "No host name (a connection to a bare IP address)", "443", "Protocol: unknown", "Hide advanced inputs",
+        "Parent programs", "Command line", "Process ID", "User ID", "Environment", "Source IP", "Source port",
+        "Destination IP", "Inbound interface", "Outbound interface", "Checksums: Unknown", "Run simulation"]
+    readonly property var itinImport: ["Close", "Import rule: a-rule", "Apply 1 change"]
+"#;
+
 const QML: &str = r#"
 import QtQuick
 import QtQuick.Window
@@ -50,6 +63,12 @@ Window {
     readonly property int maxStalls: 200
     property var focusBefore: null
     property bool escaped: false
+    property bool inTick: false
+    property string wanted: ""
+    // A phase that needs the next tick (a layout to settle) sets `again`.
+    property bool again: false
+    property int sub: 0
+    // @itineraries
     // @a11y-guard
 
     RulesPage {
@@ -78,25 +97,56 @@ Window {
     function label(item) {
         return probe.text(item) || (item ? item.objectName || String(item.Accessible.name || "") : "") || String(item);
     }
-    // Tab inside an open sheet until focus leaves it or comes back round,
-    // recording each control's position: the order must be visual.
-    function tabThrough(sheet, what) {
+    // Name a screen reader says for a control, else its object name.
+    function said(item) {
+        return String(item.Accessible.name || "") || item.objectName || probe.text(item) || String(item);
+    }
+    function findAll(root, pred, out) {
+        if (!root) return out;
+        if (pred(root)) out.push(root);
+        for (const k of (root.children || [])) probe.findAll(k, pred, out);
+        return out;
+    }
+    // Tab (real keys) round the open sheet once and compare with the exact
+    // itinerary expected: names in order, each focusable control once, none
+    // skipped, and the order visual (top to bottom, left to right).
+    function tabThrough(sheet, what, expected) {
         const seen = [];
-        let last = null;
-        for (let i = 0; i < 60; ++i) {
+        let wrapped = false;
+        for (let i = 0; i < 80; ++i) {
             tc.keyClick(Qt.Key_Tab);
             const f = probe.focused();
-            if (!probe.inside(f, sheet.contentItem) || seen.some(s => s.item === f)) break;
+            if (seen.some(s => s.item === f)) { wrapped = true; break; }
+            if (!probe.inside(f, sheet.contentItem)) {
+                // The header's Close button is a stop too; anything outside
+                // the sheet ends the round.
+                if (!probe.inside(f, sheet)) break;
+                seen.push({ item: f, x: -1, y: -1, label: probe.said(f), header: true });
+                continue;
+            }
             const p = f.mapToItem(sheet.contentItem, 0, 0);
-            seen.push({ item: f, x: p.x, y: p.y, label: probe.label(f) });
+            seen.push({ item: f, x: p.x, y: p.y, label: probe.said(f) });
         }
-        probe.expect(seen.length >= 3, what + ": Tab reached only " + seen.length + " controls");
-        for (let i = 1; i < seen.length; ++i) {
-            const a = seen[i - 1], b = seen[i];
+        // Tab starts wherever focus was: read the round from the first
+        // stop the itinerary names.
+        const k = seen.findIndex(s => s.label === expected[0]);
+        if (k > 0) seen.push(...seen.splice(0, k));
+        const got = seen.map(s => s.label);
+        probe.expect(JSON.stringify(got) === JSON.stringify(expected),
+                     what + ": Tab itinerary was " + JSON.stringify(got) + " but should be " + JSON.stringify(expected));
+        probe.expect(wrapped, what + ": Tab never came back round to the first control");
+        const body = seen.filter(s => !s.header);
+        for (let i = 1; i < body.length; ++i) {
+            const a = body[i - 1], b = body[i];
             const ordered = b.y > a.y + 2 || (Math.abs(b.y - a.y) <= 2 && b.x >= a.x);
             if (!ordered) probe.failures.push(what + ": Tab goes from '" + a.label + "' (" + Math.round(a.x) + ","
                 + Math.round(a.y) + ") back to '" + b.label + "' (" + Math.round(b.x) + "," + Math.round(b.y) + ")");
         }
+        // Every shown, enabled control that takes Tab focus was visited.
+        const missed = probe.findAll(sheet.contentItem, it => it.activeFocusOnTab === true && it.visible && it.enabled
+                                     && it.width > 0 && it.height > 0, [])
+            .filter(it => !seen.some(s => s.item === it)).map(it => probe.said(it));
+        probe.expect(missed.length === 0, what + ": Tab skipped " + JSON.stringify(missed));
         return seen;
     }
     function rowItem(i) { return page.rulesList.itemAtIndex(i); }
@@ -161,20 +211,35 @@ Window {
         case 13: return !page.simulatorSheet.visible ? "" : "the simulator closed";
         case 14: return page.importSheet.opened && probe.named(page.importSheet.contentItem, "importTick") ? "" : "the import preview open";
         case 15: return !page.importSheet.visible ? "" : "the import preview closed";
+        case 16: return page.inspectorSheet.opened ? "" : "the inspector open for the focused rule";
+        case 17: return probe.sub > 0 || !page.inspectorSheet.visible ? "" : "the inspector closed";
         default: return "";
         }
     }
 
+    // A probe that hangs (a loop, a lost event) fails naming where.
+    Timer {
+        interval: 45000
+        running: true
+        onTriggered: {
+            console.warn("rules probe: stuck in phase " + probe.phase + "." + probe.sub + "; " + probe.failures.join("; "));
+            Qt.quit();
+        }
+    }
     Timer {
         interval: 100
         running: true
         repeat: true
         onTriggered: {
+            // Key events spin the event loop: a tick must not re-enter a
+            // phase that is still typing.
+            if (probe.inTick) return;
+            probe.inTick = true;
             let done = false;
             try {
                 const waiting = probe.gate(probe.phase);
                 if (waiting !== "") {
-                    if (++probe.stalls < probe.maxStalls) return;
+                    if (++probe.stalls < probe.maxStalls) { probe.inTick = false; return; }
                     throw new Error("phase " + probe.phase + " never ready for " + waiting);
                 }
                 probe.stalls = 0;
@@ -215,7 +280,7 @@ Window {
                                  "a key right after opening pressed something in the inspector");
                     probe.resweep("inspector");
                     probe.expectNames("inspector", ["Enabled", "Edit…", "Delete rule"], []);
-                    probe.tabThrough(sheet, "inspector");
+                    probe.tabThrough(sheet, "inspector", itinInspector);
                     // Delete is two steps: Space asks, and no further key
                     // from a focus nobody chose confirms it.
                     probe.tabTo("Delete rule", f => probe.text(f) === "Delete rule");
@@ -257,18 +322,29 @@ Window {
                     // Edit… by keyboard opens the editor on this rule.
                     const edit = probe.tabTo("Edit…", f => probe.text(f) === "Edit…");
                     tc.keyClick(Qt.Key_Space);
+                } else if (probe.phase === 7 && probe.sub === 0) {
+                    // Expand the advanced options and pick Custom time, by
+                    // keyboard, so the whole editor is in the traversal.
+                    const ed = page.ruleEditor;
+                    probe.tabTo("Show advanced options", f => f.objectName === "editorShowAdvanced");
+                    tc.keyClick(Qt.Key_Space);
+                    const lasts = probe.tabToName("the Lasts selector", "editorDuration");
+                    for (let i = 0; lasts && i < 20 && lasts.displayText !== "Custom time"; ++i) tc.keyClick(Qt.Key_Down);
+                    probe.expect(lasts && lasts.displayText === "Custom time", "keys never reached Custom time");
+                    probe.again = true;
                 } else if (probe.phase === 7) {
                     const ed = page.ruleEditor;
+                    const time = probe.named(ed.contentItem, "editorCustomDuration");
+                    probe.expect(time !== null, "Custom time did not show the Time field");
+                    probe.expect(time && String(time.Accessible.name) === "Time", "the Time field is named '" + (time && time.Accessible.name) + "'");
                     probe.resweep("editor");
-                    probe.expectNames("editor", ["Name", "Description", "On", "Suggest", "Add condition", "Cancel",
-                        "Condition 1 value", "Remove condition 1",
-                        "Condition 1: match upper and lower case exactly"], ["Action", "Lasts", "Condition 1", "Condition 1 matches"]);
-                    probe.tabThrough(ed, "editor");
+                    probe.expectNames("editor", ["Name", "Description", "Time", "On", "Suggest", "Add condition", "Cancel",
+                        "Decide first", "Don't log", "Condition 1 value", "Remove condition 1",
+                        "Condition 1: match upper and lower case exactly"],
+                        ["Action", "Lasts", "Condition 1", "Condition 1 matches"]);
+                    probe.tabThrough(ed, "editor", itinEditor);
                     probe.expectNamedAfterChange(ed, "editorAction", "Action", "editor");
                     probe.expectNamedAfterChange(ed, "editorOperand", "Condition 1", "editor");
-                    probe.button(ed.contentItem, "Show advanced options").clicked();
-                    probe.resweep("editor, advanced");
-                    probe.expectNames("editor, advanced", ["Decide first", "Don't log"], []);
                     // Cancel by keyboard: closes, saves nothing.
                     const sent = ed.controller.statusText;
                     probe.tabTo("Cancel", f => f.objectName === "editorCancel");
@@ -306,15 +382,17 @@ Window {
                     ed.close();
                 } else if (probe.phase === 11) {
                     page.openSimulator("{}");
+                } else if (probe.phase === 12 && probe.sub === 0) {
+                    probe.tabTo("Advanced inputs", f => probe.text(f) === "Advanced inputs");
+                    tc.keyClick(Qt.Key_Space);
+                    probe.again = true;
                 } else if (probe.phase === 12) {
                     const sim = page.simulatorSheet;
                     probe.resweep("simulator");
-                    probe.expectNames("simulator", ["Process path", "Destination host", "Destination port"], ["Protocol"]);
-                    probe.tabThrough(sim, "simulator");
+                    probe.expectNames("simulator", ["Process path", "Destination host", "Destination port",
+                        "User ID", "Environment", "Command line", "Destination IP"], ["Protocol", "Checksums"]);
+                    probe.tabThrough(sim, "simulator", itinSimulator);
                     probe.expectNamedAfterChange(sim, "simProtocol", "Protocol", "simulator");
-                    probe.button(sim.contentItem, "Advanced inputs").clicked();
-                    probe.resweep("simulator, advanced");
-                    probe.expectNames("simulator, advanced", ["User ID", "Environment", "Command line", "Destination IP"], ["Checksums"]);
                     tc.keyClick(Qt.Key_Escape);
                 } else if (probe.phase === 13) {
                     page.importSheet.preview = { add: [{ name: "a", displayName: "a-rule", ticked: true, caution: "",
@@ -325,23 +403,61 @@ Window {
                     const imp = page.importSheet;
                     probe.resweep("import preview");
                     probe.expectNames("import preview", ["Import rule: a-rule"], []);
-                    probe.tabThrough(imp, "import preview");
+                    probe.tabThrough(imp, "import preview", itinImport);
                     // Space on the tick unticks it; it is the user's choice.
                     const tick = probe.tabToName("the tick", "importTick");
                     tc.keyClick(Qt.Key_Space);
                     probe.expect(tick && imp.ticks.a === false, "Space did not untick the change");
                     tc.keyClick(Qt.Key_Escape);
                 } else if (probe.phase === 15) {
+                    // Select A, then focus B (as Tab or a click does): the
+                    // highlight follows the focus, and Menu opens B, not A.
+                    probe.rowItem(0).forceActiveFocus();
+                    probe.expect(page.rulesList.currentIndex === 0, "focusing the first row did not select it");
+                    probe.rowItem(1).forceActiveFocus();
+                    probe.expect(page.rulesList.currentIndex === 1, "focusing another row left the selection on the first");
+                    // An arrow from a focused row: the highlight and the focus move together.
+                    probe.rowItem(0).forceActiveFocus();
+                    tc.keyClick(Qt.Key_Down);
+                    probe.expect(page.rulesList.currentIndex === 1 && probe.rowItem(1).activeFocus,
+                                 "Down moved the highlight to row " + page.rulesList.currentIndex
+                                 + " but focus is on " + probe.label(probe.focused()));
+                    tc.keyClick(Qt.Key_Menu);
+                } else if (probe.phase === 16) {
+                    probe.expect(String(page.inspectorSheet.title).indexOf("899-wget") >= 0,
+                                 "Menu on the focused second rule opened " + page.inspectorSheet.title);
+                    tc.keyClick(Qt.Key_Escape);
+                } else if (probe.phase === 17 && probe.sub === 0) {
+                    // Rows reorder while traffic updates: the key acts on the
+                    // rule that has focus when it is pressed, whatever its index.
+                    probe.rowItem(1).forceActiveFocus();
+                    probe.focusBefore = probe.rowOf(probe.focused());
+                    probe.expect(probe.focusBefore !== null, "no rule row has focus");
+                    probe.wanted = probe.focusBefore ? probe.focusBefore.displayName : "";
+                    rulesModel.applyServerMessageJson(JSON.stringify({ action: "setRules", rules: [
+                        probe.rule("899-wget", { type: "simple", operand: "process.path", data: "/usr/bin/wget" }),
+                        probe.rule("899-curl", { type: "simple", operand: "process.path", data: "/usr/bin/curl" })] }));
+                    const f = probe.rowOf(probe.focused());
+                    probe.wanted = f ? f.displayName : probe.wanted;
+                    tc.keyClick(Qt.Key_Return);
+                    probe.again = true;
+                } else if (probe.phase === 17) {
+                    probe.expect(page.inspectorSheet.opened, "Return on a focused rule opened nothing after a reorder");
+                    probe.expect(probe.wanted !== "" && String(page.inspectorSheet.title).indexOf(probe.wanted) >= 0,
+                                 "after a reorder Return opened " + page.inspectorSheet.title + ", not the focused " + probe.wanted);
+                } else if (probe.phase === 18) {
+                    page.inspectorSheet.close();
                     const bad = Object.keys(probe.missing);
                     probe.expect(bad.length === 0, bad.length + " controls lack a meaningful Accessible.name: "
                         + bad.map(k => k + " (" + probe.missing[k] + ")").join("; "));
                     done = true;
                 }
-                probe.phase++;
+                if (probe.again) { probe.again = false; probe.sub++; } else { probe.sub = 0; probe.phase++; }
             } catch (e) {
                 probe.failures.push("phase " + probe.phase + " threw: " + e);
                 done = true;
             }
+            probe.inTick = false;
             if (done) {
                 stop();
                 try {
@@ -382,7 +498,9 @@ fn the_rules_page_and_its_sheets_work_by_keyboard_and_name_every_control() {
 
     let captured = capture_stderr(|| {
         if let Some(engine) = engine.as_mut() {
-            let qml = QML.replace("    // @a11y-guard\n", GUARD);
+            let qml = QML
+                .replace("    // @itineraries\n", ITINERARIES)
+                .replace("    // @a11y-guard\n", GUARD);
             engine.load_data(&QByteArray::from(qml.as_str()), &QUrl::from(PROBE_URL));
         }
         if let Some(app) = app.as_mut() {

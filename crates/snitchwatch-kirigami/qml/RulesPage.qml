@@ -459,9 +459,20 @@ Kirigami.ScrollablePage {
         // arrows move from it. Space opens a rule (ItemDelegate), and so do
         // Enter and Return.
         onActiveFocusChanged: if (activeFocus && currentIndex < 0 && count > 0) currentIndex = 0
+        // The rule that has keyboard focus (a row's own focus, however Tab
+        // got there), read at key time; the selected row only when focus is
+        // on the list itself. `openInspector` copies the rule's fields at
+        // once, so a later reorder cannot change which rule opens.
         function openCurrent() {
-            if (list.currentItem) {
-                page.openInspector(list.currentItem);
+            let target = null;
+            for (let it = Window.activeFocusItem; it && !target; it = it.parent) {
+                if (it.name !== undefined && it.displayName !== undefined && it.ruleAction !== undefined) {
+                    target = it;
+                }
+            }
+            target = target || list.currentItem;
+            if (target) {
+                page.openInspector(target);
             }
         }
         Keys.onReturnPressed: list.openCurrent()
@@ -487,6 +498,8 @@ Kirigami.ScrollablePage {
             id: row
             width: ListView.view ? ListView.view.width : implicitWidth
             highlighted: ListView.isCurrentItem
+            // Focus, highlight and the arrows' start point always agree.
+            onActiveFocusChanged: if (activeFocus) list.currentIndex = row.index
             opacity: row.source === "blocklist" ? 0.7 : 1.0
 
             required property int index
