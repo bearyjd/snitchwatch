@@ -162,9 +162,21 @@ fn the_status_and_first_run_pages_work_by_keyboard_and_name_every_control() {
         run_deep_scan_via(Transport::Native(missing)).is_err(),
         "a scan with the scanner binary missing must fail locally"
     );
+    // The session bus connection itself must fail, which is the first thing a
+    // broker scan does: no request (and no polkit) is ever issued. A broker
+    // reply error would not prove that, so this is checked on the connection.
+    let connected = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { zbus::connection::Builder::session()?.build().await });
+    assert!(
+        connected.is_err(),
+        "the probe can reach a session bus; a broker scan would contact it"
+    );
     assert!(
         run_deep_scan_via(Transport::Broker).is_err(),
-        "the probe could reach a real session bus"
+        "a broker scan must fail locally"
     );
     // Hermetic GeoIP: a Country database sits in the default search location
     // (a temporary home and data dir), yet the explicit override names a file
