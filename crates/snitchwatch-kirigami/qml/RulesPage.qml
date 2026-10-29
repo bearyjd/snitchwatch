@@ -116,6 +116,7 @@ Kirigami.ScrollablePage {
     property alias rulesIo: rulesIo
     property alias importSheet: importSheet
     property alias ruleEditor: ruleEditor
+    property alias simulatorSheet: simulateSheet
     property alias inspectorEditButton: inspector.editButton
     property alias inspectorCommandNote: inspector.commandNote
     property alias rulesCommandNote: rulesCommandNote
@@ -454,6 +455,20 @@ Kirigami.ScrollablePage {
         model: page.model
         currentIndex: -1
         reuseItems: true
+        // Q01: Tab lands on a rule (its row takes focus); select it then, so
+        // arrows move from it. Space opens a rule (ItemDelegate), and so do
+        // Enter and Return.
+        onActiveFocusChanged: if (activeFocus && currentIndex < 0 && count > 0) currentIndex = 0
+        function openCurrent() {
+            if (list.currentItem) {
+                page.openInspector(list.currentItem);
+            }
+        }
+        Keys.onReturnPressed: list.openCurrent()
+        Keys.onEnterPressed: list.openCurrent()
+        // The Menu key opens the rule's actions (its inspector: turn on or
+        // off, edit, delete), as it opens a connection's menu.
+        Keys.onMenuPressed: list.openCurrent()
 
         RulesEmptyPlaceholder {
             parent: list
