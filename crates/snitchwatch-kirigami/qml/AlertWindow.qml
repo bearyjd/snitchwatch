@@ -192,6 +192,17 @@ Window {
         }
     }
 
+    // A deactivated window gets no key releases, so what it thought held is
+    // forgotten; when it is active again the delay starts over, so a key still
+    // down repeats while nothing is answerable and is recorded as held again.
+    function windowActiveChanged(isActive) {
+        if (!isActive) {
+            alert.heldKeys = ({});
+        } else if (alert.shown) {
+            alert.arm();
+        }
+    }
+
     function restoreFocus() {
         const spec = alert.restoreSpec;
         alert.restoreSpec = null;
@@ -353,8 +364,7 @@ Window {
         anchors.fill: parent
         focus: true
 
-        // A deactivated window gets no key releases.
-        Window.onActiveChanged: if (!Window.active) alert.heldKeys = ({})
+        Window.onActiveChanged: alert.windowActiveChanged(Window.active)
 
         Keys.onPressed: event => {
             // Tab and Shift+Tab are the window's focus chain, not ours.

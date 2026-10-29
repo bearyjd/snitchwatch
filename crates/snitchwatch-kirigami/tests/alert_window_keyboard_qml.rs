@@ -200,6 +200,20 @@ Window {
                       pre: () => { alert.keyCatcher.forceActiveFocus(); tc.keyPress(probe.keyOf[k]); tc.keyPress(probe.keyOf[k]); },
                       steps: ["press:" + k, "none", "release:" + k, "none", "click:" + k], expect: [A] });
         }
+        // The window is deactivated and activated again (focus stolen): the
+        // delay starts over, and a key down across it repeats during the delay.
+        for (const k of ["Return", "Enter"]) {
+            probe.add("an armed alert (" + k + ")", { row: true });
+            probe.add(k + " across a deactivate / activate of the same armed alert", {
+                      pre: () => {
+                          alert.windowActiveChanged(false);
+                          alert.windowActiveChanged(true);
+                          probe.expect(!alert.armed, "activating did not start the delay again");
+                          alert.keyCatcher.forceActiveFocus();
+                          tc.keyPress(probe.keyOf[k]);
+                      },
+                      steps: ["press:" + k, "none", "release:" + k, "none", "click:" + k], expect: [A] });
+        }
         // Focus on a duration the re-arm removes stays on the choice, so Return
         // selects (it does not answer); focus on Allow stays on Allow (M2).
         probe.add("Forever focused ...", { row: true, steps: ["tab:Forever"] });

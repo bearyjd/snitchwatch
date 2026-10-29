@@ -352,21 +352,21 @@ fn the_alert_wires_keys_to_the_armed_handler_and_waits_one_second() {
     // A press is recorded as held wherever it began, armed or not, so that a
     // repeat after a re-arm or a new row is not an answer: one recorder, used by
     // the window, the choices and the verdict buttons.
+    let squashed: String = ALERT_QML.split_whitespace().collect();
     assert!(
-        ALERT_QML.contains("function freshPress(key, autoRepeat)")
-            && ALERT_QML
-                .contains("alert.armed && autoRepeat !== true && alert.heldKeys[key] !== true")
-            && ALERT_QML.matches("alert.freshPress(").count() >= 4
-            && !ALERT_QML.contains("alert.heldKeys = ({})\n            alert.arm"),
+        squashed.contains("functionfreshPress(key,autoRepeat)")
+            && squashed.contains("alert.armed&&autoRepeat!==true&&alert.heldKeys[key]!==true")
+            && ALERT_QML.matches("alert.freshPress(").count() >= 4,
         "held keys must be recorded at every press and survive re-arming"
     );
     // ... and are forgotten only when the window can no longer see releases:
     // hidden or deactivated, never on a new row or a re-arm (#258 re-review).
     assert!(
-        ALERT_QML.matches("alert.heldKeys = ({})").count() == 2
-            && ALERT_QML.contains("Window.onActiveChanged: if (!Window.active) alert.heldKeys = ({})")
-            && ALERT_QML.contains("} else {\n            alert.heldKeys = ({});\n        }"),
-        "held keys must be cleared when the alert hides or its window is deactivated, only"
+        squashed.matches("alert.heldKeys=({})").count() == 2
+            && squashed.contains("Window.onActiveChanged:alert.windowActiveChanged(Window.active)")
+            && squashed.contains("if(!isActive){alert.heldKeys=({});}elseif(alert.shown){alert.arm();}")
+            && squashed.contains("}else{alert.heldKeys=({});}"),
+        "held keys must be cleared when the alert hides or its window is deactivated, and the delay restarted on activation"
     );
     // The verdict buttons see the key first and guard it like handleKey.
     assert!(
