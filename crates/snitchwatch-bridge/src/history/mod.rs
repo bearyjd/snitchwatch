@@ -15,7 +15,9 @@
 
 pub mod budget;
 pub mod caps;
+pub mod lifecycle;
 pub mod open;
+pub mod pins;
 pub mod record;
 pub mod schema;
 pub mod settings;
@@ -170,9 +172,12 @@ mod budget_tests;
 #[cfg(test)]
 mod caps_tests;
 #[cfg(test)]
+mod dormant_tests;
+#[cfg(test)]
 mod replace_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
