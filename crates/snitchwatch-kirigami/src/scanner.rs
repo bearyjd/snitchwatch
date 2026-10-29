@@ -93,7 +93,49 @@ pub fn summarize(result: &Result<String, ScanError>, hhmm: &str) -> (SummaryKind
     (kind, text)
 }
 
+/// How a scan request reaches the host scanner.
+#[derive(Debug, Clone)]
+pub enum Transport {
+    /// The Flatpak path: the host broker on the session bus.
+    Broker,
+    /// A native build: pkexec running this scanner binary.
+    Native(std::path::PathBuf),
+}
+
+#[cfg(any(test, feature = "test-seams"))]
+static FORCED_TRANSPORT: std::sync::OnceLock<Transport> = std::sync::OnceLock::new();
+
+/// Tests drive the real click path over a private bus without a `/.flatpak-info`.
+/// Compiled only for tests / the `test-seams` feature, never in a shipped build.
+#[cfg(any(test, feature = "test-seams"))]
+pub fn force_transport_for_tests(transport: Transport) {
+    let _ = FORCED_TRANSPORT.set(transport);
+}
+
+fn detect_transport() -> Transport {
+    #[cfg(any(test, feature = "test-seams"))]
+    if let Some(t) = FORCED_TRANSPORT.get() {
+        return t.clone();
+    }
+    if Path::new("/.flatpak-info").exists() {
+        return Transport::Broker;
+    }
+    let scanner =
+        std::env::var("SNITCHWATCH_SCANNER_BIN").unwrap_or_else(|_| scanner_broker::SCANNER.into());
+    Transport::Native(scanner.into())
+}
+
 pub fn run_deep_scan() -> Result<String, ScanError> {
+    run_via(detect_transport())
+}
+
+/// Run a scan over an explicit transport (test seam).
+#[cfg(any(test, feature = "test-seams"))]
+pub fn run_deep_scan_via(transport: Transport) -> Result<String, ScanError> {
+    run_via(transport)
+}
+
+fn run_via(transport: Transport) -> Result<String, ScanError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -102,12 +144,9 @@ pub fn run_deep_scan() -> Result<String, ScanError> {
             detail: e.to_string(),
         })?;
     let result = runtime.block_on(async {
-        if Path::new("/.flatpak-info").exists() {
-            scanner_broker::request_scan().await
-        } else {
-            let scanner = std::env::var("SNITCHWATCH_SCANNER_BIN")
-                .unwrap_or_else(|_| scanner_broker::SCANNER.into());
-            scanner_broker::run_native(Path::new(&scanner)).await
+        match transport {
+            Transport::Broker => scanner_broker::request_scan().await,
+            Transport::Native(scanner) => scanner_broker::run_native(&scanner).await,
         }
     });
     interpret(result)

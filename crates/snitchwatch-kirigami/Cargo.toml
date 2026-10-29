@@ -33,6 +33,12 @@ name = "application_widgets"
 path = "tests/application_widgets.rs"
 harness = false
 
+# Test-only seams in `scanner.rs` (transport override). Never a default and
+# enabled only by the self dev-dependency below, so `cargo build`/`--release`
+# and the packaged binary do not contain them; `cargo test` does.
+[features]
+test-seams = []
+
 [dependencies]
 snitchwatch-bridge = { path = "../snitchwatch-bridge", default-features = false }
 # The rule editor reads checked rules' conditions (`protocol::Operator`), and
@@ -79,6 +85,7 @@ libc = "0.2"
 cxx-qt-build = "=0.9.1"
 
 [dev-dependencies]
+snitchwatch-kirigami = { path = ".", features = ["test-seams"] }
 tempfile = "3"
 tokio = { version = "1.40", features = ["test-util"] }
 # Live core-loop integration test (tests/live_loop.rs): starts a separate test
