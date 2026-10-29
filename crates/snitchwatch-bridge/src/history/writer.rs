@@ -129,6 +129,12 @@ impl Queue {
     }
 
     #[cfg(test)]
+    pub(crate) fn retained_for_test(&self) -> (usize, usize) {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        (inner.items.len(), inner.items.capacity())
+    }
+
+    #[cfg(test)]
     pub(crate) fn lock_for_test(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -163,6 +169,11 @@ impl Queue {
         }
         let take = max.min(inner.items.len());
         let batch: Vec<Item> = inner.items.drain(..take).collect();
+        // The deque keeps its backing allocation after a drain; `queue_bytes`
+        // charges at most as many spare slots as used ones, so give the rest
+        // back (an empty queue frees it all).
+        let keep = inner.items.len() * 2;
+        inner.items.shrink_to(keep);
         let freed: usize = batch.iter().map(Item::queue_bytes).sum();
         inner.bytes = inner.bytes.saturating_sub(freed);
         batch
@@ -190,6 +201,24 @@ pub enum WriteError {
     /// transaction was rolled back. Means a journal assumption is broken.
     #[error("a transaction's journal ({journal} bytes) exceeded its budget ({limit})")]
     BudgetExceeded { journal: u64, limit: u64 },
+    /// The database is already larger than this budget allows (the budget was
+    /// lowered, or the file grew elsewhere). SQLite ignores `max_page_count`
+    /// below the current size, so the writer refuses to start; nothing is
+    /// deleted. Raise the budget or clear history.
+    #[error(
+        "history database is {bytes} bytes ({pages} pages), over the {budget_bytes}-byte \
+         budget's main-file cap of {cap_pages} pages; raise the budget or clear history"
+    )]
+    OverBudget {
+        bytes: u64,
+        pages: u64,
+        cap_pages: u64,
+        budget_bytes: u64,
+    },
+    /// The connection is not in rollback-journal (DELETE) mode, which the
+    /// disk bound assumes.
+    #[error("history database journal mode is {0:?}, not delete")]
+    JournalMode(String),
     #[error("a batch of {got} rows is over the {max}-row transaction budget")]
     BatchTooLarge { got: usize, max: u64 },
 }
@@ -213,6 +242,31 @@ pub struct TxnReport {
 
 pub type Observer = Box<dyn FnMut(&TxnReport) + Send>;
 
+/// Remove temp files that an interrupted settings save left in the history
+/// directory (`state_file::temp_path` names them `.<file>.<pid>.<rand>.tmp`),
+/// so the settings reserve of two files is the true worst case.
+fn remove_settings_leftovers(location: &Location) -> Result<(), WriteError> {
+    let settings = location.settings_path();
+    let Some(name) = settings
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+    else {
+        return Ok(());
+    };
+    let prefix = format!(".{name}.");
+    let Some(dir) = settings.parent() else {
+        return Ok(());
+    };
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if file.starts_with(&prefix) && file.ends_with(".tmp") && !entry.file_type()?.is_dir() {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// The synchronous core: every database write the writer thread does.
 pub struct Engine {
     conn: Connection,
@@ -224,8 +278,27 @@ pub struct Engine {
 impl Engine {
     pub fn new(store: Store, location: &Location, budget: Budget) -> Result<Self, WriteError> {
         let conn = store.into_connection();
+        let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let pages = pages.max(0) as u64;
+        // SQLite ignores `max_page_count` below the current size, so a file
+        // already over the cap would keep growing. Refuse; never delete.
+        if pages > budget.max_page_count {
+            return Err(WriteError::OverBudget {
+                bytes: pages * super::budget::PAGE,
+                pages,
+                cap_pages: budget.max_page_count,
+                budget_bytes: budget.total_bytes,
+            });
+        }
         // The main file can never grow past its share of B (S3).
         conn.pragma_update(None, "max_page_count", budget.max_page_count as i64)?;
+        let cap: i64 = conn.query_row("PRAGMA max_page_count", [], |r| r.get(0))?;
+        if cap as u64 != budget.max_page_count {
+            return Err(WriteError::Io(std::io::Error::other(
+                "max_page_count could not be set",
+            )));
+        }
+        remove_settings_leftovers(location)?;
         // No mid-transaction spill: a spill syncs the journal and starts a
         // second header, which the full-journal bound does not allow for.
         conn.pragma_update(None, "cache_spill", "OFF")?;
@@ -237,12 +310,28 @@ impl Engine {
         }
         let mut journal = location.db_path().into_os_string();
         journal.push("-journal");
-        Ok(Self {
+        let engine = Self {
             conn,
             budget,
             journal: journal.into(),
             observer: None,
-        })
+        };
+        engine.pin_journal_mode()?;
+        Ok(engine)
+    }
+
+    /// Put the connection in rollback-journal mode and verify it from the
+    /// value SQLite returns: the disk bound assumes a DELETE journal, and
+    /// `connection()` lets a caller change the mode before the writer starts.
+    pub fn pin_journal_mode(&self) -> Result<(), WriteError> {
+        let mode: String = self
+            .conn
+            .query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0))?;
+        if mode.eq_ignore_ascii_case("delete") {
+            Ok(())
+        } else {
+            Err(WriteError::JournalMode(mode))
+        }
     }
 
     #[cfg(test)]
@@ -469,6 +558,9 @@ pub struct WriterPanicked;
 
 impl Writer {
     pub fn spawn(mut engine: Engine, queue: Arc<Queue>) -> std::io::Result<Self> {
+        engine
+            .pin_journal_mode()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         let failed = Arc::new(AtomicU64::new(0));
         let lost = Arc::new(AtomicU64::new(0));
         let (q, f, l) = (queue.clone(), failed.clone(), lost.clone());
@@ -521,6 +613,19 @@ impl Writer {
         match self.handle.take() {
             Some(handle) => handle.join().map_err(|_| WriterPanicked),
             None => Ok(()),
+        }
+    }
+}
+
+/// Dropping a writer without [`Writer::shutdown`] stops it the same way: the
+/// queue is closed, what is queued is written, and the thread is joined, so a
+/// live worker is never left detached holding the queue. Blocks for at most
+/// the writes still queued.
+impl Drop for Writer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            self.queue.close();
+            let _ = handle.join();
         }
     }
 }

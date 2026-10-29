@@ -671,3 +671,139 @@ fn a_dead_writer_is_visible_to_producers_and_shutdown() {
         "the panic is reported, not discarded"
     );
 }
+
+// ---- review round 3 ---------------------------------------------------
+
+#[test]
+fn a_database_over_a_lowered_budget_refuses_to_start_and_loses_nothing() {
+    let big = rig_with(64 * MIB, true);
+    let mut big = big;
+    // Grow the file past the 16 MiB budget's main-file cap (8 MiB).
+    let mut i = 0;
+    while file_len(&big.location.db_path()) < 9 * MIB {
+        let batch: Vec<Item> = (i..i + 32).map(worst_item).collect();
+        big.engine.insert_batch(&batch).unwrap();
+        i += 32;
+    }
+    let location = big.location.clone();
+    let rows = i as i64;
+    drop(big.engine);
+    let store = open_store(&location).unwrap();
+    let small = Budget::new(16 * MIB).unwrap();
+    let err = match Engine::new(store, &location, small) {
+        Ok(_) => panic!("an over-cap database must not get a writer"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, WriteError::OverBudget { .. }), "{err:?}");
+    let text = err.to_string();
+    assert!(text.contains("pages") && text.contains("budget"), "{text}");
+    let count: i64 = Connection::open(location.db_path())
+        .unwrap()
+        .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, rows, "nothing was deleted");
+}
+
+#[test]
+fn a_connection_switched_to_wal_before_spawn_is_refused() {
+    let rig = rig_with(16 * MIB, true);
+    let mode: String = rig
+        .engine
+        .connection()
+        .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    // A reader holding a WAL snapshot stops the mode from being reset.
+    let reader = Connection::open(rig.location.db_path()).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM events;")
+        .unwrap();
+    let result = Writer::spawn(rig.engine, Arc::new(Queue::with_defaults()));
+    assert!(result.is_err(), "WAL must be refused at spawn");
+    drop(reader);
+}
+
+#[test]
+fn spawn_puts_a_switched_connection_back_in_delete_mode() {
+    let rig = rig_with(16 * MIB, true);
+    let _: String = rig
+        .engine
+        .connection()
+        .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+        .unwrap();
+    let location = rig.location.clone();
+    let writer = Writer::spawn(rig.engine, Arc::new(Queue::with_defaults())).unwrap();
+    let mode: String = Connection::open(location.db_path())
+        .unwrap()
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "delete");
+    writer.shutdown().unwrap();
+}
+
+#[test]
+fn leftover_settings_temp_files_are_removed_when_the_writer_opens() {
+    let rig = rig_with(16 * MIB, true);
+    let settings = rig.location.settings_path();
+    let dir = settings.parent().unwrap().to_path_buf();
+    let mut leftovers = Vec::new();
+    for k in 0..20 {
+        let p = dir.join(format!(".settings.json.{k}.{k:016x}.tmp"));
+        std::fs::write(&p, vec![b' '; 4096]).unwrap();
+        leftovers.push(p);
+    }
+    let other = dir.join("keep.txt");
+    std::fs::write(&other, b"x").unwrap();
+    let before = std::fs::read(&settings).unwrap();
+    let _again = Engine::new(
+        open_store(&rig.location).unwrap(),
+        &rig.location,
+        Budget::new(16 * MIB).unwrap(),
+    )
+    .unwrap();
+    assert!(leftovers.iter().all(|p| !p.exists()), "temp files remain");
+    assert!(other.exists(), "unrelated files are left alone");
+    assert_eq!(std::fs::read(&settings).unwrap(), before);
+}
+
+#[test]
+fn a_drained_queue_gives_its_backing_allocation_back() {
+    let queue = Queue::with_defaults();
+    for i in 0..3000 {
+        queue.try_push(small_item(i)).unwrap();
+    }
+    loop {
+        let (len, cap) = queue.retained_for_test();
+        assert!(
+            cap <= 2 * len.max(1) + 4 || len == 3000,
+            "len {len} cap {cap}"
+        );
+        if queue.pop_batch(64, Duration::ZERO).is_empty() {
+            break;
+        }
+    }
+    let (len, cap) = queue.retained_for_test();
+    assert_eq!(len, 0);
+    assert!(cap <= 4, "an empty queue retains {cap} slots");
+}
+
+#[test]
+fn dropping_a_writer_without_shutdown_stops_and_joins_the_worker() {
+    let rig = rig_with(16 * MIB, true);
+    let location = rig.location.clone();
+    let queue = Arc::new(Queue::with_defaults());
+    for i in 0..5 {
+        queue.try_push(small_item(i)).unwrap();
+    }
+    let writer = Writer::spawn(rig.engine, queue.clone()).unwrap();
+    drop(writer);
+    assert!(queue.try_push(small_item(99)).is_err(), "queue is closed");
+    let rows: i64 = Connection::open(location.db_path())
+        .unwrap()
+        .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        rows, 5,
+        "queued items were written before the join returned"
+    );
+}
