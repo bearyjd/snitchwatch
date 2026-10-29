@@ -46,8 +46,9 @@ Kirigami.ScrollablePage {
         }
     }
 
-    // The banner flips from "Scanning…" to the outcome in place, which
-    // assistive tech does not report on its own. The controller owns the
+    // The summary banner changes to the new outcome in place (the previous
+    // one stays up while a retry runs), which assistive tech does not report
+    // on its own. The controller owns the
     // not-yet-announced outcome, so a scan that finished while this page was
     // not alive is announced once the new page is attached to a window (pages
     // are built parentless and attached afterwards, see StackNav), never from
@@ -101,14 +102,20 @@ Kirigami.ScrollablePage {
             objectName: "scannerSummary"
             Accessible.name: text
             Layout.fillWidth: true
-            visible: page.controller
-                && (page.controller.busy || page.controller.summaryText.length > 0)
-            type: page.controller && page.controller.busy ? Kirigami.MessageType.Information
-                : page.controller && page.controller.summaryKind === "error" ? Kirigami.MessageType.Error
+            visible: page.controller && page.controller.summaryText.length > 0
+            type: page.controller && page.controller.summaryKind === "error" ? Kirigami.MessageType.Error
                 : page.controller && page.controller.summaryKind === "findings" ? Kirigami.MessageType.Warning
                 : Kirigami.MessageType.Positive
-            text: page.controller && page.controller.busy ? "Scanning…"
-                : page.controller ? page.controller.summaryText : ""
+            text: page.controller ? page.controller.summaryText : ""
+        }
+        // Shown alongside the previous outcome, which stays until this scan completes.
+        Kirigami.InlineMessage {
+            objectName: "scannerBusy"
+            Accessible.name: text
+            Layout.fillWidth: true
+            visible: page.controller && page.controller.busy
+            type: Kirigami.MessageType.Information
+            text: "Scanning…"
         }
 
         Controls.Label {

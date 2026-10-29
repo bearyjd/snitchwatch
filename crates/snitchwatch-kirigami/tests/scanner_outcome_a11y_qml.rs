@@ -90,8 +90,14 @@ Window {
                 // (c) page alive: the busy -> false path announces once
                 const banner = root.find(root.page, "scannerSummary");
                 expect(!!banner, "summary banner missing");
+                const previous = scanner.summaryText;
                 scanner.runScan();
-                expect(banner.Accessible.name === "Scanning…", "busy banner name is '" + banner.Accessible.name + "'");
+                // The previous outcome stays up (named for what it is) while a
+                // separate banner truthfully says the scan is running.
+                expect(banner.Accessible.name === previous, "summary banner name is '" + banner.Accessible.name + "' while busy");
+                const busyBanner = root.find(root.page, "scannerBusy");
+                expect(!!busyBanner && busyBanner.visible && busyBanner.Accessible.name === "Scanning…",
+                       "no accessible Scanning… banner while busy");
                 expect(root.announced.length === 1, "announced while busy");
                 root.step = 2;
             } else if (root.step === 2) {
