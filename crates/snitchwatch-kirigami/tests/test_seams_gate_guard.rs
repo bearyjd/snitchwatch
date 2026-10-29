@@ -53,27 +53,15 @@ fn the_feature_is_not_a_default_and_only_the_dev_dependency_enables_it() {
         .and_then(|s| s.split("\n[").next())
         .expect("[features] section");
     assert!(
-        features
-            .lines()
-            .any(|l| l.trim_start().starts_with("test-seams")),
+        features.lines().any(|l| l.trim_start().starts_with("test-seams")),
         "test-seams feature missing"
     );
     assert!(
-        !features
-            .lines()
-            .any(|l| l.trim_start().starts_with("default")),
+        !features.lines().any(|l| l.trim_start().starts_with("default")),
         "a default feature set would ship the test seams"
     );
-    let (_, dev) = MANIFEST
-        .split_once("[dev-dependencies]")
-        .expect("dev-dependencies");
-    assert!(
-        dev.contains("features = [\"test-seams\"]"),
-        "dev-dependency self-reference missing"
-    );
+    let (_, dev) = MANIFEST.split_once("[dev-dependencies]").expect("dev-dependencies");
+    assert!(dev.contains("features = [\"test-seams\"]"), "dev-dependency self-reference missing");
     let (normal, _) = MANIFEST.split_once("[dev-dependencies]").unwrap();
-    assert!(
-        !normal.contains("test-seams\"]"),
-        "test-seams enabled outside dev-dependencies"
-    );
+    assert!(!normal.contains("test-seams\"]"), "test-seams enabled outside dev-dependencies");
 }

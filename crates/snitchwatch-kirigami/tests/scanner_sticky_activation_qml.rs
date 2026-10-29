@@ -78,8 +78,7 @@ fn serve_acks() -> u16 {
             let mut buf = [0u8; 512];
             let _ = stream.read(&mut buf);
             ACKED.fetch_add(1, Ordering::SeqCst);
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         }
     });
     port
