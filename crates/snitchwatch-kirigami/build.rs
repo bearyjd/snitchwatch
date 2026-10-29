@@ -61,6 +61,7 @@ fn main() {
                 "qml/LevelRuleActions.qml",
                 "qml/InlineVerdicts.qml",
                 "qml/PromptSlotBanner.qml",
+                "qml/GuardedButton.qml",
                 "qml/LearningBanner.qml",
                 "qml/LearningReviewPage.qml",
                 "qml/LearningReviewRow.qml",
@@ -110,6 +111,7 @@ fn main() {
     .file("src/clipboard_native_test.rs")
     .file("src/delegate_incubation_test.rs")
     .file("src/accessibility_test.rs")
+    .file("src/key_repeat_test.rs")
     .file("src/bridge_bindings.rs")
     .file("src/bridge_feed.rs")
     .file("src/connections_model.rs")
@@ -151,6 +153,7 @@ fn main() {
     println!("cargo:rerun-if-changed=tests/support/clipboard_native.h");
     println!("cargo:rerun-if-changed=tests/support/delegate_incubation.h");
     println!("cargo:rerun-if-changed=tests/support/accessibility.h");
+    println!("cargo:rerun-if-changed=tests/support/key_repeat.h");
 }
 
 /// Records which source this binary was built from, as `rustc-env` constants

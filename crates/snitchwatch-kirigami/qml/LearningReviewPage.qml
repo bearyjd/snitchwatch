@@ -179,7 +179,7 @@ Kirigami.Page {
                 Flow {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.smallSpacing
-                    Controls.Button {
+                    GuardedButton {
                         objectName: "learningDeleteYes"
                         text: "Yes, delete the recorded list"
                         onClicked: {
