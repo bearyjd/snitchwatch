@@ -436,6 +436,37 @@ fn a_pre_existing_sidecar_is_tightened_before_sqlite_uses_it() {
 }
 
 #[test]
+fn an_unreadable_sidecar_fails_the_open_instead_of_surviving_loose() {
+    let root = tempdir();
+    let (_, at) = enabled_location(&root);
+    drop(open_store(&at).unwrap());
+    let shm = at.dir().join("history.db-shm");
+    std::fs::write(&shm, b"").unwrap();
+    // Owner write-only, group/other read: we can't open it to tighten it.
+    std::fs::set_permissions(&shm, std::fs::Permissions::from_mode(0o244)).unwrap();
+    if std::fs::File::open(&shm).is_ok() {
+        return; // running as root: the file can be read after all
+    }
+    assert!(
+        open_store(&at).is_err(),
+        "must not open with a 0244 sidecar"
+    );
+}
+
+#[test]
+fn a_hard_linked_sidecar_is_refused_without_chmodding_the_other_file() {
+    let root = tempdir();
+    let (state, at) = enabled_location(&root);
+    drop(open_store(&at).unwrap());
+    let other = state.join("other-file");
+    std::fs::write(&other, b"x").unwrap();
+    std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::hard_link(&other, at.dir().join("history.db-journal")).unwrap();
+    assert!(open_store(&at).is_err());
+    assert_eq!(mode_of(&other), 0o644, "chmod must follow validation");
+}
+
+#[test]
 fn a_pre_existing_database_is_tightened_to_0600() {
     let root = tempdir();
     let (_, at) = enabled_location(&root);
