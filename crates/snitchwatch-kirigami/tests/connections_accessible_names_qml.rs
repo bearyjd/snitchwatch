@@ -23,6 +23,9 @@ mod accessibility;
 const PROBE_URL: &str = "qrc:/connections_accessible_names_probe.qml";
 const DONE_MARKER: &str = "ACCESSIBLE_NAMES_PROBE_DONE";
 
+/// The shared guard helpers, spliced in at the `// @a11y-guard` line.
+const GUARD: &str = include_str!("support/a11y_guard.qmlpart");
+
 const QML: &str = r#"
 import QtQuick
 import QtQuick.Window
@@ -35,22 +38,16 @@ Window {
     width: 1400
     height: 900
     property var failures: []
-    property var missing: ({})
-    property int checked: 0
     property int phase: 0
     property int stalls: 0
     readonly property int maxStalls: 200
-    property var geo: ({})
+    // What each decision selector must be called after the change.
+    property var want: ({})
+    // @a11y-guard
     readonly property string rec: "snitchwatch-default-app"
     readonly property var actions: page.connectionActions
     readonly property var menu: page.connectionActions.menu
     readonly property var list: page.connectionList
-    // Roles a user operates; each needs a name a screen reader can say.
-    readonly property var interactive: [Accessible.Button, Accessible.CheckBox,
-        Accessible.RadioButton, Accessible.ComboBox, Accessible.EditableText,
-        Accessible.Slider, Accessible.SpinBox, Accessible.MenuItem,
-        Accessible.ButtonMenu, Accessible.ButtonDropDown, Accessible.Link]
-    // (Not PageTab: a Kirigami page reports it, and it is a container.)
 
     QtObject {
         id: feedStub
@@ -82,28 +79,7 @@ Window {
                  matchedRule: rule };
     }
     function send(msg) { model.applyServerMessageJson(JSON.stringify(msg)); }
-    function stable(key, item) {
-        if (!item || !item.visible || !(item.width > 0) || !(item.height > 0)) {
-            probe.geo[key] = "";
-            return false;
-        }
-        const g = item.mapToItem(null, 0, 0);
-        const geometry = [g.x, g.y, item.width, item.height].join(",");
-        const same = geometry === probe.geo[key];
-        probe.geo[key] = geometry;
-        return same;
-    }
     function settled() { return probe.menu.opened || !probe.menu.visible; }
-    function find(root, pred) {
-        if (!root) return null;
-        if (pred(root)) return root;
-        const kids = root.children || [];
-        for (let i = 0; i < kids.length; ++i) {
-            const f = probe.find(kids[i], pred);
-            if (f) return f;
-        }
-        return null;
-    }
     // A shown decision selector, by objectName.
     function selector(key) {
         const box = probe.find(page, it => it.objectName === key && it.visible && it.enabled);
@@ -121,58 +97,6 @@ Window {
     function leafOrNull(id) {
         const index = model.visibleRowIndex(id);
         return index >= 0 ? probe.list.itemAtIndex(index) : null;
-    }
-    function describe(item) {
-        const text = item.text !== undefined ? String(item.text) : "";
-        return String(item).split("(")[0] + " role " + item.Accessible.role
-            + (item.objectName ? " '" + item.objectName + "'" : "")
-            + (text ? " text '" + text.slice(0, 40) + "'" : "");
-    }
-    // Every shown interactive item under `item` must have a name.
-    function walk(item, where) {
-        if (!item || !item.visible) return;
-        const role = item.Accessible ? item.Accessible.role : 0;
-        // Read-only text (a message, a non-editable combo box's display) is
-        // read out as content, not operated: it is not a control.
-        const staticText = role === Accessible.EditableText && item.readOnly === true;
-        if (probe.interactive.indexOf(role) >= 0 && !staticText && item.width > 0
-                && item.height > 0 && !item.Accessible.ignored) {
-            probe.checked++;
-            probe.seen["role " + role] = (probe.seen["role " + role] || 0) + 1;
-            const name = String(item.Accessible.name || "").trim();
-            probe.names[name] = true;
-            const why = probe.unnamed(name, item, role);
-            if (why) probe.missing[probe.describe(item) + ": " + why] = where;
-            // Its parts (a combo box's display field) are named by it.
-            return;
-        }
-        const kids = item.children || [];
-        for (let i = 0; i < kids.length; ++i) probe.walk(kids[i], where);
-    }
-    // Controls checked per sweep, by role.
-    property var seen: ({})
-    property var names: ({})
-    // What each decision selector must be called after the change.
-    property var want: ({})
-    // Words that name a kind of control, not this one.
-    readonly property var generic: ["button", "push button", "combobox", "combo box", "switch",
-        "checkbox", "check box", "menuitem", "menu item", "item", "textfield", "text field",
-        "text", "edit", "toolbutton", "tool button", "control"]
-    // Why `name` does not name the control, or "" when it does.
-    function unnamed(name, item, role) {
-        if (name.length < 2) return "no name";
-        if (probe.generic.indexOf(name.toLowerCase()) >= 0) return "a generic name";
-        if (role === Accessible.ComboBox) {
-            const value = String(item.displayText || "").trim();
-            if (name === value) return "only its value, no label";
-            if (/:\s*$/.test(name)) return "a label with an empty value";
-        }
-        return "";
-    }
-    function sweep(where) {
-        const before = probe.checked;
-        probe.walk(probe.contentItem, where);
-        probe.seen[where] = probe.checked - before;
     }
 
     function gate(phase) {
@@ -313,7 +237,8 @@ fn every_interactive_connections_control_has_an_accessible_name() {
 
     let captured = capture_stderr(|| {
         if let Some(engine) = engine.as_mut() {
-            engine.load_data(&QByteArray::from(QML), &QUrl::from(PROBE_URL));
+            let qml = QML.replace("    // @a11y-guard\n", GUARD);
+            engine.load_data(&QByteArray::from(qml.as_str()), &QUrl::from(PROBE_URL));
         }
         if let Some(app) = app.as_mut() {
             app.exec();
