@@ -9,11 +9,16 @@
 //! * Kept: name, action, duration, enabled, precedence, `nolog`, and per
 //!   operator the type, the operand kind, `sensitive` and the structure.
 //! * Operand *values* are kept only for [`KEPT_OPERANDS`] and `lists.*`.
-//!   Every other operand's value is withheld. The operand *name* of an
-//!   unknown kind or of `process.env.<NAME>` is withheld too (it is user
-//!   text), so those encode as fixed tokens.
+//!   Every other operand's value is withheld. The operand *kind* string is
+//!   always kept verbatim (D7: "kind kept, value replaced by `[withheld]`"),
+//!   so the env var NAME of `process.env.<NAME>` and kinds this build does
+//!   not know are part of the kind, capped at [`MAX_KIND`] bytes.
 //! * Dropped: description, creation time, and the JSON copy of a `list`
 //!   operator's members in its `data`.
+//!
+//! `rule_hash` is unsalted (v1) and as sensitive as the kept values (paths,
+//! hosts, kind strings): never log or export it. [`RuleClass`] is a label
+//! derived from the rule name, not proof of where the rule came from.
 //!
 //! Raw `process.path` / `dest.host` values are the user's own rule text and
 //! are recorded as written (the stated limit in D4).
@@ -45,35 +50,16 @@ const KEPT_OPERANDS: [&str; 6] = [
 
 /// Backed by a directory of list files: the value (the directory) is kept,
 /// the contents are not recorded.
-const LIST_OPERANDS: [&str; 5] = [
+pub(crate) const LIST_OPERANDS: [&str; 5] = [
     "lists.domains",
     "lists.domains_regexp",
     "lists.ips",
     "lists.nets",
-    "lists.hashes.md5",
+    "lists.hash.md5",
 ];
 
-/// Known operand kinds whose value is withheld; the kind name is kept.
-const WITHHELD_OPERANDS: [&str; 14] = [
-    "process.id",
-    "process.parent.path",
-    "process.command",
-    "process.hash.md5",
-    "process.hash.sha1",
-    "user.name",
-    "source.ip",
-    "source.port",
-    "source.network",
-    "dest.network",
-    "iface.in",
-    "iface.out",
-    // The two below carry no value of their own (see `Value::None`).
-    "true",
-    "list",
-];
-
-const ENV_PREFIX: &str = "process.env.";
-const ENV_TOKEN: &str = "process.env.*";
+/// Longest operand kind string kept (over it: fail closed).
+pub const MAX_KIND: usize = 256;
 const UNKNOWN: &str = "[unknown]";
 const OPERATOR_TYPES: [&str; 5] = ["simple", "regexp", "network", "lists", "list"];
 const ACTIONS: [&str; 3] = ["allow", "deny", "reject"];
@@ -91,6 +77,8 @@ pub enum IdentityError {
     TooManyOperators,
     #[error("an operator list longer than {MAX_OPERATOR_LIST_LEN}")]
     ListTooLong,
+    #[error("operand kind longer than {MAX_KIND} bytes")]
+    KindTooLong,
     #[error("redacted form longer than {SNAPSHOT} bytes")]
     TooLarge,
 }
@@ -170,6 +158,9 @@ pub fn identify(rule: &Rule) -> Result<RuleIdentity, IdentityError> {
     if let Some(op) = &rule.operator {
         enc.operator(op, 0)?;
     }
+    if enc.out.len() > SNAPSHOT {
+        return Err(IdentityError::TooLarge);
+    }
     let digest = Sha256::digest(&enc.out);
     let mut hash = [0u8; RULE_HASH];
     hash.copy_from_slice(&digest[..RULE_HASH]);
@@ -192,11 +183,13 @@ fn allowed<'a>(value: &'a str, set: &[&str]) -> &'a str {
     }
 }
 
+/// Kept verbatim when it could be a daemon duration (`once`, `until
+/// restart`, `always`, Go `ParseDuration` strings such as `1.5h`).
 fn duration(value: &str) -> &str {
     let plain = value.len() <= MAX_DURATION
         && value
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b' ');
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'.' | b'+' | b'-'));
     if plain {
         value
     } else {
@@ -248,9 +241,12 @@ impl Encoder {
         if self.nodes > MAX_NODES {
             return Err(IdentityError::TooManyOperators);
         }
-        let (kind, value) = classify(op);
+        if op.operand.len() > MAX_KIND {
+            return Err(IdentityError::KindTooLong);
+        }
+        let value = classify(op);
         self.text(allowed(&op.r#type, &OPERATOR_TYPES))?;
-        self.text(&kind)?;
+        self.text(&op.operand)?;
         self.bytes(&[u8::from(op.sensitive)]);
         match value {
             Value::Kept(data) => {
@@ -263,25 +259,22 @@ impl Encoder {
             }
             Value::None => self.bytes(&[2]),
         }
-        self.lists |= LIST_OPERANDS.contains(&kind.as_str());
+        self.lists |= LIST_OPERANDS.contains(&op.operand.as_str());
         let members = u32::try_from(op.list.len()).map_err(|_| IdentityError::ListTooLong)?;
         self.bytes(&members.to_be_bytes());
         op.list.iter().try_for_each(|m| self.operator(m, depth + 1))
     }
 }
 
-/// The operand token the canonical form uses, and what happens to the value.
-fn classify(op: &Operator) -> (String, Value<'_>) {
+/// What happens to an operator's value. A `list`-type operator never keeps
+/// `data` (it is a JSON copy of the members), whatever its operand says.
+fn classify(op: &Operator) -> Value<'_> {
     let kind = op.operand.as_str();
-    if KEPT_OPERANDS.contains(&kind) || LIST_OPERANDS.contains(&kind) {
-        (kind.to_owned(), Value::Kept(&op.data))
-    } else if kind == "true" || kind == "list" {
-        (kind.to_owned(), Value::None)
-    } else if WITHHELD_OPERANDS.contains(&kind) {
-        (kind.to_owned(), Value::Withheld)
-    } else if kind.starts_with(ENV_PREFIX) {
-        (ENV_TOKEN.to_owned(), Value::Withheld)
+    if op.r#type == "list" || kind == "true" || kind == "list" {
+        Value::None
+    } else if KEPT_OPERANDS.contains(&kind) || LIST_OPERANDS.contains(&kind) {
+        Value::Kept(&op.data)
     } else {
-        (UNKNOWN.to_owned(), Value::Withheld)
+        Value::Withheld
     }
 }

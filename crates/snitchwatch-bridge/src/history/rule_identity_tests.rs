@@ -52,8 +52,8 @@ fn withheld_variant(v: &str) -> Rule {
     let nested = group(vec![
         op("simple", "process.command", v),
         op("regexp", "process.env.HOME", v),
-        op("simple", &format!("process.env.{v}"), v),
-        op("simple", &format!("x-{v}"), v),
+        op("simple", "process.env.NAME", v),
+        op("simple", "x-unknown-kind", v),
         op("simple", "process.hash.md5", v),
         op("simple", "user.name", v),
     ]);
@@ -79,7 +79,6 @@ fn varying_only_withheld_values_leaves_bytes_and_hash_identical() {
 fn withheld_values_never_appear_in_the_canonical_bytes() {
     let ident = id(&withheld_variant("CANARY-SECRET"));
     assert!(!contains(&ident.canonical, "CANARY"));
-    assert!(!contains(&ident.canonical, "HOME"));
     assert!(contains(&ident.canonical, "example.org"));
 }
 
@@ -233,7 +232,7 @@ fn a_value_cannot_forge_a_nested_operator() {
         ..op("simple", "dest.host", "x")
     };
     let forged_data = "x\0\0\0\x01simpledest.port\0\x011";
-    let forged = op("simple", "dest.host", &forged_data);
+    let forged = op("simple", "dest.host", forged_data);
     assert_ne!(
         id(&rule("r", Some(real))).hash,
         id(&rule("r", Some(forged))).hash
@@ -243,38 +242,106 @@ fn a_value_cannot_forge_a_nested_operator() {
 // ---- allowlist ------------------------------------------------------
 
 #[test]
-fn unknown_kinds_types_actions_and_durations_are_not_recorded() {
-    let mk = |kind: &str, operand: &str, action: &str, dur: &str| Rule {
+fn unknown_types_and_actions_are_not_recorded_but_kinds_are_kept() {
+    let mk = |kind: &str, action: &str, dur: &str| Rule {
         action: action.into(),
         duration: dur.into(),
-        ..rule("r", Some(op(kind, operand, "d")))
+        ..rule("r", Some(op(kind, "weird.kind", "d")))
     };
-    let a = id(&mk("CANARY-T", "CANARY-O", "CANARY-A", "CANARY!"));
-    let b = id(&mk("OTHER-T", "OTHER-O", "OTHER-A", "other!"));
+    let a = id(&mk("CANARY-T", "CANARY-A", "CANARY!"));
+    let b = id(&mk("OTHER-T", "OTHER-A", "other!"));
     assert_eq!(a.canonical, b.canonical);
     assert!(!contains(&a.canonical, "CANARY"));
-    // Known values are told apart.
-    assert_ne!(
-        id(&mk("simple", "dest.host", "allow", "once")).hash,
-        id(&mk("simple", "dest.host", "deny", "once")).hash
-    );
+    assert!(contains(&a.canonical, "weird.kind"));
+    let deny = id(&mk("simple", "deny", "once")).hash;
+    assert_ne!(id(&mk("simple", "allow", "once")).hash, deny);
 }
 
 #[test]
-fn env_operand_name_and_list_json_are_withheld() {
-    let mut e1 = op("simple", "process.env.SECRET_NAME_1", "v");
-    let mut e2 = op("simple", "process.env.OTHER", "w");
-    e1.list.clear();
-    e2.list.clear();
-    assert_eq!(
-        id(&rule("r", Some(e1))).canonical,
-        id(&rule("r", Some(e2))).canonical
-    );
+fn env_var_name_and_unknown_kind_are_part_of_the_kind() {
+    let h = |operand: &str, data: &str| id(&rule("r", Some(op("simple", operand, data)))).hash;
+    assert_ne!(h("process.env.A", "v"), h("process.env.B", "v"));
+    assert_ne!(h("future.kind.a", "v"), h("future.kind.b", "v"));
+    assert_eq!(h("process.env.A", "v"), h("process.env.A", "other"));
+    assert_eq!(h("future.kind.a", "v"), h("future.kind.a", "other"));
+    let cmd = id(&rule("r", Some(op("simple", "process.env.A", "SECRET"))));
+    assert!(contains(&cmd.canonical, "process.env.A"));
+    assert!(!contains(&cmd.canonical, "SECRET"));
+    assert_eq!(cmd.qualifiers.withheld_conditions, 1);
+}
+
+#[test]
+fn list_json_is_withheld() {
     let j1 = Operator {
         data: "[\"CANARY\"]".into(),
         ..group(vec![])
     };
     assert!(!contains(&id(&rule("r", Some(j1))).canonical, "CANARY"));
+}
+
+#[test]
+fn a_list_type_operator_never_keeps_data_whatever_its_operand() {
+    for operand in ["dest.host", "process.path", "process.command", ""] {
+        let o = op(
+            "list",
+            operand,
+            "[{\"operand\":\"process.command\",\"data\":\"CANARY\"}]",
+        );
+        let ident = id(&rule("r", Some(o)));
+        assert!(!contains(&ident.canonical, "CANARY"), "{operand}");
+        assert_eq!(ident.qualifiers.withheld_conditions, 0, "{operand}");
+    }
+}
+
+#[test]
+fn durations_are_kept_verbatim_so_they_stay_distinct() {
+    let h = |d: &str| {
+        id(&Rule {
+            duration: d.into(),
+            ..rule("r", None)
+        })
+        .hash
+    };
+    let all = [
+        "once",
+        "until restart",
+        "always",
+        "1.5h",
+        "2.5h",
+        "30s",
+        "5m",
+        "1h30m",
+    ];
+    for (i, a) in all.iter().enumerate() {
+        for b in &all[i + 1..] {
+            assert_ne!(h(a), h(b), "{a} vs {b}");
+        }
+    }
+    // Invalid or over-long strings collapse (and carry no text).
+    assert_eq!(h("bad!1"), h("bad!2"));
+    assert_eq!(h(&"1".repeat(33)), h("bad!1"));
+    assert_ne!(h(&"1".repeat(32)), h("bad!1"));
+}
+
+#[test]
+fn list_operand_names_match_the_vendored_daemon() {
+    let go = include_str!("../../../../vendor/opensnitch/daemon/rule/operator.go");
+    let mut vendored: Vec<&str> = go
+        .lines()
+        .filter_map(|l| l.split("Operand(\"").nth(1))
+        .filter_map(|l| l.split('"').next())
+        .filter(|n| n.starts_with("lists."))
+        .collect();
+    vendored.sort_unstable();
+    let mut ours = LIST_OPERANDS.to_vec();
+    ours.sort_unstable();
+    assert_eq!(vendored.len(), 5);
+    assert_eq!(vendored, ours);
+    for name in vendored {
+        let r = rule("r", Some(op("lists", name, "/d")));
+        assert!(id(&r).qualifiers.list_contents_not_recorded, "{name}");
+        assert!(contains(&id(&r).canonical, "/d"), "{name} directory kept");
+    }
 }
 
 #[test]
@@ -384,4 +451,26 @@ fn width_node_count_and_size_are_bounded() {
 fn errors_carry_no_rule_text() {
     let e = identify(&rule("CANARY", Some(chain(50)))).unwrap_err();
     assert!(!format!("{e:?} {e}").contains("CANARY"));
+}
+
+#[test]
+fn the_size_cap_is_exact_for_the_whole_encoding() {
+    let at = |n: usize| rule("r", Some(op("simple", "dest.host", &"h".repeat(n))));
+    let base = id(&at(0)).canonical.len();
+    let fits = SNAPSHOT - base;
+    assert_eq!(id(&at(fits)).canonical.len(), SNAPSHOT);
+    assert_eq!(identify(&at(fits + 1)), Err(IdentityError::TooLarge));
+    // Trailing fixed bytes (sensitive, tag, count) are counted too.
+    assert_eq!(identify(&at(SNAPSHOT - 62)), Err(IdentityError::TooLarge));
+}
+
+#[test]
+fn an_over_long_kind_fails_closed() {
+    let long = "k".repeat(MAX_KIND + 1);
+    assert_eq!(
+        identify(&rule("r", Some(op("simple", &long, "")))),
+        Err(IdentityError::KindTooLong)
+    );
+    let ok = "k".repeat(MAX_KIND);
+    assert!(identify(&rule("r", Some(op("simple", &ok, "")))).is_ok());
 }
