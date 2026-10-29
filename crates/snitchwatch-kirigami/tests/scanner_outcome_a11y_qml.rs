@@ -36,6 +36,12 @@ Window {
     property var page: null
     ScannerController { id: scanner }
     Item { id: holder; anchors.fill: parent }
+    Window {
+        id: hiddenWin
+        visible: false
+        width: 200; height: 200
+        Item { id: hiddenHolder; anchors.fill: parent }
+    }
     Component {
         id: pageComponent
         ScannerPage {
@@ -104,9 +110,44 @@ Window {
                 expect(scanner.busy, "second scan should be running");
                 expect(root.announced.length === 2, "old outcome announced while a new scan is busy");
                 root.step = 4;
-            } else {
+            } else if (root.step === 4) {
                 expect(root.announced.length === 3 && root.announced[2] === scanner.summaryText,
                        "new scan's outcome not announced exactly once");
+                // Completion while the page is detached keeps the outcome.
+                drop(); createParentless();
+                scanner.runScan();
+                root.step = 5;
+            } else if (root.step === 5) {
+                expect(root.announced.length === 3, "announced from a detached page on completion");
+                attach();
+                expect(root.announced.length === 4, "outcome finished while detached lost on attach");
+                // A page destroyed before it was ever attached leaves the outcome
+                // for its replacement.
+                drop(); createParentless();
+                scanner.runScan();
+                root.step = 6;
+            } else if (root.step === 6) {
+                expect(root.announced.length === 4, "announced while detached");
+                drop();
+                expect(root.announced.length === 4, "announced when the page died");
+                createParentless(); attach();
+                expect(root.announced.length === 5, "replacement page did not announce the retained outcome");
+                // Attaching to a hidden window waits until it is shown.
+                drop();
+                scanner.runScan();
+                root.step = 7;
+            } else {
+                createParentless();
+                root.page.parent = hiddenHolder;
+                expect(root.announced.length === 5, "announced into a hidden window");
+                hiddenWin.visible = true;
+                expect(root.announced.length === 6, "not announced once the window was shown");
+                // Detaching and reattaching the same instance does not repeat it.
+                root.page.parent = null;
+                root.page.parent = holder;
+                hiddenWin.visible = false;
+                hiddenWin.visible = true;
+                expect(root.announced.length === 6, "re-announced after reattach");
                 finish(null);
                 return;
             }

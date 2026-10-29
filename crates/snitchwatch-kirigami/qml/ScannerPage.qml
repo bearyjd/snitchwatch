@@ -53,13 +53,15 @@ Kirigami.ScrollablePage {
     // are built parentless and attached afterwards, see StackNav), never from
     // a detached item, and never twice.
     function announcePendingOutcome() {
-        if (!page.controller) return;
+        // The one guard: while detached, hidden, or in a hidden window the
+        // outcome stays pending and `onAttachedChanged` retries.
+        if (!page.controller || !page.attached) return;
         const message = page.controller.takePendingOutcome();
         if (message.length === 0) return;
         summaryBanner.Accessible.announce(message, Accessible.Polite);
         page.outcomeAnnounced(message);
     }
-    readonly property bool attached: visible && Window.window !== null
+    readonly property bool attached: visible && Window.window !== null && Window.window.visible
     onAttachedChanged: if (attached) page.announcePendingOutcome()
 
     // `errorText` includes the scanner's stderr and binary path, so it sits
