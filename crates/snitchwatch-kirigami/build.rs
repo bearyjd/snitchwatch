@@ -10,7 +10,7 @@ use cxx_qt_build::{CxxQtBuilder, QmlFile, QmlModule};
 
 #[path = "build_commit.rs"]
 mod build_commit;
-use build_commit::is_commit_id;
+use build_commit::{is_commit_id, is_directive_safe_path};
 
 fn main() {
     build_identity();
@@ -193,11 +193,13 @@ fn build_identity() {
             // Re-run when HEAD or the branch it names moves. A dirty flag can
             // go stale until the next rebuild; that is accepted.
             if let Some(path) = git(&["rev-parse", "--path-format=absolute", "--git-path", "HEAD"])
+                .filter(|p| is_directive_safe_path(p))
             {
                 println!("cargo:rerun-if-changed={path}");
             }
             if let Some(r) = git(&["symbolic-ref", "-q", "HEAD"]) {
                 if let Some(path) = git(&["rev-parse", "--path-format=absolute", "--git-path", &r])
+                    .filter(|p| is_directive_safe_path(p))
                 {
                     println!("cargo:rerun-if-changed={path}");
                 }

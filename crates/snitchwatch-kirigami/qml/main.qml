@@ -53,7 +53,7 @@ Kirigami.ApplicationWindow {
     // need explicitly named root properties to inject these objects without
     // accidentally self-binding a same-named page property.
     property var bridgeFeedRef: bridgeFeed
-    property var daemonStatsRef: trafficModel
+    property var daemonRefs: ({ stats: trafficModel, health: daemonHealthModel })
     // Exposed for the headless probe (tests/honest_ui_main_banner_qml.rs).
     property alias bridgeStatusLabel: bridgeStatusLabel
 
@@ -140,6 +140,7 @@ Kirigami.ApplicationWindow {
         target: bridgeFeed
         function onOkChanged() { if (!bridgeFeed.ok) { curatedDefaultsModel.resetBridgeSession(); trafficModel.resetDaemonStats(); } }
     }
+    Connections { target: daemonHealthModel; function onDaemonReachableChanged() { if (!daemonHealthModel.daemonReachable) trafficModel.resetDaemonStats(); } }
 
     // First-run onboarding wizard (Task 12). Owns daemon-detection state; the
     // onboarding page itself is pushed/popped below based on `state`.

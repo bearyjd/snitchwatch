@@ -5,3 +5,9 @@
 pub fn is_commit_id(s: &str) -> bool {
     (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
+
+/// A path that can go into a `cargo:` directive line: non-empty and free of
+/// control characters (a newline would start a second directive).
+pub fn is_directive_safe_path(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(char::is_control)
+}

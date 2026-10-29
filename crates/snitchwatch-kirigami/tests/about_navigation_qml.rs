@@ -1,11 +1,17 @@
 //! About must be reachable from a healthy window, and must not keep showing a
-//! daemon version once the daemon link is gone. This creates `main.qml` with
-//! no daemon problem (the banner is hidden), opens About through the global
-//! drawer's action (reachable by keyboard and named for a screen reader like
-//! every other page entry), feeds a daemon statistics message, then drops the
-//! bridge link and checks the version row. Like `honest_ui_main_banner_qml.rs`
-//! it never runs the event loop; a probe error is a QML warning naming the
-//! probe URL. Run headless with `QT_QPA_PLATFORM=offscreen`.
+//! daemon version once the daemon (or the bridge link) is gone. This creates
+//! `main.qml` with no daemon problem (the banner is hidden), opens About
+//! through the global drawer's action, then walks the version row through
+//! daemon down / recovery with the bridge link up throughout, and through a
+//! bridge-link loss.
+//!
+//! Limit, stated plainly: like `honest_ui_main_banner_qml.rs` this never runs
+//! the event loop (under one `main.qml` starts the bridge and never quits), so
+//! it proves the action's wiring (present, visible, enabled, named, opens the
+//! page) but NOT real key delivery. The action is a plain `Kirigami.Action`
+//! in the same drawer as every other page, so it gets that drawer's keyboard
+//! handling. A probe error is a QML warning naming the probe URL. Run
+//! headless with `QT_QPA_PLATFORM=offscreen`.
 use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
 
 #[allow(unused_imports)]
@@ -49,19 +55,32 @@ QtObject {
         const page = main.pageStack.currentItem;
         check(find(page, "aboutCopyButton") !== null, "About did not open from the drawer");
 
-        main.bridgeFeedRef.ok = true;
-        main.daemonStatsRef.applyServerMessageJson(JSON.stringify({
+        const report = (up) => main.daemonRefs.health.applyServerMessageJson(JSON.stringify({
+            action: "diagnosticsReport",
+            checks: [{ kind: "daemon_reachable", status: up ? { status: "ok" } : { status: "failed", detail: "down" } }]
+        }));
+        const stats = () => main.daemonRefs.stats.applyServerMessageJson(JSON.stringify({
             action: "daemonStatistics", daemonVersion: "1.8.0", uptime: 1, rules: 1,
             connections: 1, ignored: 0, accepted: 1, dropped: 0, ruleHits: 1, ruleMisses: 0
         }));
         const shown = () => find(page, "aboutValue_daemon_version").text;
+
+        // Bridge link up throughout; only the daemon goes away and comes back.
+        main.bridgeFeedRef.ok = true;
+        report(true);
+        stats();
         check(shown() === "1.8.0", "connected shows '" + shown() + "'");
+        report(false);
+        check(shown() === "not connected", "daemon down shows '" + shown() + "'");
+        check(main.daemonRefs.stats.daemonVersion === "", "the stale version was kept");
+        report(true);
+        check(shown() === "not connected", "recovery revived '" + shown() + "' without fresh statistics");
+        stats();
+        check(shown() === "1.8.0", "fresh statistics after recovery show '" + shown() + "'");
 
+        // Losing the bridge link forgets it too.
         main.bridgeFeedRef.ok = false;
-        check(shown() === "not connected", "after disconnect shows '" + shown() + "'");
-        check(main.daemonStatsRef.daemonVersion === "", "the stale version was kept");
-
-        // Reconnecting alone brings no version back; only fresh statistics do.
+        check(shown() === "not connected", "after bridge loss shows '" + shown() + "'");
         main.bridgeFeedRef.ok = true;
         check(shown() === "not connected", "reconnect revived '" + shown() + "'");
     }
