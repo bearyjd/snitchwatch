@@ -53,6 +53,7 @@ Kirigami.ApplicationWindow {
     // need explicitly named root properties to inject these objects without
     // accidentally self-binding a same-named page property.
     property var bridgeFeedRef: bridgeFeed
+    property var daemonStatsRef: trafficModel
     // Exposed for the headless probe (tests/honest_ui_main_banner_qml.rs).
     property alias bridgeStatusLabel: bridgeStatusLabel
 
@@ -137,7 +138,7 @@ Kirigami.ApplicationWindow {
 
     Connections {
         target: bridgeFeed
-        function onOkChanged() { if (!bridgeFeed.ok) curatedDefaultsModel.resetBridgeSession(); }
+        function onOkChanged() { if (!bridgeFeed.ok) { curatedDefaultsModel.resetBridgeSession(); trafficModel.resetDaemonStats(); } }
     }
 
     // First-run onboarding wizard (Task 12). Owns daemon-detection state; the
@@ -448,11 +449,6 @@ Kirigami.ApplicationWindow {
             Kirigami.Action {
                 text: "Details"
                 onTriggered: nav.replaceMain(daemonHealthPageComponent)
-            },
-            Kirigami.Action {
-                text: "About"
-                icon.name: "help-about"
-                onTriggered: nav.replaceMain(aboutPageComponent)
             }
         ]
     }
@@ -651,7 +647,7 @@ Kirigami.ApplicationWindow {
     }
     Component {
         id: aboutPageComponent
-        AboutPage { daemonConnected: trafficModel.statsReceived; daemonVersion: trafficModel.daemonVersion }
+        AboutPage { daemonConnected: bridgeFeed.ok && trafficModel.statsReceived; daemonVersion: trafficModel.daemonVersion }
     }
     // A new prompt does NOT raise this window. The alert (AlertHost.qml ->
     // AlertWindow.qml) is its own window, independent of this one: in "Ask me"
@@ -790,6 +786,11 @@ Kirigami.ApplicationWindow {
                 text: "Daemon Health"
                 icon.name: "dialog-warning"
                 onTriggered: nav.replaceMain(daemonHealthPageComponent)
+            },
+            Kirigami.Action {
+                text: "About"
+                icon.name: "help-about"
+                onTriggered: nav.replaceMain(aboutPageComponent)
             }
         ]
     }

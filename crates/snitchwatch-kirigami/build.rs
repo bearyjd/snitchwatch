@@ -8,6 +8,10 @@
 //! `.file(...)` so their generated code is compiled and statically registered.
 use cxx_qt_build::{CxxQtBuilder, QmlFile, QmlModule};
 
+#[path = "build_commit.rs"]
+mod build_commit;
+use build_commit::is_commit_id;
+
 fn main() {
     build_identity();
     let builder = CxxQtBuilder::new_qml_module(
@@ -213,9 +217,4 @@ fn build_identity() {
         "cargo:rustc-env=SNITCHWATCH_BUILD_DIRTY={}",
         u8::from(dirty)
     );
-}
-
-/// A hex object id (SHA-1 or SHA-256 length); anything else is not recorded.
-fn is_commit_id(s: &str) -> bool {
-    (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }

@@ -61,6 +61,12 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "startBridgeFeed"]
         fn start_bridge_feed(self: Pin<&mut TrafficModel>);
+
+        /// Forget the daemon statistics (and so its version) when the bridge
+        /// link drops: they describe a connection that no longer exists.
+        #[qinvokable]
+        #[cxx_name = "resetDaemonStats"]
+        fn reset_daemon_stats(self: Pin<&mut TrafficModel>);
     }
 
     impl cxx_qt::Threading for TrafficModel {}
@@ -168,6 +174,11 @@ fn stats_display_from_message(msg: &ServerMessage) -> Option<StatsDisplay> {
 }
 
 impl qobject::TrafficModel {
+    pub fn reset_daemon_stats(mut self: Pin<&mut Self>) {
+        self.as_mut().set_stats_received(false);
+        self.as_mut().set_daemon_version(QString::default());
+    }
+
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
         match serde_json::from_str::<ServerMessage>(&json.to_string()) {
             Ok(msg) => self.apply_server_message(msg),
