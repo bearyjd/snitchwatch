@@ -810,18 +810,22 @@ fn a_save_in_flight_keeps_its_temp_file_when_a_writer_opens() {
     let loc = location.clone();
     let saver = std::thread::spawn(move || {
         let mut n = 0;
-        while !flag.load(std::sync::atomic::Ordering::Relaxed) && n < 400 {
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) && n < 100_000 {
             super::settings::save(&loc, &current).expect("save raced with the sweep");
             n += 1;
         }
     });
-    for _ in 0..20 {
+    for _ in 0..300 {
         let _e = Engine::new(
             open_store(&location).unwrap(),
             &location,
             Budget::new(16 * MIB).unwrap(),
         )
         .unwrap();
+        super::settings::load(&location).expect("load raced with the save");
+    }
+    for _ in 0..20_000 {
+        super::settings::load(&location).expect("load raced with the save");
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     saver.join().unwrap();
@@ -895,4 +899,26 @@ fn dropping_a_writer_without_shutdown_stops_and_joins_the_worker() {
         rows, 5,
         "queued items were written before the join returned"
     );
+}
+
+#[test]
+fn reading_a_file_while_it_is_replaced_never_reports_a_hard_link() {
+    // A save renames over the file; a reader that opened the old inode sees
+    // zero links. That is a replacement, not a hard link: it is retried.
+    let rig = rig_with(16 * MIB, true);
+    let path = rig.location.settings_path();
+    let saver_path = path.clone();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let saver = std::thread::spawn(move || {
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::state_file::write(&saver_path, b"{}").unwrap();
+        }
+    });
+    for _ in 0..3000 {
+        let read = crate::state_file::read(&path, 4096);
+        assert!(read.is_ok(), "{read:?}");
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    saver.join().unwrap();
 }

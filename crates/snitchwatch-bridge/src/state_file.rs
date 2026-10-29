@@ -41,16 +41,31 @@ pub(crate) fn invalid(message: impl Into<String>) -> io::Error {
 
 /// The file's bytes; `None` when there is no file.
 pub fn read(path: &Path, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
+    // A save replaces the file by `rename`: a reader that opened the old one
+    // just before sees it with zero links. That is a replaced file (retry),
+    // not a hard link.
+    for _ in 0..16 {
+        if let Some(read) = read_once(path, max_bytes)? {
+            return Ok(read);
+        }
+    }
+    Err(invalid("the file keeps being replaced while it is read"))
+}
+
+fn read_once(path: &Path, max_bytes: u64) -> io::Result<Option<Option<Vec<u8>>>> {
     let file = match fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
     {
         Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(None)),
         Err(e) => return Err(e),
     };
     let meta = file.metadata()?;
+    if meta.nlink() == 0 {
+        return Ok(None);
+    }
     let facts = Facts {
         is_file: meta.is_file(),
         uid: meta.uid(),
@@ -64,7 +79,7 @@ pub fn read(path: &Path, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
     if bytes.len() as u64 > max_bytes {
         return Err(invalid("the file is too large"));
     }
-    Ok(Some(bytes))
+    Ok(Some(Some(bytes)))
 }
 
 /// Replaces the file with `bytes`, atomically. The caller checks the size.
