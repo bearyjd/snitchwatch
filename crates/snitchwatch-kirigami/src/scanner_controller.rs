@@ -10,7 +10,7 @@
 //! simpler, correctly-scoped choice.
 
 use core::pin::Pin;
-use cxx_qt::Threading;
+use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 
 #[cxx_qt::bridge]
@@ -35,6 +35,11 @@ pub mod qobject {
         /// True while a scan is in flight (polkit prompt + the scan itself
         /// can both take real wall-clock time).
         #[qproperty(bool, busy)]
+        /// One line stating the outcome of the last scan attempt (clean,
+        /// findings or failure); empty before the first attempt.
+        #[qproperty(QString, summary_text, cxx_name = "summaryText")]
+        /// "clean", "findings" or "error"; empty before the first attempt.
+        #[qproperty(QString, summary_kind, cxx_name = "summaryKind")]
         type ScannerController = super::ScannerControllerRust;
 
         /// Run one privileged deep scan off the UI thread. Wired to the
@@ -42,6 +47,14 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "runScan"]
         fn run_scan(self: Pin<&mut ScannerController>);
+
+        /// The outcome line of a finished scan that has not been announced to
+        /// assistive tech yet, or empty. Returns it and clears it, so each
+        /// scan is announced at most once, even if the page that was
+        /// listening when it finished is gone (navigated away) by then.
+        #[qinvokable]
+        #[cxx_name = "takePendingOutcome"]
+        fn take_pending_outcome(self: Pin<&mut ScannerController>) -> QString;
     }
 
     impl cxx_qt::Threading for ScannerController {}
@@ -54,20 +67,40 @@ pub struct ScannerControllerRust {
     error_text: QString,
     error_title: QString,
     busy: bool,
+    summary_text: QString,
+    summary_kind: QString,
+    pending_outcome: QString,
 }
 
 impl qobject::ScannerController {
+    fn take_pending_outcome(mut self: Pin<&mut Self>) -> QString {
+        std::mem::take(&mut self.as_mut().rust_mut().pending_outcome)
+    }
+
     fn run_scan(mut self: Pin<&mut Self>) {
         if self.busy {
             return;
         }
+        tracing::info!("deep scan requested");
+        // An outcome nobody heard must not be announced over the new scan.
+        self.as_mut().rust_mut().pending_outcome = QString::default();
         self.as_mut().set_busy(true);
         self.as_mut().set_error_text(QString::default());
         self.as_mut().set_error_title(QString::default());
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
             let result = crate::scanner::run_deep_scan();
+            match &result {
+                Ok(json) => tracing::info!(report_bytes = json.len(), "deep scan replied: ok"),
+                Err(e) => tracing::warn!(error_title = e.title, "deep scan failed"),
+            }
+            let (kind, summary) = crate::scanner::summarize(&result, &crate::scanner::local_hhmm());
             let _ = qt_thread.queue(move |mut qobject| {
+                qobject
+                    .as_mut()
+                    .set_summary_kind(QString::from(kind.as_str()));
+                qobject.as_mut().set_summary_text(QString::from(&summary));
+                qobject.as_mut().rust_mut().pending_outcome = QString::from(&summary);
                 match result {
                     Ok(json) => {
                         qobject.as_mut().set_report_json(QString::from(&json));

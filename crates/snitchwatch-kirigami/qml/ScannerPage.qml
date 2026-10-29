@@ -20,6 +20,10 @@ Kirigami.ScrollablePage {
     // Injected by main.qml so the controller's lifetime is owned there.
     property ScannerController controller
 
+    // Emitted with the banner text each time a scan ends, alongside the
+    // screen-reader announcement, so the announcement is observable in tests.
+    signal outcomeAnnounced(string message)
+
     // Re-parsed whenever reportJson changes; {} before the first scan runs.
     readonly property var report: {
         if (!page.controller || page.controller.reportJson.length === 0) {
@@ -31,6 +35,34 @@ Kirigami.ScrollablePage {
             return {};
         }
     }
+
+    // A new outcome always lands in view, whatever the scroll position.
+    Connections {
+        target: page.controller
+        function onSummaryTextChanged() { page.flickable.contentY = 0; }
+        function onBusyChanged() {
+            page.flickable.contentY = 0;
+            if (!page.controller.busy) page.announcePendingOutcome();
+        }
+    }
+
+    // The banner flips from "Scanning…" to the outcome in place, which
+    // assistive tech does not report on its own. The controller owns the
+    // not-yet-announced outcome, so a scan that finished while this page was
+    // not alive is announced once the new page is attached to a window (pages
+    // are built parentless and attached afterwards, see StackNav), never from
+    // a detached item, and never twice.
+    function announcePendingOutcome() {
+        // The one guard: while detached, hidden, or in a hidden window the
+        // outcome stays pending and `onAttachedChanged` retries.
+        if (!page.controller || !page.attached) return;
+        const message = page.controller.takePendingOutcome();
+        if (message.length === 0) return;
+        summaryBanner.Accessible.announce(message, Accessible.Polite);
+        page.outcomeAnnounced(message);
+    }
+    readonly property bool attached: visible && Window.window !== null && Window.window.visible
+    onAttachedChanged: if (attached) page.announcePendingOutcome()
 
     // `errorText` includes the scanner's stderr and binary path, so it sits
     // in a PlainText label, never in the InlineMessage (issue #51).
@@ -61,6 +93,23 @@ Kirigami.ScrollablePage {
     ColumnLayout {
         width: page.width
         spacing: Kirigami.Units.largeSpacing
+
+        // Outcome of the last attempt, above the sections so it is never
+        // below the fold. Counts only; error detail stays in the header.
+        Kirigami.InlineMessage {
+            id: summaryBanner
+            objectName: "scannerSummary"
+            Accessible.name: text
+            Layout.fillWidth: true
+            visible: page.controller
+                && (page.controller.busy || page.controller.summaryText.length > 0)
+            type: page.controller && page.controller.busy ? Kirigami.MessageType.Information
+                : page.controller && page.controller.summaryKind === "error" ? Kirigami.MessageType.Error
+                : page.controller && page.controller.summaryKind === "findings" ? Kirigami.MessageType.Warning
+                : Kirigami.MessageType.Positive
+            text: page.controller && page.controller.busy ? "Scanning…"
+                : page.controller ? page.controller.summaryText : ""
+        }
 
         Controls.Label {
             Layout.fillWidth: true
