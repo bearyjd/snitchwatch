@@ -42,14 +42,22 @@ Kirigami.ScrollablePage {
         function onSummaryTextChanged() { page.flickable.contentY = 0; }
         function onBusyChanged() {
             page.flickable.contentY = 0;
-            // The banner flips from "Scanning…" to the outcome in place, which
-            // assistive tech does not report on its own.
-            if (!page.controller.busy && summaryBanner.text.length > 0) {
-                summaryBanner.Accessible.announce(summaryBanner.text, Accessible.Polite);
-                page.outcomeAnnounced(summaryBanner.text);
-            }
+            if (!page.controller.busy) page.announcePendingOutcome();
         }
     }
+
+    // The banner flips from "Scanning…" to the outcome in place, which
+    // assistive tech does not report on its own. The controller owns the
+    // not-yet-announced outcome, so a scan that finished while this page was
+    // not alive is announced when it is next created, and never twice.
+    function announcePendingOutcome() {
+        if (!page.controller) return;
+        const message = page.controller.takePendingOutcome();
+        if (message.length === 0) return;
+        summaryBanner.Accessible.announce(message, Accessible.Polite);
+        page.outcomeAnnounced(message);
+    }
+    Component.onCompleted: page.announcePendingOutcome()
 
     // `errorText` includes the scanner's stderr and binary path, so it sits
     // in a PlainText label, never in the InlineMessage (issue #51).

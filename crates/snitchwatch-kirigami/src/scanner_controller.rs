@@ -10,7 +10,7 @@
 //! simpler, correctly-scoped choice.
 
 use core::pin::Pin;
-use cxx_qt::Threading;
+use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 
 #[cxx_qt::bridge]
@@ -47,6 +47,14 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "runScan"]
         fn run_scan(self: Pin<&mut ScannerController>);
+
+        /// The outcome line of a finished scan that has not been announced to
+        /// assistive tech yet, or empty. Returns it and clears it, so each
+        /// scan is announced at most once, even if the page that was
+        /// listening when it finished is gone (navigated away) by then.
+        #[qinvokable]
+        #[cxx_name = "takePendingOutcome"]
+        fn take_pending_outcome(self: Pin<&mut ScannerController>) -> QString;
     }
 
     impl cxx_qt::Threading for ScannerController {}
@@ -61,9 +69,14 @@ pub struct ScannerControllerRust {
     busy: bool,
     summary_text: QString,
     summary_kind: QString,
+    pending_outcome: QString,
 }
 
 impl qobject::ScannerController {
+    fn take_pending_outcome(mut self: Pin<&mut Self>) -> QString {
+        std::mem::take(&mut self.as_mut().rust_mut().pending_outcome)
+    }
+
     fn run_scan(mut self: Pin<&mut Self>) {
         if self.busy {
             return;
@@ -85,6 +98,7 @@ impl qobject::ScannerController {
                     .as_mut()
                     .set_summary_kind(QString::from(kind.as_str()));
                 qobject.as_mut().set_summary_text(QString::from(&summary));
+                qobject.as_mut().rust_mut().pending_outcome = QString::from(&summary);
                 match result {
                     Ok(json) => {
                         qobject.as_mut().set_report_json(QString::from(&json));

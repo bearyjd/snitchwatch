@@ -32,44 +32,81 @@ Window {
     visible: true
     width: 900; height: 700
     property var announced: []
+    property int step: 0
     ScannerController { id: scanner }
-    ScannerPage {
-        id: page; anchors.fill: parent; controller: scanner
-        onOutcomeAnnounced: message => root.announced = root.announced.concat([message])
+    // Destroying and recreating the page stands in for navigating away/back.
+    Loader {
+        id: pageLoader
+        anchors.fill: parent
+        active: true
+        sourceComponent: ScannerPage {
+            controller: scanner
+            onOutcomeAnnounced: message => root.announced = root.announced.concat([message])
+        }
     }
     function find(item, name) {
         if (item.objectName === name) return item;
         for (let child of item.children) { let result = find(child, name); if (result) return result; }
         return null;
     }
+    function expect(ok, what) { if (!ok) throw new Error(what + " (announced=" + JSON.stringify(root.announced) + ")"); }
+    function finish(error) {
+        console.warn(error ? "SCANNER_A11Y_FAILED: " + error : "SCANNER_A11Y_COMPLETE");
+        Qt.quit();
+    }
+    // Each step starts a real scan (missing-binary preflight failure) and
+    // continues once the worker has reported back.
+    function advance() {
+        try {
+            if (root.step === 0) {
+                // (a) the scan finishes while the page does not exist
+                pageLoader.active = false;
+                scanner.runScan();
+                root.step = 1;
+            } else if (root.step === 1) {
+                expect(root.announced.length === 0, "announced with no page alive");
+                expect(scanner.summaryText.length > 0, "no outcome");
+                const outcome = scanner.summaryText;
+                pageLoader.active = true;
+                expect(root.announced.length === 1 && root.announced[0] === outcome,
+                       "outcome finished off-page was not announced exactly once on return");
+                // (b) later revisits do not repeat a stale summary
+                pageLoader.active = false;
+                pageLoader.active = true;
+                pageLoader.active = false;
+                pageLoader.active = true;
+                expect(root.announced.length === 1, "stale summary re-announced on revisit");
+                // (c) page alive: the busy -> false path announces once
+                const banner = root.find(pageLoader.item, "scannerSummary");
+                expect(!!banner, "summary banner missing");
+                scanner.runScan();
+                expect(banner.Accessible.name === "Scanning…", "busy banner name is '" + banner.Accessible.name + "'");
+                expect(root.announced.length === 1, "announced while busy");
+                root.step = 2;
+            } else {
+                const banner = root.find(pageLoader.item, "scannerSummary");
+                expect(root.announced.length === 2 && root.announced[1] === scanner.summaryText,
+                       "live completion not announced exactly once");
+                expect(banner.Accessible.name === scanner.summaryText,
+                       "outcome banner name is '" + banner.Accessible.name + "'");
+                finish(null);
+                return;
+            }
+            waitForScan.start();
+        } catch (error) { finish(error); }
+    }
     Timer {
-        interval: 5000; running: true
+        id: waitForScan
+        interval: 50; repeat: true
+        onTriggered: if (!scanner.busy) { stop(); root.advance(); }
+    }
+    Timer {
+        interval: 15000; running: true
         onTriggered: { console.warn("SCANNER_A11Y_TIMEOUT"); Qt.quit(); }
     }
     Timer {
         interval: 200; running: true
-        onTriggered: {
-            try {
-                const banner = root.find(page, "scannerSummary");
-                if (!banner) throw new Error("summary banner missing");
-                scanner.busy = true;
-                if (banner.Accessible.name !== "Scanning…")
-                    throw new Error("busy banner name is '" + banner.Accessible.name + "'");
-                if (root.announced.length !== 0) throw new Error("announced before the scan ended");
-                const outcome = "Scan finished at 12:00: 2 anomalies found.";
-                scanner.summaryKind = "findings";
-                scanner.summaryText = outcome;
-                if (root.announced.length !== 0) throw new Error("announced while still busy");
-                scanner.busy = false;
-                if (banner.Accessible.name !== outcome)
-                    throw new Error("outcome banner name is '" + banner.Accessible.name + "'");
-                if (root.announced.length !== 1 || root.announced[0] !== outcome)
-                    throw new Error("outcome not announced: " + JSON.stringify(root.announced));
-                console.warn("SCANNER_A11Y_COMPLETE");
-            } catch (error) {
-                console.warn("SCANNER_A11Y_FAILED: " + error);
-            } finally { Qt.quit(); }
-        }
+        onTriggered: root.advance()
     }
 }
 "#;
