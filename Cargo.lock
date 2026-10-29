@@ -4722,6 +4722,7 @@ dependencies = [
  "serde_json",
  "snitchwatch-bridge",
  "snitchwatch-bridge-cli",
+ "snitchwatch-kirigami",
  "snitchwatch-proto",
  "tempfile",
  "tokio",

@@ -102,15 +102,18 @@ pub enum Transport {
     Native(std::path::PathBuf),
 }
 
+#[cfg(any(test, feature = "test-seams"))]
 static FORCED_TRANSPORT: std::sync::OnceLock<Transport> = std::sync::OnceLock::new();
 
 /// Tests drive the real click path over a private bus without a `/.flatpak-info`.
-#[doc(hidden)]
+/// Compiled only for tests / the `test-seams` feature, never in a shipped build.
+#[cfg(any(test, feature = "test-seams"))]
 pub fn force_transport_for_tests(transport: Transport) {
     let _ = FORCED_TRANSPORT.set(transport);
 }
 
 fn detect_transport() -> Transport {
+    #[cfg(any(test, feature = "test-seams"))]
     if let Some(t) = FORCED_TRANSPORT.get() {
         return t.clone();
     }
@@ -123,10 +126,16 @@ fn detect_transport() -> Transport {
 }
 
 pub fn run_deep_scan() -> Result<String, ScanError> {
-    run_deep_scan_via(detect_transport())
+    run_via(detect_transport())
 }
 
+/// Run a scan over an explicit transport (test seam).
+#[cfg(any(test, feature = "test-seams"))]
 pub fn run_deep_scan_via(transport: Transport) -> Result<String, ScanError> {
+    run_via(transport)
+}
+
+fn run_via(transport: Transport) -> Result<String, ScanError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

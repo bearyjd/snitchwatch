@@ -28,14 +28,26 @@ impl FakeBroker {
     }
 }
 
-fn start_private_bus() -> std::process::Child {
-    let mut daemon = Command::new("dbus-daemon")
-        .args(["--session", "--nofork", "--print-address=1"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("dbus-daemon is needed for the click-path test");
+/// Kills and reaps the private bus however the test ends (panic included).
+struct PrivateBus(std::process::Child);
+
+impl Drop for PrivateBus {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn start_private_bus() -> PrivateBus {
+    let mut daemon = PrivateBus(
+        Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("dbus-daemon is needed for the click-path test"),
+    );
     let mut address = String::new();
-    BufReader::new(daemon.stdout.take().unwrap())
+    BufReader::new(daemon.0.stdout.take().unwrap())
         .read_line(&mut address)
         .unwrap();
     std::env::set_var("DBUS_SESSION_BUS_ADDRESS", address.trim());
@@ -70,7 +82,7 @@ fn serve_fake_broker() {
 #[test]
 fn run_scan_over_the_broker_bus_draws_the_report() {
     init_headless_qt_env();
-    let mut daemon = start_private_bus();
+    let _daemon = start_private_bus();
     serve_fake_broker();
     force_transport_for_tests(Transport::Broker);
 
@@ -144,8 +156,6 @@ Window {
         }
     });
     drop(guard);
-    let _ = daemon.kill();
-    let _ = daemon.wait();
     assert!(
         root_ok.load(Ordering::SeqCst),
         "page failed to load: {captured}"
