@@ -140,7 +140,7 @@ Kirigami.ApplicationWindow {
         target: bridgeFeed
         function onOkChanged() { if (!bridgeFeed.ok) { curatedDefaultsModel.resetBridgeSession(); trafficModel.resetDaemonStats(); } }
     }
-    Connections { target: daemonHealthModel; function onDaemonReachableChanged() { if (!daemonHealthModel.daemonReachable) trafficModel.resetDaemonStats(); } }
+    Connections { target: daemonHealthModel; function onDaemonDownChanged() { trafficModel.resetDaemonStats(); } }
 
     // First-run onboarding wizard (Task 12). Owns daemon-detection state; the
     // onboarding page itself is pushed/popped below based on `state`.
@@ -648,7 +648,7 @@ Kirigami.ApplicationWindow {
     }
     Component {
         id: aboutPageComponent
-        AboutPage { daemonConnected: bridgeFeed.ok && trafficModel.statsReceived; daemonVersion: trafficModel.daemonVersion }
+        AboutPage { daemonConnected: bridgeFeed.ok && !daemonHealthModel.daemonDown && trafficModel.statsReceived; daemonVersion: trafficModel.daemonVersion }
     }
     // A new prompt does NOT raise this window. The alert (AlertHost.qml ->
     // AlertWindow.qml) is its own window, independent of this one: in "Ask me"

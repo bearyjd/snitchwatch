@@ -73,10 +73,30 @@ QtObject {
         report(false);
         check(shown() === "not connected", "daemon down shows '" + shown() + "'");
         check(main.daemonRefs.stats.daemonVersion === "", "the stale version was kept");
+        // A statistics callback queued before the drop but run after the down
+        // report, and a repeated down report (no edge), must not revive it.
+        stats();
+        check(shown() === "not connected", "a late statistics callback revived '" + shown() + "'");
+        check(page.about.reportText.indexOf("1.8.0") < 0, "the copy report carries the stale version");
+        report(false);
+        check(shown() === "not connected", "a repeated down report left '" + shown() + "'");
         report(true);
         check(shown() === "not connected", "recovery revived '" + shown() + "' without fresh statistics");
         stats();
         check(shown() === "1.8.0", "fresh statistics after recovery show '" + shown() + "'");
+        check(page.about.reportText.indexOf("1.8.0") >= 0, "the copy report lost the fresh version");
+
+        // Flapping: down, late statistics, up, down again.
+        report(false);
+        stats();
+        check(shown() === "not connected", "flap 1 shows '" + shown() + "'");
+        report(true);
+        report(false);
+        stats();
+        check(shown() === "not connected", "flap 2 shows '" + shown() + "'");
+        report(true);
+        stats();
+        check(shown() === "1.8.0", "after flapping, fresh statistics show '" + shown() + "'");
 
         // Losing the bridge link forgets it too.
         main.bridgeFeedRef.ok = false;
