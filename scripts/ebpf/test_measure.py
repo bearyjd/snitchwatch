@@ -2,6 +2,7 @@
 """Offline tests for measure.py against synthetic /proc trees and exports."""
 import csv
 import json
+import signal
 import os
 import stat
 import sys
@@ -197,6 +198,46 @@ class OutputSafety(unittest.TestCase):
     def test_force_refuses_non_regular_file(self):
         with self.assertRaisesRegex(OSError, "not a regular file"):
             self._run(Path("/dev/null"), force=True)
+
+    def test_force_refuses_hardlinked_file_and_leaves_both_names(self):
+        out = self.root / "a.csv"
+        out.write_text("shared content")
+        out.chmod(0o644)
+        other = self.root / "b.csv"
+        os.link(out, other)
+        with self.assertRaisesRegex(OSError, "link"):
+            self._run(out, force=True)
+        self.assertEqual(other.read_text(), "shared content")
+        self.assertEqual(stat.S_IMODE(os.stat(other).st_mode), 0o644)
+
+    def _with_alarm(self, fn):
+        def boom(*_):
+            raise TimeoutError("blocked on FIFO")
+        old = signal.signal(signal.SIGALRM, boom)
+        signal.alarm(3)
+        try:
+            return fn()
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old)
+
+    def test_fifo_refused_promptly_with_and_without_force(self):
+        fifo = self.root / "pipe.csv"
+        os.mkfifo(fifo)
+        for force in (False, True):
+            with self.assertRaises(OSError):
+                self._with_alarm(lambda: self._run(fifo, force=force))
+
+    def test_reading_a_fifo_is_refused_promptly(self):
+        fifo = self.root / "in.json"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(OSError, "regular"):
+            self._with_alarm(lambda: measure.read_regular_text(fifo))
+
+    def test_read_regular_text_reads_regular_file(self):
+        f = self.root / "ok.json"
+        f.write_text('{"a": 1}')
+        self.assertEqual(measure.read_regular_text(f), '{"a": 1}')
 
     def test_new_file_is_private(self):
         out = self.root / "new.csv"

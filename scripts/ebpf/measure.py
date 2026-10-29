@@ -10,6 +10,7 @@ Plan: docs/superpowers/plans/2026-10-29-ebpf-q05-q06.md
 """
 import argparse
 import csv
+import io
 import json
 import os
 import stat
@@ -80,27 +81,51 @@ def _fmt(v):
     return "" if v is None else repr(round(v, 3)) if isinstance(v, float) else str(v)
 
 
+def _open_regular(path, flags, mode=0o600):
+    """os.open that never blocks on a FIFO, never follows a symlink, and
+    returns (fd, st) only for a regular file; otherwise closes and raises."""
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, mode)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"{path}: not a regular file")
+        return fd, st
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def open_private(out, force=False):
     """Open `out` for writing as a private (0600) regular file.
 
     Default: exclusive creation, so an existing file (or any symlink, even a
     dangling one) is refused and never touched. With force, an existing
-    REGULAR file is truncated and chmod'ed to 0600; symlinks stay refused.
+    REGULAR, singly-linked file is truncated and chmod'ed to 0600; symlinks,
+    FIFOs/devices and hard-linked files (shared inode) are refused before any
+    change is made.
     """
-    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+    flags = os.O_WRONLY | os.O_CREAT
     if not force:
         flags |= os.O_EXCL
-    fd = os.open(out, flags, 0o600)  # FileExistsError / ELOOP on symlink
+    fd, st = _open_regular(out, flags)  # FileExistsError / ELOOP on symlink
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"{out}: not a regular file")
         if force:
+            if st.st_nlink > 1:
+                raise OSError(f"{out}: has {st.st_nlink} hard links; refusing to modify "
+                              "a shared file")
             os.fchmod(fd, 0o600)
             os.ftruncate(fd, 0)
     except BaseException:
         os.close(fd)
         raise
     return fd
+
+
+def read_regular_text(path):
+    """Read a user-supplied file as UTF-8 text; regular files only (no FIFO hang)."""
+    fd, _ = _open_regular(path, os.O_RDONLY)
+    with os.fdopen(fd, encoding="utf-8", newline="") as fh:
+        return fh.read()
 
 
 def run(name, interval, duration, out, proc, clk_tck, sleep=time.sleep,
@@ -257,8 +282,7 @@ def unknown_rate(total_doc, missing_doc):
 
 
 def _load(path):
-    with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+    return json.loads(read_regular_text(path))
 
 
 def main(argv=None):
@@ -290,8 +314,12 @@ def main(argv=None):
             return 1
         print(f"wrote {n} rows to {a.out}")
     elif a.cmd == "summarize":
-        with open(a.csv, newline="") as fh:
-            print(json.dumps(summarize(list(csv.DictReader(fh))), indent=2))
+        try:
+            rows = list(csv.DictReader(io.StringIO(read_regular_text(a.csv))))
+        except OSError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        print(json.dumps(summarize(rows), indent=2))
     else:
         try:
             print(json.dumps(unknown_rate(_load(a.total), _load(a.missing_path)), indent=2))
