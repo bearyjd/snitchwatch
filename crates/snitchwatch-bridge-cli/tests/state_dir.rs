@@ -138,3 +138,25 @@ fn a_missing_state_directory_still_starts_the_bridge() {
     assert!(databases(root.path()).is_empty());
     assert!(!missing.exists());
 }
+
+/// Connection history is off by default: the real binary, with a state
+/// directory, creates no `history/` directory and no settings file.
+#[test]
+fn a_started_bridge_creates_no_history_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let _bridge = start_bridge(root.path(), &[("STATE_DIRECTORY", &state)]);
+    std::thread::sleep(Duration::from_millis(300));
+    let mut names: Vec<String> = std::fs::read_dir(&state)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("history") || n == "settings.json"),
+        "{names:?}"
+    );
+}

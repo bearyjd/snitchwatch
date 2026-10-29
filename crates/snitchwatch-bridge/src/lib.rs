@@ -26,6 +26,7 @@ pub mod error;
 pub mod filter_pause;
 pub mod grpc_client;
 pub mod grpc_server;
+pub mod history;
 pub mod notice;
 pub mod pause_answers;
 pub mod profiles;
