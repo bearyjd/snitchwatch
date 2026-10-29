@@ -48,6 +48,7 @@ ColumnLayout {
         }
         Controls.ComboBox {
             id: lengthBox
+            Accessible.name: "For how long: " + lengthBox.displayText
             enabled: !panel.running
             model: ["1 hour", "6 hours", "24 hours (default)", "3 days", "7 days (the longest)"]
             currentIndex: 2
@@ -86,7 +87,7 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        Controls.Button {
+        GuardedButton {
             id: startButton
             text: "Start learning"
             icon.name: "media-playback-start"
@@ -96,7 +97,7 @@ ColumnLayout {
                 understoodBox.checked = false;
             }
         }
-        Controls.Button {
+        GuardedButton {
             id: stopButton
             text: "Stop learning"
             icon.name: "media-playback-stop"

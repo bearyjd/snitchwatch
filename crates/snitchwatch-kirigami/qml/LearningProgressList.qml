@@ -36,7 +36,7 @@ ColumnLayout {
         visible: list.progress !== null
         text: list.progress === null ? "" : list.progress.summary
     }
-    Controls.Button {
+    GuardedButton {
         visible: list.controller !== null && list.controller.applying === true
         text: "Cancel"
         onClicked: list.controller.cancelApply()

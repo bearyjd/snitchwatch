@@ -65,3 +65,25 @@ fn the_feature_is_not_a_default_and_only_the_dev_dependency_enables_it() {
     let (normal, _) = MANIFEST.split_once("[dev-dependencies]").unwrap();
     assert!(!normal.contains("test-seams\"]"), "test-seams enabled outside dev-dependencies");
 }
+
+/// The auto-repeat key filter (C++ bridge) is compiled only for the feature,
+/// and nothing in the shipped crate roots refers to it.
+#[test]
+fn the_key_repeat_bridge_is_compiled_only_under_the_feature() {
+    let build = include_str!("../build.rs");
+    let needle = "\"src/key_repeat_test.rs\"";
+    let hits: Vec<_> = build.match_indices(needle).collect();
+    assert_eq!(hits.len(), 1, "key_repeat bridge should be registered exactly once");
+    let before = &build[..hits[0].0];
+    let gate = before.rfind("CARGO_FEATURE_TEST_SEAMS").expect("bridge is not behind the feature check");
+    assert!(
+        before[gate..].matches('{').count() > before[gate..].matches('}').count(),
+        "bridge registration is outside the CARGO_FEATURE_TEST_SEAMS block"
+    );
+    for (name, src) in [
+        ("lib.rs", include_str!("../src/lib.rs")),
+        ("main.rs", include_str!("../src/main.rs")),
+    ] {
+        assert!(!src.contains("key_repeat"), "{name} references the test-only key filter");
+    }
+}

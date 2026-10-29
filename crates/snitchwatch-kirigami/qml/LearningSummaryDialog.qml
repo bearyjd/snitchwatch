@@ -138,7 +138,7 @@ Controls.Dialog {
                 text: "Go back"
                 onClicked: dialog.close()
             }
-            Controls.Button {
+            GuardedButton {
                 id: applyButton
                 objectName: "learningApplyButton"
                 enabled: dialog.allConfirmed

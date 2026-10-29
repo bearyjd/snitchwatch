@@ -65,11 +65,25 @@ ColumnLayout {
             Kirigami.Action {
                 text: "Stop learning"
                 icon.name: "media-playback-stop"
+                // A button that ignores a held key (GuardedButton); a narrow
+                // bar's overflow menu uses the action itself.
+                displayComponent: GuardedButton {
+                    returnActivates: true
+                    text: "Stop learning"
+                    icon.name: "media-playback-stop"
+                    onClicked: banner.settings.stopLearning()
+                }
                 onTriggered: banner.settings.stopLearning()
             },
             Kirigami.Action {
                 text: "Review"
                 icon.name: "view-list-details"
+                displayComponent: GuardedButton {
+                    returnActivates: true
+                    text: "Review"
+                    icon.name: "view-list-details"
+                    onClicked: banner.reviewRequested()
+                }
                 onTriggered: banner.reviewRequested()
             }
         ]

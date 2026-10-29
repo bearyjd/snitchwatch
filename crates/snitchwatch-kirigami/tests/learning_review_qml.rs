@@ -87,6 +87,13 @@ const VERDICT_WORDS: [&str; 24] = [
     "threat",
 ];
 
+/// Every button block: plain ones and the held-key-guarded ones.
+fn buttons(code: &str) -> Vec<String> {
+    let mut found = blocks(code, "Controls.Button {");
+    found.extend(blocks(code, "GuardedButton {"));
+    found
+}
+
 fn source(name: &str) -> &'static str {
     FILES.iter().find(|(n, _)| *n == name).expect("file").1
 }
@@ -160,7 +167,7 @@ fn every_label_in_the_review_files_is_plain_text() {
 fn buttons_carry_fixed_text_and_tick_boxes_none() {
     for (name, src) in FILES {
         let code = code_lines(src);
-        for block in blocks(&code, "Controls.Button {") {
+        for block in buttons(&code) {
             if let Some(text) = text_binding(&block) {
                 assert!(is_fixed_text(&text), "{name}: a button shows data: {text}");
             }
@@ -243,7 +250,7 @@ fn learning_starts_from_one_place_and_rules_are_applied_from_one_place() {
         "apply is called from more than one place"
     );
     let dialog = code_lines(source("LearningSummaryDialog.qml"));
-    let apply = blocks(&dialog, "Controls.Button {")
+    let apply = buttons(&dialog)
         .into_iter()
         .find(|b| b.contains("learningApplyButton"))
         .expect("the Apply button");
@@ -416,12 +423,12 @@ fn many_rules_are_listed_in_list_views_not_repeaters() {
 fn deleting_the_record_asks_first() {
     let page = code_lines(source("LearningReviewPage.qml"));
     assert_eq!(page.matches("clearData()").count(), 1);
-    let yes = blocks(&page, "Controls.Button {")
+    let yes = buttons(&page)
         .into_iter()
         .find(|b| b.contains("learningDeleteYes"))
         .expect("the confirming button");
     assert!(yes.contains("page.controller.clearData()"));
-    let first = blocks(&page, "Controls.Button {")
+    let first = buttons(&page)
         .into_iter()
         .find(|b| b.contains("learningClearButton"))
         .unwrap();
