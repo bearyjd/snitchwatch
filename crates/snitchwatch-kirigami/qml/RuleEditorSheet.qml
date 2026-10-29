@@ -194,6 +194,7 @@ SizedOverlaySheet {
                 Controls.TextField {
                     objectName: "editorName"
                     Layout.fillWidth: true
+                    Accessible.name: "Name"
                     text: sheet.draft.name
                     onTextEdited: sheet.update({ name: text })
                 }
@@ -208,6 +209,7 @@ SizedOverlaySheet {
             Controls.ComboBox {
                 objectName: "editorAction"
                 Kirigami.FormData.label: "Action"
+                Accessible.name: Kirigami.FormData.label + ": " + displayText
                 model: sheet.actions
                 textRole: "label"
                 currentIndex: sheet.actions.findIndex(function (a) {
@@ -220,6 +222,7 @@ SizedOverlaySheet {
             Controls.ComboBox {
                 objectName: "editorDuration"
                 Kirigami.FormData.label: "Lasts"
+                Accessible.name: Kirigami.FormData.label + ": " + displayText
                 visible: !sheet.forProfile
                 model: sheet.catalogue.durations.map(function (d) { return d.label; })
                        .concat(["Custom time"])
@@ -231,6 +234,7 @@ SizedOverlaySheet {
             Controls.TextField {
                 objectName: "editorCustomDuration"
                 Kirigami.FormData.label: "Time"
+                Accessible.name: Kirigami.FormData.label
                 visible: sheet.customDuration && !sheet.forProfile
                 placeholderText: "Such as 30s, 5m or 1h30m"
                 text: sheet.draft.duration
@@ -239,6 +243,7 @@ SizedOverlaySheet {
             Controls.Switch {
                 objectName: "editorEnabled"
                 Kirigami.FormData.label: "On"
+                Accessible.name: Kirigami.FormData.label
                 visible: !sheet.forProfile
                 checked: sheet.draft.enabled
                 onToggled: sheet.update({ enabled: checked })
@@ -246,6 +251,7 @@ SizedOverlaySheet {
             Controls.TextField {
                 objectName: "editorDescription"
                 Kirigami.FormData.label: "Description"
+                Accessible.name: Kirigami.FormData.label
                 visible: !sheet.forProfile
                 text: sheet.draft.description
                 onTextEdited: sheet.update({ description: text })
@@ -276,6 +282,7 @@ SizedOverlaySheet {
                     Layout.fillWidth: true
                     Controls.ComboBox {
                         objectName: "editorOperand"
+                        Accessible.name: "Condition " + (conditionRow.index + 1) + ": " + displayText
                         model: sheet.catalogue.operands.map(function (o) {
                             return o.group + ": " + o.label;
                         })
@@ -288,6 +295,7 @@ SizedOverlaySheet {
                     }
                     Controls.ComboBox {
                         objectName: "editorKind"
+                        Accessible.name: "Condition " + (conditionRow.index + 1) + " matches: " + displayText
                         model: conditionRow.info.kinds.map(function (k) { return sheet.kindLabels[k]; })
                         currentIndex: conditionRow.info.kinds.indexOf(conditionRow.condition.kind)
                         onActivated: function (i) {
@@ -297,6 +305,7 @@ SizedOverlaySheet {
                     Controls.TextField {
                         objectName: "editorValue"
                         Layout.fillWidth: true
+                        Accessible.name: "Condition " + (conditionRow.index + 1) + " value"
                         text: conditionRow.condition.value || ""
                         onTextEdited: sheet.setCondition(conditionRow.index, { value: text })
                     }
@@ -304,6 +313,7 @@ SizedOverlaySheet {
                         objectName: "editorRemoveCondition"
                         icon.name: "list-remove"
                         text: "Remove"
+                        Accessible.name: "Remove condition " + (conditionRow.index + 1)
                         display: Controls.AbstractButton.IconOnly
                         onClicked: sheet.removeCondition(conditionRow.index)
                     }
@@ -313,6 +323,7 @@ SizedOverlaySheet {
                     visible: conditionRow.condition.kind !== "network"
                     Controls.CheckBox {
                         objectName: "editorCaseSensitive"
+                        Accessible.name: "Condition " + (conditionRow.index + 1) + ": match upper and lower case exactly"
                         checked: !!conditionRow.condition.caseSensitive
                         onToggled: sheet.setCondition(conditionRow.index, { caseSensitive: checked })
                     }
@@ -352,12 +363,14 @@ SizedOverlaySheet {
             Controls.Switch {
                 objectName: "editorPrecedence"
                 Kirigami.FormData.label: "Decide first"
+                Accessible.name: Kirigami.FormData.label
                 checked: sheet.draft.precedence
                 onToggled: sheet.update({ precedence: checked })
             }
             Controls.Switch {
                 objectName: "editorNolog"
                 Kirigami.FormData.label: "Don't log"
+                Accessible.name: Kirigami.FormData.label
                 checked: sheet.draft.nolog
                 onToggled: sheet.update({ nolog: checked })
             }

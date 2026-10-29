@@ -116,6 +116,7 @@ Kirigami.ScrollablePage {
     property alias rulesIo: rulesIo
     property alias importSheet: importSheet
     property alias ruleEditor: ruleEditor
+    property alias simulatorSheet: simulateSheet
     property alias inspectorEditButton: inspector.editButton
     property alias inspectorCommandNote: inspector.commandNote
     property alias rulesCommandNote: rulesCommandNote
@@ -454,6 +455,31 @@ Kirigami.ScrollablePage {
         model: page.model
         currentIndex: -1
         reuseItems: true
+        // Q01: Tab lands on a rule (its row takes focus); select it then, so
+        // arrows move from it. Space opens a rule (ItemDelegate), and so do
+        // Enter and Return.
+        onActiveFocusChanged: if (activeFocus && currentIndex < 0 && count > 0) currentIndex = 0
+        // The rule that has keyboard focus (a row's own focus, however Tab
+        // got there), read at key time; the selected row only when focus is
+        // on the list itself. `openInspector` copies the rule's fields at
+        // once, so a later reorder cannot change which rule opens.
+        function openCurrent() {
+            let target = null;
+            for (let it = Window.activeFocusItem; it && !target; it = it.parent) {
+                if (it.name !== undefined && it.displayName !== undefined && it.ruleAction !== undefined) {
+                    target = it;
+                }
+            }
+            target = target || list.currentItem;
+            if (target) {
+                page.openInspector(target);
+            }
+        }
+        Keys.onReturnPressed: list.openCurrent()
+        Keys.onEnterPressed: list.openCurrent()
+        // The Menu key opens the rule's actions (its inspector: turn on or
+        // off, edit, delete), as it opens a connection's menu.
+        Keys.onMenuPressed: list.openCurrent()
 
         RulesEmptyPlaceholder {
             parent: list
@@ -472,6 +498,8 @@ Kirigami.ScrollablePage {
             id: row
             width: ListView.view ? ListView.view.width : implicitWidth
             highlighted: ListView.isCurrentItem
+            // Focus, highlight and the arrows' start point always agree.
+            onActiveFocusChanged: if (activeFocus) list.currentIndex = row.index
             opacity: row.source === "blocklist" ? 0.7 : 1.0
 
             required property int index

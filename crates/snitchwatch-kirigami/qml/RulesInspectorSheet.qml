@@ -70,6 +70,7 @@ SizedOverlaySheet {
             Controls.Switch {
                 id: inspectEnabledSwitch
                 Kirigami.FormData.label: "Enabled"
+                Accessible.name: Kirigami.FormData.label
                 enabled: host.inspectToggleable && (!host.inspectManagedDns || host.inspectEnabled)
                 checked: host.inspectEnabled
                 onToggled: host.setInspectEnabled(checked)
