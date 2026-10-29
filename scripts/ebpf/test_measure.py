@@ -127,21 +127,81 @@ class Sampling(unittest.TestCase):
 
 
 def export(groups, completeness="incomplete", omissions=0, app_filter=False,
-           window=(10, 30)):
+           window=(10, 30), verdicts=False):
     return {
         "format": "snitchwatch-cache-summary",
         "schemaVersion": 1,
         "requestedWindow": {"fromMs": window[0], "toMs": window[1]},
-        "filterKinds": {"timeWindow": True, "application": app_filter, "verdicts": False},
+        "filterKinds": {"timeWindow": True, "application": app_filter, "verdicts": verdicts},
         "coverage": {
             "completeness": completeness,
             "unexaminedRetained": omissions,
             "rowOmissions": {"inspectionLimit": omissions, "fieldTooLong": 0,
                              "inputBudget": 0, "invalidTimestamp": 0},
+            "groupOmissions": {k: {"groups": 0, "observations": 0}
+                               for k in ("groupLimit", "artifactLimit", "wireLimit")},
         },
         "groups": [dict({"id": f"g{i:06d}", "appRef": f"a-{i}"}, **g)
                    for i, g in enumerate(groups, 1)],
     }
+
+
+class OutputSafety(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        write_global(self.root, 1)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, out, force=False):
+        return measure.run("opensnitchd", 1.0, 0.0, out, self.root, 100,
+                           lambda s: None, lambda: 0.0, force=force)
+
+    def test_existing_file_refused_and_untouched(self):
+        out = self.root / "keep.csv"
+        out.write_text("precious")
+        out.chmod(0o644)
+        with self.assertRaises(FileExistsError):
+            self._run(out)
+        self.assertEqual(out.read_text(), "precious")
+        self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o644)
+
+    def test_symlink_refused_even_with_force(self):
+        target = self.root / "target.txt"
+        target.write_text("victim")
+        link = self.root / "link.csv"
+        link.symlink_to(target)
+        for force in (False, True):
+            with self.assertRaises(OSError):
+                self._run(link, force=force)
+        self.assertEqual(target.read_text(), "victim")
+
+    def test_dangling_symlink_refused(self):
+        link = self.root / "dangling.csv"
+        link.symlink_to(self.root / "nowhere")
+        with self.assertRaises(OSError):
+            self._run(link)
+        self.assertFalse((self.root / "nowhere").exists())
+
+    def test_force_overwrites_regular_file_and_fixes_mode(self):
+        out = self.root / "old.csv"
+        out.write_text("old data " * 2000)
+        out.chmod(0o644)
+        self._run(out, force=True)
+        self.assertNotIn("old data", out.read_text())
+        self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o600)
+        self.assertTrue(out.read_text().startswith("t_s,"))
+
+    def test_force_refuses_non_regular_file(self):
+        with self.assertRaisesRegex(OSError, "not a regular file"):
+            self._run(Path("/dev/null"), force=True)
+
+    def test_new_file_is_private(self):
+        out = self.root / "new.csv"
+        self._run(out)
+        self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o600)
 
 
 class UnknownRate(unittest.TestCase):
@@ -202,7 +262,79 @@ class UnknownRate(unittest.TestCase):
             doc["coverage"]["rowOmissions"]["inspectionLimit"] = rows
             doc["coverage"]["unexaminedRetained"] = unexamined
             r = measure.unknown_rate(doc, export([{"count": 1}], app_filter=True))
-            self.assertEqual(len(r["warnings"]), 1, (rows, unexamined))
+            want = "omitted before grouping" if rows else "unexamined"
+            hits = [w for w in r["warnings"] if want in w]
+            self.assertEqual(len(hits), 1, (rows, unexamined, r["warnings"]))
+
+    def test_group_omissions_warn_and_flag_each_kind(self):
+        for kind in ("groupLimit", "artifactLimit", "wireLimit"):
+            for side in ("total", "missing"):
+                total = export([{"count": 4}])
+                missing = export([{"count": 1}], app_filter=True)
+                doc = total if side == "total" else missing
+                doc["coverage"]["groupOmissions"][kind] = {"groups": 2, "observations": 9}
+                r = measure.unknown_rate(total, missing)
+                self.assertTrue(r["truncated"], (kind, side))
+                self.assertTrue(any(kind in w for w in r["warnings"]), (kind, side))
+
+    def test_group_omission_with_only_groups_nonzero_still_flags(self):
+        total = export([{"count": 4}])
+        total["coverage"]["groupOmissions"]["wireLimit"] = {"groups": 1, "observations": 0}
+        self.assertTrue(measure.unknown_rate(
+            total, export([{"count": 1}], app_filter=True))["truncated"])
+
+    def test_group_omission_observations_only_flags(self):
+        total = export([{"count": 4}])
+        total["coverage"]["groupOmissions"]["groupLimit"] = {"groups": 0, "observations": 5}
+        self.assertTrue(measure.unknown_rate(
+            total, export([{"count": 1}], app_filter=True))["truncated"])
+
+    def test_missing_coverage_object_is_truncated_not_a_crash(self):
+        total = export([{"count": 4}])
+        del total["coverage"]
+        r = measure.unknown_rate(total, export([{"count": 1}], app_filter=True))
+        self.assertTrue(r["truncated"])
+
+    def test_verdict_filter_on_both_sides_rejected(self):
+        with self.assertRaises(ValueError):
+            measure.unknown_rate(export([{"count": 4}], verdicts=True),
+                                 export([{"count": 1}], app_filter=True, verdicts=True))
+
+    def test_clean_exports_not_truncated(self):
+        r = measure.unknown_rate(export([{"count": 4}]),
+                                 export([{"count": 1}], app_filter=True))
+        self.assertFalse(r["truncated"])
+        self.assertEqual(r["warnings"], [])
+
+    def test_row_omissions_set_truncated_flag(self):
+        r = measure.unknown_rate(export([{"count": 4}], omissions=2),
+                                 export([{"count": 1}], app_filter=True))
+        self.assertTrue(r["truncated"])
+
+    def test_missing_coverage_data_is_treated_as_truncated(self):
+        total = export([{"count": 4}])
+        del total["coverage"]["groupOmissions"]
+        r = measure.unknown_rate(total, export([{"count": 1}], app_filter=True))
+        self.assertTrue(r["truncated"])
+
+    def test_verdict_filter_on_either_side_rejected(self):
+        with self.assertRaises(ValueError):
+            measure.unknown_rate(export([{"count": 4}], verdicts=True),
+                                 export([{"count": 1}], app_filter=True))
+        with self.assertRaises(ValueError):
+            measure.unknown_rate(export([{"count": 4}]),
+                                 export([{"count": 1}], app_filter=True, verdicts=True))
+
+    def test_filter_kinds_must_otherwise_match(self):
+        total = export([{"count": 4}])
+        missing = export([{"count": 1}], app_filter=True)
+        missing["filterKinds"]["timeWindow"] = False
+        with self.assertRaises(ValueError):
+            measure.unknown_rate(total, missing)
+        total2 = export([{"count": 4}])
+        total2["filterKinds"]["extra"] = True
+        with self.assertRaises(ValueError):
+            measure.unknown_rate(total2, export([{"count": 1}], app_filter=True))
 
     def test_omissions_produce_warning(self):
         total = export([{"count": 4}], omissions=7)

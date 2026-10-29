@@ -12,6 +12,7 @@ import argparse
 import csv
 import json
 import os
+import stat
 import statistics
 import sys
 import time
@@ -79,10 +80,34 @@ def _fmt(v):
     return "" if v is None else repr(round(v, 3)) if isinstance(v, float) else str(v)
 
 
-def run(name, interval, duration, out, proc, clk_tck, sleep=time.sleep, now=time.monotonic):
+def open_private(out, force=False):
+    """Open `out` for writing as a private (0600) regular file.
+
+    Default: exclusive creation, so an existing file (or any symlink, even a
+    dangling one) is refused and never touched. With force, an existing
+    REGULAR file is truncated and chmod'ed to 0600; symlinks stay refused.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+    if not force:
+        flags |= os.O_EXCL
+    fd = os.open(out, flags, 0o600)  # FileExistsError / ELOOP on symlink
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{out}: not a regular file")
+        if force:
+            os.fchmod(fd, 0o600)
+            os.ftruncate(fd, 0)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def run(name, interval, duration, out, proc, clk_tck, sleep=time.sleep,
+        now=time.monotonic, force=False):
     """Sample until duration elapses; returns the number of rows written."""
     out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = open_private(out, force)
     start = now()
     prev = {}  # pid -> (ticks, t)
     prev_forks = None
@@ -162,10 +187,38 @@ def _check_export(doc, label):
     return total
 
 
-def _omitted(doc):
-    cov = doc.get("coverage") or {}
-    ro = cov.get("rowOmissions") or {}
-    return sum(v for v in ro.values() if type(v) is int), cov.get("unexaminedRetained", 0)
+GROUP_LIMITS = ("groupLimit", "artifactLimit", "wireLimit")
+
+
+def _truncation_warnings(doc, label):
+    """Every reported omission or limit, or a note that coverage is unreadable."""
+    cov = doc.get("coverage")
+    if not isinstance(cov, dict):
+        return [f"{label}: coverage missing; completeness cannot be judged"]
+    out = []
+    ro = cov.get("rowOmissions")
+    if not isinstance(ro, dict):
+        out.append(f"{label}: rowOmissions missing; completeness cannot be judged")
+    else:
+        rows = sum(v for v in ro.values() if type(v) is int)
+        if rows:
+            out.append(f"{label}: {rows} rows omitted before grouping (rowOmissions)")
+    unexamined = cov.get("unexaminedRetained", 0)
+    if type(unexamined) is not int or unexamined:
+        out.append(f"{label}: {unexamined} retained rows unexamined")
+    go = cov.get("groupOmissions")
+    if not isinstance(go, dict):
+        out.append(f"{label}: groupOmissions missing; completeness cannot be judged")
+    else:
+        for kind in GROUP_LIMITS:
+            item = go.get(kind)
+            if not isinstance(item, dict) or type(item.get("groups")) is not int \
+                    or type(item.get("observations")) is not int:
+                out.append(f"{label}: groupOmissions.{kind} missing or malformed")
+            elif item["groups"] or item["observations"]:
+                out.append(f"{label}: groupOmissions.{kind} dropped {item['groups']} "
+                           f"groups / {item['observations']} observations")
+    return out
 
 
 def unknown_rate(total_doc, missing_doc):
@@ -183,18 +236,24 @@ def unknown_rate(total_doc, missing_doc):
         raise ValueError("total export must not use the application filter")
     if any("appBasename" in g for g in missing_doc["groups"]):
         raise ValueError("missing-path export discloses a name: wrong filter")
+    tf = total_doc.get("filterKinds") or {}
+    mf = missing_doc.get("filterKinds") or {}
+    if tf.get("verdicts") or mf.get("verdicts"):
+        raise ValueError("a verdict filter makes the rate invalid; export without it")
+    rest = lambda f: {k: v for k, v in f.items() if k != "application"}  # noqa: E731
+    if rest(tf) != rest(mf):
+        raise ValueError("the exports' filters differ beyond the missing-path filter")
     if total_doc.get("requestedWindow") != missing_doc.get("requestedWindow"):
         raise ValueError("the two exports cover different requested windows")
     if unknown > total:
         raise ValueError(f"unknown ({unknown}) exceeds total ({total}): exports are inconsistent")
-    warnings = []
-    for label, doc in (("total", total_doc), ("missing-path", missing_doc)):
-        rows, unexamined = _omitted(doc)
-        if rows or unexamined:
-            warnings.append(f"{label}: {rows} rows omitted, {unexamined} retained rows "
-                            "unexamined; the rate is not over the full window")
+    warnings = (_truncation_warnings(total_doc, "total")
+                + _truncation_warnings(missing_doc, "missing-path"))
+    if warnings:
+        warnings.append("the rate is NOT over the full window and may be biased")
     return {"total": total, "unknown": unknown,
-            "rate": (unknown / total) if total else None, "warnings": warnings}
+            "rate": (unknown / total) if total else None,
+            "truncated": bool(warnings), "warnings": warnings}
 
 
 def _load(path):
@@ -211,6 +270,8 @@ def main(argv=None):
     s.add_argument("--duration", type=float, required=True, help="seconds")
     s.add_argument("--out", type=Path, required=True)
     s.add_argument("--proc", type=Path, default=Path("/proc"))
+    s.add_argument("--force", action="store_true",
+                   help="overwrite an existing regular file (symlinks still refused)")
     m = sub.add_parser("summarize")
     m.add_argument("csv", type=Path)
     u = sub.add_parser("unknown-rate")
@@ -220,7 +281,13 @@ def main(argv=None):
     if a.cmd == "sample":
         if a.interval <= 0 or a.duration < 0:
             ap.error("interval must be > 0 and duration >= 0")
-        n = run(a.name, a.interval, a.duration, a.out, a.proc, os.sysconf("SC_CLK_TCK"))
+        try:
+            n = run(a.name, a.interval, a.duration, a.out, a.proc,
+                    os.sysconf("SC_CLK_TCK"), force=a.force)
+        except OSError as e:
+            print(f"error: cannot write {a.out}: {e} (existing files need --force)",
+                  file=sys.stderr)
+            return 1
         print(f"wrote {n} rows to {a.out}")
     elif a.cmd == "summarize":
         with open(a.csv, newline="") as fh:
