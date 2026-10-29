@@ -62,6 +62,7 @@ fn main() {
                 "qml/InlineVerdicts.qml",
                 "qml/PromptSlotBanner.qml",
                 "qml/GuardedButton.qml",
+                "qml/GuardedSwitch.qml",
                 "qml/LearningBanner.qml",
                 "qml/LearningReviewPage.qml",
                 "qml/LearningReviewRow.qml",

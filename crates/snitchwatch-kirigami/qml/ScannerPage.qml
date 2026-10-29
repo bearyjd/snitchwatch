@@ -128,7 +128,7 @@ Kirigami.ScrollablePage {
         }
 
         RowLayout {
-            Controls.Button {
+            GuardedButton {
                 objectName: "scannerRunButton"
                 text: page.controller && page.controller.busy ? "Scanning…" : "Run Deep Scan"
                 enabled: page.controller && !page.controller.busy

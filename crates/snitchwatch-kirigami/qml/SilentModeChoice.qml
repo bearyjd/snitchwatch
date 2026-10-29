@@ -21,6 +21,7 @@ ColumnLayout {
         ? step.settings.silentMode : SilentModes.recommended
     property alias denyWarningBox: denyWarning
     property alias continueButton: continueButton
+    property alias reviewButton: reviewButton
 
     // Open the existing recommended-rules page (main.qml replaces the page).
     signal reviewRecommendedRules()
@@ -66,17 +67,20 @@ ColumnLayout {
         visible: step.selected === "deny"
         type: Kirigami.MessageType.Warning
         text: SilentModes.denyWarning
-        actions: [
-            Kirigami.Action {
-                text: "Review recommended background-service rules"
-                icon.name: "checkmark"
-                enabled: step.settings !== null
-                onTriggered: {
-                    step.settings.chooseSilentMode(step.selected);
-                    step.reviewRecommendedRules();
-                }
-            }
-        ]
+    }
+    // Not an action of the message above: it saves a policy, so it is a
+    // button that ignores a held Space (an InlineMessage action cannot).
+    GuardedButton {
+        id: reviewButton
+        objectName: "denyReviewButton"
+        visible: step.selected === "deny"
+        text: "Review recommended background-service rules"
+        icon.name: "checkmark"
+        enabled: step.settings !== null
+        onClicked: {
+            step.settings.chooseSilentMode(step.selected);
+            step.reviewRecommendedRules();
+        }
     }
 
     Controls.Label {
@@ -88,7 +92,7 @@ ColumnLayout {
         text: SilentModes.notRunningNote
     }
 
-    Controls.Button {
+    GuardedButton {
         id: continueButton
         objectName: "silentModeContinue"
         Layout.alignment: Qt.AlignRight

@@ -45,8 +45,9 @@ Kirigami.ScrollablePage {
         Kirigami.FormLayout {
             Layout.fillWidth: true
 
-            Controls.Switch {
+            GuardedSwitch {
                 Kirigami.FormData.label: "Launch at login"
+                Accessible.name: "Launch at login"
                 checked: page.controller ? page.controller.autostartEnabled : false
                 enabled: page.controller && !page.controller.busy
                 onToggled: page.controller.setAutostart(checked)
@@ -62,8 +63,9 @@ Kirigami.ScrollablePage {
                 wrapMode: Text.Wrap
             }
 
-            Controls.Switch {
+            GuardedSwitch {
                 Kirigami.FormData.label: "Online research (RDAP) in decision dialog"
+                Accessible.name: "Online research (RDAP) in decision dialog"
                 checked: page.controller ? page.controller.rdapEnabled : false
                 enabled: page.controller && !page.controller.busy
                 onToggled: page.controller.toggleRdapEnabled(checked)
@@ -89,7 +91,13 @@ Kirigami.ScrollablePage {
 
             Controls.ComboBox {
                 objectName: "defaultDurationBox"
+                // An arrow, Home, End or Space still held (auto-repeating) must not walk
+                // through the choices: each step would save one.
+                Keys.priority: Keys.BeforeItem
+                Keys.onPressed: event => { if (event.isAutoRepeat) event.accepted = true; }
+                Keys.onReleased: event => { if (event.isAutoRepeat) event.accepted = true; }
                 Kirigami.FormData.label: "Allow remembers for"
+                Accessible.name: "Allow remembers for: " + displayText
                 textRole: "label"
                 valueRole: "token"
                 model: Durations.all
@@ -106,7 +114,13 @@ Kirigami.ScrollablePage {
             }
             Controls.ComboBox {
                 objectName: "silentModeBox"
+                // An arrow, Home, End or Space still held (auto-repeating) must not walk
+                // through the choices: each step would save one.
+                Keys.priority: Keys.BeforeItem
+                Keys.onPressed: event => { if (event.isAutoRepeat) event.accepted = true; }
+                Keys.onReleased: event => { if (event.isAutoRepeat) event.accepted = true; }
                 Kirigami.FormData.label: "New connections"
+                Accessible.name: "New connections: " + displayText
                 textRole: "label"
                 valueRole: "token"
                 model: SilentModes.all
@@ -197,6 +211,7 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             Layout.preferredHeight: Kirigami.Units.gridUnit * 20
             readOnly: true
+            Accessible.name: "Crash log"
             wrapMode: Controls.TextArea.NoWrap
             font.family: "monospace"
             selectByMouse: true

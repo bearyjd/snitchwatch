@@ -107,8 +107,8 @@ Window {
                                  && SilentModes.denyWarning.indexOf("DNS") >= 0
                                  && SilentModes.denyWarning.indexOf("NetworkManager") >= 0,
                                  "warning names DNS and NetworkManager");
-                    probe.expect(choice.denyWarningBox.actions.length === 1, "one curated-defaults offer");
-                    choice.denyWarningBox.actions[0].trigger();
+                    probe.expect(choice.reviewButton.visible, "one curated-defaults offer");
+                    choice.reviewButton.clicked();
                     probe.expect(probe.reviewAsked === true, "the recommended-rules page is requested");
                     probe.next();
                 } else if (probe.phase === 2 && probe.elapsed() > 400) {
