@@ -35,6 +35,26 @@ Controls.AbstractButton {
     // Name carries the counts in words, so nothing depends on the colour.
     Accessible.name: cluster.summary
     Accessible.role: Accessible.Button
+    Accessible.description: isCluster ? "Lists these " + cluster.members.length + " places" : "Scopes connections to this place"
+    // Space clicks a button on its release, auto-repeats included, so a key
+    // still held while the focus arrives would apply the scope. Return and
+    // Enter act once on a fresh press, on the marker that has the focus.
+    Keys.priority: Keys.BeforeItem
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            if (!event.isAutoRepeat && marker.enabled) {
+                marker.clicked();
+            }
+            event.accepted = true;
+        } else if (event.key === Qt.Key_Space && event.isAutoRepeat) {
+            event.accepted = true;
+        }
+    }
+    Keys.onReleased: event => {
+        if (event.key === Qt.Key_Space && event.isAutoRepeat) {
+            event.accepted = true;
+        }
+    }
     hoverEnabled: true
     activeFocusOnTab: true
     padding: 0

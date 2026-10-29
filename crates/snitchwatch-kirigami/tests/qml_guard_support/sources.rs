@@ -71,6 +71,8 @@ pub const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../../qml/MapDrilldown.qml"),
     "\n",
+    include_str!("../../qml/MapFocus.qml"),
+    "\n",
     include_str!("../../qml/MapDestinationsPopup.qml"),
     "\n",
     include_str!("../../qml/MapCamera.qml"),
@@ -235,6 +237,7 @@ pub const ALL_QML: &[(&str, &str)] = &[
         "MapDrilldown.qml",
         include_str!("../../qml/MapDrilldown.qml"),
     ),
+    ("MapFocus.qml", include_str!("../../qml/MapFocus.qml")),
     (
         "MapHierarchy.qml",
         include_str!("../../qml/MapHierarchy.qml"),
@@ -281,6 +284,10 @@ pub const ALL_QML: &[(&str, &str)] = &[
     (
         "GuardedButton.qml",
         include_str!("../../qml/GuardedButton.qml"),
+    ),
+    (
+        "GuardedToolButton.qml",
+        include_str!("../../qml/GuardedToolButton.qml"),
     ),
     (
         "GuardedSwitch.qml",
