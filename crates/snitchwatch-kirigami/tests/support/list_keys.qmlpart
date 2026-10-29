@@ -1,0 +1,158 @@
+    // Shared keyboard-probe helpers for the list pages (Q01 slice 5), spliced
+    // into a probe's root Window (id `probe`) in place of `// @list-keys`
+    // (`tests/support/probe_runner.rs`). The probe sets `doneMarker`, adds
+    // steps with `step(name, wait, run)`, and everything else is here:
+    //   * a step runs once its `wait()` returns "" (else the name of what it
+    //     waits for; ~200 ticks of waiting fails naming it): the #237 pattern;
+    //   * REAL key events through QtTest; `hold`/`stray` send auto-repeats;
+    //   * `itinerary` walks Tab from a start item and returns each stop.
+    readonly property int repeat: Qt.GroupSwitchModifier
+    property var failures: []
+    property var steps: []
+    property int at: 0
+    property int stalls: 0
+    readonly property int maxStalls: 200
+    TestCase { id: tc; name: "listkeys"; when: false }
+
+    function expect(ok, what) { if (!ok) probe.failures.push(what); }
+    function step(name, wait, run) { probe.steps.push({ name: name, wait: wait, run: run }); }
+    function focused() { return probe.activeFocusItem; }
+    function nameOf(item) {
+        return item ? String(item.Accessible.name || item.objectName || item) : "(nothing)";
+    }
+    function key(k) { tc.keyClick(k); }
+    function typeText(text) { for (const c of text) tc.keyClick(c); }
+    // The key arrives as a still-held key does: auto-repeat presses and
+    // releases with no press of its own, then its real release (the key was
+    // down before this control had focus).
+    function stray(k) {
+        for (let i = 0; i < 3; ++i) {
+            tc.keyPress(k, probe.repeat);
+            tc.keyRelease(k, probe.repeat);
+        }
+        tc.keyRelease(k);
+    }
+    // A key pressed on this control and held: its press, auto-repeats, release.
+    function hold(k) {
+        tc.keyPress(k);
+        for (let i = 0; i < 3; ++i) {
+            tc.keyPress(k, probe.repeat);
+            tc.keyRelease(k, probe.repeat);
+        }
+        tc.keyRelease(k);
+    }
+    // Tab from `start`: every stop until focus is back on `start` (or lost).
+    function itinerary(start, limit) {
+        start.forceActiveFocus();
+        const out = [];
+        for (let i = 0; i < limit; ++i) {
+            tc.keyClick(Qt.Key_Tab);
+            const f = probe.focused();
+            if (!f || f === start) break;
+            const p = f.mapToItem(null, 0, 0);
+            out.push({ name: probe.nameOf(f), x: p.x, y: p.y });
+        }
+        return out;
+    }
+    // "" when `stops` run top to bottom, left to right within a line (a stop
+    // never above the one before it, nor left of it on the same line).
+    function readingOrder(stops) {
+        for (let i = 1; i < stops.length; ++i) {
+            const a = stops[i - 1], b = stops[i];
+            if (b.y + 8 < a.y || (Math.abs(b.y - a.y) <= 8 && b.x < a.x)) {
+                return "'" + b.name + "' (" + b.x + "," + b.y + ") after '" + a.name + "' ("
+                    + a.x + "," + a.y + ")";
+            }
+        }
+        return "";
+    }
+    // The exact stops, in visual order, and the way back with Shift+Tab.
+    function checkItinerary(what, start, want) {
+        const stops = probe.itinerary(start, want.length + 6);
+        const names = stops.map(s => s.name);
+        probe.expect(JSON.stringify(names) === JSON.stringify(want),
+                     what + ": Tab visits " + JSON.stringify(names) + ", expected " + JSON.stringify(want));
+        const bad = probe.readingOrder(stops);
+        probe.expect(bad === "", what + ": Tab order is not the visual order: " + bad);
+        if (stops.length === 0) return;
+        // Back from `start`, which Tab came round to: the same stops reversed.
+        start.forceActiveFocus();
+        const back = [];
+        for (let i = 0; i < stops.length; ++i) {
+            tc.keyClick(Qt.Key_Backtab);
+            back.push(probe.nameOf(probe.focused()));
+        }
+        const wantBack = names.slice().reverse();
+        probe.expect(JSON.stringify(back) === JSON.stringify(wantBack),
+                     what + ": Shift+Tab visits " + JSON.stringify(back) + ", expected " + JSON.stringify(wantBack));
+    }
+    // Focus the shown control `name` by Tab alone (Tab goes round, through
+    // `start` too; a focus scope may take focus back to where it last was
+    // rather than to its first stop); "" when it got it, else the stops visited.
+    function tabTo(start, name, limit) {
+        start.forceActiveFocus();
+        const seen = [];
+        for (let i = 0; i < limit; ++i) {
+            tc.keyClick(Qt.Key_Tab);
+            const f = probe.focused();
+            if (!f) break;
+            if (probe.nameOf(f) === name) return "";
+            seen.push(probe.nameOf(f));
+        }
+        return "no Tab to '" + name + "' (visited " + JSON.stringify(seen) + ")";
+    }
+    function mustTab(start, name, limit) {
+        const why = probe.tabTo(start, name, limit);
+        probe.expect(why === "", why);
+    }
+    // Every name in `must` was seen by the guard's sweeps.
+    function sawNames(must) {
+        const absent = must.filter(n => !probe.names[n]);
+        probe.expect(absent.length === 0, "expected names not found: " + JSON.stringify(absent)
+                     + " (saw " + JSON.stringify(Object.keys(probe.names)) + ")");
+    }
+    function noMissingNames() {
+        const bad = Object.keys(probe.missing);
+        probe.expect(bad.length === 0, bad.length + " interactive controls lack a meaningful Accessible.name: "
+                     + bad.map(k => k + " (" + probe.missing[k] + ")").join("; "));
+    }
+
+    Timer {
+        interval: 60
+        running: true
+        repeat: true
+        onTriggered: {
+            let done = false;
+            let current = null;
+            try {
+                if (probe.at >= probe.steps.length) {
+                    done = true;
+                } else {
+                    current = probe.steps[probe.at];
+                    const waiting = current.wait ? current.wait() : "";
+                    if (waiting !== "") {
+                        if (++probe.stalls < probe.maxStalls) return;
+                        throw new Error("never ready for " + waiting);
+                    }
+                    probe.stalls = 0;
+                    probe.at++;
+                    console.warn(probe.doneMarker + " TRACE " + current.name);
+                    current.run();
+                }
+            } catch (e) {
+                probe.failures.push("step '" + (current ? current.name : "?") + "': " + e);
+                done = true;
+            }
+            if (done) {
+                stop();
+                try {
+                    if (probe.failures.length > 0) {
+                        throw new Error("list-page probe failed: " + probe.failures.join("; "));
+                    }
+                    console.warn(probe.doneMarker);
+                } finally {
+                    Qt.quit();
+                }
+            }
+        }
+    }

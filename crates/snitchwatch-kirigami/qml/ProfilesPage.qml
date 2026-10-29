@@ -69,9 +69,11 @@ Kirigami.ScrollablePage {
             id: newProfileName
             Layout.fillWidth: true
             placeholderText: "New profile name…"
+            Accessible.name: "New profile name"
         }
-        Controls.Button {
+        GuardedButton {
             text: "Create"
+            Accessible.name: "Create profile"
             icon.name: "list-add"
             enabled: newProfileName.text.trim().length > 0
             onClicked: {
@@ -157,7 +159,7 @@ Kirigami.ScrollablePage {
         }
     }
 
-    ListView {
+    FocusOrderListView {
         id: list
         model: page.model
         currentIndex: -1
@@ -173,12 +175,15 @@ Kirigami.ScrollablePage {
             explanation: "Create a profile above, e.g. \"At Home\" or \"Public Wi-Fi\", then set its network matchers to auto-activate it."
         }
 
-        delegate: Controls.ItemDelegate {
+        delegate: NavigableRow {
             id: row
             width: ListView.view ? ListView.view.width : implicitWidth
             highlighted: ListView.isCurrentItem
+            focusPolicy: Qt.StrongFocus
+            Accessible.name: row.isActive ? row.name + " (active)" : row.name
+            Accessible.description: row.networkMatchers.length > 0 ? row.networkMatchers
+                : "No network matchers (manual activation only)"
 
-            required property int index
             required property string profileId
             required property string name
             required property string networkMatchers
@@ -284,6 +289,9 @@ Kirigami.ScrollablePage {
     SizedOverlaySheet {
         id: inspector
         title: page.inspectName
+        // Focus goes into the sheet (Tab then reaches its first control, and
+        // Escape closes it), on nothing that a held key could press.
+        onOpened: inspector.contentItem.forceActiveFocus(Qt.TabFocusReason)
 
         ColumnLayout {
             Layout.preferredWidth: inspector.preferredWidth
@@ -295,9 +303,10 @@ Kirigami.ScrollablePage {
                 Controls.TextField {
                     id: renameField
                     Kirigami.FormData.label: "Name"
+                    Accessible.name: "Profile name"
                     text: page.inspectName
                 }
-                Controls.Button {
+                GuardedButton {
                     Kirigami.FormData.label: " "
                     text: "Save name"
                     enabled: renameField.text.trim().length > 0 && renameField.text.trim() !== page.inspectName
@@ -311,9 +320,10 @@ Kirigami.ScrollablePage {
                     id: matchersField
                     Kirigami.FormData.label: "Network matchers"
                     placeholderText: "Home*, Office-5G"
+                    Accessible.name: "Network matchers"
                     text: page.inspectMatchers
                 }
-                Controls.Button {
+                GuardedButton {
                     Kirigami.FormData.label: " "
                     text: "Save matchers"
                     enabled: matchersField.text !== page.inspectMatchers
@@ -370,10 +380,12 @@ Kirigami.ScrollablePage {
                             text: ruleRow.modelData.conditions
                             elide: Text.ElideMiddle
                         }
-                        Controls.Button {
+                        GuardedButton {
                             objectName: "profileRuleRemove"
                             icon.name: "list-remove"
                             text: "Remove"
+                            Accessible.name: "Remove rule: " + ruleRow.modelData.action + " "
+                                + ruleRow.modelData.conditions
                             display: Controls.AbstractButton.IconOnly
                             onClicked: page.model.removeRule(page.inspectId, ruleRow.modelData.id)
                         }
@@ -403,7 +415,7 @@ Kirigami.ScrollablePage {
                 wrapMode: Text.Wrap
                 text: ruleEditorController.statusText
             }
-            Controls.Button {
+            GuardedButton {
                 objectName: "profileAddRule"
                 Layout.fillWidth: true
                 text: "Add rule…"
@@ -415,7 +427,7 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
             }
 
-            Controls.Button {
+            GuardedButton {
                 Layout.fillWidth: true
                 visible: !page.inspectActive
                 text: "Activate"
@@ -425,7 +437,7 @@ Kirigami.ScrollablePage {
                     page.inspectActive = true;
                 }
             }
-            Controls.Button {
+            GuardedButton {
                 Layout.fillWidth: true
                 visible: page.inspectActive
                 text: "Deactivate"
@@ -442,12 +454,16 @@ Kirigami.ScrollablePage {
 
             // Two-step confirmation kept inline (no separate dialog type
             // introduced) — mirrors RulesPage's existing button-row pattern.
-            Controls.Button {
+            GuardedButton {
                 Layout.fillWidth: true
                 visible: !page.confirmingDelete
                 text: "Delete profile"
+                Accessible.name: "Delete profile " + page.inspectName
                 icon.name: "edit-delete-remove"
-                onClicked: page.confirmingDelete = true
+                onClicked: {
+                    page.confirmingDelete = true;
+                    cancelDelete.forceActiveFocus(Qt.TabFocusReason);
+                }
             }
 
             ColumnLayout {
@@ -464,14 +480,17 @@ Kirigami.ScrollablePage {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.largeSpacing
-                    Controls.Button {
+                    GuardedButton {
+                        id: cancelDelete
                         Layout.fillWidth: true
                         text: "Cancel"
+                        Accessible.name: "Cancel deleting profile " + page.inspectName
                         onClicked: page.confirmingDelete = false
                     }
-                    Controls.Button {
+                    GuardedButton {
                         Layout.fillWidth: true
                         text: "Confirm delete"
+                        Accessible.name: "Confirm deleting profile " + page.inspectName
                         icon.name: "edit-delete-remove"
                         onClicked: {
                             page.model.deleteProfile(page.inspectId);

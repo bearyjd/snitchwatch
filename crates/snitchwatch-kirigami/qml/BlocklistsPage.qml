@@ -35,6 +35,8 @@ Kirigami.ScrollablePage {
 
     // Snapshot of the subscription currently shown in the detail sheet.
     property string inspectId: ""
+    // Exposed for the headless probes.
+    property alias inspectorSheet: inspector
     property string inspectDisplayName: ""
     property string inspectUrl: ""
     property int inspectEntryCount: 0
@@ -100,9 +102,11 @@ Kirigami.ScrollablePage {
             id: subscribeUrl
             Layout.fillWidth: true
             placeholderText: "Blocklist URL to subscribe…"
+            Accessible.name: "Blocklist URL to subscribe"
         }
-        Controls.Button {
+        GuardedButton {
             text: "Subscribe"
+            Accessible.name: "Subscribe to blocklist"
             icon.name: "list-add"
             enabled: subscribeUrl.text.trim().length > 0
             onClicked: {
@@ -164,12 +168,16 @@ Kirigami.ScrollablePage {
                       + ", so " + (page.leftoverRules === 1 ? "it keeps" : "they keep")
                       + " blocking the hosts of lists you may no longer have."
             }
-            Controls.Button {
+            GuardedButton {
                 objectName: "removeLeftovers"
                 visible: !page.confirmingLeftover
                 text: "Remove these rules"
+                Accessible.name: "Remove leftover blocklist rules"
                 icon.name: "edit-delete-remove"
-                onClicked: page.confirmingLeftover = true
+                onClicked: {
+                    page.confirmingLeftover = true;
+                    cancelLeftovers.forceActiveFocus(Qt.TabFocusReason);
+                }
             }
             // A removal that failed, or left some behind.
             Controls.Label {
@@ -195,14 +203,17 @@ Kirigami.ScrollablePage {
                         : "Remove them from the firewall? The hosts they blocked will no longer "
                           + "be blocked."
                 }
-                Controls.Button {
+                GuardedButton {
+                    id: cancelLeftovers
                     objectName: "cancelRemoveLeftovers"
                     text: "Cancel"
+                    Accessible.name: "Cancel removing leftover blocklist rules"
                     onClicked: page.confirmingLeftover = false
                 }
-                Controls.Button {
+                GuardedButton {
                     objectName: "confirmRemoveLeftovers"
                     text: "Confirm remove"
+                    Accessible.name: "Confirm removing leftover blocklist rules"
                     icon.name: "edit-delete-remove"
                     onClicked: {
                         page.model.removeLeftoverRules();
@@ -275,7 +286,7 @@ Kirigami.ScrollablePage {
         }
     }
 
-    ListView {
+    FocusOrderListView {
         id: list
         model: page.model
         currentIndex: -1
@@ -292,12 +303,15 @@ Kirigami.ScrollablePage {
                 + "Hosts are matched by exact name, not subdomains."
         }
 
-        delegate: Controls.ItemDelegate {
+        delegate: NavigableRow {
             id: row
             width: ListView.view ? ListView.view.width : implicitWidth
             highlighted: ListView.isCurrentItem
+            focusPolicy: Qt.StrongFocus
+            Accessible.name: row.displayName
+            Accessible.description: row.url + ". " + row.entryCount + " hosts. " + row.statusLabel
+                + ". " + row.enforcementLabel
 
-            required property int index
             required property string listId
             required property string displayName
             required property string url
@@ -401,6 +415,9 @@ Kirigami.ScrollablePage {
     SizedOverlaySheet {
         id: inspector
         title: page.inspectDisplayName
+        // Focus goes into the sheet (Tab then reaches its first control, and
+        // Escape closes it), on nothing that a held key could press.
+        onOpened: inspector.contentItem.forceActiveFocus(Qt.TabFocusReason)
 
         ColumnLayout {
             Layout.preferredWidth: inspector.preferredWidth
@@ -496,18 +513,20 @@ Kirigami.ScrollablePage {
                 opacity: 0.7
             }
 
-            Controls.Button {
+            GuardedButton {
                 Layout.fillWidth: true
                 visible: page.entriesModel && page.entriesModel.subscriptionId === page.inspectId
                     && page.entriesModel.hasMore
                 text: "Show more"
+                Accessible.name: "Show more hosts"
                 icon.name: "go-down"
                 onClicked: page.model.requestEntries(page.inspectId, page.entriesModel.count)
             }
 
-            Controls.Button {
+            GuardedButton {
                 Layout.fillWidth: true
                 text: "Unsubscribe"
+                Accessible.name: "Unsubscribe from " + page.inspectDisplayName
                 icon.name: "edit-delete-remove"
                 onClicked: {
                     page.model.unsubscribe(page.inspectId);
