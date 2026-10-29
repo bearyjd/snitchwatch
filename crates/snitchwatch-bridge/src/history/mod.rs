@@ -17,6 +17,7 @@ pub mod budget;
 pub mod caps;
 pub mod open;
 pub mod record;
+pub mod rule_identity;
 pub mod schema;
 pub mod settings;
 pub mod writer;
@@ -170,7 +171,13 @@ mod budget_tests;
 #[cfg(test)]
 mod caps_tests;
 #[cfg(test)]
+mod identity_dormant_tests;
+#[cfg(test)]
 mod replace_tests;
+#[cfg(test)]
+mod rule_identity_fuzz_tests;
+#[cfg(test)]
+mod rule_identity_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
