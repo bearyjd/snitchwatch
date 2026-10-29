@@ -33,12 +33,31 @@ Item {
         return -1;
     }
 
+    // The index of the choice button `item`, or -1.
+    function indexOfItem(item) {
+        for (let i = 0; i < rep.count; i++) {
+            if (rep.itemAt(i) === item) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // Focus the choice button at `index`, or the last one if there are fewer.
+    function focusAt(index) {
+        const item = rep.itemAt(Math.min(index, rep.count - 1));
+        if (item !== null) {
+            item.forceActiveFocus();
+        }
+    }
+
     RowLayout {
         id: strip
         anchors.fill: parent
         spacing: 0
 
         Repeater {
+            id: rep
             model: seg.model
             delegate: Controls.Button {
                 required property var modelData

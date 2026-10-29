@@ -357,8 +357,16 @@ fn the_alert_wires_keys_to_the_armed_handler_and_waits_one_second() {
             && ALERT_QML
                 .contains("alert.armed && autoRepeat !== true && alert.heldKeys[key] !== true")
             && ALERT_QML.matches("alert.freshPress(").count() >= 4
-            && !ALERT_QML.contains("alert.heldKeys = ({})"),
+            && !ALERT_QML.contains("alert.heldKeys = ({})\n            alert.arm"),
         "held keys must be recorded at every press and survive re-arming"
+    );
+    // ... and are forgotten only when the window can no longer see releases:
+    // hidden or deactivated, never on a new row or a re-arm (#258 re-review).
+    assert!(
+        ALERT_QML.matches("alert.heldKeys = ({})").count() == 2
+            && ALERT_QML.contains("Window.onActiveChanged: if (!Window.active) alert.heldKeys = ({})")
+            && ALERT_QML.contains("} else {\n            alert.heldKeys = ({});\n        }"),
+        "held keys must be cleared when the alert hides or its window is deactivated, only"
     );
     // The verdict buttons see the key first and guard it like handleKey.
     assert!(

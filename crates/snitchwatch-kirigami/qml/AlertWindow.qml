@@ -63,8 +63,16 @@ Window {
     property bool armed: false
     // Keys pressed (armed or not) and not yet released: a press of one of
     // these (some platforms do not flag the repeats) is not a fresh press.
-    // Kept across re-arming and row replacement; only a real release clears it.
+    // Kept across re-arming and row replacement; only a real release clears
+    // it, or the window going away (hidden, deactivated): a release then goes
+    // to another window, and the key, if still down, repeats on return and is
+    // recorded again.
     property var heldKeys: ({})
+    // Where the focus was on a choice or verdict button, and where to put it
+    // back when a re-arm (which disables the controls, and may remove a choice
+    // button) took it to the key catcher: {choice, index} or {button}.
+    property var focusSpec: null
+    property var restoreSpec: null
     // A row answered or dismissed here and not yet resolved by the bridge is
     // not shown again.
     property string handledRowId: ""
@@ -152,6 +160,49 @@ Window {
     function resetFocus() {
         alert.dropFocus(content);
         keys.forceActiveFocus();
+        alert.focusSpec = null;
+        alert.restoreSpec = null;
+    }
+
+    function specOf(item) {
+        if (item === alert.allowButton || item === alert.denyButton) {
+            return { button: item };
+        }
+        for (const choice of [scopeChoice, durationChoice]) {
+            const index = choice.indexOfItem(item);
+            if (index >= 0) {
+                return { choice: choice, index: index };
+            }
+        }
+        return null;
+    }
+
+    // Focus on a control, or lost to the key catcher while the alert stays up
+    // (a re-arm disabled the controls or removed the focused choice).
+    onActiveFocusItemChanged: {
+        const item = alert.activeFocusItem;
+        if (item === null || item === alert.keyCatcher) {
+            if (alert.focusSpec !== null && alert.shown) {
+                alert.restoreSpec = alert.focusSpec;
+            }
+            alert.focusSpec = null;
+        } else {
+            alert.focusSpec = alert.specOf(item);
+            alert.restoreSpec = null;
+        }
+    }
+
+    function restoreFocus() {
+        const spec = alert.restoreSpec;
+        alert.restoreSpec = null;
+        if (spec === null) {
+            return;
+        }
+        if (spec.button !== undefined) {
+            spec.button.forceActiveFocus();
+        } else {
+            spec.choice.focusAt(spec.index);
+        }
     }
 
     // Takes the focus off every item under `item` (the focus a hidden window
@@ -177,12 +228,16 @@ Window {
     // buttons may have moved under the pointer: wait again.
     onRemembersChanged: alert.arm()
 
-    onShownChanged: if (alert.shown) {
-        alert.resetFocus();
-        alert.arm();
-        alert.raise();
-        // Return/Esc need the keyboard focus; a compositor may still refuse.
-        alert.requestActivate();
+    onShownChanged: {
+        if (alert.shown) {
+            alert.resetFocus();
+            alert.arm();
+            alert.raise();
+            // Return/Esc need the keyboard focus; a compositor may still refuse.
+            alert.requestActivate();
+        } else {
+            alert.heldKeys = ({});
+        }
     }
 
     // Sends `choice` ("allow" or "deny") for the row shown. Ignored until
@@ -268,7 +323,10 @@ Window {
         id: armTimer
         interval: alert.armDelayMs
         repeat: false
-        onTriggered: alert.armed = true
+        onTriggered: {
+            alert.armed = true;
+            alert.restoreFocus();
+        }
     }
 
     Connections {
@@ -294,6 +352,9 @@ Window {
         id: keys
         anchors.fill: parent
         focus: true
+
+        // A deactivated window gets no key releases.
+        Window.onActiveChanged: if (!Window.active) alert.heldKeys = ({})
 
         Keys.onPressed: event => {
             // Tab and Shift+Tab are the window's focus chain, not ours.

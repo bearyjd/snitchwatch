@@ -172,7 +172,10 @@ Window {
             const answers = on === "Allow" || on === "Deny";
             probe.add(k + " pressed on " + on + " while armed ...", { row: true, steps: ["tab:" + on, "press:" + k],
                       expect: answers ? [on === "Allow" ? A : D] : [] });
+            // An answer hides the alert; a key still down repeats while it
+            // is back and unarmed (the hide forgot it), and is recorded again.
             probe.add("... unflagged " + k + " repeats on the replacement row", { row: true,
+                      pre: answers ? () => { alert.keyCatcher.forceActiveFocus(); tc.keyPress(probe.keyOf[k]); } : null,
                       steps: ["press:" + k, "none", "press:" + k, "none", "release:" + k, "none", "click:" + k], expect: [A] });
         }
         // Space down on Allow when the offered durations change; unflagged
@@ -181,6 +184,35 @@ Window {
         probe.add("... unflagged Space repeat and release after a duration re-arm", { rearm: true,
                   steps: ["press:Space", "none", "press:Space", "release:Space", "none", "tab:Allow", "click:Space"],
                   expect: ["{r}:allow:any_host_on_domain:this_time:true"] });
+        // A key that answered, whose release never reached the window (it went
+        // to another one after the alert hid): the next prompt's FIRST press
+        // answers (#258 re-review M1).
+        for (const k of ["Escape", "Return", "Enter"]) {
+            probe.add(k + " answers and is never released ...", { row: true, steps: ["press:" + k], expect: [k === "Escape" ? D : A] });
+            probe.add("... one fresh " + k + " on the prompt after the alert hid", { row: true, hide: true,
+                      steps: ["click:" + k], expect: [k === "Escape" ? D : A] });
+        }
+        // The same key still physically held when the alert comes back repeats
+        // there, unflagged, and is swallowed again until it is released.
+        for (const k of ["Return", "Enter"]) {
+            probe.add(k + " answers and stays down ...", { row: true, steps: ["tab:Allow", "press:" + k], expect: [A] });
+            probe.add("... repeats on the alert that comes back are swallowed (" + k + ")", { row: true, hide: true,
+                      pre: () => { alert.keyCatcher.forceActiveFocus(); tc.keyPress(probe.keyOf[k]); tc.keyPress(probe.keyOf[k]); },
+                      steps: ["press:" + k, "none", "release:" + k, "none", "click:" + k], expect: [A] });
+        }
+        // Focus on a duration the re-arm removes stays on the choice, so Return
+        // selects (it does not answer); focus on Allow stays on Allow (M2).
+        probe.add("Forever focused ...", { row: true, steps: ["tab:Forever"] });
+        probe.add("... the durations shrink to Once", { rearm: true,
+                  run: () => probe.expect(probe.where(probe.focused()) === "Once", "focus after the durations shrank: " + probe.where(probe.focused())),
+                  steps: ["click:Return", "none"] });
+        probe.add("Allow focused ...", { row: true, steps: ["tab:Allow"] });
+        probe.add("... a re-arm keeps it there", { rearm: true,
+                  run: () => probe.expect(probe.where(probe.focused()) === "Allow", "focus after a re-arm: " + probe.where(probe.focused())),
+                  steps: ["click:Return"], expect: ["{r}:allow:any_host_on_domain:this_time:true"] });
+        // A replacement row starts with the focus off Deny.
+        probe.add("Deny focused, never answered ...", { row: true, steps: ["tab:Deny"] });
+        probe.add("... Return on the replacement row is Allow", { row: true, steps: ["click:Return"], expect: [A] });
         probe.add("a repeated Space / Return press is not an answer", { row: true, run: probe.repeats });
     }
     // The native-button guard, with the auto-repeat flag QtTest cannot set.
@@ -236,9 +268,21 @@ Window {
         feedStub.submitted = [];
         if (s.row) {
             feedStub.appBound = true;
-            if (probe.current !== "") probe.decide(probe.current);
+            const previous = probe.current;
             probe.current = "r" + n;
-            connModel.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [probe.row(probe.current)] }));
+            const insert = () => connModel.applyServerMessageJson(JSON.stringify({ action: "insertConnectionRows", rows: [probe.row(probe.current)] }));
+            if (s.hide && previous !== "") {
+                // Nothing pending: the alert hides, then the next row shows it.
+                probe.decide(previous);
+                alert.refresh();
+                probe.expect(!alert.visible, s.name + ": the alert did not hide");
+                insert();
+            } else {
+                // The next row is already queued when the old one resolves, so
+                // the alert never hides: a plain row replacement.
+                insert();
+                if (previous !== "") probe.decide(previous);
+            }
             alert.refresh();
         }
         if (s.rearm) {
