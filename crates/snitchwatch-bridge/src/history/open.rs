@@ -140,6 +140,16 @@ pub(crate) fn ensure_dir(dir: &Path, euid: u32) -> Result<(), Unavailable> {
     check_dir(dir, euid)
 }
 
+fn io_failure(sidecar: &Path, e: &std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        e.kind(),
+        format!(
+            "couldn't check the permissions of {}: {e}",
+            sidecar.display()
+        ),
+    )
+}
+
 /// Make each existing SQLite sidecar of `db` exactly 0600, through a handle
 /// opened `O_NOFOLLOW | O_NONBLOCK`. One that isn't a regular file of ours is
 /// left for [`crate::sqlite_file::open_owner_only`] to refuse.
@@ -155,11 +165,22 @@ pub(crate) fn tighten_sidecars(db: &Path) -> Result<(), crate::sqlite_file::Open
         {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            // A symlink (ELOOP) or anything unreadable: the opener refuses it.
-            Err(_) => continue,
+            // A symlink (ELOOP): the opener refuses it.
+            Err(e) if e.raw_os_error() == Some(libc::ELOOP) => continue,
+            // Anything else (a 0244 file we can't read, say) means the mode
+            // can't be checked or fixed: fail closed rather than let a
+            // group/other-readable sidecar survive the open.
+            Err(e) => return Err(io_failure(&sidecar, &e).into()),
         };
         let meta = file.metadata()?;
-        if meta.is_file() && meta.uid() == effective_uid() && meta.mode() & 0o7777 != 0o600 {
+        // Type, owner and link count are checked **before** any chmod: a hard
+        // link to someone else's file must not have its mode changed (the
+        // opener refuses it afterwards).
+        if meta.is_file()
+            && meta.uid() == effective_uid()
+            && meta.nlink() == 1
+            && meta.mode() & 0o7777 != 0o600
+        {
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
         }
     }
