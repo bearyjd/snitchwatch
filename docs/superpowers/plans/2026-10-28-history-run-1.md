@@ -75,7 +75,7 @@ page budget. Read literally:
 | Item | Depends on | Why |
 |------|-----------|-----|
 | PR 1 storage, schema, caps | nothing | Creates the store and the S1 cap table |
-| PR 2 writer, page budget | PR 1 | Needs the schema and caps; **produces the S2 result** |
+| PR 2 writer, disk budget | PR 1 | Needs the schema and caps; implements the S2 full-journal bound |
 | PR 3a in-memory primitives (generation counter, acceptance-sequence counter, pin registry, reader-gate skeleton) | PR 1 (module only) | Pure in-memory; no database |
 | PR 3b durable parts (watermark committed with each batch, session ledger, bounded gap/session ledger) | **PR 2** | The watermark is advanced in the writer's transaction and the ledger lives inside the page budget |
 | PR 4a pure rule identity (recursive allowlist, canonical encoding, hash incl. `Operator.sensitive`, `rule_class`, qualifier flags, redaction-equivalence tests) | PR 1 (caps) | Pure functions over `Rule`; no database |
@@ -130,26 +130,26 @@ not release the run.
 
 2. **History PR 2: writer and page budget.** *(depends on PR 1)*
    - **Goal:** one writer thread, bounded queue (bytes and count), batched
-     transactions bounded by pages, incremental vacuum, no full `VACUUM`.
+     transactions, incremental vacuum, the full-journal disk bound, no full `VACUUM`.
    - **Touches:** `history/writer.rs`, `history/budget.rs`. Bridge only.
    - **Tests first:** a full queue drops and counts without ever blocking a
      verdict (blocked writer plus a timed `AskRule` through `mock_opensnitchd`);
-     worst-case rows (every field at cap) through insert, eviction and
-     incremental vacuum never modify more pages per transaction than the
-     budget; main file + peak journal + the settings file at maximum with its
-     atomic replacement in flight + unallocated slack <= B under the same
-     workload; freed space shrinks the file; `secure_delete` canary scan.
+     the main file never exceeds B/2 when filled to the limit with worst-case
+     rows (every field at cap); main file + a full journal + the settings file
+     at maximum with its atomic replacement in flight <= B when a transaction
+     journals every page; a mutant that loosens the cap fails both; freed space shrinks the file; `secure_delete` canary scan.
    - **Lands:** S2, S3, S4, S5 (clear-all recreation arrives in PR 10 of the
      parent plan), D5 insert path.
-   - **Proof obligation:** **S2.** The implementation must prove the worst-case
-     pages-per-row constant from the schema and caps (indexes, snapshot rows,
-     orphan cleanup) and encode it as the transaction budget.
-   - **Decision point 1 (owner):** the run stops here for review whatever the
-     S2 result (see "Decision points"); the PR records the result either way.
-   - **Review focus:** the budget is enforced before commit, not measured after;
-     the arithmetic is checked against the schema, not a fixture.
-   - **Merge condition:** green CI, `/codex` clean, **and S2 proved**. If S2
-     cannot be proved, the PR is parked as a draft (below).
+   - **S2 resolved by the owner, 2026-10-28:** the per-row page proof is
+     declined as unproved; the full-journal fallback is used (a full rollback
+     journal reserved, main file at most half of the budget). No derived
+     rows-per-transaction claim exists.
+   - **Decision point 1 (owner):** the run stops here for review (see
+     "Decision points"); S2 is already decided.
+   - **Review focus:** the cap plus the full-journal reserve add up to at most
+     B with no fill-invariant argument; `cache_spill=OFF` is verified on open.
+   - **Merge condition:** green CI, `/codex` clean, and the owner's release
+     (the run stops after this PR whatever happens).
 
 ### Batch 2: primitives and identity
 
@@ -239,22 +239,15 @@ are **not** part of this run, so nothing is duplicated.
 
 ## Decision points
 
-1. **The run stops after PR 2 for owner review, whatever the S2 result.** The
-   approved implementation plan lists both outcomes of S2 as owner decision
-   points: a proved constant and the full-journal fallback. By default, once
-   PR 2 is reviewed and either merged (S2 proved) or parked as a draft (S2 not
-   proved), the run does **not** begin 3b or 4b on its own. It records the S2
-   result in the PR (the proof, or the measured numbers and the fallback
-   question), then does only work that does not depend on PR 2 (3a, 4a), and
-   reports.
+1. **The run stops after PR 2 for owner review.** S2 was decided by the owner
+   on 2026-10-28: the per-row page proof is declined as unproved and the
+   full-journal fallback is used. Once PR 2 is reviewed and merged, the run
+   does **not** begin 3b or 4b on its own. It does only work that does not
+   depend on PR 2 (3a, 4a), and reports.
    - **WAIVER: declined by the owner, 2026-10-28.** *(Proposed text, not in
      force: if S2 is proved, the run may continue to 3b and 4b without a stop.)*
      The run therefore always stops after PR 2, proved or not, and waits for the
      owner's release.
-   - If S2 cannot be proved, the full-journal fallback (reserve a
-     full-database rollback journal; main-file share at most half of the
-     budget) is an owner decision because it halves the usable cache. PR 2 is
-     parked as a draft; 3b and 4b wait.
 2. **Any field cap the owner has not set** (S1) is proposed in the PR, not
    merged as a guess.
 3. **The split** (3a/3b, 4a/4b) and the halves-versus-whole rule in
@@ -279,8 +272,8 @@ are **not** part of this run, so nothing is duplicated.
 ## What the owner gets in the morning
 
 - A list of merged PRs with their SHAs.
-- The **S2 result**: proved constant, or the measured numbers and the parked
-  draft with the full-journal fallback question.
+- The **S2 result**: the full-journal fallback, as the owner decided, with its
+  test and mutant evidence.
 - The proposed S1 field caps beyond the three already set, for confirmation.
 - Parked items, each with its reason and `/codex` round count.
 - Anything that needs a decision, and the tower note listing the merged SHAs.

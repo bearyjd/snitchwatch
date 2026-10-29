@@ -137,7 +137,35 @@ pub(crate) fn encode(settings: &Settings) -> Result<Vec<u8>, Unavailable> {
 /// Read the settings file through one handle opened `O_NOFOLLOW | O_NONBLOCK`:
 /// a regular file of ours with no other link, at most [`SETTINGS_MAX_BYTES`];
 /// whatever its mode, it is set to exactly 0600 on that handle first.
+///
+/// A save replaces the file by `rename`, so a reader that opened the old file
+/// just before can see it with **zero** links: it was replaced, not hard
+/// linked. That is retried (the new file is already in place); a file that
+/// keeps vanishing is refused.
 fn read_checked(path: &std::path::Path) -> Result<Option<Vec<u8>>, Unavailable> {
+    read_checked_with(path, crate::state_file::REPLACED_RETRIES, &mut || {})
+}
+
+/// [`read_checked`] with the retry cap and a hook that runs after each open
+/// and before the `fstat` (tests replace the file by hand there).
+pub(crate) fn read_checked_with(
+    path: &std::path::Path,
+    tries: u32,
+    after_open: &mut dyn FnMut(),
+) -> Result<Option<Vec<u8>>, Unavailable> {
+    for _ in 0..tries {
+        if let Some(read) = read_checked_once(path, after_open)? {
+            return Ok(read);
+        }
+    }
+    Err(bad("the file keeps being replaced while it is read"))
+}
+
+/// One attempt; `Ok(None)` when the file was replaced under us (retry).
+fn read_checked_once(
+    path: &std::path::Path,
+    after_open: &mut dyn FnMut(),
+) -> Result<Option<Option<Vec<u8>>>, Unavailable> {
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     let file = match std::fs::OpenOptions::new()
@@ -146,10 +174,14 @@ fn read_checked(path: &std::path::Path) -> Result<Option<Vec<u8>>, Unavailable> 
         .open(path)
     {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(None)),
         Err(e) => return Err(bad(e)),
     };
+    after_open();
     let meta = file.metadata().map_err(bad)?;
+    if meta.nlink() == 0 {
+        return Ok(None);
+    }
     // SAFETY: geteuid takes no arguments and always succeeds.
     let euid = unsafe { libc::geteuid() };
     let facts = crate::sqlite_file::FileFacts {
@@ -174,7 +206,7 @@ fn read_checked(path: &std::path::Path) -> Result<Option<Vec<u8>>, Unavailable> 
     if bytes.len() as u64 > SETTINGS_MAX_BYTES {
         return Err(bad("too large"));
     }
-    Ok(Some(bytes))
+    Ok(Some(Some(bytes)))
 }
 
 /// `None` when there is no settings file (never enabled).

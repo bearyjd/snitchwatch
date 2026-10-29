@@ -4,7 +4,7 @@
 //! mismatch makes history `unavailable`, since changing either later needs a
 //! full `VACUUM`, which S4 forbids): `page_size = 4096`,
 //! `auto_vacuum = INCREMENTAL`. Per connection: `journal_mode = DELETE` (S2
-//! and S3 reason about a rollback journal) and `secure_delete = ON` (S5).
+//! and S3 reserve room for a full rollback journal) and `secure_delete = ON` (S5).
 //! None of the pragmas is part of [`schema_sql`], which is what
 //! `require_known_schema` compares.
 //!
@@ -13,10 +13,9 @@
 //! this build is refused; 0 with no objects (a new file) is created at the
 //! current version, in one transaction with its tables.
 //!
-//! **Shape, with S2 in mind.** Every b-tree is a term in the per-row page
-//! sum PR 2 must prove, so the schema has as few as it can: rowid tables,
-//! and only fixed-width columns are indexed (`ts_ms`, the 16-byte
-//! `rule_hash`). Nothing indexes `process_path` or `dst_host`. The `gaps` and
+//! **Shape.** Fewer b-trees mean less write amplification, so the schema has
+//! as few as it can: rowid tables, and only fixed-width columns are indexed
+//! (`ts_ms`, the 16-byte `rule_hash`). Nothing indexes `process_path` or `dst_host`. The `gaps` and
 //! `sessions` tables of the design arrive with the ledger (PR 3), by a
 //! version-2 migration; `meta` is not needed (the version is
 //! `user_version`, the consent record is in the settings file).

@@ -1,6 +1,6 @@
 //! S1: the one field-cap table. Every string the history store persists has a
 //! fixed maximum byte length, so the largest possible row, index entry and
-//! snapshot are known from the schema (the S2 page arithmetic builds on it).
+//! snapshot are known from the schema.
 //!
 //! Two layers enforce it, so neither is the only guard: the insert API takes
 //! only the capped types below (a value is cut to its cap, on a UTF-8
@@ -65,6 +65,11 @@ impl<const CAP: usize> Capped<CAP> {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Bytes the string has allocated (its capacity, not its length).
+    pub fn allocated(&self) -> usize {
+        self.0.capacity()
+    }
 }
 
 impl<const CAP: usize> std::fmt::Debug for Capped<CAP> {
@@ -92,6 +97,10 @@ impl Snapshot {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn allocated(&self) -> usize {
+        self.0.capacity()
     }
 }
 

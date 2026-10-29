@@ -13,11 +13,13 @@
 //! * [`caps`] and [`record`] are S1: the field-cap table and the insert API.
 //! * [`settings`] is the bridge-owned enabled/consent/retention file.
 
+pub mod budget;
 pub mod caps;
 pub mod open;
 pub mod record;
 pub mod schema;
 pub mod settings;
+pub mod writer;
 
 use std::path::{Path, PathBuf};
 
@@ -164,8 +166,14 @@ pub(crate) fn open_store_as(location: &Location, euid: u32) -> Result<Store, Una
 }
 
 #[cfg(test)]
+mod budget_tests;
+#[cfg(test)]
 mod caps_tests;
+#[cfg(test)]
+mod replace_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod writer_tests;

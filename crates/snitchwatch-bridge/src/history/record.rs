@@ -158,3 +158,18 @@ pub fn insert_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> rusqlite
     )?;
     Ok(())
 }
+
+/// [`insert_snapshot`] unless that hash is already stored (then nothing is
+/// written, so the page budget is not spent).
+pub fn ensure_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO rules_seen (rule_hash, snapshot, first_seen_ms) \
+         VALUES (?1, ?2, ?3)",
+        params![
+            snapshot.rule_hash.as_slice(),
+            snapshot.snapshot.as_str(),
+            snapshot.first_seen_ms
+        ],
+    )?;
+    Ok(())
+}
