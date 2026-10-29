@@ -170,6 +170,8 @@ mod budget_tests;
 #[cfg(test)]
 mod caps_tests;
 #[cfg(test)]
+mod replace_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;

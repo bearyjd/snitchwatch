@@ -800,35 +800,88 @@ fn other_target(dir: &std::path::Path) -> std::path::PathBuf {
     p
 }
 
+/// A thread running `work` until stopped. Dropping it (a failed assertion in
+/// the test unwinds through here) stops and joins it, so the first error is
+/// the one that shows; `finish` returns the first error the worker saw.
+struct Saver {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    first_error: Arc<Mutex<Option<String>>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Saver {
+    fn start(mut work: impl FnMut() -> Result<(), String> + Send + 'static) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first_error = Arc::new(Mutex::new(None));
+        let (flag, sink) = (stop.clone(), first_error.clone());
+        let handle = std::thread::spawn(move || {
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Err(e) = work() {
+                    sink.lock().unwrap().get_or_insert(e);
+                    return;
+                }
+            }
+        });
+        Self {
+            stop,
+            first_error,
+            handle: Some(handle),
+        }
+    }
+
+    fn finish(mut self) -> Option<String> {
+        self.stop_and_join();
+        self.first_error.lock().unwrap().take()
+    }
+
+    fn stop_and_join(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for Saver {
+    fn drop(&mut self) {
+        self.stop_and_join();
+    }
+}
+
+/// Retry exhaustion is documented and fails closed; anything else is a bug.
+fn tolerate_exhaustion<T, E: std::fmt::Display>(r: Result<T, E>) {
+    if let Err(e) = r {
+        let text = e.to_string();
+        assert!(text.contains("keeps being replaced"), "{text}");
+    }
+}
+
 #[test]
 fn a_save_in_flight_keeps_its_temp_file_when_a_writer_opens() {
     let rig = rig_with(16 * MIB, true);
     let location = rig.location.clone();
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = stop.clone();
     let current = super::settings::load(&location).unwrap().unwrap();
     let loc = location.clone();
-    let saver = std::thread::spawn(move || {
-        let mut n = 0;
-        while !flag.load(std::sync::atomic::Ordering::Relaxed) && n < 100_000 {
-            super::settings::save(&loc, &current).expect("save raced with the sweep");
-            n += 1;
-        }
+    let saver = Saver::start(move || {
+        super::settings::save(&loc, &current).map_err(|e| format!("save failed: {e}"))
     });
     for _ in 0..300 {
-        let _e = Engine::new(
-            open_store(&location).unwrap(),
-            &location,
-            Budget::new(16 * MIB).unwrap(),
-        )
-        .unwrap();
-        super::settings::load(&location).expect("load raced with the save");
+        tolerate_exhaustion(
+            open_store(&location)
+                .map_err(|e| e.to_string())
+                .and_then(|store| {
+                    Engine::new(store, &location, Budget::new(16 * MIB).unwrap())
+                        .map(drop)
+                        .map_err(|e| e.to_string())
+                }),
+        );
     }
     for _ in 0..20_000 {
-        super::settings::load(&location).expect("load raced with the save");
+        tolerate_exhaustion(super::settings::load(&location));
     }
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    saver.join().unwrap();
+    if let Some(e) = saver.finish() {
+        panic!("{e}");
+    }
 }
 
 #[test]
@@ -903,22 +956,18 @@ fn dropping_a_writer_without_shutdown_stops_and_joins_the_worker() {
 
 #[test]
 fn reading_a_file_while_it_is_replaced_never_reports_a_hard_link() {
-    // A save renames over the file; a reader that opened the old inode sees
-    // zero links. That is a replacement, not a hard link: it is retried.
+    // Steady state the file has exactly one link, so no read may say
+    // otherwise; only the documented exhaustion error is tolerated.
     let rig = rig_with(16 * MIB, true);
     let path = rig.location.settings_path();
     let saver_path = path.clone();
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = stop.clone();
-    let saver = std::thread::spawn(move || {
-        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
-            crate::state_file::write(&saver_path, b"{}").unwrap();
-        }
+    let saver = Saver::start(move || {
+        crate::state_file::write(&saver_path, b"{}").map_err(|e| format!("write failed: {e}"))
     });
     for _ in 0..3000 {
-        let read = crate::state_file::read(&path, 4096);
-        assert!(read.is_ok(), "{read:?}");
+        tolerate_exhaustion(crate::state_file::read(&path, 4096));
     }
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    saver.join().unwrap();
+    if let Some(e) = saver.finish() {
+        panic!("{e}");
+    }
 }

@@ -44,15 +44,32 @@ pub fn read(path: &Path, max_bytes: u64) -> io::Result<Option<Vec<u8>>> {
     // A save replaces the file by `rename`: a reader that opened the old one
     // just before sees it with zero links. That is a replaced file (retry),
     // not a hard link.
-    for _ in 0..16 {
-        if let Some(read) = read_once(path, max_bytes)? {
+    read_with(path, max_bytes, REPLACED_RETRIES, &mut || {})
+}
+
+pub(crate) const REPLACED_RETRIES: u32 = 16;
+
+/// [`read`] with the retry cap and a hook that runs after each open and
+/// before the `fstat` (tests replace the file by hand there).
+pub(crate) fn read_with(
+    path: &Path,
+    max_bytes: u64,
+    tries: u32,
+    after_open: &mut dyn FnMut(),
+) -> io::Result<Option<Vec<u8>>> {
+    for _ in 0..tries {
+        if let Some(read) = read_once(path, max_bytes, after_open)? {
             return Ok(read);
         }
     }
     Err(invalid("the file keeps being replaced while it is read"))
 }
 
-fn read_once(path: &Path, max_bytes: u64) -> io::Result<Option<Option<Vec<u8>>>> {
+fn read_once(
+    path: &Path,
+    max_bytes: u64,
+    after_open: &mut dyn FnMut(),
+) -> io::Result<Option<Option<Vec<u8>>>> {
     let file = match fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -62,6 +79,7 @@ fn read_once(path: &Path, max_bytes: u64) -> io::Result<Option<Option<Vec<u8>>>>
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(None)),
         Err(e) => return Err(e),
     };
+    after_open();
     let meta = file.metadata()?;
     if meta.nlink() == 0 {
         return Ok(None);

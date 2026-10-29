@@ -143,18 +143,29 @@ pub(crate) fn encode(settings: &Settings) -> Result<Vec<u8>, Unavailable> {
 /// linked. That is retried (the new file is already in place); a file that
 /// keeps vanishing is refused.
 fn read_checked(path: &std::path::Path) -> Result<Option<Vec<u8>>, Unavailable> {
-    for _ in 0..REPLACED_RETRIES {
-        if let Some(read) = read_checked_once(path)? {
+    read_checked_with(path, crate::state_file::REPLACED_RETRIES, &mut || {})
+}
+
+/// [`read_checked`] with the retry cap and a hook that runs after each open
+/// and before the `fstat` (tests replace the file by hand there).
+pub(crate) fn read_checked_with(
+    path: &std::path::Path,
+    tries: u32,
+    after_open: &mut dyn FnMut(),
+) -> Result<Option<Vec<u8>>, Unavailable> {
+    for _ in 0..tries {
+        if let Some(read) = read_checked_once(path, after_open)? {
             return Ok(read);
         }
     }
     Err(bad("the file keeps being replaced while it is read"))
 }
 
-const REPLACED_RETRIES: u32 = 16;
-
 /// One attempt; `Ok(None)` when the file was replaced under us (retry).
-fn read_checked_once(path: &std::path::Path) -> Result<Option<Option<Vec<u8>>>, Unavailable> {
+fn read_checked_once(
+    path: &std::path::Path,
+    after_open: &mut dyn FnMut(),
+) -> Result<Option<Option<Vec<u8>>>, Unavailable> {
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     let file = match std::fs::OpenOptions::new()
@@ -166,6 +177,7 @@ fn read_checked_once(path: &std::path::Path) -> Result<Option<Option<Vec<u8>>>, 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(None)),
         Err(e) => return Err(bad(e)),
     };
+    after_open();
     let meta = file.metadata().map_err(bad)?;
     if meta.nlink() == 0 {
         return Ok(None);
