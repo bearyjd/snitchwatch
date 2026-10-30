@@ -48,6 +48,10 @@ Kirigami.ApplicationWindow {
     property var failures: []
     property int step: 0
     property var simulated: []
+    // tc.mouseClick runs the event loop; under load the next tick can fire
+    // inside a step and re-run it before `step` advances.
+    property bool inStep: false
+    property int stalls: 0
 
     ConnectionsModel { id: connModel }
     StackNav { id: nav; stack: probe.pageStack }
@@ -89,6 +93,28 @@ Kirigami.ApplicationWindow {
         }
         return null;
     }
+    // A freshly replaced Connections page is not compact (so a row click
+    // pushes no detail page) until it is attached to the window and sized, and
+    // its row delegate is 0 wide and still moving until the list has laid out
+    // (a click at (2, 2) then misses it). Ready = the delegate has a width and
+    // sat at the same place on two consecutive ticks.
+    property string lastRowPos: ""
+    function connectionsReady() {
+        if (probe.pageStack.depth !== 1) return false;
+        const page = probe.pageStack.get(0);
+        if (!page || page.objectName !== "connectionsPage" || !page.compact) return false;
+        const list = page.connectionList;
+        for (let i = 0; list && i < list.count; i++) {
+            const d = list.itemAtIndex(i);
+            if (d && d.rowId === "b") {
+                const pos = JSON.stringify(d.mapToItem(null, 0, 0)) + "w" + d.width;
+                const settled = d.width > 0 && pos === probe.lastRowPos;
+                probe.lastRowPos = pos;
+                return settled;
+            }
+        }
+        return false;
+    }
     function openDetail() {
         const page = probe.pageStack.get(0);
         const list = page.connectionList;
@@ -107,6 +133,12 @@ Kirigami.ApplicationWindow {
         probe.expect(probe.pageStack.currentItem.objectName === "rulesStub", what + ": rules not on top");
     }
 
+    // Per step: a gate that must hold before the step runs (same index).
+    readonly property var gates: ({
+        1: () => probe.connectionsReady(),
+        3: () => probe.connectionsReady(),
+        5: () => probe.connectionsReady()
+    })
     readonly property var steps: [
         function () {
             connModel.setGroupedMode(false);
@@ -148,6 +180,7 @@ Kirigami.ApplicationWindow {
         running: true
         repeat: true
         onTriggered: {
+            if (probe.inStep) return;
             if (probe.step >= probe.steps.length) {
                 stop();
                 try {
@@ -160,12 +193,25 @@ Kirigami.ApplicationWindow {
                 }
                 return;
             }
+            const gate = probe.gates[probe.step];
+            if (gate && !gate()) {
+                // A stuck gate fails the probe after 40 ticks (10 s); it never hangs it.
+                if (++probe.stalls > 40) {
+                    probe.failures.push("step " + probe.step + " never ready");
+                    probe.step = probe.steps.length;
+                }
+                return;
+            }
+            probe.stalls = 0;
+            probe.inStep = true;
             try {
                 probe.steps[probe.step]();
             } catch (e) {
                 probe.failures.push("step " + probe.step + " threw: " + e);
+            } finally {
+                probe.step++;
+                probe.inStep = false;
             }
-            probe.step++;
         }
     }
 }
