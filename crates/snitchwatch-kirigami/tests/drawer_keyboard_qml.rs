@@ -46,6 +46,21 @@ const QML: &str = include_str!("probes/drawer_keyboard_probe.qml");
 fn the_drawer_works_by_keyboard() {
     init_headless_qt_env();
     std::env::remove_var("SNITCHWATCH_DEMO");
+    // A fresh, empty home: the pages' first controls depend on what is stored
+    // (learned programs, rules, settings), so the table below assumes none.
+    let home = tempfile::tempdir().expect("temp home");
+    for (var, dir) in [
+        ("HOME", ""),
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_CACHE_HOME", "cache"),
+        ("XDG_RUNTIME_DIR", "run"),
+    ] {
+        let path = home.path().join(dir);
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        std::env::set_var(var, &path);
+    }
 
     let mut app = QGuiApplication::new();
     assert!(

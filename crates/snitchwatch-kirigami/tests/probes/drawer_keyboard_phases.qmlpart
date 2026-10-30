@@ -8,7 +8,7 @@
         { name: "Traffic", title: "Traffic", first: "TrafficPage 'Traffic'" },
         { name: "Profiles", title: "Profiles", first: "QQuickListView" },
         { name: "Recommended background-service rules", title: "Recommended background-service rules", first: "QQuickListView" },
-        { name: "Make rules from what I saw", title: "Make rules from what I saw", first: "LearningReviewRow" },
+        { name: "Make rules from what I saw", title: "Make rules from what I saw", first: "ComboBox 'For how long: 24 hours (default)'" },
         { name: "Security Scan", title: "Security Scan", first: "GuardedButton 'Run Deep Scan'" },
         { name: "Settings & Diagnostics", title: "Settings & Diagnostics", first: "Button 'Download optional DB-IP City Lite…'" },
         { name: "Daemon Health", title: "Daemon Health", first: "Button 'Recheck'" },
@@ -158,6 +158,9 @@
             probe.expect(!probe.inDrawer(f), entry.name + ": focus stayed in the drawer");
             probe.expect(!probe.inside(f, old), entry.name + ": focus is in the destroyed page");
             probe.expect(f.visible && f.enabled, entry.name + ": focus is on a hidden or disabled item: " + probe.label(f));
+            if (entry.name === "Make rules from what I saw")
+                probe.expect(probe.find(page, it => String(it).indexOf("LearningReviewRow") === 0) === null,
+                             "the review page has rows; its first control is no longer the length ComboBox");
             // On the page's expected first control (not a later one, not the page).
             probe.expect(probe.label(f) === entry.first,
                          entry.name + ": focus is on " + probe.label(f) + ", expected " + entry.first);
