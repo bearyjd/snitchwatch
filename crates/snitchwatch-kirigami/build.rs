@@ -66,6 +66,8 @@ fn main() {
                 "qml/GuardedToolButton.qml",
                 "qml/GuardedSwitch.qml",
                 "qml/GuardedRadioButton.qml",
+                "qml/NavigableRow.qml",
+                "qml/FocusOrderListView.qml",
                 "qml/LearningBanner.qml",
                 "qml/LearningReviewPage.qml",
                 "qml/LearningReviewRow.qml",
