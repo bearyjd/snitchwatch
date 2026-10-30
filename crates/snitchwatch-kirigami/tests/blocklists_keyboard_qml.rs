@@ -11,6 +11,7 @@
 //!     list is replaced between the focus and the key.
 //!   * Every shown control is named (the shared guard), in the sheet and in
 //!     the confirming states too.
+//!
 //! Run headless with `QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic`.
 #[allow(unused_imports)]
 use snitchwatch_kirigami::blocklists_model as _;
