@@ -15,9 +15,9 @@
 #[allow(unused_imports)]
 use snitchwatch_kirigami::curated_defaults_model as _;
 
-mod common;
 #[path = "../src/accessibility_test.rs"]
 mod accessibility;
+mod common;
 #[path = "../src/key_repeat_test.rs"]
 mod key_repeat;
 #[path = "support/probe_runner.rs"]

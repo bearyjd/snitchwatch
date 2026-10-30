@@ -31,7 +31,12 @@ fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
         );
         assert!(has_line(&code, &line), "{page_name} must declare `{line}`");
     }
-    let header = blocks(&code, "header: ColumnLayout {");
+    // (BlocklistsPage also has a list header holding the leftover buttons, so
+    // that they come first in the Tab chain; the banners are in the other.)
+    let header: Vec<_> = blocks(&code, "header: ColumnLayout {")
+        .into_iter()
+        .filter(|block| block.contains("Kirigami.InlineMessage {"))
+        .collect();
     assert_eq!(header.len(), 1, "{page_name} lost its banner header");
     let banners = blocks(&header[0], "Kirigami.InlineMessage {");
     assert_eq!(banners.len(), 5, "{page_name}: expected five warnings");

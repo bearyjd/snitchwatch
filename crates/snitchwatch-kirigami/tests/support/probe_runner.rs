@@ -57,12 +57,13 @@ pub fn run(qml: &str, url: &str, done_marker: &str) {
 
     let captured = capture_stderr(|| {
         if let Some(engine) = engine.as_mut() {
-            let qml = qml
-                .replace("    // @a11y-guard\n", GUARD)
-                .replace("    // @list-keys\n", &KEYS.replace(
+            let qml = qml.replace("    // @a11y-guard\n", GUARD).replace(
+                "    // @list-keys\n",
+                &KEYS.replace(
                     "@STEP_LIMIT@",
                     &std::env::var("SW_STEPS").unwrap_or_else(|_| "1000000".into()),
-                ));
+                ),
+            );
             engine.load_data(&QByteArray::from(qml.as_str()), &QUrl::from(url));
         }
         if let Some(app) = app.as_mut() {
