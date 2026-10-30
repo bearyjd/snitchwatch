@@ -1,0 +1,380 @@
+    readonly property var map: band.mapView
+    property int baseCalls: 0
+    function calls() { return conn.scopes.slice(probe.baseCalls); }
+
+    function expect(ok, what) { if (!ok) probe.failures.push(what); }
+    function focused() { return probe.activeFocusItem; }
+    function label(item) {
+        if (!item) return "nothing";
+        const name = item.Accessible ? String(item.Accessible.name || "") : "";
+        return name || (item.text !== undefined ? String(item.text) : "") || item.objectName || String(item);
+    }
+    function inside(item, ancestor) {
+        for (let it = item; it; it = it.parent) if (it === ancestor) return true;
+        return false;
+    }
+    function where(item) {
+        if (!item) return "nothing";
+        const surface = probe.inside(item, probe.map.countryMenu.contentItem) ? "popup"
+            : probe.inside(item, band) ? "band" : "window";
+        return surface + "/" + probe.label(item);
+    }
+    function scope() { return conn.geoScopeKind + "|" + conn.geoScopeKey; }
+    function markerCount() { return probe.map.markerRepeater.count; }
+    function markers() {
+        const out = [];
+        for (let i = 0; i < probe.markerCount(); ++i) out.push(probe.map.markerRepeater.itemAt(i));
+        return out;
+    }
+    function markerNames() { return probe.markers().map(m => String(m.Accessible.name)); }
+    // Everything a stray key could change.
+    function snapshot() {
+        return JSON.stringify([conn.scopes, probe.map.camera.zoom, probe.map.camera.centerX, probe.map.camera.centerY,
+                               MapBandState.collapsed, probe.map.countryMenu.opened]);
+    }
+    function tabTo(target, here) {
+        if (!here) start.forceActiveFocus();
+        for (let i = 0; i < 40; ++i) {
+            if (probe.where(probe.focused()).indexOf(target) === 0) return true;
+            tc.keyClick(Qt.Key_Tab);
+        }
+        return probe.where(probe.focused()).indexOf(target) === 0;
+    }
+    // The focus chain from `start` until it reaches `after`.
+    function tabRound() {
+        start.forceActiveFocus();
+        const seen = [];
+        for (let i = 0; i < 40; ++i) {
+            tc.keyClick(Qt.Key_Tab);
+            if (probe.focused() === after || probe.focused() === start) break;
+            seen.push(probe.where(probe.focused()));
+        }
+        return seen;
+    }
+    function markersReady(n) {
+        if (probe.markerCount() !== n) return n + " markers (have " + probe.markerCount() + ")";
+        const all = probe.markers();
+        for (let i = 0; i < all.length; ++i)
+            // A marker the camera has moved off the map is disabled: not an error.
+            if (all[i].enabled && !probe.stable("marker" + i, all[i])) return "marker " + i + " to settle";
+        return probe.stable("band", band) ? "" : "the band to stop moving";
+    }
+    function sweepNamed(where, exact) {
+        probe.sweep(where);
+        for (const name of exact)
+            probe.expect(probe.names[name] === true, where + ": no control named '" + name + "'");
+    }
+    function list() { return probe.map.countryMenu.contentItem; }
+    function popupOpen() { return probe.map.countryMenu.opened; }
+    function entries() {
+        const l = probe.list();
+        return probe.collect(l.contentItem, it => it.modelData !== undefined);
+    }
+    function collect(root, pred, out) {
+        out = out || [];
+        if (!root) return out;
+        if (pred(root)) out.push(root);
+        const kids = root.children || [];
+        for (let i = 0; i < kids.length; ++i) probe.collect(kids[i], pred, out);
+        return out;
+    }
+    function entryNames() { return probe.entries().sort((a, b) => a.y - b.y).map(e => String(e.Accessible.name)); }
+    function popupReady() {
+        if (!probe.popupOpen()) return "the popup open";
+        const l = probe.list();
+        if (!l.currentItem || !probe.stable("entry", l.currentItem)) return "the popup entries to settle";
+        return "";
+    }
+    function currentName() { const c = probe.list().currentItem; return c ? String(c.Accessible.name) : "none"; }
+    // Everything a held key must leave alone.
+    function held(what, key) {
+        const before = probe.snapshot();
+        tc.keyPress(key, probe.repeat);
+        tc.keyPress(key, probe.repeat);
+        tc.keyRelease(key, probe.repeat);
+        probe.expect(probe.snapshot() === before, what + ": an auto-repeat changed " + probe.snapshot());
+        // The final release of a key that was never pressed here does nothing.
+        tc.keyRelease(key);
+        probe.expect(probe.snapshot() === before, what + ": the release of a held key changed " + probe.snapshot());
+    }
+    // Space held down on the focus: the platform's repeats, then the release.
+    function spaceHeld(what) {
+        const before = probe.snapshot();
+        tc.keyPress(Qt.Key_Space);
+        for (let i = 0; i < 2; ++i) {
+            tc.keyRelease(Qt.Key_Space, probe.repeat);
+            tc.keyPress(Qt.Key_Space, probe.repeat);
+        }
+        probe.expect(probe.snapshot() === before, what + ": acted before the release " + probe.snapshot());
+    }
+    function inMap() { return probe.inside(probe.focused(), probe.map); }
+    function scopeLabel() { return probe.find(band, it => String(it.Accessible.name || "").indexOf("Geographic scope: ") === 0); }
+    function pick(prefix) {
+        for (let i = 0; i < 12 && probe.currentName().indexOf(prefix) !== 0; ++i) tc.keyClick(Qt.Key_Down);
+        return probe.currentName().indexOf(prefix) === 0;
+    }
+    function gate(phase) {
+        switch (phase) {
+        case 1: return probe.markersReady(3);
+        case 2: return probe.scope() === "country|country:US" ? probe.markersReady(2) : "the US scope";
+        case 3: return probe.scope() === "city|city:nyc" ? probe.markersReady(1) : "the New York scope";
+        case 4: case 6: case 10: case 12: case 14: case 16: return probe.popupReady();
+        case 5: case 11: return probe.popupOpen() ? "the popup closed" : "";
+        case 7: return probe.scope() === "ip|ip:8.8.4.4" || probe.scope() === "ip|ip:8.8.8.8" ? "" : "an IP scope";
+        case 8: return probe.scope() === "|" ? "" : "the World scope";
+        case 9: return probe.popupOpen() ? "" : "the popup closed" ;
+        case 13: case 15: return probe.popupOpen() ? "the popup closed" : (probe.scope() === "country|unknown" || probe.scope() === "city|unknown:unknown-city" ? "" : "the next scope");
+        case 17: return probe.popupOpen() ? "the popup closed" : "";
+        case 18: return probe.scope() === "|" ? "" : "the World scope";
+        case 19: return probe.map.camera.zoom === 1 ? probe.markersReady(3) : "the camera to fit the world";
+        case 20: return probe.markerCount() === 2 ? probe.markersReady(2) : "the Japan marker to go";
+        default: return "";
+        }
+    }
+
+    function run(phase) {
+        switch (phase) {
+        case 0:
+            probe.requestActivate();
+            probe.baseCalls = conn.scopes.length;
+            start.forceActiveFocus();
+            tc.keyPress(Qt.Key_Space, probe.repeat);
+            probe.expect(probe.lastRepeat === true, "the auto-repeat seam sends no auto-repeat");
+            tc.keyRelease(Qt.Key_Space, probe.repeat);
+            tc.keyClick(Qt.Key_Space);
+            probe.expect(probe.lastRepeat === false, "a plain key arrived as an auto-repeat");
+            break;
+        case 1: {
+            const mark = "observed connections: ";
+            const seen = probe.tabRound();
+            const world = "band/World map of observed connection destinations by approximate database location";
+            const itinerary = ["band/Hide map", "band/Zoom in", "band/Fit world map", "band/Places",
+                "band/List destinations, including local, unknown and unavailable locations", world];
+            probe.expect(JSON.stringify(seen.slice(0, 6)) === JSON.stringify(itinerary), "world Tab itinerary: " + JSON.stringify(seen));
+            const names = seen.slice(6).sort();
+            probe.expect(JSON.stringify(names) === JSON.stringify([
+                "band/Germany: 1 observed connections: 1 allowed, 0 denied, 0 pending",
+                "band/Japan: 1 observed connections: 1 allowed, 0 denied, 0 pending",
+                "band/United States: 4 observed connections: 4 allowed, 0 denied, 0 pending"]), "markers on the Tab path: " + JSON.stringify(names));
+            probe.expect(probe.map.Accessible.description.indexOf("Geographic scope: World") === 0,
+                         "the map does not say its scope: " + probe.map.Accessible.description);
+            probe.sweepNamed("world map", ["Hide map", "Zoom in", "Fit world map", "Places",
+                "United States: 4 observed connections: 4 allowed, 0 denied, 0 pending"]);
+            const us = probe.markers().find(m => m.cluster.members[0].code === "US");
+            probe.expect(us.Accessible.description === "Scopes connections to this place", "marker description: " + us.Accessible.description);
+            // A marker holds focus after Tab, and a held key does nothing to it.
+            probe.expect(probe.tabTo("band/United States"), "cannot Tab to the United States marker");
+            probe.held("marker (Space)", Qt.Key_Space);
+            probe.held("marker (Return)", Qt.Key_Return);
+            probe.held("marker (Enter)", Qt.Key_Enter);
+            probe.spaceHeld("marker");
+            probe.expect(probe.scope() === "|", "a held Space scoped the map: " + probe.scope());
+            tc.keyRelease(Qt.Key_Space);
+            probe.expect(JSON.stringify(probe.calls()) === JSON.stringify(["country|country:US"]),
+                         "Space did not scope to the country exactly once: " + JSON.stringify(probe.calls()));
+            break;
+        }
+        case 2: {
+            probe.expect(probe.inMap(), "focus left the map after scoping: " + probe.where(probe.focused()));
+            probe.expect(probe.map.Accessible.description.indexOf("Geographic scope: United States") === 0,
+                         "the map does not say the new scope: " + probe.map.Accessible.description);
+            const label = probe.scopeLabel();
+            probe.expect(label && label.Accessible.name === "Geographic scope: United States", "no scope label for the breadcrumb");
+            const seen = probe.tabRound();
+            probe.expect(seen.slice(0, 9).join("|") === ["band/Hide map", "band/Zoom out", "band/Zoom in", "band/Fit world map", "band/Places",
+                "band/Clear geographic scope; preserve search", "band/Go to enclosing geographic scope",
+                "band/List destinations, including local, unknown and unavailable locations",
+                "band/World map of observed connection destinations by approximate database location"].join("|"),
+                "country Tab itinerary: " + JSON.stringify(seen));
+            // Return acts on the marker that has the focus, even after the markers reorder.
+            const nyc = probe.markers().find(m => m.cluster.members[0].key === "city:nyc");
+            probe.expect(nyc !== undefined, "no New York marker");
+            probe.expect(probe.tabTo("band/New York"), "cannot Tab to the New York marker");
+            const before = probe.markers().indexOf(nyc);
+            probe.map.applyClusters(probe.map.markers.slice().reverse());
+            probe.expect(probe.markers().indexOf(nyc) !== before, "the markers did not reorder");
+            probe.expect(probe.focused() === nyc, "focus left the New York marker when the markers reordered");
+            probe.held("marker (Return)", Qt.Key_Return);
+            tc.keyClick(Qt.Key_Return);
+            probe.expect(probe.scope() === "city|city:nyc", "Return did not act on the focused marker: " + probe.scope());
+            probe.expect(probe.calls().length === 2, "Return scoped more than once: " + JSON.stringify(probe.calls()));
+            break;
+        }
+        case 3: {
+            probe.expect(probe.inMap(), "focus left the map after the city scope: " + probe.where(probe.focused()));
+            probe.expect(probe.markerNames()[0].indexOf("2 observed IPs") === 0, "no stack marker: " + JSON.stringify(probe.markerNames()));
+            probe.expect(probe.tabTo("band/2 observed IPs"), "cannot Tab to the IP stack");
+            probe.expect(probe.markers()[0].Accessible.description === "Lists these 2 places", "stack description: " + probe.markers()[0].Accessible.description);
+            probe.held("stack (Return)", Qt.Key_Return);
+            probe.held("stack (Space)", Qt.Key_Space);
+            probe.spaceHeld("stack");
+            probe.expect(!probe.popupOpen(), "a held Space opened the stack");
+            tc.keyRelease(Qt.Key_Space);
+            break;
+        }
+        case 4: {
+            probe.expect(probe.popupOpen() && probe.scope() === "city|city:nyc", "the stack did not list its IPs without choosing one");
+            probe.expect(probe.inside(probe.focused(), probe.map.countryMenu.contentItem), "focus is not in the popup: " + probe.where(probe.focused()));
+            probe.expect(probe.entryNames().every(n => n.indexOf("8.8.") === 0 && n.length > 8), "unnamed stack entries: " + JSON.stringify(probe.entryNames()));
+            probe.sweepNamed("stack popup", []);
+            tc.keyClick(Qt.Key_Escape);
+            break;
+        }
+        case 5: {
+            probe.expect(probe.scope() === "city|city:nyc" && probe.calls().length === 2, "Escape chose something: " + JSON.stringify(probe.calls()));
+            probe.expect(probe.where(probe.focused()).indexOf("band/2 observed IPs") === 0,
+                         "focus did not return to the stack marker: " + probe.where(probe.focused()));
+            tc.keyClick(Qt.Key_Return);
+            break;
+        }
+        case 6: {
+            const l = probe.list();
+            const first = probe.currentName();
+            tc.keyClick(Qt.Key_Down);
+            const second = probe.currentName();
+            probe.expect(first !== second, "Down did not move the highlighted entry: " + first + " / " + second);
+            probe.expect(probe.focused() === l.currentItem, "focus is not on the highlighted entry: " + probe.where(probe.focused()));
+            const target = probe.map.countryMenu.members[l.currentIndex];
+            // The stack reorders under the open popup; the key still acts on the highlighted entry.
+            probe.map.applyClusters(probe.map.markers.slice().reverse());
+            probe.held("entry (Return)", Qt.Key_Return);
+            probe.held("entry (Space)", Qt.Key_Space);
+            probe.expect(probe.calls().length === 2, "a held key chose an entry: " + JSON.stringify(probe.calls()));
+            tc.keyClick(Qt.Key_Space);
+            probe.expect(probe.calls().length === 3 && probe.scope() === "ip|" + target.key,
+                         "Space did not choose the highlighted entry " + target.key + ": " + JSON.stringify(probe.calls()));
+            break;
+        }
+        case 7: {
+            probe.expect(probe.inMap() || probe.where(probe.focused()).indexOf("band/") === 0, "focus lost after choosing an IP: " + probe.where(probe.focused()));
+            probe.expect(probe.map.Accessible.description.indexOf("Geographic scope: " + probe.map.activeGeoScope.name) === 0,
+                         "the map does not say the IP scope: " + probe.map.Accessible.description);
+            probe.expect(probe.tabTo("band/Clear geographic scope"), "cannot Tab to World");
+            probe.held("World", Qt.Key_Space);
+            probe.spaceHeld("World");
+            probe.expect(probe.scope() !== "|", "a held Space cleared the scope");
+            tc.keyRelease(Qt.Key_Space);
+            break;
+        }
+        case 8: {
+            probe.expect(probe.tabTo("band/Places"), "cannot Tab to Places");
+            probe.held("Places", Qt.Key_Space);
+            probe.spaceHeld("Places");
+            probe.expect(!probe.popupOpen(), "a held Space opened Places");
+            tc.keyRelease(Qt.Key_Space);
+            break;
+        }
+        case 9: break;
+        case 10: {
+            probe.sweepNamed("Places popup", []);
+            probe.expect(probe.entryNames().length === 4 && probe.entryNames().every(n => n.length > 12), "Places entries: " + JSON.stringify(probe.entryNames()));
+            tc.keyClick(Qt.Key_Escape);
+            break;
+        }
+        case 11: {
+            probe.expect(probe.where(probe.focused()).indexOf("band/Places") === 0, "focus did not return to Places: " + probe.where(probe.focused()));
+            probe.expect(probe.scope() === "|", "Escape changed the scope: " + probe.scope());
+            tc.keyClick(Qt.Key_Space);
+            break;
+        }
+        case 12: {
+            probe.expect(probe.pick("Unknown"), "cannot reach Unknown by Down: " + probe.currentName());
+            tc.keyClick(Qt.Key_Return);
+            break;
+        }
+        case 13: {
+            probe.expect(probe.scope() === "country|unknown", "Return did not choose Unknown: " + probe.scope());
+            probe.expect(probe.where(probe.focused()).indexOf("band/Places") === 0, "focus did not return to the opener: " + probe.where(probe.focused()));
+            probe.expect(probe.tabTo("band/List destinations"), "cannot Tab to Destinations");
+            tc.keyClick(Qt.Key_Space);
+            break;
+        }
+        case 14: {
+            probe.expect(probe.pick("City unavailable"), "the unavailable-location city is not in the list: " + JSON.stringify(probe.entryNames()));
+            tc.keyClick(Qt.Key_Return);
+            break;
+        }
+        case 15: {
+            probe.expect(probe.scope() === "city|unknown:unknown-city", "unavailable city not chosen: " + probe.scope());
+            probe.expect(probe.tabTo("band/List destinations"), "cannot Tab to Destinations");
+            tc.keyClick(Qt.Key_Space);
+            break;
+        }
+        case 16: {
+            probe.expect(probe.pick("7.7.7.7"), "the IP without coordinates is not in the list: " + JSON.stringify(probe.entryNames()));
+            tc.keyClick(Qt.Key_Return);
+            break;
+        }
+        case 17: {
+            probe.expect(probe.scope() === "ip|ip:7.7.7.7", "the unplaced IP was not chosen: " + probe.scope());
+            probe.expect(probe.map.empty, "the map should have no pins for an IP without coordinates");
+            probe.expect(probe.tabTo("band/List destinations") || probe.tabTo("band/Hide map"), "focus is lost");
+            // Every band button ignores a held Space.
+            for (const name of ["band/Hide map", "band/Zoom in", "band/Fit world map", "band/Places",
+                                "band/Clear geographic scope", "band/Go to enclosing geographic scope", "band/List destinations"]) {
+                probe.expect(probe.tabTo(name), "cannot Tab to " + name);
+                probe.held(name, Qt.Key_Space);
+                probe.expect(!probe.popupOpen(), name + ": a held Space opened a popup");
+            }
+            const bad = Object.keys(probe.missing);
+            probe.expect(bad.length === 0, bad.length + " controls lack a meaningful Accessible.name: "
+                         + bad.map(k => k + " (" + probe.missing[k] + ")").join("; "));
+            probe.expect(probe.tabTo("band/Clear geographic scope"), "cannot Tab to World");
+            tc.keyClick(Qt.Key_Space);
+            break;
+        }
+        case 18: {
+            probe.expect(probe.tabTo("band/Fit world map"), "cannot Tab to Fit");
+            tc.keyClick(Qt.Key_Space);
+            break;
+        }
+        case 19: {
+            // A live update removes the marker that has the focus: the focus stays in the map.
+            probe.expect(probe.tabTo("band/Japan"), "cannot Tab to the Japan marker: " + probe.where(probe.focused()));
+            const next = probe.fixture();
+            delete next.countries["country:JP"];
+            geo.snapshot = next;
+            geo.hierarchyChanged();
+            break;
+        }
+        case 20: {
+            probe.expect(probe.markerNames().every(n => n.indexOf("Japan") !== 0), "Japan is still on the map");
+            probe.expect(probe.inMap(), "focus left the map when its marker went away: " + probe.where(probe.focused()));
+            return true;
+        }
+        }
+        return false;
+    }
+
+    Timer {
+        interval: 100
+        running: true
+        repeat: true
+        onTriggered: {
+            let done = false;
+            try {
+                const waiting = probe.gate(probe.phase);
+                if (waiting !== "") {
+                    if (++probe.stalls < probe.maxStalls) return;
+                    throw new Error("phase " + probe.phase + " never ready for " + waiting);
+                }
+                probe.stalls = 0;
+                done = probe.run(probe.phase);
+                probe.phase++;
+            } catch (e) {
+                probe.failures.push("phase " + probe.phase + " threw: " + e);
+                done = true;
+            }
+            if (done) {
+                stop();
+                try {
+                    if (probe.failures.length > 0) {
+                        throw new Error("map keyboard probe: " + probe.failures.join("; "));
+                    }
+                    console.warn("MAP_KEYBOARD_PROBE_DONE");
+                } finally {
+                    Qt.quit();
+                }
+            }
+        }
+    }
