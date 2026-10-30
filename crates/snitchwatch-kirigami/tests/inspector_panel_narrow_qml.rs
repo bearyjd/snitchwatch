@@ -94,6 +94,9 @@ Kirigami.ApplicationWindow {
     }
 
     property int busyTicks: 0
+    // tc.mouseClick/keyClick run the event loop; under load the next tick can
+    // fire inside a step and re-run it before `step` advances.
+    property bool inStep: false
     readonly property var steps: [
         function () {
             probe.page = probe.pageStack.get(0);
@@ -203,6 +206,7 @@ Kirigami.ApplicationWindow {
         running: true
         repeat: true
         onTriggered: {
+            if (probe.inStep) return;
             if (probe.step >= probe.steps.length) {
                 stop();
                 try {
@@ -227,12 +231,15 @@ Kirigami.ApplicationWindow {
                 return;
             }
             probe.busyTicks = 0;
+            probe.inStep = true;
             try {
                 probe.steps[probe.step]();
             } catch (e) {
                 probe.failures.push("step " + probe.step + " threw: " + e);
+            } finally {
+                probe.step++;
+                probe.inStep = false;
             }
-            probe.step++;
         }
     }
 }
