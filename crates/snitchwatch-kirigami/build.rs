@@ -105,6 +105,7 @@ fn main() {
                 "qml/DaemonHealthPage.qml",
                 "qml/DenyStatusSection.qml",
                 "qml/AboutPage.qml",
+                "qml/GlobalDrawer.qml",
             ]),
     )
     .qt_module("Widgets")

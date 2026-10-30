@@ -53,6 +53,7 @@ const FILES: [(&str, &str); 6] = [
     ),
 ];
 const MAIN: &str = include_str!("../qml/main.qml");
+const DRAWER: &str = include_str!("../qml/GlobalDrawer.qml");
 const BUILD: &str = include_str!("../build.rs");
 const PROBE_URL: &str = "qrc:/learning_review_probe.qml";
 const DONE_MARKER: &str = "LEARNING_REVIEW_PROBE_DONE";
@@ -297,11 +298,16 @@ fn the_page_is_reachable_registered_and_main_qml_stays_small() {
     assert_eq!(page.len(), 1);
     assert!(page[0].contains("controller: learningReviewController"));
     assert!(page[0].contains("settings: settingsController"));
-    let entry = blocks(&code, "Kirigami.Action {")
+    // The drawer lives in GlobalDrawer.qml; main.qml registers the page.
+    let entry = blocks(&code_lines(DRAWER), "Kirigami.Action {")
         .into_iter()
         .find(|b| b.contains("Make rules from what I saw"))
         .expect("no navigation entry");
-    assert!(entry.contains("nav.replaceMain(learningReviewPageComponent)"));
+    assert!(entry.contains("drawer.openPage(\"learningReview\")"));
+    assert!(
+        code.contains("learningReview: learningReviewPageComponent"),
+        "main.qml does not register the review page for the drawer"
+    );
     assert!(
         MAIN.lines().count() <= 800,
         "main.qml is {} lines",

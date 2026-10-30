@@ -1,0 +1,172 @@
+    // `first`: the label of the control that must hold focus after the switch,
+    // the page's first control in Tab order (Traffic has none: the page itself).
+    readonly property var entries: [
+        { name: "Connections", title: "Connections", first: "Switch 'Pending only'" },
+        { name: "Geography", title: "Geography", first: "QQuickListView 'Countries by connections'" },
+        { name: "Rules", title: "Rules", first: "QQuickListView" },
+        { name: "Blocklists", title: "Blocklists", first: "QQuickListView" },
+        { name: "Traffic", title: "Traffic", first: "TrafficPage 'Traffic'" },
+        { name: "Profiles", title: "Profiles", first: "QQuickListView" },
+        { name: "Recommended background-service rules", title: "Recommended background-service rules", first: "QQuickListView" },
+        { name: "Make rules from what I saw", title: "Make rules from what I saw", first: "ComboBox 'For how long: 24 hours (default)'" },
+        { name: "Security Scan", title: "Security Scan", first: "GuardedButton 'Run Deep Scan'" },
+        { name: "Settings & Diagnostics", title: "Settings & Diagnostics", first: "Button 'Download optional DB-IP City Lite…'" },
+        { name: "Daemon Health", title: "Daemon Health", first: "Button 'Recheck'" },
+        { name: "About", title: "About", first: "Button 'Copy version info'" }
+    ]
+    property var opener: null
+    readonly property string openerName: "Open navigation menu"
+    readonly property var keys: [Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space]
+
+    function expect(ok, what) { if (!ok) probe.failures.push(what); }
+    function label(item) {
+        if (!item) return "nothing";
+        const name = item.Accessible ? String(item.Accessible.name || "") : "";
+        return String(item).split("(")[0].split("_QML")[0].split("_QMLTYPE")[0] + (name ? " '" + name + "'" : "");
+    }
+    function inside(item, ancestor) {
+        if (!ancestor) return false;
+        for (let it = item; it; it = it.parent) if (it === ancestor) return true;
+        return false;
+    }
+    function drawer() { return probe.shell.globalDrawer; }
+    function focused() { return probe.shell.activeFocusItem; }
+    function inDrawer(item) { return probe.inside(item, probe.drawer().contentItem); }
+    function page() { return probe.shell.pageStack.currentItem; }
+    // Wait (bounded, spinning the event loop) until cond() holds.
+    function waitFor(cond, what) {
+        for (let i = 0; i < 200; ++i) {
+            if (cond()) return;
+            probe.tc.wait(25);
+        }
+        throw new Error("never ready: " + what);
+    }
+    function settle() { probe.tc.wait(150); }
+    function isOpener(item) {
+        return !!item && String(item).indexOf("HandleButton") === 0 && item.drawer === probe.drawer();
+    }
+    // Tab (from here) until `pred(focused)`; false if not within n presses.
+    function tabUntil(pred, n) {
+        for (let i = 0; i < n; ++i) {
+            if (pred(probe.focused())) return true;
+            probe.tc.keyClick(Qt.Key_Tab);
+        }
+        return pred(probe.focused());
+    }
+    function snapshot() {
+        const d = probe.drawer();
+        return [probe.page(), d.drawerOpen, probe.label(probe.focused())].map(String).join("|");
+    }
+    // A key held by someone else (auto-repeat, then its release) changes nothing.
+    function held(what, key) {
+        const before = probe.snapshot();
+        probe.tc.keyPress(key, probe.repeat);
+        probe.tc.keyPress(key, probe.repeat);
+        probe.tc.keyRelease(key, probe.repeat);
+        probe.settle();
+        probe.expect(probe.snapshot() === before, what + ": an auto-repeat of key " + key + " changed " + probe.snapshot() + " (was " + before + ")");
+    }
+    function openDrawer() {
+        probe.phase = "focus the opener";
+        probe.expect(probe.tabUntil(probe.isOpener, 40), "the drawer opener is not reachable by Tab (at " + probe.label(probe.focused()) + ")");
+        probe.expect(String(probe.focused().Accessible.name) === probe.openerName, "the opener is named '" + probe.focused().Accessible.name + "'");
+        probe.phase = "open the drawer";
+        probe.opener = probe.focused();
+        probe.tc.keyClick(Qt.Key_Space);
+        probe.waitFor(() => probe.drawer().drawerOpen && probe.drawer().position === 1, "the drawer to open");
+        probe.waitFor(() => probe.inDrawer(probe.focused()), "focus to enter the drawer");
+        probe.settle();
+    }
+    function waitClosed() {
+        probe.waitFor(() => !probe.drawer().drawerOpen && probe.drawer().position === 0, "the drawer to close");
+        probe.settle();
+    }
+
+    function run() {
+        probe.phase = "create main.qml";
+        const component = Qt.createComponent("qrc:/qt/qml/com/snitchwatch/shell/qml/main.qml");
+        if (component.status !== Component.Ready) throw new Error(component.errorString());
+        probe.shell = component.createObject(null, { onboardingShown: true, silentStepShown: true, visible: true });
+        probe.tc = probe.tcc.createObject(probe.shell.contentItem);
+        probe.waitFor(() => probe.shell.active && probe.page() && probe.page().visible, "the window to show its first page");
+        probe.settle();
+        const first = probe.page();
+        probe.expect(probe.shell.globalDrawer.modal, "the drawer is not modal at this width; the Tab trap below assumes it");
+
+        // 1. Stray keys with the drawer closed switch nothing.
+        probe.phase = "stray keys";
+        let before = probe.snapshot();
+        for (const k of [Qt.Key_Escape, Qt.Key_Menu, Qt.Key_F10, Qt.Key_Return, Qt.Key_Enter]) {
+            probe.tc.keyClick(k);
+            probe.expect(probe.page() === first && !probe.drawer().drawerOpen, "stray key " + k + " changed the page or opened the drawer");
+        }
+
+        // 2. Open from a fresh window, by keys alone; Escape closes it and
+        //    puts focus back on the opener.
+        probe.openDrawer();
+        probe.expect(probe.label(probe.focused()) === "GlobalDrawerActionItem 'Connections'", "focus did not land on the first entry: " + probe.label(probe.focused()));
+        probe.phase = "Escape";
+        probe.tc.keyClick(Qt.Key_Escape);
+        probe.waitClosed();
+        probe.expect(probe.focused() === probe.opener, "Escape did not return focus to the opener: " + probe.label(probe.focused()));
+        probe.expect(probe.page() === first, "Escape switched the page");
+        // A held key on the opener does not open the drawer.
+        for (const k of probe.keys) probe.held("opener", k);
+
+        // 3. The exact ordered list of entries, and Tab stays inside the drawer.
+        probe.openDrawer();
+        probe.phase = "list the entries";
+        const seen = [];
+        const roles = [];
+        for (let i = 0; i < probe.entries.length; ++i) {
+            const f = probe.focused();
+            seen.push(f && f.Accessible ? String(f.Accessible.name) : "nothing");
+            roles.push(f && f.Accessible ? f.Accessible.role : -1);
+            probe.expect(probe.inDrawer(f), "entry " + i + " is not in the drawer: " + probe.label(f));
+            probe.tc.keyClick(Qt.Key_Tab);
+        }
+        probe.expect(JSON.stringify(seen) === JSON.stringify(probe.entries.map(e => e.name)),
+                     "drawer entries are " + JSON.stringify(seen));
+        probe.expect(probe.label(probe.focused()) === "GlobalDrawerActionItem 'Connections'", "Tab left the drawer or did not wrap: " + probe.label(probe.focused()));
+        probe.expect(roles.every(r => r === Accessible.ListItem), "drawer entries are not list items: " + roles.join());
+        probe.sweep("drawer open");
+        probe.expect(probe.names[probe.openerName] === true, "no control named '" + probe.openerName + "'");
+        const bad = Object.keys(probe.missing);
+        probe.expect(bad.length === 0, bad.length + " controls lack a meaningful Accessible.name: " + bad.join("; "));
+        probe.tc.keyClick(Qt.Key_Escape);
+        probe.waitClosed();
+
+        // 4. Every entry fires on a FRESH Return, Enter or Space, never on a
+        //    held key, and focus ends inside the NEW page.
+        for (let i = 0; i < probe.entries.length; ++i) {
+            const entry = probe.entries[i];
+            const key = probe.keys[i % 3];
+            probe.openDrawer();
+            probe.phase = "entry '" + entry.name + "'";
+            probe.expect(probe.tabUntil(f => probe.label(f) === "GlobalDrawerActionItem '" + entry.name + "'", 14), "cannot Tab to '" + entry.name + "'");
+            const old = probe.page();
+            for (const k of probe.keys) probe.held(entry.name, k);
+            probe.expect(probe.page() === old && probe.drawer().drawerOpen, entry.name + ": a held key switched the page");
+            probe.tc.keyClick(key);
+            probe.waitFor(() => probe.page() !== old && !probe.drawer().drawerOpen && probe.drawer().position === 0, "'" + entry.name + "' to open its page");
+            probe.settle();
+            const page = probe.page();
+            probe.expect(page.title === entry.title, entry.name + " opened a page titled '" + page.title + "'");
+            const f = probe.focused();
+            probe.expect(!!f, entry.name + ": no focus after the switch");
+            probe.expect(probe.inside(f, page), entry.name + ": focus is not in the new page: " + probe.label(f));
+            probe.expect(!probe.inDrawer(f), entry.name + ": focus stayed in the drawer");
+            probe.expect(!probe.inside(f, old), entry.name + ": focus is in the destroyed page");
+            probe.expect(f.visible && f.enabled, entry.name + ": focus is on a hidden or disabled item: " + probe.label(f));
+            if (entry.name === "Make rules from what I saw")
+                probe.expect(probe.find(page, it => String(it).indexOf("LearningReviewRow") === 0) === null,
+                             "the review page has rows; its first control is no longer the length ComboBox");
+            // On the page's expected first control (not a later one, not the page).
+            probe.expect(probe.label(f) === entry.first,
+                         entry.name + ": focus is on " + probe.label(f) + ", expected " + entry.first);
+            // Stray keys on the new page leave it where it is.
+            probe.tc.keyClick(Qt.Key_Escape);
+            probe.expect(probe.page() === page && !probe.drawer().drawerOpen, entry.name + ": Escape on the page switched or opened something");
+        }
+        probe.phase = "done";
+    }
