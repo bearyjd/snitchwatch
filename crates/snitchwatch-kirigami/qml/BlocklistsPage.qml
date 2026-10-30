@@ -125,25 +125,91 @@ Kirigami.ScrollablePage {
     // and subscriptions kept in memory only, lost on restart. The storage
     // problem's reason is data, so it goes in a PlainText label, never in an
     // InlineMessage (issue #51).
+    header: ColumnLayout {
+        spacing: 0
+
+        Kirigami.InlineMessage {
+            objectName: "unreadableStoreBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: page.storageUnreadable
+            text: "Snitchwatch couldn't read its saved blocklists, so it isn't changing any "
+                + "blocklist rules the firewall already has."
+        }
+        Controls.Label {
+            objectName: "leftoverFilesLeftText"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: page.leftoverRules === 0 && page.leftoverFilesLeft.length > 0
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: Kirigami.Theme.neutralTextColor
+            text: page.leftoverFilesLeft
+        }
+        Kirigami.InlineMessage {
+            objectName: "perUserBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: page.perUserBlocklists
+            text: "This Snitchwatch service runs for your user only, so it doesn't apply blocklists "
+                + "to the firewall. That needs the system-wide Snitchwatch service. Blocklist "
+                + "rules a system-wide Snitchwatch service left in the firewall can't be checked "
+                + "or removed from here; start the system-wide service to remove them."
+        }
+        Kirigami.InlineMessage {
+            objectName: "overLimitBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: page.anyOverLimit
+            text: "Some blocklists are over the total size limit of 2,000,000 hosts, so they "
+                + "aren't applied to the firewall. Remove a list to make room."
+        }
+        Kirigami.InlineMessage {
+            objectName: "notEnforcedBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            // Not beside the unreadable-store warning, which says why.
+            visible: page.anyNotEnforced && !page.storageUnreadable
+            text: "Some blocklists aren't confirmed to be blocking. Open a list to see why."
+        }
+        Kirigami.InlineMessage {
+            objectName: "memoryOnlyStorageBanner"
+            Layout.fillWidth: true
+            type: Kirigami.MessageType.Warning
+            visible: !page.storagePersistent
+            text: "Blocklist subscriptions are kept in memory only, so they can't be applied to "
+                + "the firewall and are lost when Snitchwatch's background service restarts (for "
+                + "example on logout or reboot)."
+        }
+        Controls.Label {
+            objectName: "exactMatchNote"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: page.model && page.model.count > 0
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            text: "Hosts are matched by exact name, not subdomains."
+        }
+        Controls.Label {
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: page.storageReason.length > 0
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: "Details: " + page.storageReason
+        }
+    }
+
     FocusOrderListView {
         id: list
         model: page.model
         currentIndex: -1
         reuseItems: true
 
-        // In the list, so its buttons come first in the Tab chain (the header
-        // is made before the rows); a page-level header is made after them.
+        // In the list's header, so its buttons come first in the Tab chain
+        // (the list makes its header before its rows; the page's header is
+        // made after them).
         header: ColumnLayout {
-            spacing: 0
-
-            Kirigami.InlineMessage {
-                objectName: "unreadableStoreBanner"
-                Layout.fillWidth: true
-                type: Kirigami.MessageType.Warning
-                visible: page.storageUnreadable
-                text: "Snitchwatch couldn't read its saved blocklists, so it isn't changing any "
-                    + "blocklist rules the firewall already has."
-            }
             // Issue #73. The count is data, so it sits in a PlainText label.
             ColumnLayout {
                 objectName: "leftoverNotice"
@@ -229,68 +295,6 @@ Kirigami.ScrollablePage {
                         }
                     }
                 }
-            }
-            Controls.Label {
-                objectName: "leftoverFilesLeftText"
-                Layout.fillWidth: true
-                Layout.margins: Kirigami.Units.smallSpacing
-                visible: page.leftoverRules === 0 && page.leftoverFilesLeft.length > 0
-                textFormat: Text.PlainText
-                wrapMode: Text.Wrap
-                color: Kirigami.Theme.neutralTextColor
-                text: page.leftoverFilesLeft
-            }
-            Kirigami.InlineMessage {
-                objectName: "perUserBanner"
-                Layout.fillWidth: true
-                type: Kirigami.MessageType.Warning
-                visible: page.perUserBlocklists
-                text: "This Snitchwatch service runs for your user only, so it doesn't apply blocklists "
-                    + "to the firewall. That needs the system-wide Snitchwatch service. Blocklist "
-                    + "rules a system-wide Snitchwatch service left in the firewall can't be checked "
-                    + "or removed from here; start the system-wide service to remove them."
-            }
-            Kirigami.InlineMessage {
-                objectName: "overLimitBanner"
-                Layout.fillWidth: true
-                type: Kirigami.MessageType.Warning
-                visible: page.anyOverLimit
-                text: "Some blocklists are over the total size limit of 2,000,000 hosts, so they "
-                    + "aren't applied to the firewall. Remove a list to make room."
-            }
-            Kirigami.InlineMessage {
-                objectName: "notEnforcedBanner"
-                Layout.fillWidth: true
-                type: Kirigami.MessageType.Warning
-                // Not beside the unreadable-store warning, which says why.
-                visible: page.anyNotEnforced && !page.storageUnreadable
-                text: "Some blocklists aren't confirmed to be blocking. Open a list to see why."
-            }
-            Kirigami.InlineMessage {
-                objectName: "memoryOnlyStorageBanner"
-                Layout.fillWidth: true
-                type: Kirigami.MessageType.Warning
-                visible: !page.storagePersistent
-                text: "Blocklist subscriptions are kept in memory only, so they can't be applied to "
-                    + "the firewall and are lost when Snitchwatch's background service restarts (for "
-                    + "example on logout or reboot)."
-            }
-            Controls.Label {
-                objectName: "exactMatchNote"
-                Layout.fillWidth: true
-                Layout.margins: Kirigami.Units.smallSpacing
-                visible: page.model && page.model.count > 0
-                wrapMode: Text.Wrap
-                opacity: 0.7
-                text: "Hosts are matched by exact name, not subdomains."
-            }
-            Controls.Label {
-                Layout.fillWidth: true
-                Layout.margins: Kirigami.Units.smallSpacing
-                visible: page.storageReason.length > 0
-                textFormat: Text.PlainText
-                wrapMode: Text.Wrap
-                text: "Details: " + page.storageReason
             }
         }
 
