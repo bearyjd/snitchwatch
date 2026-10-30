@@ -1,6 +1,17 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-26)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-30)
 
-> Start with the 2026-10-26 section below and local `.omc/STATE.md`. Earlier sections are dated history.
+> Start with the 2026-10-30 section below and local `.omc/STATE.md`. Earlier sections are dated history.
+
+## 2026-10-30 — overnight run 3: Q01 keyboard work complete, history still dormant, GUI rebuild pending
+
+- **Source:** `main` at `fd54e8d`, CI green (kirigami job included). Open PRs: only #252 (scanner watchdog, parked draft by the owner).
+- **Q01 keyboard and screen-reader work is merged end to end:** prompt (#258), answer surfaces (#253), Rules page (#270), learning review (#271), status/settings/first-run pages (#273), Connections map (#275), list pages (#278), global drawer (#277, drawer only, no page shortcuts per D3). Shared helpers: `GuardedButton`/`GuardedSwitch`/`GuardedRadioButton`/`GuardedToolButton` swallow Space auto-repeat (Qt clicks a button on release of an auto-repeated Space); the key-repeat test injector is gated behind the off-by-default `test-seams` cargo feature (#263).
+- **Also merged:** Deep Scan outcome announcements and sticky failures (#260, #264), About page (#265), reader rename-race fixes (#268), flaky-probe hardening (#276, #279), main-CI repair after two PRs collided (#280), eBPF Q05/Q06 preparation plan plus read-only `scripts/ebpf/measure.py` (#272), scan-page flicker research note (#274, cause not found; needs the owner's answers).
+- **Connection history is dormant on main and OFF:** store (#261), writer and page budget with the full-journal fallback (#262), lifecycle primitives (#267), pure rule identity (#269). No production call sites; guard tests enforce it. PR 3b/4b (durable parts) are not started and need the owner's go-ahead. Recorded LOWs: the #267 dormant-guard scanner (escaped apostrophe, block-comment newlines), and the unsalted `rule_hash` must never be logged or exported.
+- **Tower:** images `ca868f9f` then `e97d231c` published (pin still `5860dcd`); nothing to merge on our side; no repin until history ships. Bridge-touching merges since the pin are all dormant: `2c5e510`, `3cdbbfa`, `c8108a9`, `e3f2473`.
+- **GUI rebuild:** the build must run outside the agent tool sandbox (nested bwrap cannot bind `/etc/resolv.conf` there). Prepared: `dist/q01-complete-build-2/` with `rebuild-local.py`; command: `cd dist/q01-complete-build-2 && python3 rebuild-local.py --execute fd54e8d3d73a6dd3a16b0fc6a8a23296b07e72c2`. It writes `dist/snitchwatch-system-r15.1-q01-complete.flatpak`, installs nothing. `dist/q01-complete-build/` is a failed partial attempt (safe to delete). The installed GUI is still the stale `a05c1b4` build.
+- **Needs the owner:** desktop checks that tests cannot prove (Orca on the new names and the scan-outcome announcement, Breeze focus rings, tray by keyboard, prompt focus, real X11/Wayland auto-repeat flags); the Security Scan flicker details (see `docs/superpowers/research/2026-10-29-scan-page-flicker.md`); eBPF host steps and open questions in `docs/superpowers/plans/2026-10-29-ebpf-q05-q06.md`; whether history goes past dormant.
+- **Known flakes:** `inspector_panel_narrow_qml` and the status-pages Geography step are hardened (#276), `inspector_panel_navigation_qml` too (#279); #259 (learned/silent tests) is still open; seven other Timer-driven probes lack the re-entrancy guard (listed in #279).
 
 ## 2026-10-26 — clarity counts in review, new bridge image published
 
