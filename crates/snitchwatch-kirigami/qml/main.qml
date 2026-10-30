@@ -727,73 +727,25 @@ Kirigami.ApplicationWindow {
         if (!analysisExportController.saving) root.hide();
     }
 
-    globalDrawer: Kirigami.GlobalDrawer {
+    // One entry per page, in GlobalDrawer.qml; it routes through `nav`.
+    globalDrawer: GlobalDrawer {
         title: appInfo.appName
-        titleIcon: "security-high"
-        isMenu: false
-        actions: [
-            Kirigami.Action {
-                text: "Connections"
-                icon.name: "network-connect"
-                checked: true
-                onTriggered: nav.replaceMain(connectionsPageComponent)
-            },
-            Kirigami.Action {
-                text: "Geography"
-                icon.name: "map-globe"
-                onTriggered: nav.replaceMain(geoPageComponent)
-            },
-            Kirigami.Action {
-                text: "Rules"
-                icon.name: "view-list-details"
-                onTriggered: nav.replaceMain(rulesPageComponent)
-            },
-            Kirigami.Action {
-                text: "Blocklists"
-                icon.name: "edit-delete"
-                onTriggered: nav.replaceMain(blocklistsPageComponent)
-            },
-            Kirigami.Action {
-                text: "Traffic"
-                icon.name: "office-chart-line"
-                onTriggered: nav.replaceMain(trafficPageComponent)
-            },
-            Kirigami.Action {
-                text: "Profiles"
-                icon.name: "preferences-system-network"
-                onTriggered: nav.replaceMain(profilesPageComponent)
-            },
-            Kirigami.Action {
-                text: "Recommended background-service rules"
-                icon.name: "checkmark"
-                onTriggered: nav.replaceMain(recommendedRulesPageComponent)
-            },
-            Kirigami.Action {
-                text: "Make rules from what I saw"
-                icon.name: "view-list-details"
-                onTriggered: nav.replaceMain(learningReviewPageComponent)
-            },
-            Kirigami.Action {
-                text: "Security Scan"
-                icon.name: "security-low"
-                onTriggered: nav.replaceMain(scannerPageComponent)
-            },
-            Kirigami.Action {
-                text: "Settings & Diagnostics"
-                icon.name: "settings-configure"
-                onTriggered: nav.replaceMain(diagnosticsPageComponent)
-            },
-            Kirigami.Action {
-                text: "Daemon Health"
-                icon.name: "dialog-warning"
-                onTriggered: nav.replaceMain(daemonHealthPageComponent)
-            },
-            Kirigami.Action {
-                text: "About"
-                icon.name: "help-about"
-                onTriggered: nav.replaceMain(aboutPageComponent)
-            }
-        ]
+        nav: nav
+        window: root
+        pages: ({
+            connections: connectionsPageComponent,
+            geo: geoPageComponent,
+            rules: rulesPageComponent,
+            blocklists: blocklistsPageComponent,
+            traffic: trafficPageComponent,
+            profiles: profilesPageComponent,
+            recommendedRules: recommendedRulesPageComponent,
+            learningReview: learningReviewPageComponent,
+            scanner: scannerPageComponent,
+            diagnostics: diagnosticsPageComponent,
+            daemonHealth: daemonHealthPageComponent,
+            about: aboutPageComponent
+        })
     }
 
     pageStack.initialPage: nav.createPage(connectionsPageComponent)
