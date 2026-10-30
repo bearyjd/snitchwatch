@@ -24,6 +24,9 @@ Window {
     property var itineraries: ({})
     property bool dismissed: false
     property bool finished: false
+    // tc.keyClick runs the event loop; under load the next tick can fire inside
+    // a step and run it again before `step` advances (a doubled Tab walk).
+    property bool inStep: false
     property var expected: ({})
     // @a11y-guard
 
@@ -229,7 +232,8 @@ Window {
         } },
         // Settings & Diagnostics: switches and selectors named "Label: value".
         { gate: () => "", run: () => { settingsCtl.refreshPreferences(); probe.mount(diagC); } },
-        { gate: () => probe.pageReady(), run: () => {
+        // The switches and selectors are disabled while the settings load.
+        { gate: () => settingsCtl.busy ? "settings idle" : probe.pageReady(), run: () => {
             probe.expectItinerary("diagnostics", @@DIAGNOSTICS_ITINERARY@@);
             probe.sweepNamed("diagnostics", ["Launch at login", "Online research (RDAP) in decision dialog",
                 "Allow remembers for: Forever", "New connections: Ask me (alerts)"]);
@@ -467,7 +471,7 @@ Window {
         running: true
         repeat: true
         onTriggered: {
-            if (probe.finished) return;
+            if (probe.finished || probe.inStep) return;
             try {
                 if (probe.step < probe.steps.length) {
                     const current = probe.steps[probe.step];
@@ -477,7 +481,12 @@ Window {
                         throw new Error("step " + probe.step + " never ready for " + waiting);
                     }
                     probe.stalls = 0;
-                    current.run();
+                    probe.inStep = true;
+                    try {
+                        current.run();
+                    } finally {
+                        probe.inStep = false;
+                    }
                     probe.step++;
                 }
             } catch (e) {
