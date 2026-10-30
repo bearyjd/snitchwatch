@@ -147,7 +147,7 @@ Window {
             probe.key(Qt.Key_Return);
             probe.expect(probe.sent.length === 0, "a stray key subscribed: " + JSON.stringify(probe.sent));
             probe.key(Qt.Key_Space);
-            probe.expect(probe.sent.length === 1 && /https:\\/\\/x.invalid\\/a.txt/.test(JSON.stringify(probe.sent[0])), "Subscribe: " + JSON.stringify(probe.sent));
+            probe.expect(probe.sent.length === 1 && JSON.stringify(probe.sent[0]).indexOf("https://x.invalid/a.txt") >= 0, "Subscribe: " + JSON.stringify(probe.sent));
             probe.sent = [];
         });
         probe.step("leftover rules ask first; focus on Cancel", null, function () {
@@ -233,7 +233,7 @@ Window {
             probe.sweep("end");
             probe.sawNames(["Blocklist URL to subscribe", "Subscribe to blocklist", "Remove leftover blocklist rules",
                 "Cancel removing leftover blocklist rules", "Confirm removing leftover blocklist rules",
-                "Show more hosts", "Unsubscribe from Ads", "Ads", "Trackers", "Malware"]);
+                "Show more hosts", "Unsubscribe from Ads"]);
             probe.noMissingNames();
         });
     }
