@@ -235,7 +235,6 @@ Window {
                 "Show more hosts", "Unsubscribe from Ads", "Ads", "Trackers", "Malware"]);
             probe.noMissingNames();
         });
-        probe.steps.length = 4;
     }
 }
 "#;

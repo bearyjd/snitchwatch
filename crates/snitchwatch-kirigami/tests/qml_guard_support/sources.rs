@@ -287,6 +287,14 @@ pub const ALL_QML: &[(&str, &str)] = &[
         include_str!("../../qml/GuardedSwitch.qml"),
     ),
     (
+        "NavigableRow.qml",
+        include_str!("../../qml/NavigableRow.qml"),
+    ),
+    (
+        "FocusOrderListView.qml",
+        include_str!("../../qml/FocusOrderListView.qml"),
+    ),
+    (
         "GuardedRadioButton.qml",
         include_str!("../../qml/GuardedRadioButton.qml"),
     ),

@@ -12,6 +12,7 @@
     property int at: 0
     property int stalls: 0
     readonly property int maxStalls: 200
+    readonly property int stepLimit: @STEP_LIMIT@
     TestCase { id: tc; name: "listkeys"; when: false }
 
     function expect(ok, what) { if (!ok) probe.failures.push(what); }
@@ -125,7 +126,7 @@
             let done = false;
             let current = null;
             try {
-                if (probe.at >= probe.steps.length) {
+                if (probe.at >= Math.min(probe.steps.length, probe.stepLimit)) {
                     done = true;
                 } else {
                     current = probe.steps[probe.at];
@@ -136,7 +137,6 @@
                     }
                     probe.stalls = 0;
                     probe.at++;
-                    console.warn(probe.doneMarker + " TRACE " + current.name);
                     current.run();
                 }
             } catch (e) {
