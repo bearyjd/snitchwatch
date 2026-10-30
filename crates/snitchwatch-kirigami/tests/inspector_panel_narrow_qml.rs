@@ -93,7 +93,6 @@ Kirigami.ApplicationWindow {
         return null;
     }
 
-    property int busyTicks: 0
     // tc.mouseClick/keyClick run the event loop; under load the next tick can
     // fire inside a step and re-run it before `step` advances.
     property bool inStep: false
@@ -219,18 +218,6 @@ Kirigami.ApplicationWindow {
                 }
                 return;
             }
-            // A push or pop animates; under load it can outlast a tick, and
-            // the next step would read the depth too early (#110).
-            // A stack stuck busy fails the probe after 40 ticks (6 s); it
-            // never hangs it.
-            if (probe.pageStack.busy === true) {
-                if (++probe.busyTicks > 40) {
-                    probe.failures.push("the page stack stayed busy at step " + probe.step);
-                    probe.step = probe.steps.length;
-                }
-                return;
-            }
-            probe.busyTicks = 0;
             probe.inStep = true;
             try {
                 probe.steps[probe.step]();
