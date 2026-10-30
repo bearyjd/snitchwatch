@@ -1,16 +1,18 @@
+    // `first`: the label of the control that must hold focus after the switch,
+    // the page's first control in Tab order (Traffic has none: the page itself).
     readonly property var entries: [
-        { name: "Connections", title: "Connections" },
-        { name: "Geography", title: "Geography" },
-        { name: "Rules", title: "Rules" },
-        { name: "Blocklists", title: "Blocklists" },
-        { name: "Traffic", title: "Traffic" },
-        { name: "Profiles", title: "Profiles" },
-        { name: "Recommended background-service rules", title: "Recommended background-service rules" },
-        { name: "Make rules from what I saw", title: "Make rules from what I saw" },
-        { name: "Security Scan", title: "Security Scan" },
-        { name: "Settings & Diagnostics", title: "Settings & Diagnostics" },
-        { name: "Daemon Health", title: "Daemon Health" },
-        { name: "About", title: "About" }
+        { name: "Connections", title: "Connections", first: "Switch 'Pending only'" },
+        { name: "Geography", title: "Geography", first: "QQuickListView 'Countries by connections'" },
+        { name: "Rules", title: "Rules", first: "QQuickListView" },
+        { name: "Blocklists", title: "Blocklists", first: "QQuickListView" },
+        { name: "Traffic", title: "Traffic", first: "TrafficPage 'Traffic'" },
+        { name: "Profiles", title: "Profiles", first: "QQuickListView" },
+        { name: "Recommended background-service rules", title: "Recommended background-service rules", first: "QQuickListView" },
+        { name: "Make rules from what I saw", title: "Make rules from what I saw", first: "LearningReviewRow" },
+        { name: "Security Scan", title: "Security Scan", first: "GuardedButton 'Run Deep Scan'" },
+        { name: "Settings & Diagnostics", title: "Settings & Diagnostics", first: "Button 'Download optional DB-IP City Lite…'" },
+        { name: "Daemon Health", title: "Daemon Health", first: "Button 'Recheck'" },
+        { name: "About", title: "About", first: "Button 'Copy version info'" }
     ]
     property var opener: null
     readonly property string openerName: "Open navigation menu"
@@ -156,10 +158,9 @@
             probe.expect(!probe.inDrawer(f), entry.name + ": focus stayed in the drawer");
             probe.expect(!probe.inside(f, old), entry.name + ": focus is in the destroyed page");
             probe.expect(f.visible && f.enabled, entry.name + ": focus is on a hidden or disabled item: " + probe.label(f));
-            // On the page's first control; the page itself only if it has none.
-            const tabbable = probe.find(page, it => it.visible && it.enabled && it.activeFocusOnTab === true);
-            probe.expect(tabbable ? f !== page : f === page,
-                         entry.name + ": focus is not on a control of the new page: " + probe.label(f));
+            // On the page's expected first control (not a later one, not the page).
+            probe.expect(probe.label(f) === entry.first,
+                         entry.name + ": focus is on " + probe.label(f) + ", expected " + entry.first);
             // Stray keys on the new page leave it where it is.
             probe.tc.keyClick(Qt.Key_Escape);
             probe.expect(probe.page() === page && !probe.drawer().drawerOpen, entry.name + ": Escape on the page switched or opened something");
