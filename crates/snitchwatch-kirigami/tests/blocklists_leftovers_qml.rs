@@ -77,7 +77,7 @@ Window {
         return item.contentItem ? probeWindow.findChild(item.contentItem, name) : null;
     }
     function part(name) {
-        return probeWindow.findChild(page.header, name) || probeWindow.findChild(page, name);
+        return probeWindow.findChild(page.header, name);
     }
 
     BlocklistsModel { id: model }

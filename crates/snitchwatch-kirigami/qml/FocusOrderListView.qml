@@ -5,7 +5,8 @@
 // to bottom: a footer made before the rows is tabbed to before them. After
 // the rows or the content change, the footer is made the last child again,
 // which puts it last in the chain. (The header is made first, and rows are
-// added in order.) A footer holding focus is left alone until it does not.
+// added in order.) A footer holding focus is left alone; the restack is tried
+// again when focus moves, and when the model is reset or rows are inserted.
 import QtQuick
 
 ListView {
@@ -24,6 +25,17 @@ ListView {
         footer.parent = holder;
     }
 
+    Connections {
+        target: view.Window.window
+        function onActiveFocusItemChanged() { Qt.callLater(view.restack); }
+    }
+    // (A reset keeps the count, so countChanged alone misses it.)
+    Connections {
+        target: view.model instanceof QtObject ? view.model : null
+        ignoreUnknownSignals: true
+        function onModelReset() { Qt.callLater(view.restack); }
+        function onRowsInserted() { Qt.callLater(view.restack); }
+    }
     onCountChanged: Qt.callLater(view.restack)
     onContentHeightChanged: Qt.callLater(view.restack)
     // A Kirigami page makes its flickable a Tab stop of its own, after the

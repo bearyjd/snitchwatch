@@ -39,6 +39,7 @@ Window {
     height: 1800
     readonly property string doneMarker: "RECOMMENDED_KEYBOARD_PROBE_DONE"
     property var sent: []
+    property string chosen: ""
     // @a11y-guard
     // @list-keys
 
@@ -218,17 +219,21 @@ Window {
         probe.step("the list is replaced between focus and key", null, function () {
             probe.sent = [];
             probe.mustTab(start, "Recommended rule: " + probe.bin("chronyc"), 30);
+            // The rule the user chose is the one focused NOW, before the
+            // replacement: a key may do that or nothing, never another rule.
+            probe.chosen = probe.rowOf(probe.focused());
+            probe.expect(probe.chosen === "chronyc", "focus is on '" + probe.chosen + "', not chronyc");
             probe.send(["dns-resolved", "old", "nm", "chronyc", "flatpak"]);
         });
         probe.step("key after the reorder", probe.rowsReady, function () {
             const shown = probe.rowOf(probe.focused());
             probe.key(Qt.Key_Space);
-            // Nothing, or the rule of the row that now has focus: never the
-            // row that had it before the list was replaced.
             const asked = probe.sentIds();
-            probe.expect(asked.length === 0 || (shown !== "" && JSON.stringify(asked) === JSON.stringify([shown + ":" + (shown === "old" || shown === "nm" || shown === "chronyc" ? "false" : "true")])),
-                         "after a reorder Space asked " + JSON.stringify(asked) + " with focus on '" + shown + "'");
+            probe.expect(asked.length === 0 || JSON.stringify(asked) === JSON.stringify([probe.chosen + ":false"]),
+                         "after a reorder Space asked " + JSON.stringify(asked) + ": the user chose '" + probe.chosen
+                         + "', the focus is now on '" + shown + "'");
             probe.mustTab(start, "Recommended rule: " + probe.bin("chronyc"), 30);
+            probe.chosen = probe.rowOf(probe.focused());
             probe.sent = [];
             tc.keyPress(Qt.Key_Space);
             probe.send(probe.natural);
@@ -237,8 +242,31 @@ Window {
             const shown = probe.rowOf(probe.focused());
             tc.keyRelease(Qt.Key_Space);
             const asked = probe.sentIds();
-            probe.expect(asked.length === 0 || (shown !== "" && asked.length === 1 && asked[0].split(":")[0] === shown),
-                         "a release after a reorder asked " + JSON.stringify(asked) + " with focus on '" + shown + "'");
+            probe.expect(asked.length === 0 || JSON.stringify(asked) === JSON.stringify([probe.chosen + ":false"]),
+                         "a release after a reorder asked " + JSON.stringify(asked) + ": the user pressed on '" + probe.chosen
+                         + "', the focus is now on '" + shown + "'");
+        });
+        // A reset while the orphans section (the list's footer) has focus must
+        // not leave the new rows after it in the Tab chain once focus leaves.
+        probe.step("the list is reset while the footer has focus", probe.rowsReady, function () {
+            probe.mustTab(start, "Remove old rule snitchwatch-default-gone", 40);
+            probe.send(["dns-resolved", "old", "nm", "chronyc", "flatpak"]);
+        });
+        probe.step("focus leaves the footer", probe.rowsReady, function () {
+            probe.rowAt(0).forceActiveFocus();
+        });
+        probe.step("rows come before the footer again", probe.rowsReady, function () {
+            probe.checkItinerary("after a reset in the footer", start, [
+                "Turn all on", "Turn all off",
+                probe.bin("dns-resolved"), "Recommended rule: " + probe.bin("dns-resolved"),
+                "Review DNS choice for " + probe.bin("dns-resolved"),
+                probe.bin("old"), "Recommended rule: " + probe.bin("old"),
+                "Keep rule for " + probe.bin("old"),
+                probe.bin("nm"), "Recommended rule: " + probe.bin("nm"),
+                "Remove rule for " + probe.bin("nm"),
+                probe.bin("chronyc"), "Recommended rule: " + probe.bin("chronyc"),
+                probe.bin("flatpak"), "Recommended rule: " + probe.bin("flatpak"),
+                "Remove old rule snitchwatch-default-gone"]);
         });
         probe.step("names after the changes", null, function () {
             probe.names = {};

@@ -229,6 +229,49 @@ Window {
                          "after a reorder Return opened '" + page.inspectId + "' with focus on '" + shown + "'");
             probe.key(Qt.Key_Escape);
         });
+        // The leftover-rules warning stays in view while the list scrolls, and
+        // a narrow window wraps its text with every button inside the viewport.
+        probe.step("many rows, scrolled to the end, narrow", probe.rowsReady, function () {
+            probe.width = 420;
+            const all = [];
+            for (let i = 0; i < 40; ++i) all.push(probe.blocklist("m" + i, "Many " + i));
+            lists.applyServerMessageJson(JSON.stringify({ action: "setBlocklists", storage: { persistent: true },
+                blocklists: all }));
+            lists.applyServerMessageJson(JSON.stringify({ action: "setBlocklistLeftovers", count: 2 }));
+        });
+        probe.step("the warning is in view", function () {
+            const l = probe.list();
+            return l && l.count === 40 && probe.control("Remove leftover blocklist rules") ? "" : "the long list and the warning";
+        }, function () {
+            probe.list().positionViewAtEnd();
+        });
+        probe.step("check the viewport", function () { return probe.stable("remove", probe.control("Remove leftover blocklist rules")) ? "" : "the warning to settle"; }, function () {
+            probe.expect(probe.list().contentY > 100, "the list did not scroll: contentY " + probe.list().contentY);
+            const inView = function (item) {
+                if (!item) return "missing";
+                for (let it = item; it; it = it.parent) if (it === probe.list().contentItem) return "inside the scrolling content";
+                const p = item.mapToItem(null, 0, 0);
+                const ok = p.x >= 0 && p.y >= 0 && p.x + item.width <= probe.width && p.y + item.height <= probe.height;
+                return ok ? "" : "outside the window: " + p.x + "," + p.y + " " + item.width + "x" + item.height + " in " + probe.width + "x" + probe.height;
+            };
+            const remove = probe.control("Remove leftover blocklist rules");
+            probe.expect(inView(remove) === "", "Remove leftover rules, list scrolled to the end: " + inView(remove));
+            const text = probe.find(page, it => it.objectName === "leftoverText");
+            probe.expect(!!text && inView(text) === "", "leftover warning text, list scrolled to the end: " + (text ? inView(text) : "missing"));
+            probe.expect(!!text && text.lineCount > 1 && text.width <= probe.width, "the warning does not wrap in a narrow window: lines "
+                         + (text ? text.lineCount + ", width " + text.width : "n/a"));
+            probe.mustTab(start, "Remove leftover blocklist rules", 8);
+            probe.key(Qt.Key_Space);
+        });
+        probe.step("confirming buttons are in view", function () { return probe.control("Cancel removing leftover blocklist rules") ? "" : "the confirmation"; }, function () {
+            for (const name of ["Cancel removing leftover blocklist rules", "Confirm removing leftover blocklist rules"]) {
+                const b = probe.control(name);
+                const p = b ? b.mapToItem(null, 0, 0) : null;
+                probe.expect(!!p && p.x >= 0 && p.x + b.width <= probe.width && p.y >= 0 && p.y + b.height <= probe.height,
+                             "'" + name + "' is outside the narrow window: " + (p ? p.x + "," + p.y + " " + b.width + "x" + b.height : "missing"));
+            }
+            probe.key(Qt.Key_Escape);
+        });
         probe.step("names after", function () { return probe.sheet().visible ? "the sheet to close" : ""; }, function () {
             probe.sweep("end");
             probe.sawNames(["Blocklist URL to subscribe", "Subscribe to blocklist", "Remove leftover blocklist rules",

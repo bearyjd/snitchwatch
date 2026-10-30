@@ -136,6 +136,92 @@ Kirigami.ScrollablePage {
             text: "Snitchwatch couldn't read its saved blocklists, so it isn't changing any "
                 + "blocklist rules the firewall already has."
         }
+        // Issue #73. The count is data, so it sits in a PlainText label.
+        ColumnLayout {
+            objectName: "leftoverNotice"
+            Layout.fillWidth: true
+            Layout.margins: Kirigami.Units.smallSpacing
+            visible: page.leftoverRules > 0
+            spacing: Kirigami.Units.smallSpacing
+
+            Controls.Label {
+                objectName: "leftoverText"
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: Kirigami.Theme.neutralTextColor
+                text: page.leftoversProbablyWanted
+                    ? page.leftoverNoun() + " made by Snitchwatch "
+                      + (page.leftoverRules === 1 ? "is" : "are") + " in the firewall, and "
+                      + (page.leftoverRules === 1 ? "is" : "are") + " probably "
+                      + (page.leftoverRules === 1 ? "a list" : "lists") + " you still subscribe to: "
+                      + "Snitchwatch can't read its saved blocklists, so it isn't changing "
+                      + (page.leftoverRules === 1 ? "it" : "them") + ". It checks them only when "
+                      + "it starts. Removing " + (page.leftoverRules === 1 ? "it" : "them")
+                      + " turns that blocking off; it comes back only if the saved blocklists "
+                      + "can be read after a restart, and if they are damaged it stays off."
+                    : (page.leftoverRules === 1
+                       ? "1 blocklist rule made by Snitchwatch is still in the firewall"
+                       : page.leftoverRules + " blocklist rules made by Snitchwatch are still in "
+                         + "the firewall")
+                      + ", but this service isn't managing " + (page.leftoverRules === 1 ? "it" : "them")
+                      + ", so " + (page.leftoverRules === 1 ? "it keeps" : "they keep")
+                      + " blocking the hosts of lists you may no longer have."
+            }
+            GuardedButton {
+                objectName: "removeLeftovers"
+                visible: !page.confirmingLeftover
+                text: "Remove these rules"
+                Accessible.name: "Remove leftover blocklist rules"
+                icon.name: "edit-delete-remove"
+                onClicked: {
+                    page.confirmingLeftover = true;
+                    cancelLeftovers.forceActiveFocus(Qt.TabFocusReason);
+                }
+            }
+            // A removal that failed, or left some behind.
+            Controls.Label {
+                objectName: "leftoverReasonText"
+                Layout.fillWidth: true
+                visible: page.leftoverReason.length > 0
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: Kirigami.Theme.negativeTextColor
+                text: page.leftoverReason
+            }
+            RowLayout {
+                visible: page.confirmingLeftover
+                spacing: Kirigami.Units.largeSpacing
+                Controls.Label {
+                    objectName: "leftoverConfirmText"
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    text: page.leftoversProbablyWanted
+                        ? "Remove them? The hosts they block will no longer be blocked until "
+                          + "Snitchwatch is restarted with readable saved blocklists, and not at "
+                          + "all if they are damaged."
+                        : "Remove them from the firewall? The hosts they blocked will no longer "
+                          + "be blocked."
+                }
+                GuardedButton {
+                    id: cancelLeftovers
+                    objectName: "cancelRemoveLeftovers"
+                    text: "Cancel"
+                    Accessible.name: "Cancel removing leftover blocklist rules"
+                    onClicked: page.confirmingLeftover = false
+                }
+                GuardedButton {
+                    objectName: "confirmRemoveLeftovers"
+                    text: "Confirm remove"
+                    Accessible.name: "Confirm removing leftover blocklist rules"
+                    icon.name: "edit-delete-remove"
+                    onClicked: {
+                        page.model.removeLeftoverRules();
+                        page.confirmingLeftover = false;
+                    }
+                }
+            }
+        }
         Controls.Label {
             objectName: "leftoverFilesLeftText"
             Layout.fillWidth: true
@@ -200,103 +286,28 @@ Kirigami.ScrollablePage {
         }
     }
 
+    // The page's header is made after the list's scroll view, which puts the
+    // leftover-rules buttons after the rows in the Tab chain (children are
+    // visited in order). Re-adding the other children after the header (via
+    // a scratch parent, so none is ever parentless) puts them back in
+    // visual order; the header itself stays pinned above the list.
+    Item { id: reparentScratch; visible: false }
+    Component.onCompleted: Qt.callLater(function () {
+        const head = page.header;
+        const holder = head ? head.parent : null;
+        if (!holder || holder.children[0] === head) return;
+        for (const it of Array.from(holder.children)) {
+            if (it === head || it === reparentScratch) continue;
+            it.parent = reparentScratch;
+            it.parent = holder;
+        }
+    })
+
     FocusOrderListView {
         id: list
         model: page.model
         currentIndex: -1
         reuseItems: true
-
-        // In the list's header, so its buttons come first in the Tab chain
-        // (the list makes its header before its rows; the page's header is
-        // made after them).
-        header: ColumnLayout {
-            // Issue #73. The count is data, so it sits in a PlainText label.
-            ColumnLayout {
-                objectName: "leftoverNotice"
-                Layout.fillWidth: true
-                Layout.margins: Kirigami.Units.smallSpacing
-                visible: page.leftoverRules > 0
-                spacing: Kirigami.Units.smallSpacing
-
-                Controls.Label {
-                    objectName: "leftoverText"
-                    Layout.fillWidth: true
-                    textFormat: Text.PlainText
-                    wrapMode: Text.Wrap
-                    color: Kirigami.Theme.neutralTextColor
-                    text: page.leftoversProbablyWanted
-                        ? page.leftoverNoun() + " made by Snitchwatch "
-                          + (page.leftoverRules === 1 ? "is" : "are") + " in the firewall, and "
-                          + (page.leftoverRules === 1 ? "is" : "are") + " probably "
-                          + (page.leftoverRules === 1 ? "a list" : "lists") + " you still subscribe to: "
-                          + "Snitchwatch can't read its saved blocklists, so it isn't changing "
-                          + (page.leftoverRules === 1 ? "it" : "them") + ". It checks them only when "
-                          + "it starts. Removing " + (page.leftoverRules === 1 ? "it" : "them")
-                          + " turns that blocking off; it comes back only if the saved blocklists "
-                          + "can be read after a restart, and if they are damaged it stays off."
-                        : (page.leftoverRules === 1
-                           ? "1 blocklist rule made by Snitchwatch is still in the firewall"
-                           : page.leftoverRules + " blocklist rules made by Snitchwatch are still in "
-                             + "the firewall")
-                          + ", but this service isn't managing " + (page.leftoverRules === 1 ? "it" : "them")
-                          + ", so " + (page.leftoverRules === 1 ? "it keeps" : "they keep")
-                          + " blocking the hosts of lists you may no longer have."
-                }
-                GuardedButton {
-                    objectName: "removeLeftovers"
-                    visible: !page.confirmingLeftover
-                    text: "Remove these rules"
-                    Accessible.name: "Remove leftover blocklist rules"
-                    icon.name: "edit-delete-remove"
-                    onClicked: {
-                        page.confirmingLeftover = true;
-                        cancelLeftovers.forceActiveFocus(Qt.TabFocusReason);
-                    }
-                }
-                // A removal that failed, or left some behind.
-                Controls.Label {
-                    objectName: "leftoverReasonText"
-                    Layout.fillWidth: true
-                    visible: page.leftoverReason.length > 0
-                    textFormat: Text.PlainText
-                    wrapMode: Text.Wrap
-                    color: Kirigami.Theme.negativeTextColor
-                    text: page.leftoverReason
-                }
-                RowLayout {
-                    visible: page.confirmingLeftover
-                    spacing: Kirigami.Units.largeSpacing
-                    Controls.Label {
-                        objectName: "leftoverConfirmText"
-                        Layout.fillWidth: true
-                        wrapMode: Text.Wrap
-                        text: page.leftoversProbablyWanted
-                            ? "Remove them? The hosts they block will no longer be blocked until "
-                              + "Snitchwatch is restarted with readable saved blocklists, and not at "
-                              + "all if they are damaged."
-                            : "Remove them from the firewall? The hosts they blocked will no longer "
-                              + "be blocked."
-                    }
-                    GuardedButton {
-                        id: cancelLeftovers
-                        objectName: "cancelRemoveLeftovers"
-                        text: "Cancel"
-                        Accessible.name: "Cancel removing leftover blocklist rules"
-                        onClicked: page.confirmingLeftover = false
-                    }
-                    GuardedButton {
-                        objectName: "confirmRemoveLeftovers"
-                        text: "Confirm remove"
-                        Accessible.name: "Confirm removing leftover blocklist rules"
-                        icon.name: "edit-delete-remove"
-                        onClicked: {
-                            page.model.removeLeftoverRules();
-                            page.confirmingLeftover = false;
-                        }
-                    }
-                }
-            }
-        }
 
         Kirigami.PlaceholderMessage {
             parent: list
