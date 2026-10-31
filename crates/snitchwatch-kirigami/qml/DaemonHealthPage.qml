@@ -23,7 +23,7 @@ Kirigami.ScrollablePage {
             text: page.model.statusSummary
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             visible: page.model.hasProblem
@@ -34,7 +34,7 @@ Kirigami.ScrollablePage {
             text: page.model.troubleshootingText
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             visible: !page.model.hasProblem
@@ -42,7 +42,7 @@ Kirigami.ScrollablePage {
             text: page.model.statusSummary
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             objectName: "processMonitorReported"
@@ -50,7 +50,7 @@ Kirigami.ScrollablePage {
             text: page.model.monitorStatus
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             objectName: "processMonitorSupport"

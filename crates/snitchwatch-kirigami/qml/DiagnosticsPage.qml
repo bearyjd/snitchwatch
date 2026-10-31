@@ -53,7 +53,7 @@ Kirigami.ScrollablePage {
                 onToggled: page.controller.setAutostart(checked)
             }
 
-            Controls.Label {
+            SelectableText {
                 objectName: "autostartError"
                 Kirigami.FormData.label: "Status"
                 visible: page.controller && page.controller.autostartError.length > 0
@@ -71,7 +71,7 @@ Kirigami.ScrollablePage {
                 onToggled: page.controller.toggleRdapEnabled(checked)
             }
 
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: ""
                 opacity: 0.7
                 wrapMode: Text.Wrap
@@ -106,7 +106,7 @@ Kirigami.ScrollablePage {
                 enabled: page.controller && !page.controller.busy
                 onActivated: page.controller.chooseDefaultDuration(currentValue)
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: ""
                 opacity: 0.7
                 wrapMode: Text.Wrap
@@ -129,7 +129,7 @@ Kirigami.ScrollablePage {
                 enabled: page.controller && !page.controller.busy
                 onActivated: page.controller.chooseSilentMode(currentValue)
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: ""
                 objectName: "silentModeNote"
                 opacity: 0.7
@@ -145,7 +145,8 @@ Kirigami.ScrollablePage {
         RowLayout {
             Layout.fillWidth: true
 
-            Kirigami.Heading {
+            SelectableText {
+                wrapMode: Text.NoWrap
                 Layout.fillWidth: true
                 level: 3
                 text: "Upstream opensnitch-ui coexistence"
@@ -168,7 +169,7 @@ Kirigami.ScrollablePage {
             text: "The upstream OpenSnitch UI is also set up on this system."
         }
 
-        Controls.Label {
+        SelectableText {
             objectName: "coexistenceDetail"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
@@ -186,7 +187,8 @@ Kirigami.ScrollablePage {
         RowLayout {
             Layout.fillWidth: true
 
-            Kirigami.Heading {
+            SelectableText {
+                wrapMode: Text.NoWrap
                 Layout.fillWidth: true
                 level: 3
                 text: "Crash log"
