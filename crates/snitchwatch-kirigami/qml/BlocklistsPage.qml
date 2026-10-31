@@ -93,9 +93,11 @@ Kirigami.ScrollablePage {
         Layout.fillWidth: true
         spacing: Kirigami.Units.largeSpacing
 
-        Kirigami.Heading {
+        SelectableText {
             text: page.title
             level: 1
+            wrapMode: Text.NoWrap
+            textFormat: Text.PlainText
             Layout.alignment: Qt.AlignVCenter
         }
         Controls.TextField {
@@ -502,8 +504,10 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
             }
 
-            Kirigami.Heading {
+            SelectableText {
                 level: 3
+                wrapMode: Text.NoWrap
+                textFormat: Text.PlainText
                 text: "Entries"
             }
 
