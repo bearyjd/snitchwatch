@@ -25,12 +25,27 @@ const FILES: &[(&str, &str, usize, &[&str])] = &[
     ("MapView.qml", include_str!("../qml/MapView.qml"), 2, &[]),
 ];
 
+/// Converted `Kirigami.Heading` blocks per file (all were level 3).
+const HEADINGS: &[(&str, usize)] = &[
+    ("DiagnosticsPage.qml", 2),
+    ("ScannerPage.qml", 1),
+    ("DenyStatusSection.qml", 1),
+    ("GeoDatabaseSettings.qml", 1),
+];
+
 #[test]
 fn batch_1_texts_are_selectable() {
     for (name, source, selectable, kept) in FILES {
         let code = code_lines(source);
         let converted = blocks(&code, "SelectableText {").len();
         assert_eq!(converted, *selectable, "{name}: SelectableText blocks");
+        // Each converted Heading keeps its Kirigami level (size + Heading role).
+        let leveled = blocks(&code, "SelectableText {")
+            .iter()
+            .filter(|b| b.lines().any(|l| l.trim() == "level: 3"))
+            .count();
+        let expected = HEADINGS.iter().find(|(n, _)| n == name).map_or(0, |(_, c)| *c);
+        assert_eq!(leveled, expected, "{name}: SelectableText blocks with `level: 3`");
         let mut left = blocks(&code, "Controls.Label {");
         left.extend(blocks(&code, "Kirigami.Heading {"));
         assert_eq!(

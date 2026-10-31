@@ -2,7 +2,7 @@
 //! `Kirigami.Heading.level` (plan `2026-10-30-selectable-text.md`, "Headings").
 //!   * a leveled text has the point size of a Kirigami.Heading of that level
 //!     and reports the Heading role, so a screen reader still announces a
-//!     heading;
+//!     heading (default type: Normal weight, as Heading.qml);
 //!   * level 0 (the default) is exactly the old SelectableText: same font as a
 //!     plain TextEdit, StaticText role;
 //!   * a leveled text is still no Tab stop and never takes focus.
@@ -64,6 +64,8 @@ Window {
                 probe.expect(s.level === l, "level property is " + s.level);
                 probe.expect(Math.abs(s.font.pointSize - h.font.pointSize) < 0.01,
                              "level " + l + ": size " + s.font.pointSize + ", Heading " + h.font.pointSize);
+                probe.expect(s.font.weight === h.font.weight,
+                             "level " + l + ": weight " + s.font.weight + ", Heading " + h.font.weight);
                 probe.expect(s.Accessible.role === Accessible.Heading, "level " + l + " role " + s.Accessible.role);
                 probe.expect(s.activeFocusOnTab === false && s.readOnly === true && s.selectByMouse === true,
                              "level " + l + " lost its selectable-text behaviour");
