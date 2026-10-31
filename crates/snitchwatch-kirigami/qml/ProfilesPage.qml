@@ -111,7 +111,7 @@ Kirigami.ScrollablePage {
             text: "Profiles are not applied to the firewall here: activating one installs "
                 + "no firewall rules, so it changes nothing that is allowed or blocked."
         }
-        Controls.Label {
+        SelectableText {
             objectName: "notAppliedReason"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -128,7 +128,7 @@ Kirigami.ScrollablePage {
             text: "Profiles are kept in memory only, so they are lost when Snitchwatch's "
                 + "background service restarts (for example on logout or reboot)."
         }
-        Controls.Label {
+        SelectableText {
             objectName: "savedNote"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -138,7 +138,7 @@ Kirigami.ScrollablePage {
             text: "Profiles are saved, so they are kept when Snitchwatch's background service "
                 + "restarts."
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
             visible: page.storageReason.length > 0
@@ -148,7 +148,7 @@ Kirigami.ScrollablePage {
         }
         // Why the last create/rename/matcher change was refused (#116). The
         // reason comes from the bridge, so it sits in a PlainText label.
-        Controls.Label {
+        SelectableText {
             objectName: "profileNote"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -338,8 +338,10 @@ Kirigami.ScrollablePage {
                     }
                 }
 
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Status"
+                    textFormat: Text.PlainText
+                    wrapMode: Text.NoWrap
                     text: page.inspectActive ? "Active" : "Inactive"
                     color: page.inspectActive ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.neutralTextColor
                 }
@@ -350,12 +352,13 @@ Kirigami.ScrollablePage {
             }
 
             // The profile's rules and whether the firewall has them.
-            Controls.Label {
+            SelectableText {
                 textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
                 text: "Rules"
                 font.bold: true
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "profileNoRules"
                 Layout.fillWidth: true
                 visible: page.inspectRules.length === 0
@@ -372,6 +375,11 @@ Kirigami.ScrollablePage {
                     spacing: 0
                     RowLayout {
                         Layout.fillWidth: true
+                        // Right-click Copy of the rule (its conditions are elided, so both
+                        // texts stay Labels; selectable-text plan, class B).
+                        RowCopyMenu {
+                            copyText: ruleRow.modelData.action + " " + ruleRow.modelData.conditions
+                        }
                         Controls.Label {
                             objectName: "profileRuleAction"
                             textFormat: Text.PlainText
@@ -395,14 +403,15 @@ Kirigami.ScrollablePage {
                             onClicked: page.model.removeRule(page.inspectId, ruleRow.modelData.id)
                         }
                     }
-                    Controls.Label {
+                    SelectableText {
                         objectName: "profileRuleStatus"
                         textFormat: Text.PlainText
+                        wrapMode: Text.NoWrap
                         text: ruleRow.modelData.status
                         color: ruleRow.modelData.installed ? Kirigami.Theme.positiveTextColor
                                                            : Kirigami.Theme.neutralTextColor
                     }
-                    Controls.Label {
+                    SelectableText {
                         objectName: "profileRuleReason"
                         Layout.fillWidth: true
                         visible: ruleRow.modelData.reason.length > 0
@@ -412,7 +421,7 @@ Kirigami.ScrollablePage {
                     }
                 }
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "profileEditorStatus"
                 Layout.fillWidth: true
                 visible: ruleEditorController.statusText.length > 0
@@ -476,7 +485,7 @@ Kirigami.ScrollablePage {
                 visible: page.confirmingDelete
                 spacing: Kirigami.Units.smallSpacing
 
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     text: "Delete this profile permanently?"
                     color: Kirigami.Theme.negativeTextColor

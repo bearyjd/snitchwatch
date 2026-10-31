@@ -80,7 +80,7 @@ Kirigami.ScrollablePage {
             text: "This Snitchwatch service doesn't add or remove recommended rules. Nothing "
                 + "here can be turned on or off; rules already in the firewall stay as they are."
         }
-        Controls.Label {
+        SelectableText {
             objectName: "unavailableReason"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -89,7 +89,7 @@ Kirigami.ScrollablePage {
             wrapMode: Text.Wrap
             text: page.unavailableReason
         }
-        Controls.Label {
+        SelectableText {
             objectName: "dnsUnsupported"
             Layout.fillWidth: true
             textFormat: Text.PlainText
@@ -97,7 +97,7 @@ Kirigami.ScrollablePage {
             visible: page.model && !page.model.broadSupported
             text: "This service cannot accept reviewed DNS consent. Connect to an updated service to turn on or keep the DNS rule. Turning it off is still available."
         }
-        Controls.Label {
+        SelectableText {
             objectName: "dnsChoiceResult"
             Layout.fillWidth: true
             textFormat: Text.PlainText
@@ -149,7 +149,7 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
                 label: "No longer recommended"
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "orphansExplanation"
                 Layout.fillWidth: true
                 Layout.margins: Kirigami.Units.smallSpacing
@@ -171,6 +171,17 @@ Kirigami.ScrollablePage {
                     spacing: Kirigami.Units.smallSpacing
                     // Remove asks first; a new list from the bridge ends it.
                     property bool confirmingRemove: false
+
+                    // Right-click Copy of the whole row. The name is elided, so every
+                    // text of the row stays a Label (a second menu would open beside this).
+                    RowCopyMenu {
+                        copyText: {
+                            const lines = [orphanRow.modelData.ruleName, orphanRow.modelData.statusText];
+                            if (orphanRow.modelData.problem.length > 0) lines.push(orphanRow.modelData.problem);
+                            if (orphanRow.modelData.canRemove && orphanRow.confirmingRemove) lines.push(orphanRemoveQuestion.text);
+                            return lines.filter(line => line.length > 0).join("\n");
+                        }
+                    }
 
                     Controls.Label {
                         objectName: "orphanName"
@@ -209,6 +220,7 @@ Kirigami.ScrollablePage {
                         }
                     }
                     Controls.Label {
+                        id: orphanRemoveQuestion
                         objectName: "orphanRemoveQuestion"
                         visible: orphanRow.modelData.canRemove && orphanRow.confirmingRemove
                         text: "Remove the firewall's rule under this name? Snitchwatch no longer "
@@ -262,6 +274,17 @@ Kirigami.ScrollablePage {
             required property bool heldBack
             // Remove asks first; a model reset (the bridge's answer) ends it.
             property bool confirmingRemove: false
+
+            // Right-click Copy of the whole row (mouse only; selectable-text plan,
+            // class C). The program is elided, so every text of the row stays a Label.
+            RowCopyMenu {
+                copyText: {
+                    const lines = [row.program, row.allows, row.why, row.statusText];
+                    if (row.problem.length > 0) lines.push(row.problem);
+                    if (row.canRemove && row.confirmingRemove) lines.push(removeQuestion.text);
+                    return lines.filter(line => line.length > 0).join("\n");
+                }
+            }
 
             contentItem: RowLayout {
                 spacing: Kirigami.Units.largeSpacing
@@ -349,6 +372,7 @@ Kirigami.ScrollablePage {
                         }
                     }
                     Controls.Label {
+                        id: removeQuestion
                         objectName: "removeQuestion"
                         visible: row.canRemove && row.confirmingRemove
                         text: "Remove the firewall's rule under this name? It differs from this "
