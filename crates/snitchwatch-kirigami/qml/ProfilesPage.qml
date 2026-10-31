@@ -194,6 +194,11 @@ Kirigami.ScrollablePage {
                 page.openInspector(row);
             }
 
+            // Right-click Copy of the row's text (mouse only; selectable-text plan, class C).
+            RowCopyMenu {
+                copyText: row.Accessible.name + "\n" + row.Accessible.description
+            }
+
             contentItem: RowLayout {
                 spacing: Kirigami.Units.largeSpacing
 

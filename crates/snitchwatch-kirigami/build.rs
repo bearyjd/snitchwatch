@@ -22,6 +22,7 @@ fn main() {
             .qml_file(QmlFile::from("qml/Durations.qml").singleton(true))
             .qml_file(QmlFile::from("qml/SilentModes.qml").singleton(true))
             .qml_file(QmlFile::from("qml/MapBandState.qml").singleton(true))
+            .qml_file(QmlFile::from("qml/SelectionRegistry.qml").singleton(true))
             .qml_files([
                 "qml/main.qml",
                 "qml/TrayMenu.qml",
@@ -108,6 +109,9 @@ fn main() {
                 "qml/DenyStatusSection.qml",
                 "qml/AboutPage.qml",
                 "qml/GlobalDrawer.qml",
+                "qml/SelectableText.qml",
+                "qml/RowCopyMenu.qml",
+                "qml/GuardedMenuItem.qml",
             ]),
     )
     .qt_module("Widgets")

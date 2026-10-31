@@ -251,3 +251,21 @@ fn per_connection_traffic_readouts_stay_hidden() {
         "main.qml threads the zero-fed TrafficModel into ConnectionsPage again (issue #49)"
     );
 }
+
+/// `SelectableText` (a TextEdit) renders markup too if told to. Its default is
+/// PlainText and no use may switch to another format.
+#[test]
+fn selectable_text_is_plain_text() {
+    let component = code_lines(include_str!("../qml/SelectableText.qml"));
+    assert!(component.contains("textFormat: TextEdit.PlainText"));
+    for (name, source) in ALL_QML {
+        for block in blocks(&code_lines(source), "SelectableText {") {
+            for format in ["RichText", "AutoText", "MarkdownText", "StyledText"] {
+                assert!(
+                    !block.contains(format),
+                    "{name}: a SelectableText sets `{format}`; external text must stay plain:\n{block}"
+                );
+            }
+        }
+    }
+}

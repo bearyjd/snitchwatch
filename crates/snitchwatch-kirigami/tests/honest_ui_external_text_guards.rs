@@ -239,7 +239,12 @@ fn violations(name: &str, source: &str, exprs: &[&str]) -> Vec<String> {
             .is_some_and(|b| exprs.iter().any(|e| b.contains(e)))
     };
     let mut found = Vec::new();
-    for open in ["Controls.Label {", "Kirigami.Heading {", "Text {"] {
+    for open in [
+        "Controls.Label {",
+        "Kirigami.Heading {",
+        "Text {",
+        "SelectableText {",
+    ] {
         for block in blocks(&code, open) {
             if shows(&text_binding(&block)) && !block.contains("textFormat: Text.PlainText") {
                 found.push(format!(
