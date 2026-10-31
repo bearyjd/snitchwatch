@@ -65,7 +65,7 @@ Kirigami.ScrollablePage {
             level: 1
             Layout.alignment: Qt.AlignVCenter
         }
-        Controls.TextField {
+        RoundedField {
             id: newProfileName
             Layout.fillWidth: true
             placeholderText: "New profile name…"
@@ -312,7 +312,7 @@ Kirigami.ScrollablePage {
             Kirigami.FormLayout {
                 Layout.fillWidth: true
 
-                Controls.TextField {
+                RoundedField {
                     id: renameField
                     Kirigami.FormData.label: "Name"
                     Accessible.name: "Profile name"
@@ -328,7 +328,7 @@ Kirigami.ScrollablePage {
                     }
                 }
 
-                Controls.TextField {
+                RoundedField {
                     id: matchersField
                     Kirigami.FormData.label: "Network matchers"
                     placeholderText: "Home*, Office-5G"

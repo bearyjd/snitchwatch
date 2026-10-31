@@ -291,7 +291,7 @@ Kirigami.ScrollablePage {
         Item {
             Layout.fillWidth: true
         }
-        Controls.Button {
+        RoundedButton {
             objectName: "analyzeButton"
             text: "Analyze rules"
             icon.name: "dialog-scripts"
@@ -299,27 +299,27 @@ Kirigami.ScrollablePage {
                                                           : !!page.model
             onClicked: page.model.analyze()
         }
-        Controls.Button {
+        RoundedButton {
             objectName: "exportRules"
             text: "Export…"
             icon.name: "document-export"
             enabled: !rulesIo.busy
             onClicked: rulesIo.requestExport()
         }
-        Controls.Button {
+        RoundedButton {
             objectName: "importRules"
             text: "Import…"
             icon.name: "document-import"
             enabled: !rulesIo.busy && !rulesIo.applying
             onClicked: importDialog.open()
         }
-        Controls.Button {
+        RoundedButton {
             objectName: "newRule"
             text: "New rule…"
             icon.name: "list-add"
             onClicked: page.openEditor("")
         }
-        Controls.Button {
+        RoundedButton {
             text: "Simulate"
             icon.name: "system-run"
             onClicked: simulateSheet.open()
@@ -639,7 +639,7 @@ Kirigami.ScrollablePage {
                             color: Kirigami.Theme.neutralTextColor
                             Layout.fillWidth: true
                         }
-                        Controls.Button {
+                        RoundedButton {
                             objectName: "shadowShow"
                             flat: true
                             text: "Show rule"
@@ -673,7 +673,7 @@ Kirigami.ScrollablePage {
 
                 // One click deletes this one rule; the hint above says what
                 // that changes. No confirmation step, no bulk variant.
-                Controls.Button {
+                RoundedButton {
                     objectName: "allAppsDelete"
                     visible: row.appliesToAllApps && row.deletable
                     text: "Delete"

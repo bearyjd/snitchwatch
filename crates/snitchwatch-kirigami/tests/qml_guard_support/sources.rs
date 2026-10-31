@@ -307,6 +307,18 @@ pub const ALL_QML: &[(&str, &str)] = &[
         include_str!("../../qml/RoundedButton.qml"),
     ),
     (
+        "RoundedFieldFrame.qml",
+        include_str!("../../qml/RoundedFieldFrame.qml"),
+    ),
+    (
+        "RoundedField.qml",
+        include_str!("../../qml/RoundedField.qml"),
+    ),
+    (
+        "RoundedTextArea.qml",
+        include_str!("../../qml/RoundedTextArea.qml"),
+    ),
+    (
         "GuardedButton.qml",
         include_str!("../../qml/GuardedButton.qml"),
     ),

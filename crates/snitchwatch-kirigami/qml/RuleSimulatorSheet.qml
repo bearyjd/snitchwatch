@@ -174,7 +174,7 @@ SizedOverlaySheet {
         Kirigami.FormLayout {
             Layout.fillWidth: true
 
-            Controls.TextField {
+            RoundedField {
                 id: simProcessPath
                 objectName: "simProcessPath"
                 Kirigami.FormData.label: "Process path"
@@ -182,7 +182,7 @@ SizedOverlaySheet {
                 placeholderText: "/usr/bin/curl"
                 Layout.fillWidth: true
             }
-            Controls.TextField {
+            RoundedField {
                 id: simHost
                 objectName: "simHost"
                 Kirigami.FormData.label: "Destination host"
@@ -222,7 +222,7 @@ SizedOverlaySheet {
             }
         }
 
-        Controls.Button {
+        RoundedButton {
             Layout.fillWidth: true
             text: advancedInputs.visible ? "Hide advanced inputs" : "Advanced inputs"
             icon.name: advancedInputs.visible ? "arrow-up" : "arrow-down"
@@ -248,7 +248,7 @@ SizedOverlaySheet {
             Kirigami.FormLayout {
                 Layout.fillWidth: true
 
-                Controls.TextArea {
+                RoundedTextArea {
                     id: simParentPaths
                     Kirigami.FormData.label: "Parent programs"
                     Accessible.name: Kirigami.FormData.label
@@ -267,21 +267,21 @@ SizedOverlaySheet {
                     Layout.fillWidth: true
                     Layout.preferredHeight: Kirigami.Units.gridUnit * 4
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simCommand
                     Kirigami.FormData.label: "Command line"
                     Accessible.name: Kirigami.FormData.label
                     placeholderText: "/usr/bin/curl -s https://github.com"
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simPid
                     Kirigami.FormData.label: "Process ID"
                     Accessible.name: Kirigami.FormData.label
                     validator: IntValidator { bottom: 0; top: 2147483647 }
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simUid
                     objectName: "simUid"
                     Kirigami.FormData.label: "User ID"
@@ -290,7 +290,7 @@ SizedOverlaySheet {
                     validator: IntValidator { bottom: 0; top: 2147483647 }
                     Layout.fillWidth: true
                 }
-                Controls.TextArea {
+                RoundedTextArea {
                     id: simEnv
                     objectName: "simEnv"
                     Kirigami.FormData.label: "Environment"
@@ -317,21 +317,21 @@ SizedOverlaySheet {
                     font: Kirigami.Theme.smallFont
                     text: "Once you type a variable here, every variable you don't list counts as unset."
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simSrcIp
                     Kirigami.FormData.label: "Source IP"
                     Accessible.name: Kirigami.FormData.label
                     placeholderText: "192.168.1.10"
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simSrcPort
                     Kirigami.FormData.label: "Source port"
                     Accessible.name: Kirigami.FormData.label
                     validator: IntValidator { bottom: 0; top: 65535 }
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simDestIp
                     objectName: "simDestIp"
                     Kirigami.FormData.label: "Destination IP"
@@ -339,14 +339,14 @@ SizedOverlaySheet {
                     placeholderText: "93.184.216.34"
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simIfaceIn
                     Kirigami.FormData.label: "Inbound interface"
                     Accessible.name: Kirigami.FormData.label
                     placeholderText: "eth0"
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simIfaceOut
                     Kirigami.FormData.label: "Outbound interface"
                     Accessible.name: Kirigami.FormData.label
@@ -363,7 +363,7 @@ SizedOverlaySheet {
                     model: ["Unknown", "Off", "On, program's MD5 below",
                             "On, program has none recorded"]
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simMd5
                     Kirigami.FormData.label: "Program MD5"
                     Accessible.name: Kirigami.FormData.label
@@ -374,7 +374,7 @@ SizedOverlaySheet {
             }
         }
 
-        Controls.Button {
+        RoundedButton {
             Layout.fillWidth: true
             text: "Run simulation"
             icon.name: "system-run"

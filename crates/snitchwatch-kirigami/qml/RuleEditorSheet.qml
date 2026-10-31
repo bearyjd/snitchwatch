@@ -191,14 +191,14 @@ SizedOverlaySheet {
             RowLayout {
                 Kirigami.FormData.label: "Name"
                 visible: !sheet.forProfile
-                Controls.TextField {
+                RoundedField {
                     objectName: "editorName"
                     Layout.fillWidth: true
                     Accessible.name: "Name"
                     text: sheet.draft.name
                     onTextEdited: sheet.update({ name: text })
                 }
-                Controls.Button {
+                RoundedButton {
                     objectName: "editorSuggestName"
                     text: "Suggest"
                     onClicked: sheet.update({
@@ -231,7 +231,7 @@ SizedOverlaySheet {
                     sheet.chooseDuration(index);
                 }
             }
-            Controls.TextField {
+            RoundedField {
                 objectName: "editorCustomDuration"
                 Kirigami.FormData.label: "Time"
                 Accessible.name: Kirigami.FormData.label
@@ -240,7 +240,7 @@ SizedOverlaySheet {
                 text: sheet.draft.duration
                 onTextEdited: sheet.update({ duration: text })
             }
-            Controls.Switch {
+            GuardedSwitch {
                 objectName: "editorEnabled"
                 Kirigami.FormData.label: "On"
                 Accessible.name: Kirigami.FormData.label
@@ -248,7 +248,7 @@ SizedOverlaySheet {
                 checked: sheet.draft.enabled
                 onToggled: sheet.update({ enabled: checked })
             }
-            Controls.TextField {
+            RoundedField {
                 objectName: "editorDescription"
                 Kirigami.FormData.label: "Description"
                 Accessible.name: Kirigami.FormData.label
@@ -282,6 +282,9 @@ SizedOverlaySheet {
                     Layout.fillWidth: true
                     Controls.ComboBox {
                         objectName: "editorOperand"
+                        // As tall as the 44 px value field beside it, so the row
+                        // stays one line of controls with the same tops.
+                        Layout.preferredHeight: Theme.hitMin
                         Accessible.name: "Condition " + (conditionRow.index + 1) + ": " + displayText
                         model: sheet.catalogue.operands.map(function (o) {
                             return o.group + ": " + o.label;
@@ -295,6 +298,9 @@ SizedOverlaySheet {
                     }
                     Controls.ComboBox {
                         objectName: "editorKind"
+                        // As tall as the 44 px value field beside it, so the row
+                        // stays one line of controls with the same tops.
+                        Layout.preferredHeight: Theme.hitMin
                         Accessible.name: "Condition " + (conditionRow.index + 1) + " matches: " + displayText
                         model: conditionRow.info.kinds.map(function (k) { return sheet.kindLabels[k]; })
                         currentIndex: conditionRow.info.kinds.indexOf(conditionRow.condition.kind)
@@ -302,14 +308,14 @@ SizedOverlaySheet {
                             sheet.setCondition(conditionRow.index, { kind: conditionRow.info.kinds[i] });
                         }
                     }
-                    Controls.TextField {
+                    RoundedField {
                         objectName: "editorValue"
                         Layout.fillWidth: true
                         Accessible.name: "Condition " + (conditionRow.index + 1) + " value"
                         text: conditionRow.condition.value || ""
                         onTextEdited: sheet.setCondition(conditionRow.index, { value: text })
                     }
-                    Controls.Button {
+                    RoundedButton {
                         objectName: "editorRemoveCondition"
                         icon.name: "list-remove"
                         text: "Remove"
@@ -344,14 +350,14 @@ SizedOverlaySheet {
             }
         }
 
-        Controls.Button {
+        RoundedButton {
             objectName: "editorAddCondition"
             text: "Add condition"
             icon.name: "list-add"
             onClicked: sheet.addCondition()
         }
 
-        Controls.Button {
+        RoundedButton {
             objectName: "editorShowAdvanced"
             visible: !sheet.forProfile
             flat: true
@@ -361,14 +367,14 @@ SizedOverlaySheet {
         Kirigami.FormLayout {
             Layout.fillWidth: true
             visible: sheet.showAdvanced && !sheet.forProfile
-            Controls.Switch {
+            GuardedSwitch {
                 objectName: "editorPrecedence"
                 Kirigami.FormData.label: "Decide first"
                 Accessible.name: Kirigami.FormData.label
                 checked: sheet.draft.precedence
                 onToggled: sheet.update({ precedence: checked })
             }
-            Controls.Switch {
+            GuardedSwitch {
                 objectName: "editorNolog"
                 Kirigami.FormData.label: "Don't log"
                 Accessible.name: Kirigami.FormData.label
@@ -438,13 +444,13 @@ SizedOverlaySheet {
         RowLayout {
             Layout.fillWidth: true
             spacing: Kirigami.Units.largeSpacing
-            Controls.Button {
+            RoundedButton {
                 objectName: "editorCancel"
                 Layout.fillWidth: true
                 text: "Cancel"
                 onClicked: sheet.close()
             }
-            Controls.Button {
+            RoundedButton {
                 objectName: "editorSave"
                 Layout.fillWidth: true
                 enabled: !!sheet.controller && !sheet.controller.busy

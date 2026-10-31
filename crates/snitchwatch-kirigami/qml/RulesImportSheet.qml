@@ -266,7 +266,7 @@ SizedOverlaySheet {
             delegate: plainRow
         }
 
-        Controls.Button {
+        RoundedButton {
             objectName: "importShowUnchanged"
             visible: sheet.preview.unchanged.length > 0
             flat: true
@@ -310,7 +310,7 @@ SizedOverlaySheet {
             wrapMode: Text.Wrap
         }
 
-        Controls.Button {
+        RoundedButton {
             objectName: "importApply"
             Layout.fillWidth: true
             visible: !sheet.controller || !sheet.controller.applied
