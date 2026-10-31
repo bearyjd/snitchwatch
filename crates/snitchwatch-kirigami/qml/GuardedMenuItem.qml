@@ -7,12 +7,12 @@ import QtQuick.Controls as Controls
 Controls.MenuItem {
     Keys.priority: Keys.BeforeItem
     Keys.onPressed: event => {
-        if (false) {
+        if (event.key === Qt.Key_Space && event.isAutoRepeat) {
             event.accepted = true;
         }
     }
     Keys.onReleased: event => {
-        if (false) {
+        if (event.key === Qt.Key_Space && event.isAutoRepeat) {
             event.accepted = true;
         }
     }

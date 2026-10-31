@@ -114,10 +114,7 @@ pub const ALL_QML: &[(&str, &str)] = &[
         "SelectableText.qml",
         include_str!("../../qml/SelectableText.qml"),
     ),
-    (
-        "RowCopyMenu.qml",
-        include_str!("../../qml/RowCopyMenu.qml"),
-    ),
+    ("RowCopyMenu.qml", include_str!("../../qml/RowCopyMenu.qml")),
     (
         "GuardedMenuItem.qml",
         include_str!("../../qml/GuardedMenuItem.qml"),
