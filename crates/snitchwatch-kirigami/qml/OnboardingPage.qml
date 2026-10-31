@@ -98,7 +98,7 @@ Kirigami.Page {
             }
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             horizontalAlignment: Text.AlignHCenter
@@ -108,7 +108,7 @@ Kirigami.Page {
             text: page.controller ? page.controller.detail : ""
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             horizontalAlignment: Text.AlignHCenter
@@ -119,7 +119,7 @@ Kirigami.Page {
                   "opensnitch), or use the bluebuild batteries-included image instead."
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             horizontalAlignment: Text.AlignHCenter

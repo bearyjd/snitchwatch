@@ -49,7 +49,7 @@ ColumnLayout {
                 checked: step.selected === modelData.token
                 onClicked: step.selected = modelData.token
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Kirigami.Units.gridUnit * 2
                 wrapMode: Text.Wrap
@@ -83,7 +83,7 @@ ColumnLayout {
         }
     }
 
-    Controls.Label {
+    SelectableText {
         objectName: "notRunningNote"
         Layout.fillWidth: true
         wrapMode: Text.Wrap

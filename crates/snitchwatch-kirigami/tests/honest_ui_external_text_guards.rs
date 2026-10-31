@@ -279,8 +279,10 @@ fn external_text_is_shown_in_plain_text_labels() {
     for (name, source, exprs, min_checked) in PAGES {
         let bad = violations(name, source, exprs);
         assert!(bad.is_empty(), "{}", bad.join("\n"));
-        let checked = blocks(&code_lines(source), "Controls.Label {")
+        let code = code_lines(source);
+        let checked = ["Controls.Label {", "SelectableText {"]
             .iter()
+            .flat_map(|open| blocks(&code, open))
             .filter(|block| {
                 text_binding(block).is_some_and(|b| exprs.iter().any(|e| b.contains(e)))
             })

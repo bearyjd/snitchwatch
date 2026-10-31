@@ -100,7 +100,7 @@ ColumnLayout {
             anchors.margins: Kirigami.Units.smallSpacing
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Label {
+            SelectableText {
                 id: summaryLabel
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
@@ -108,7 +108,7 @@ ColumnLayout {
                 text: "Ends in " + banner.timeLeft + ". " + banner.programs
                     + (banner.programs === 1 ? " program" : " programs") + " seen."
             }
-            Controls.Label {
+            SelectableText {
                 id: incompleteLabel
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
@@ -116,7 +116,7 @@ ColumnLayout {
                 visible: banner.settings !== null && banner.settings.learningIncomplete === true
                 text: "Some connections were missed under heavy load, so this record is not complete."
             }
-            Controls.Label {
+            SelectableText {
                 id: droppedLabel
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
@@ -127,7 +127,7 @@ ColumnLayout {
                         ? " program was not recorded or was dropped to stay within the limits."
                         : " programs were not recorded or were dropped to stay within the limits.")
             }
-            Controls.Label {
+            SelectableText {
                 id: noticeLabel
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
@@ -135,7 +135,7 @@ ColumnLayout {
                 visible: banner.settings !== null && banner.settings.learnedNotice !== ""
                 text: banner.settings !== null ? banner.settings.learnedNotice : ""
             }
-            Controls.Label {
+            SelectableText {
                 id: whereLabel
                 Layout.fillWidth: true
                 wrapMode: Text.WrapAnywhere
