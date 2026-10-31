@@ -39,4 +39,29 @@ QtObject {
         default: return partial;
         }
     }
+
+    // Rounded, iOS / Little Snitch 6 style tokens (docs/superpowers/plans/
+    // 2026-10-30-rounded-ios-style.md). Radii, sizes and opacities only:
+    // colours are read from each control's own palette, never fixed here.
+    readonly property int radiusSmall: 6
+    readonly property int radiusMedium: 10
+    readonly property int radiusLarge: 14
+    // Qt clamps a Rectangle radius to half its shorter side: a capsule.
+    readonly property int radiusPill: 999
+    // The least height (and, for icon-only buttons, width) of anything the
+    // user can click or tap; the visible control is this size too.
+    readonly property int hitMin: Math.max(44, Kirigami.Units.gridUnit * 2.5)
+    readonly property int controlPaddingH: Kirigami.Units.largeSpacing * 2
+    readonly property int borderWidth: 1
+    readonly property int separatorWidth: 1
+    readonly property int focusRingWidth: 2
+    readonly property real fillOpacity: 0.08
+    readonly property real borderOpacity: 0.18
+    readonly property real hoverOpacity: 0.08
+    readonly property real pressedOpacity: 0.16
+    readonly property real disabledOpacity: 0.4
+    // iOS switch proportions.
+    readonly property int switchTrackWidth: 51
+    readonly property int switchTrackHeight: 31
+    readonly property int switchKnob: 27
 }

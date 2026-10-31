@@ -7,9 +7,8 @@
 // sets `returnActivates` (the learning banner's Stop learning and Review) is
 // also clicked by a fresh Return or Enter press; an auto-repeated one never.
 import QtQuick
-import QtQuick.Controls as Controls
 
-Controls.Button {
+RoundedButton {
     id: button
     property bool returnActivates: false
     Keys.priority: Keys.BeforeItem

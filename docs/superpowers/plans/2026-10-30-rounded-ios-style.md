@@ -125,7 +125,7 @@ batch C.
 ## 5. Rollout (no two batches touch the same files)
 
 - **PR A (this PR):** `Theme` tokens, `RoundedSurface`, `RoundedButton`, the
-  four Guarded wrappers, probe + source guard, pilot pages **About** and
+  four Guarded wrappers, probe + source guard, pilot pages **About** (in-place restyle of its plain button) and
   **Silent-mode choice** (uses Guarded radio + buttons), screenshot runner
   entries.
 - **B:** `SegmentedChoice`, alert window and `PendingDecisionSheet` buttons.
@@ -143,6 +143,16 @@ keyboard tests unchanged, screenshots attached, `just check` + kirigami tests.
 - Breeze vs Basic: geometry is verified; the look on Plasma is not (owner).
 - Taller/wider controls can truncate text in tight `RowLayout`s: probe asserts
   `width >= implicitWidth`; narrow-window tests stay as the guard.
+- **Type-name coupling (found in PR A):** `tests/drawer_keyboard_qml.rs` (and
+  probably its siblings) assert the QML *type name* of the focused control
+  (`Button`). Swapping a plain `Controls.Button` for `RoundedButton` renames it,
+  which fails those unchanged keyboard tests. PR A therefore restyles the About
+  copy button in place (`implicitHeight`, `horizontalPadding`, `background:
+  RoundedSurface`), and the site-swap batches must either do the same or update
+  the expected names in the probes in the same batch (a mechanical, reviewable
+  edit). `GuardedButton` keeps its own type name.
+- `honest_ui_qml_guards` keeps an explicit list of every QML file
+  (`tests/qml_guard_support/sources.rs`): each new component adds an entry.
 - Wrapper `GuardedButton` is documented for irreversible actions; plain
   buttons get `RoundedButton`, **not** `GuardedButton`, so no held-key
   semantics change silently.

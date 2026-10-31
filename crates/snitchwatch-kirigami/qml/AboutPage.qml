@@ -98,7 +98,13 @@ Kirigami.ScrollablePage {
         RowLayout {
             spacing: Kirigami.Units.largeSpacing
             Controls.Button {
+                id: copyButton
                 objectName: "aboutCopyButton"
+                // Restyled in place, not swapped for `RoundedButton`: the drawer
+                // keyboard probe asserts this control's QML type name (`Button`).
+                implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+                horizontalPadding: Theme.controlPaddingH
+                background: RoundedSurface { control: copyButton }
                 text: "Copy version info"
                 icon.name: "edit-copy"
                 Accessible.name: "Copy version info"
