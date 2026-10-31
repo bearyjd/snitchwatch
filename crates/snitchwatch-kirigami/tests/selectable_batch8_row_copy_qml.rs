@@ -59,6 +59,7 @@ Window {
 
     function clip() { sink.text = ""; sink.paste(); return sink.text; }
     function setClip(s) { sink.text = s; sink.selectAll(); sink.copy(); }
+    readonly property string longPath: "/opt/" + "d".repeat(150) + "/" + "e".repeat(150) + "/claude/versions/2.1.3"
     function row(id, process, path, host, action, at) {
         return { id: id, process: process, processPath: path, dstHost: host,
                  dstIp: "93.184.216.34", dstPort: 443, protocol: "tcp", direction: "outgoing",
@@ -96,16 +97,14 @@ Window {
     }
     // The copy as the menu captures it when it opens on `d`.
     function copyOf(d) { return probe.actions.snapshot(d).rowText; }
-    // The copy holds every shown text, full length (the path tail beside an
-    // unverified label stands for the full path, which the copy holds).
+    // The copy holds every shown text, full length, the path tail included.
     function expectHoldsShown(d, what, atLeast) {
         const text = probe.copyOf(d);
         const shown = probe.shownTexts(d, []);
         probe.expect(shown.length >= atLeast, what + ": only " + shown.length + " shown texts found: "
                      + JSON.stringify(shown));
         for (const s of shown) {
-            const want = s === d.programPathTail && d.programLabelUnverified ? d.programPathFull : s;
-            probe.expect(text.indexOf(want) >= 0, what + ": copy lacks shown '" + want + "': " + JSON.stringify(text));
+            probe.expect(text.indexOf(s) >= 0, what + ": copy lacks shown '" + s + "': " + JSON.stringify(text));
         }
         probe.expect(text !== "" && text.indexOf("\n\n") < 0 && !text.endsWith("\n"),
                      what + ": empty or blank lines: " + JSON.stringify(text));
@@ -137,7 +136,7 @@ Window {
                 probe.row("event-1", "curl", "/usr/bin/curl", "deny.example", "deny", probe.t0 + 2000),
                 probe.row("event-2", "curl", "/usr/bin/curl", "deny.example", "deny", probe.t0 + 3000),
                 probe.row("event-3", "curl", "/usr/bin/curl", "deny.example", "deny", probe.t0 + 4000),
-                probe.row("ver-1", "claude", "/opt/claude/versions/2.1.3", "v.example", "allow", probe.t0 + 5000)] }));
+                probe.row("ver-1", "claude", probe.longPath, "v.example", "allow", probe.t0 + 5000)] }));
             model.holdBackNoticesForTests("/usr/bin/python3", "example.com", 3, 3600);
         });
         probe.step("leaf copies hold every shown text", () => {
@@ -166,8 +165,13 @@ Window {
             const unverified = probe.delegateFor("ver-1");
             probe.expect(unverified.programLabelUnverified, "fixture: label is verified");
             const verText = probe.expectHoldsShown(unverified, "unverified", 5);
-            probe.inOrder(verText, [unverified.programLabel + " ?", "/opt/claude/versions/2.1.3", "v.example:443  tcp"],
-                          "unverified");
+            const tail = probe.shownTexts(unverified, []).filter(t => t === unverified.programPathTail);
+            probe.expect(tail.length === 1 && tail[0].endsWith("/versions/2.1.3"),
+                         "fixture: visible tail " + JSON.stringify(tail));
+            probe.expect(unverified.programPathFull.length <= 300 && unverified.programPathFull.indexOf("2.1.3") < 0,
+                         "fixture: full path not capped short of the tail: " + unverified.programPathFull.length);
+            probe.inOrder(verText, [unverified.programLabel + " ?", tail[0], "v.example:443  tcp"], "unverified");
+            probe.expect(verText.split("\n").indexOf(unverified.programPathFull) >= 0, "no fuller path line: " + verText);
         });
         probe.step("a real right-click copies the row", () => {
             const d = probe.delegateFor("ask-2");

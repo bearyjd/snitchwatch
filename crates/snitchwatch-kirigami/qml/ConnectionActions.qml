@@ -57,10 +57,14 @@ Item {
         return row.groupTotal + " connection" + (row.groupTotal === 1 ? "" : "s");
     }
     // Every text the row shows, in order and full length (the host line is
-    // elided on screen; an unverified label's path tail stands for the path).
+    // elided on screen; an unverified label also gets its fuller path).
     function rowText(row) {
         const label = row.programLabel + (row.programLabelUnverified ? " ?" : "");
-        const path = row.programLabelUnverified ? [row.programPathFull] : [];
+        // The fuller path first, then the tail exactly as shown (the full path
+        // is capped, so it can lack the tail's trailing components).
+        const path = !row.programLabelUnverified ? []
+            : row.programPathFull === row.programPathTail ? [row.programPathTail]
+            : [row.programPathFull, row.programPathTail];
         const lines = row.isGroupHeader
             ? [label].concat(path, [actions.totalText(row)],
                 row.groupPending > 0 ? [row.groupPending + " pending"] : [], [row.verdictCountsItem.summary])
