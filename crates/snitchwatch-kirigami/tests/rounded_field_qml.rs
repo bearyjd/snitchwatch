@@ -125,24 +125,50 @@ Window {
         LayoutMirroring.enabled: true
         LayoutMirroring.childrenInherit: true
         RoundedField { id: rtlField; width: 300; text: "\u0645\u0631\u062d\u0628\u0627"; Accessible.name: "Mirrored field" }
+        RoundedTextArea { id: rtlArea; y: 50; width: 200; wrapMode: TextEdit.Wrap; Accessible.name: "Mirrored area"
+            text: "\u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645 \u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645 \u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645 \u0645\u0631\u062d\u0628\u0627 \u0628\u0627\u0644\u0639\u0627\u0644\u0645" }
+    }
+    Item {
+        id: ltr
+        y: 450; x: 400; width: 250; height: 150
+        LayoutMirroring.enabled: false
+        LayoutMirroring.childrenInherit: true
+        RoundedTextArea { id: ltrArea; width: 200; wrapMode: TextEdit.Wrap; Accessible.name: "LTR area"
+            text: "The quick brown fox jumps over the lazy dog and keeps running across the field" }
+    }
+
+    function areaFacts(a) {
+        let minX = 1e9, maxX = -1e9;
+        for (let i = 0; i <= a.text.length; ++i) {
+            const r = a.positionToRectangle(i);
+            minX = Math.min(minX, r.x); maxX = Math.max(maxX, r.x);
+        }
+        return { token: Theme.spacingMedium, mirrored: a.LayoutMirroring.enabled, w: a.width, h: a.height, left: a.leftPadding,
+                 right: a.rightPadding, minX: minX, maxX: maxX, lines: a.lineCount,
+                 contentW: a.contentWidth, contentH: a.contentHeight,
+                 top: a.topPadding, bottom: a.bottomPadding, code0: a.text.charCodeAt(0),
+                 bodyW: a.background.body.width, bodyX: a.background.body.x };
     }
 
     function report() {
         try {
             const sized = {};
             for (const [k, c] of Object.entries({ field: field, empty: empty, dark: dark, area: area,
-                                                  compact: compact, compactArea: compactArea })) {
+                                                  compact: compact, compactArea: compactArea,
+                                                  rtlArea: rtlArea, ltrArea: ltrArea })) {
                 sized[k] = { h: c.height, ih: c.implicitHeight, w: c.width, iw: c.implicitWidth };
             }
             const r0 = rtlField.positionToRectangle(0);
             const r1 = rtlField.positionToRectangle(rtlField.text.length);
             console.warn("ROUNDED_FIELD_RESULT " + JSON.stringify({
                 hitMin: Theme.hitMin, sized: sized,
-                focus: { field: focusFacts(field), dark: focusFacts(dark), area: focusFacts(area) },
-                tabStops: { field: tabStops(field), area: tabStops(area), rtl: tabStops(rtlField) },
+                focus: { field: focusFacts(field), dark: focusFacts(dark), area: focusFacts(area),
+                         rtlArea: focusFacts(rtlArea), ltrArea: focusFacts(ltrArea) },
+                tabStops: { field: tabStops(field), area: tabStops(area), rtlArea: tabStops(rtlArea), ltrArea: tabStops(ltrArea), rtl: tabStops(rtlField) },
                 rtl: { code0: rtlField.text.charCodeAt(0), mirrored: rtlField.LayoutMirroring.enabled, w: rtlField.width, left: rtlField.leftPadding,
                        right: rtlField.rightPadding, x0: r0.x, x1: r1.x,
                        bodyW: rtlField.background.body.width, bodyX: rtlField.background.body.x },
+                areas: { rtl: areaFacts(rtlArea), ltr: areaFacts(ltrArea) },
                 dark: { highlight: dark.palette.highlight.toString(), base: dark.palette.base.toString() }
             }));
         } catch (e) {
@@ -250,4 +276,37 @@ fn rounded_fields_hit_box_focus_ring_tab_stops_and_mirroring() {
         (num(&r["bodyW"], &line) - w).abs() < 0.5 && num(&r["bodyX"], &line).abs() < 0.5,
         "frame does not cover the mirrored field: {line}"
     );
+
+    // Multi-line area, mirrored and not: symmetric padding at least the token,
+    // wrapped text inside the padding, a hit-high control, a frame over all of it.
+    for (name, rtl) in [("ltr", false), ("rtl", true)] {
+        let a = &v["areas"][name];
+        assert_eq!(a["mirrored"], rtl, "{name} area mirroring: {line}");
+        if rtl {
+            assert_eq!(a["code0"], 0x0645, "the mirrored area is not Arabic text: {line}");
+        }
+        let (w, l, rp) = (num(&a["w"], &line), num(&a["left"], &line), num(&a["right"], &line));
+        assert!((l - rp).abs() < 0.01, "{name} area padding not symmetric: {line}");
+        let tok = num(&a["token"], &line);
+        assert!(tok > 0.0 && l >= tok && rp >= tok, "{name} area padding under the token: {line}");
+        assert!(num(&a["lines"], &line) > 1.0, "{name} area text did not wrap: {line}");
+        assert!(
+            num(&a["contentW"], &line) <= w - l - rp + 0.5,
+            "{name} area content wider than the padded box: {line}"
+        );
+        assert!(
+            num(&a["minX"], &line) >= l - 0.5 && num(&a["maxX"], &line) <= w - rp + 0.5,
+            "{name} area text outside the padding: {line}"
+        );
+        let h = num(&a["h"], &line);
+        assert!(h >= hit, "{name} area under Theme.hitMin high: {line}");
+        assert!(
+            h >= num(&a["contentH"], &line) + num(&a["top"], &line) + num(&a["bottom"], &line) - 0.5,
+            "{name} area text taller than the box: {line}"
+        );
+        assert!(
+            (num(&a["bodyW"], &line) - w).abs() < 0.5 && num(&a["bodyX"], &line).abs() < 0.5,
+            "{name} area frame does not cover it: {line}"
+        );
+    }
 }
