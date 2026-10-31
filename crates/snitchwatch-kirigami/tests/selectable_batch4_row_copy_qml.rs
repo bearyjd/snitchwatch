@@ -71,6 +71,17 @@ Window {
         out.sort((a, b) => a.y - b.y || a.x - b.x);
         return out.map(o => o.text);
     }
+    // The visible Labels under `root` in the order they are drawn (item tree order).
+    function shownInOrder(root) {
+        const out = [];
+        function visit(it) {
+            if (it instanceof Controls.Label && it.visible && it.text.length > 0) out.push(it.text);
+            const kids = it.children || [];
+            for (let i = 0; i < kids.length; ++i) visit(kids[i]);
+        }
+        visit(root);
+        return out;
+    }
     function sameAsShown(row, h, what) {
         const want = probe.shown(row);
         probe.expect(want.length >= 3, what + ": too few visible texts " + JSON.stringify(want));
@@ -165,10 +176,18 @@ Window {
         probe.step("profiles: row and rule row", null, function () {
             probe.ran++;
             const l = probe.profList();
-            const home = probe.handlerOf(l.itemAtIndex(0)).copyText;
-            probe.expect(home === "Home (active)\nHome*, Office", "home copy " + JSON.stringify(home));
-            const work = probe.handlerOf(l.itemAtIndex(1)).copyText;
-            probe.expect(work === "Work\nNo network matchers (manual activation only)", "work copy " + JSON.stringify(work));
+            const homeRow = l.itemAtIndex(0);
+            const home = probe.shownInOrder(homeRow);
+            probe.expect(home.length === 4 && home[0] === "\u25cf" && home[3] === "Active",
+                         "active profile row shows " + JSON.stringify(home));
+            probe.expect(probe.handlerOf(homeRow).copyText === home.join("\n"),
+                         "home copy " + JSON.stringify(probe.handlerOf(homeRow).copyText) + " != shown " + JSON.stringify(home));
+            const workRow = l.itemAtIndex(1);
+            const work = probe.shownInOrder(workRow);
+            probe.expect(work.length === 3 && work[0] === "\u25cb",
+                         "inactive profile row shows " + JSON.stringify(work));
+            probe.expect(probe.handlerOf(workRow).copyText === work.join("\n"),
+                         "work copy " + JSON.stringify(probe.handlerOf(workRow).copyText) + " != shown " + JSON.stringify(work));
             prof.inspectorSheet.enter = null;
             prof.inspectorSheet.exit = null;
             prof.openInspector({ profileId: "home", name: "Home", networkMatchers: "Home*, Office", isActive: true });
@@ -178,8 +197,10 @@ Window {
             const h = probe.handlerOf(cond.parent);
             probe.expect(h !== null, "the rule row has no RowCopyMenu");
             probe.expect(act.text.length > 0 && cond.text.length > 0, "empty rule texts");
-            probe.expect(h.copyText === act.text + " " + cond.text,
-                         "rule copy " + JSON.stringify(h.copyText) + " != " + JSON.stringify(act.text + " " + cond.text));
+            const ruleShown = probe.shownInOrder(cond.parent);
+            probe.expect(ruleShown.length === 2, "rule row shows " + JSON.stringify(ruleShown));
+            probe.expect(h.copyText === ruleShown.join(" "),
+                         "rule copy " + JSON.stringify(h.copyText) + " != shown " + JSON.stringify(ruleShown));
         });
         // Last: every step above really ran (a skipped step must not pass).
         probe.step("steps executed == " + probe.expectedSteps, null, function () {

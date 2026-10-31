@@ -189,6 +189,12 @@ Kirigami.ScrollablePage {
             required property string networkMatchers
             required property bool isActive
 
+            // The texts the row draws, shared by its Labels and its Copy.
+            readonly property string dotText: row.isActive ? "●" : "○"
+            readonly property string matchersText: row.networkMatchers.length > 0
+                ? row.networkMatchers : "No network matchers (manual activation only)"
+            readonly property string activeText: "Active"
+
             onClicked: {
                 list.currentIndex = row.index;
                 page.openInspector(row);
@@ -196,14 +202,15 @@ Kirigami.ScrollablePage {
 
             // Right-click Copy of the row's text (mouse only; selectable-text plan, class C).
             RowCopyMenu {
-                copyText: row.Accessible.name + "\n" + row.Accessible.description
+                copyText: [row.dotText, row.name, row.matchersText]
+                    .concat(row.isActive ? [row.activeText] : []).join("\n")
             }
 
             contentItem: RowLayout {
                 spacing: Kirigami.Units.largeSpacing
 
                 Controls.Label {
-                    text: row.isActive ? "●" : "○"
+                    text: row.dotText
                     color: row.isActive ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.disabledTextColor
                     Layout.alignment: Qt.AlignVCenter
                 }
@@ -220,7 +227,7 @@ Kirigami.ScrollablePage {
                     }
                     Controls.Label {
                         textFormat: Text.PlainText
-                        text: row.networkMatchers.length > 0 ? row.networkMatchers : "No network matchers (manual activation only)"
+                        text: row.matchersText
                         opacity: 0.7
                         font: Kirigami.Theme.smallFont
                         elide: Text.ElideMiddle
@@ -230,7 +237,7 @@ Kirigami.ScrollablePage {
 
                 Controls.Label {
                     visible: row.isActive
-                    text: "Active"
+                    text: row.activeText
                     color: Kirigami.Theme.positiveTextColor
                     Layout.alignment: Qt.AlignVCenter
                 }

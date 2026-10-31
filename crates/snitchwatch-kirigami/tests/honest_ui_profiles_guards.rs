@@ -128,6 +128,7 @@ fn profiles_page_labels_showing_profile_data_are_plain_text() {
         &[
             "row.name",
             "row.networkMatchers",
+            "row.matchersText",
             "page.storageReason",
             "page.notAppliedReason",
             "page.profileNote",

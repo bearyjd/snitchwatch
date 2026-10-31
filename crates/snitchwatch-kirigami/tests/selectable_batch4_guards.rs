@@ -23,10 +23,10 @@ const FILES: &[(&str, &str, usize, &[&str])] = &[
             // The page title in the title area (the PageRow header is not converted).
             "text: page.title",
             // The profile row is clickable and elided: its Labels stay, the row has the menu.
-            "row.isActive ? \"●\" : \"○\"",
+            "text: row.dotText",
             "text: row.name",
-            "row.networkMatchers.length > 0 ? row.networkMatchers : \"No network",
-            "text: \"Active\"",
+            "text: row.matchersText",
+            "text: row.activeText",
             // A rule's action and conditions (elided) share one RowCopyMenu.
             "profileRuleAction",
             "profileRuleConditions",
@@ -90,7 +90,7 @@ const COPY_TOKENS: &[(&str, &[&[&str]])] = &[
     (
         "ProfilesPage.qml",
         &[
-            &["row.Accessible.name", "row.Accessible.description"],
+            &["row.dotText", "row.name", "row.matchersText", "row.activeText"],
             &["ruleRow.modelData.action", "ruleRow.modelData.conditions"],
         ],
     ),
