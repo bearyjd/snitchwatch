@@ -69,6 +69,17 @@ fn status_summary(checks: &[DiagnosticCheck]) -> String {
     }
 }
 
+/// Milliseconds since the first health report was handled: a monotonic stamp
+/// for the `snitchwatch_kirigami::health` log lines, so an owner can send log
+/// lines instead of catching a few-ms flash by eye.
+fn monotonic_ms() -> u128 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis()
+}
+
 #[cxx_qt::bridge]
 pub mod qobject {
     unsafe extern "C++" {
@@ -147,10 +158,29 @@ impl qobject::DaemonHealthModel {
             return;
         };
         let mut this = self;
-        this.as_mut().set_has_problem(has_problem(&checks));
-        this.as_mut().set_daemon_down(daemon_down(&checks));
-        this.as_mut()
-            .set_status_summary(QString::from(&status_summary(&checks)));
+        let (problem, down, summary) = (
+            has_problem(&checks),
+            daemon_down(&checks),
+            status_summary(&checks),
+        );
+        // Summary strings are fixed sentences (never check detail), so this
+        // is safe to log.
+        if *this.has_problem() != problem
+            || *this.daemon_down() != down
+            || this.status_summary().to_string() != summary
+        {
+            tracing::debug!(
+                target: "snitchwatch_kirigami::health",
+                t_ms = %monotonic_ms(),
+                "health changed: hasProblem {} -> {problem}, daemonDown {} -> {down}, summary {:?} -> {summary:?}",
+                this.has_problem(),
+                this.daemon_down(),
+                this.status_summary().to_string(),
+            );
+        }
+        this.as_mut().set_has_problem(problem);
+        this.as_mut().set_daemon_down(down);
+        this.as_mut().set_status_summary(QString::from(&summary));
         this.as_mut()
             .set_troubleshooting_text(QString::from(&troubleshooting_text(&checks)));
     }
