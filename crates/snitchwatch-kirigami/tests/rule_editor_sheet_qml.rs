@@ -173,7 +173,8 @@ Window {
                 // carry none (Kirigami's own form labels are fixed text).
                 let markup = 0;
                 for (const node of probeWindow.all(sheet.contentItem, [])) {
-                    if (node instanceof Controls.Label && node.text.indexOf("<b>") >= 0) {
+                    if ((node instanceof Controls.Label || node instanceof SelectableText)
+                        && node.text.indexOf("<b>") >= 0) {
                         markup += 1;
                         probeWindow.expect(node.textFormat === Text.PlainText,
                             "markup rendered as rich text: " + node.text);

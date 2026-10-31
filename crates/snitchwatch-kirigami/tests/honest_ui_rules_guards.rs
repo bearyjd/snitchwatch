@@ -208,7 +208,8 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
 #[test]
 fn import_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
     let code = code_lines(IMPORT_SHEET);
-    let labels = blocks(&code, "Controls.Label {");
+    let mut labels = blocks(&code, "Controls.Label {");
+    labels.extend(blocks(&code, "SelectableText {"));
     assert!(labels.len() >= 12, "found {} labels", labels.len());
     for block in &labels {
         assert!(
@@ -232,7 +233,8 @@ fn import_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
 #[test]
 fn editor_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
     let code = code_lines(EDITOR_SHEET);
-    let labels = blocks(&code, "Controls.Label {");
+    let mut labels = blocks(&code, "Controls.Label {");
+    labels.extend(blocks(&code, "SelectableText {"));
     assert!(labels.len() >= 8, "found {} labels", labels.len());
     for block in &labels {
         assert!(
