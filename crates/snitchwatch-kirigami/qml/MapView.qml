@@ -364,7 +364,7 @@ Item {
         anchors.centerIn: parent
         width: Math.min(parent.width - Kirigami.Units.largeSpacing * 2, Kirigami.Units.gridUnit * 30)
         spacing: Kirigami.Units.smallSpacing
-        Controls.Label {
+        SelectableText {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
             font.bold: true
@@ -375,7 +375,7 @@ Item {
                 : hierarchy.available && hierarchy.snapshot.observedConnections>0 ? "No coordinates for these destinations"
                 : (view.geoModel ? "No destinations to place yet" : "No map data")
         }
-        Controls.Label {
+        SelectableText {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
             textFormat: Text.PlainText

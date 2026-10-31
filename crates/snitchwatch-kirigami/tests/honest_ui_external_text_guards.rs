@@ -44,26 +44,26 @@ const PAGES: &[(&str, &str, &[&str], usize)] = &[
         "DaemonHealthPage.qml",
         include_str!("../qml/DaemonHealthPage.qml"),
         &["troubleshootingText"],
-        1,
+        0,
     ),
     (
         // The tower helper's blocker lines; the commands are fixed text.
         "DenyStatusSection.qml",
         include_str!("../qml/DenyStatusSection.qml"),
         &["blockersText", "modelData"],
-        2,
+        0,
     ),
     (
         "DiagnosticsPage.qml",
         include_str!("../qml/DiagnosticsPage.qml"),
         &["autostartError", "coexistenceDetail"],
-        2,
+        0,
     ),
     (
         "ScannerPage.qml",
         include_str!("../qml/ScannerPage.qml"),
         &["modelData.path", "errorText"],
-        2,
+        0,
     ),
     (
         "OnboardingPage.qml",
@@ -147,7 +147,7 @@ const PAGES: &[(&str, &str, &[&str], usize)] = &[
         "GeoDatabaseSettings.qml",
         include_str!("../qml/GeoDatabaseSettings.qml"),
         &["dbPath", "dbSource", "dbInstallPath", "dbInstallError"],
-        4,
+        0,
     ),
 ];
 

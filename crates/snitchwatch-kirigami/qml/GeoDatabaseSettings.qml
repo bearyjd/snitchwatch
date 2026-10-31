@@ -19,16 +19,17 @@ ColumnLayout {
             + " (UTC). Bundled data updates with Snitchwatch releases.";
     }
 
-    Kirigami.Heading {
+    SelectableText {
+        wrapMode: Text.NoWrap
         level: 3
         text: "GeoIP database"
     }
-    Controls.Label {
+    SelectableText {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         text: "Country data is bundled. Optional DB-IP City Lite adds approximate city estimates without an account. Download the City Lite archive in your browser, decompress it, then import the extracted .mmdb file below. No background download is performed. MaxMind Country and City databases are also supported."
     }
-    Controls.Label {
+    SelectableText {
         objectName: "geoDatabaseCapability"
         Layout.fillWidth: true
         wrapMode: Text.Wrap
@@ -36,34 +37,39 @@ ColumnLayout {
             ? "City-capable database active. Locations are approximate database estimates; several IPs may share one position. A city may be unavailable for some IPs."
             : "Country data active. Install optional City data for approximate city estimates."
     }
-    Controls.Label {
+    SelectableText {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         text: "IP Geolocation by DB-IP (https://db-ip.com), CC BY 4.0. Lite data has reduced accuracy and coverage. Imports are stored privately beside the fallback paths below. Importing selects that dataset after restart; Country data remains the fallback."
     }
-    Controls.Label {
+    SelectableText {
+        wrapMode: Text.NoWrap
         text: "Manual Country fallback location"
     }
-    Controls.Label {
+    SelectableText {
         objectName: "geoDatabasePath"
         Layout.fillWidth: true
         wrapMode: Text.WrapAnywhere
         textFormat: Text.PlainText
         text: settings.model ? settings.model.dbInstallPath : ""
     }
-    Controls.Label { text: "Manual City fallback location" }
-    Controls.Label {
+    SelectableText {
+        wrapMode: Text.NoWrap
+        text: "Manual City fallback location"
+    }
+    SelectableText {
         objectName: "geoCityDatabasePath"
         Layout.fillWidth: true
         wrapMode: Text.WrapAnywhere
         textFormat: Text.PlainText
         text: settings.model ? settings.model.dbCityInstallPath : ""
     }
-    Controls.Label {
+    SelectableText {
+        wrapMode: Text.NoWrap
         visible: settings.model && settings.model.dbAvailable
         text: "Current database"
     }
-    Controls.Label {
+    SelectableText {
         objectName: "geoDatabaseSource"
         visible: settings.model && settings.model.dbAvailable
         Layout.fillWidth: true
@@ -71,14 +77,14 @@ ColumnLayout {
         textFormat: Text.PlainText
         text: settings.model ? settings.model.dbSource : ""
     }
-    Controls.Label {
+    SelectableText {
         objectName: "geoDatabaseBuild"
         visible: settings.model && settings.model.dbAvailable
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         text: settings.model ? settings.buildDateText(settings.model.dbBuildEpoch) : ""
     }
-    Controls.Label {
+    SelectableText {
         objectName: "geoActiveDatabasePath"
         visible: settings.model && settings.model.dbAvailable
         Layout.fillWidth: true
@@ -130,7 +136,7 @@ ColumnLayout {
             onClicked: { settings.cityImport = true; databaseFile.open(); }
         }
     }
-    Controls.Label {
+    SelectableText {
         id: browserError
         Layout.fillWidth: true
         visible: false
@@ -142,7 +148,7 @@ ColumnLayout {
         running: settings.model && settings.model.dbInstallBusy
         visible: running
     }
-    Controls.Label {
+    SelectableText {
         objectName: "geoInstallError"
         Layout.fillWidth: true
         visible: settings.model && settings.model.dbInstallError.length > 0
@@ -151,7 +157,7 @@ ColumnLayout {
         text: settings.model ? settings.model.dbInstallError : ""
         color: Kirigami.Theme.negativeTextColor
     }
-    Controls.Label {
+    SelectableText {
         objectName: "geoRestartNotice"
         Layout.fillWidth: true
         visible: settings.model && settings.model.dbRestartRequired

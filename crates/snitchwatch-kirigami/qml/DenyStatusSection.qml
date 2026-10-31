@@ -28,31 +28,33 @@ ColumnLayout {
     }
     ClipboardCopy { id: clipboard }
 
-    Kirigami.Heading {
+    SelectableText {
+        wrapMode: Text.NoWrap
         level: 3
         text: "Deny mode (system firewall default)"
     }
-    Controls.Label {
+    SelectableText {
         objectName: "denyHeadline"
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         font.bold: section.model.state === "overdue"
         text: section.model.headline
     }
-    Controls.Label {
+    SelectableText {
         objectName: "denyDetail"
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         visible: text !== ""
         text: section.model.detail
     }
-    Controls.Label {
+    SelectableText {
+        wrapMode: Text.NoWrap
         objectName: "denyAsOf"
         visible: text !== ""
         opacity: 0.7
         text: section.model.asOf
     }
-    Controls.Label {
+    SelectableText {
         // The helper's own blocker lines, which can carry config paths.
         objectName: "denyBlockers"
         Layout.fillWidth: true
@@ -61,7 +63,7 @@ ColumnLayout {
         visible: text !== ""
         text: section.model.blockersText
     }
-    Controls.Label {
+    SelectableText {
         Layout.fillWidth: true
         wrapMode: Text.WordWrap
         text: "To change it, run one of these in a terminal (on [minutes] takes 1 to 60):"
@@ -71,7 +73,8 @@ ColumnLayout {
         RowLayout {
             required property string modelData
             Layout.fillWidth: true
-            Controls.Label {
+            SelectableText {
+                wrapMode: Text.NoWrap
                 Layout.fillWidth: true
                 font.family: "monospace"
                 textFormat: Text.PlainText

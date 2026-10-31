@@ -9,7 +9,9 @@
 //     moving focus), so the Tab itinerary, the arrow keys and the reading order
 //     are unchanged. Ctrl+C is a Shortcut on the one text that holds the
 //     selection (SelectionRegistry), off while a text field has focus;
-//   * reports the StaticText role, not EditableText.
+//   * reports the StaticText role, not EditableText;
+//   * `level` (0 = none, the default) makes it a heading like
+//     Kirigami.Heading.level: the same point-size factor and the Heading role.
 // Right-click opens "Copy" and "Select all" (made on first use).
 import QtQuick
 import QtQuick.Controls as Controls
@@ -19,6 +21,9 @@ TextEdit {
     id: root
     // The context menu once opened; null before.
     property var contextMenu: null
+    // Kirigami.Heading's level: 1 (big) to 5 (small); 0 is body text and leaves
+    // the font alone. The factors are Kirigami.Heading's own.
+    property int level: 0
 
     readOnly: true
     selectByMouse: true
@@ -31,8 +36,18 @@ TextEdit {
     color: Kirigami.Theme.textColor
     selectedTextColor: Kirigami.Theme.highlightedTextColor
     selectionColor: Kirigami.Theme.highlightColor
-    Accessible.role: Accessible.StaticText
+    Accessible.role: root.level > 0 ? Accessible.Heading : Accessible.StaticText
     Accessible.name: root.text
+
+    Binding {
+        when: root.level > 0
+        target: root
+        property: "font.pointSize"
+        value: {
+            const factors = { 1: 1.35, 2: 1.20, 3: 1.15, 4: 1.10 };
+            return Kirigami.Theme.defaultFont.pointSize * (factors[root.level] || 1);
+        }
+    }
 
     HoverHandler {
         cursorShape: Qt.IBeamCursor
