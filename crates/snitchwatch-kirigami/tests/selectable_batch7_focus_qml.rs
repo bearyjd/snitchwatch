@@ -1,8 +1,10 @@
-//! Selectable text, batch 7: on a real `PendingDecisionSheet` and
-//! `MakeRuleSheet` (the latter with its form open), every converted
+//! Selectable text, batch 7: on a real `PendingDecisionSheet`,
+//! `MakeRuleSheet` (with its form open) and `InspectorPanel` (and so its
+//! `ConnectionExplanation`, whose root is a `SelectableText`), every converted
 //! `SelectableText` is mouse only. It is not a Tab stop, a click on it leaves
 //! the active-focus item where it was (and it never holds active focus), and
-//! a Tab round visits none of them. Complements the source guards in
+//! a Tab round visits none of them.
+//! A click on an inspector text never calls the page's `dismissInspector`. Complements the source guards in
 //! `selectable_batch7_guards.rs`. Run headless with
 //! `QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic`.
 #[allow(unused_imports)]
@@ -31,12 +33,12 @@ Window {
     id: probe
     visible: true
     width: 900
-    height: 1400
+    height: 2800
     readonly property string doneMarker: "SELECTABLE_BATCH7_FOCUS_DONE"
     // @a11y-guard
     // @list-keys
     property int ran: 0
-    readonly property int expectedSteps: 4
+    readonly property int expectedSteps: 5
 
     QtObject {
         id: feedStub
@@ -56,6 +58,41 @@ Window {
         property bool busy: false
         function begin(rowId) { makeController.rowId = rowId; return "req-1"; }
         function notSent(why) { makeController.busy = false; makeController.statusText = why; }
+    }
+
+    QtObject {
+        id: pageStub
+        property int dismissed: 0
+        property bool inspecting: true
+        property string inspectProcess: "/usr/bin/app"
+        property var inspectDetails: ({ processPath: "/usr/bin/app", dstHost: "example.com",
+                                        dstIp: "93.184.216.34", dstPort: 443, protocol: "tcp" })
+        property string inspectVerdict: "allow"
+        property string inspectVerdictText: "Allowed"
+        property bool inspectSameSource: true
+        property var bridgeFeed: null
+        property var model: null
+        property string inspectHost: "example.com"
+        property string inspectIp: "93.184.216.34"
+        property string inspectPort: "443"
+        property string inspectProtocol: "tcp"
+        property string inspectMatchedRule: ""
+        property string inspectMatchedRuleDisplay: "default action"
+        property bool inspectNoLongerPending: false
+        property bool inspectPending: false
+        property bool inspectMakeRuleOffered: false
+        property string inspectId: "9:decided"
+        property bool inspectBindableProcessPath: true
+        property bool inspectAppBoundRules: true
+        property bool inspectAlsoListedByDefault: false
+        property int inspectDeadlineMs: 0
+        property bool inspectDecideLater: false
+        property int inspectSession: 1
+        property var makeRuleController: makeController
+        function dismissInspector() { dismissed++; }
+        function showPassiveNotice(text) {}
+        function showRuleRequested(rule) {}
+        function simulateConnectionRequested(prefill) {}
     }
 
     ColumnLayout {
@@ -79,6 +116,11 @@ Window {
             model: makeModel
             controller: makeController
             bindableProcessPath: true
+        }
+        InspectorPanel {
+            id: inspector
+            Layout.fillWidth: true
+            page: pageStub
         }
     }
 
@@ -143,6 +185,22 @@ Window {
             probe.ran++;
             const n = probe.clickEach(make, "make", 2);
             probe.expect(n >= 5, "make rule sheet: only " + n + " SelectableText found");
+            for (const f of probe.tabRound())
+                probe.expect(!(f.selectByMouse !== undefined && f.contextMenu !== undefined),
+                             "Tab reached a SelectableText: '" + f.text + "'");
+        });
+        probe.step("inspector panel: clicks leave focus alone and never dismiss; Tab skips every text", function () {
+            return inspector.visible && inspector.width > 0 ? "" : "the inspector panel";
+        }, function () {
+            probe.ran++;
+            const n = probe.clickEach(inspector, "inspector", 4);
+            probe.expect(n >= 4, "inspector panel: only " + n + " SelectableText found");
+            let explained = false;
+            for (const t of probe.selectables(inspector, []))
+                if (t.objectName === "connectionExplanation") explained = true;
+            probe.expect(explained, "inspector panel: the connection explanation is not a SelectableText");
+            probe.expect(pageStub.dismissed === 0,
+                         "a click on an inspector text dismissed the inspector " + pageStub.dismissed + "x");
             for (const f of probe.tabRound())
                 probe.expect(!(f.selectByMouse !== undefined && f.contextMenu !== undefined),
                              "Tab reached a SelectableText: '" + f.text + "'");

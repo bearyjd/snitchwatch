@@ -244,6 +244,65 @@ fn batch_7_texts_are_not_inside_click_targets() {
     }
 }
 
+/// Components whose root block is a `SelectableText` (so using one is using a
+/// selectable text), derived from `qml/*.qml`.
+fn selectable_root_components() -> Vec<String> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("qml");
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("read qml dir") {
+        let path = entry.expect("qml dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("qml") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read qml file");
+        let root = code_lines(&source)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with("import ") && !l.starts_with("pragma "))
+            .map(str::to_owned);
+        if root.as_deref() == Some("SelectableText {") {
+            names.push(path.file_stem().unwrap().to_string_lossy().into_owned());
+        }
+    }
+    names.sort();
+    names
+}
+
+/// A component whose root is a `SelectableText` is a selectable text: it must
+/// not sit inside a click target, and (its own file is checked above through
+/// the `SelectableText {` root block) nothing clickable may sit inside its
+/// use site either.
+#[test]
+fn batch_7_selectable_root_components_are_not_inside_click_targets() {
+    let components = selectable_root_components();
+    assert!(
+        components.iter().any(|c| c == "ConnectionExplanation"),
+        "root scan lost ConnectionExplanation: {components:?}"
+    );
+    for (name, source, _, _) in FILES {
+        let code = code_lines(source);
+        for component in &components {
+            let open = format!("{component} {{");
+            for target in CLICK_TARGETS {
+                for block in blocks(&code, target) {
+                    assert!(
+                        !block.contains(&open),
+                        "{name}: `{component}` (a SelectableText) sits inside `{target}`:\n{block}"
+                    );
+                }
+            }
+            for usage in blocks(&code, &open) {
+                for target in CLICK_TARGETS {
+                    assert!(
+                        !usage.contains(target),
+                        "{name}: `{component}` contains `{target}`:\n{usage}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn batch_7_adds_no_tab_stop() {
     for (name, source, _, _) in FILES {
