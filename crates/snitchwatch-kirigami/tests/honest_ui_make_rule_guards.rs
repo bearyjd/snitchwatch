@@ -23,6 +23,11 @@ fn connections_page_labels_showing_connection_data_are_plain_text() {
             "page.inspectProtocol",
             "page.inspectVerdict",
             "page.inspectMatchedRuleDisplay",
+            // Selectable-text batch 8: the row's host line and verdict word
+            // (row.host, row.verdict) are built by ConnectionActions, which
+            // "Copy row text" shares.
+            "row.actions.hostLine(row)",
+            "row.actions.verdictText(row)",
         ],
         10,
     );

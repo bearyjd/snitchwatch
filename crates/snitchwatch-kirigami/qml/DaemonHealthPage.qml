@@ -59,7 +59,7 @@ Kirigami.ScrollablePage {
                    check the daemon log to confirm which method is running."
         }
 
-        Controls.Button {
+        RoundedButton {
             text: "Recheck"
             onClicked: page.model.recheck()
         }

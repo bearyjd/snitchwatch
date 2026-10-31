@@ -58,6 +58,16 @@ Controls.AbstractButton {
     hoverEnabled: true
     activeFocusOnTab: true
     padding: 0
+    // The VISIBLE marker stays small (it scales with the count); only the
+    // region that takes clicks and hover grows to Theme.hitMin, centred on the
+    // marker. A containment mask adds no item, no input handler and no Tab
+    // stop, and does not touch the map's drag/pan.
+    containmentMask: QtObject {
+        function contains(point: point): bool {
+            return Math.abs(point.x - marker.width / 2) <= Math.max(marker.width, Theme.hitMin) / 2
+                && Math.abs(point.y - marker.height / 2) <= Math.max(marker.height, Theme.hitMin) / 2;
+        }
+    }
     width: diameter + Kirigami.Units.smallSpacing * 2
     height: width
 
@@ -74,8 +84,10 @@ Controls.AbstractButton {
     }
 
     background: Item {
-        // Focus / hover halo.
+        // Focus / hover halo. Drawn outside the verdict shape, in the
+        // selection colour, which no verdict colour uses.
         Rectangle {
+            objectName: "focusHalo"
             anchors.centerIn: parent
             width: marker.diameter + Kirigami.Units.smallSpacing * 2
             height: width

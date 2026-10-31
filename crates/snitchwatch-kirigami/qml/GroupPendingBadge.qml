@@ -1,28 +1,38 @@
 // A group header's "N pending" badge: collapsed groups expose pending
 // connections through it. Split out of ConnectionRow.qml for its line budget.
-// Use a border: Fusion/Basic can give neutral background and text the same
-// color, making a filled badge unreadable (issue #31).
+// The hairline capsule and a faint fill come from RoundedSurface (radiusPill);
+// the label keeps the neutral text colour, so a filled badge cannot end up with
+// the same colour for background and text (issue #31).
+//
+// The badge is NOT independently tappable: it sits on a clickable group-header
+// row, which is the hit target (the row's hit area is at least Theme.hitMin).
+// So its visible size stays small on purpose, it takes no focus, and its
+// surface zeroes the 44 px implicit size a RoundedSurface otherwise has.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 
-Rectangle {
+Controls.Control {
     id: badge
 
     property int count: 0
 
-    color: "transparent"
-    border.color: Kirigami.Theme.neutralTextColor
-    border.width: 1
-    radius: height / 2
-    implicitWidth: pendingBadgeLabel.implicitWidth + Kirigami.Units.largeSpacing
-    implicitHeight: pendingBadgeLabel.implicitHeight + Kirigami.Units.smallSpacing
+    focusPolicy: Qt.NoFocus
+    leftPadding: Kirigami.Units.largeSpacing / 2
+    rightPadding: Kirigami.Units.largeSpacing / 2
+    topPadding: Kirigami.Units.smallSpacing / 2
+    bottomPadding: Kirigami.Units.smallSpacing / 2
     Layout.alignment: Qt.AlignVCenter
 
-    Controls.Label {
+    background: RoundedSurface {
+        control: badge
+        implicitWidth: 0
+        implicitHeight: 0
+    }
+
+    contentItem: Controls.Label {
         id: pendingBadgeLabel
-        anchors.centerIn: parent
         textFormat: Text.PlainText
         text: badge.count + " pending"
         color: Kirigami.Theme.neutralTextColor
