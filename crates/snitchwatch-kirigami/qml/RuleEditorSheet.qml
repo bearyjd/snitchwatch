@@ -206,7 +206,7 @@ SizedOverlaySheet {
                     })
                 }
             }
-            Controls.ComboBox {
+            RoundedComboBox {
                 objectName: "editorAction"
                 Kirigami.FormData.label: "Action"
                 Accessible.name: Kirigami.FormData.label + ": " + displayText
@@ -219,7 +219,7 @@ SizedOverlaySheet {
                     sheet.update({ action: sheet.actions[index].value });
                 }
             }
-            Controls.ComboBox {
+            RoundedComboBox {
                 objectName: "editorDuration"
                 Kirigami.FormData.label: "Lasts"
                 Accessible.name: Kirigami.FormData.label + ": " + displayText
@@ -280,11 +280,8 @@ SizedOverlaySheet {
 
                 RowLayout {
                     Layout.fillWidth: true
-                    Controls.ComboBox {
+                    RoundedComboBox {
                         objectName: "editorOperand"
-                        // As tall as the 44 px value field beside it, so the row
-                        // stays one line of controls with the same tops.
-                        Layout.preferredHeight: Theme.hitMin
                         Accessible.name: "Condition " + (conditionRow.index + 1) + ": " + displayText
                         model: sheet.catalogue.operands.map(function (o) {
                             return o.group + ": " + o.label;
@@ -296,11 +293,8 @@ SizedOverlaySheet {
                             sheet.chooseOperand(conditionRow.index, sheet.catalogue.operands[i].operand);
                         }
                     }
-                    Controls.ComboBox {
+                    RoundedComboBox {
                         objectName: "editorKind"
-                        // As tall as the 44 px value field beside it, so the row
-                        // stays one line of controls with the same tops.
-                        Layout.preferredHeight: Theme.hitMin
                         Accessible.name: "Condition " + (conditionRow.index + 1) + " matches: " + displayText
                         model: conditionRow.info.kinds.map(function (k) { return sheet.kindLabels[k]; })
                         currentIndex: conditionRow.info.kinds.indexOf(conditionRow.condition.kind)
@@ -327,7 +321,7 @@ SizedOverlaySheet {
                 RowLayout {
                     Layout.fillWidth: true
                     visible: conditionRow.condition.kind !== "network"
-                    Controls.CheckBox {
+                    RoundedCheckBox {
                         objectName: "editorCaseSensitive"
                         Accessible.name: "Condition " + (conditionRow.index + 1) + ": match upper and lower case exactly"
                         checked: !!conditionRow.condition.caseSensitive

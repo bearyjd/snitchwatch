@@ -18,23 +18,21 @@ fn count(src: &str, opener: &str) -> usize {
 }
 
 /// Plain controls that must be gone from every batch-D file.
-const SWAPPED: [&str; 6] = [
+const SWAPPED: [&str; 8] = [
     "Controls.Button {",
     "Controls.TextField {",
     "Controls.TextArea {",
     "Controls.Switch {",
     "Controls.RadioButton {",
     "Controls.ToolButton {",
+    "Controls.CheckBox {",
+    "Controls.ComboBox {",
 ];
 
 /// Plain controls that stay, with the reason:
-/// - `CheckBox` / `ComboBox`: `RoundedCheckBox` / `RoundedComboBox` arrive with
-///   restyle batch C (#297), not yet on main.
 /// - `SpinBox`: no wrapper is planned for it.
 /// - `ItemDelegate`: list rows belong to restyle batch E.
-const PLAIN: [&str; 4] = [
-    "Controls.CheckBox {",
-    "Controls.ComboBox {",
+const PLAIN: [&str; 2] = [
     "Controls.SpinBox {",
     "Controls.ItemDelegate {",
 ];
@@ -45,18 +43,18 @@ struct Expect {
     rounded_field: usize,
     rounded_area: usize,
     guarded_switch: usize,
-    plain: [usize; 4],
+    plain: [usize; 2], rounded_check: usize, rounded_combo: usize,
 }
 
 const FILES: [Expect; 8] = [
-    Expect { file: "RulesPage", rounded_button: 7, rounded_field: 0, rounded_area: 0, guarded_switch: 0, plain: [0, 0, 0, 1] },
-    Expect { file: "RuleEditorSheet", rounded_button: 6, rounded_field: 4, rounded_area: 0, guarded_switch: 3, plain: [1, 4, 0, 0] },
-    Expect { file: "RulesImportSheet", rounded_button: 2, rounded_field: 0, rounded_area: 0, guarded_switch: 0, plain: [1, 0, 0, 0] },
-    Expect { file: "RuleSimulatorSheet", rounded_button: 2, rounded_field: 11, rounded_area: 2, guarded_switch: 0, plain: [1, 2, 1, 0] },
-    Expect { file: "RulesInspectorSheet", rounded_button: 5, rounded_field: 0, rounded_area: 0, guarded_switch: 1, plain: [0, 0, 0, 0] },
-    Expect { file: "BlocklistsPage", rounded_button: 0, rounded_field: 1, rounded_area: 0, guarded_switch: 0, plain: [0, 0, 0, 0] },
-    Expect { file: "ProfilesPage", rounded_button: 0, rounded_field: 3, rounded_area: 0, guarded_switch: 0, plain: [0, 0, 0, 0] },
-    Expect { file: "RecommendedRulesPage", rounded_button: 0, rounded_field: 0, rounded_area: 0, guarded_switch: 1, plain: [0, 0, 0, 0] },
+    Expect { file: "RulesPage", rounded_button: 7, rounded_field: 0, rounded_area: 0, guarded_switch: 0, plain: [0, 1], rounded_check: 0, rounded_combo: 0 },
+    Expect { file: "RuleEditorSheet", rounded_button: 6, rounded_field: 4, rounded_area: 0, guarded_switch: 3, plain: [0, 0], rounded_check: 1, rounded_combo: 4 },
+    Expect { file: "RulesImportSheet", rounded_button: 2, rounded_field: 0, rounded_area: 0, guarded_switch: 0, plain: [0, 0], rounded_check: 1, rounded_combo: 0 },
+    Expect { file: "RuleSimulatorSheet", rounded_button: 2, rounded_field: 11, rounded_area: 2, guarded_switch: 0, plain: [1, 0], rounded_check: 1, rounded_combo: 2 },
+    Expect { file: "RulesInspectorSheet", rounded_button: 5, rounded_field: 0, rounded_area: 0, guarded_switch: 1, plain: [0, 0], rounded_check: 0, rounded_combo: 0 },
+    Expect { file: "BlocklistsPage", rounded_button: 0, rounded_field: 1, rounded_area: 0, guarded_switch: 0, plain: [0, 0], rounded_check: 0, rounded_combo: 0 },
+    Expect { file: "ProfilesPage", rounded_button: 0, rounded_field: 3, rounded_area: 0, guarded_switch: 0, plain: [0, 0], rounded_check: 0, rounded_combo: 0 },
+    Expect { file: "RecommendedRulesPage", rounded_button: 0, rounded_field: 0, rounded_area: 0, guarded_switch: 1, plain: [0, 0], rounded_check: 0, rounded_combo: 0 },
 ];
 
 #[test]
@@ -70,6 +68,8 @@ fn batch_d_files_use_the_rounded_controls_and_keep_only_the_documented_plain_one
         assert_eq!(count(&src, "RoundedField {"), e.rounded_field, "{}: RoundedField", e.file);
         assert_eq!(count(&src, "RoundedTextArea {"), e.rounded_area, "{}: RoundedTextArea", e.file);
         assert_eq!(count(&src, "GuardedSwitch {"), e.guarded_switch, "{}: GuardedSwitch", e.file);
+        assert_eq!(count(&src, "RoundedCheckBox {"), e.rounded_check, "{}: RoundedCheckBox", e.file);
+        assert_eq!(count(&src, "RoundedComboBox {"), e.rounded_combo, "{}: RoundedComboBox", e.file);
         for (opener, want) in PLAIN.iter().zip(e.plain) {
             assert_eq!(count(&src, opener), want, "{}: plain `{opener}`", e.file);
         }

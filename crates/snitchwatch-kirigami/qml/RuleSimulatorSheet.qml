@@ -191,7 +191,7 @@ SizedOverlaySheet {
                 enabled: !simHostEmpty.checked
                 Layout.fillWidth: true
             }
-            Controls.CheckBox {
+            RoundedCheckBox {
                 id: simHostEmpty
                 objectName: "simHostEmpty"
                 text: "No host name (a connection to a bare IP address)"
@@ -205,7 +205,7 @@ SizedOverlaySheet {
                 to: 65535
                 value: 443
             }
-            Controls.ComboBox {
+            RoundedComboBox {
                 id: simProtocol
                 objectName: "simProtocol"
                 Kirigami.FormData.label: "Protocol"
@@ -353,7 +353,7 @@ SizedOverlaySheet {
                     placeholderText: "eth0"
                     Layout.fillWidth: true
                 }
-                Controls.ComboBox {
+                RoundedComboBox {
                     id: simChecksums
                     objectName: "simChecksums"
                     Kirigami.FormData.label: "Checksums"

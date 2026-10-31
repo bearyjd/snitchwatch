@@ -99,7 +99,7 @@ SizedOverlaySheet {
 
             RowLayout {
                 Layout.fillWidth: true
-                Controls.CheckBox {
+                RoundedCheckBox {
                     objectName: "importTick"
                     Accessible.name: "Import rule: " + change.row.displayName
                     checked: !!sheet.ticks[change.row.name]
