@@ -4,9 +4,17 @@
 // key's own final release still clicks it once; Return and Enter never do.
 import QtQuick
 import QtQuick.Controls as Controls
+import com.snitchwatch.shell
 
 Controls.ToolButton {
     id: button
+    implicitWidth: Math.max(Theme.hitMin, implicitContentWidth + leftPadding + rightPadding)
+    implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+    background: RoundedSurface {
+        control: button
+        flat: true
+        tinted: button.checked
+    }
     Keys.priority: Keys.BeforeItem
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Space && event.isAutoRepeat) {

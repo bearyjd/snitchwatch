@@ -63,6 +63,8 @@ fn main() {
                 "qml/LevelRuleActions.qml",
                 "qml/InlineVerdicts.qml",
                 "qml/PromptSlotBanner.qml",
+                "qml/RoundedSurface.qml",
+                "qml/RoundedButton.qml",
                 "qml/GuardedButton.qml",
                 "qml/GuardedToolButton.qml",
                 "qml/GuardedSwitch.qml",

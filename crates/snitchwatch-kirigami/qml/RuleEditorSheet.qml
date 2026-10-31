@@ -258,7 +258,7 @@ SizedOverlaySheet {
             }
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             textFormat: Text.PlainText
             text: "Conditions: the rule matches a connection when all of them match."
@@ -327,12 +327,13 @@ SizedOverlaySheet {
                         checked: !!conditionRow.condition.caseSensitive
                         onToggled: sheet.setCondition(conditionRow.index, { caseSensitive: checked })
                     }
-                    Controls.Label {
+                    SelectableText {
                         textFormat: Text.PlainText
                         text: "Match upper and lower case exactly"
+                        wrapMode: Text.NoWrap
                     }
                 }
-                Controls.Label {
+                SelectableText {
                     objectName: "editorOperandHelp"
                     Layout.fillWidth: true
                     textFormat: Text.PlainText
@@ -382,7 +383,7 @@ SizedOverlaySheet {
 
         Repeater {
             model: sheet.checked.problems
-            Controls.Label {
+            SelectableText {
                 objectName: "editorProblem"
                 required property string modelData
                 Layout.fillWidth: true
@@ -394,7 +395,7 @@ SizedOverlaySheet {
         }
         Repeater {
             model: sheet.checked.warnings
-            Controls.Label {
+            SelectableText {
                 objectName: "editorWarning"
                 required property string modelData
                 Layout.fillWidth: true
@@ -406,7 +407,7 @@ SizedOverlaySheet {
         }
         Repeater {
             model: sheet.checked.cautions
-            Controls.Label {
+            SelectableText {
                 objectName: "editorCaution"
                 required property string modelData
                 Layout.fillWidth: true
@@ -416,7 +417,7 @@ SizedOverlaySheet {
                 wrapMode: Text.Wrap
             }
         }
-        Controls.Label {
+        SelectableText {
             objectName: "editorRenameNote"
             visible: sheet.renaming
             Layout.fillWidth: true
@@ -425,7 +426,7 @@ SizedOverlaySheet {
                 + "Until then both exist; if removing fails, Snitchwatch says which rules are left."
             wrapMode: Text.Wrap
         }
-        Controls.Label {
+        SelectableText {
             objectName: "editorStatus"
             visible: text.length > 0
             Layout.fillWidth: true
