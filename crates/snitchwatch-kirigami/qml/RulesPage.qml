@@ -282,10 +282,11 @@ Kirigami.ScrollablePage {
         Layout.fillWidth: true
         spacing: Kirigami.Units.largeSpacing
 
-        Kirigami.Heading {
+        SelectableText {
             text: page.title
             level: 1
             Layout.alignment: Qt.AlignVCenter
+            wrapMode: Text.NoWrap
         }
         Item {
             Layout.fillWidth: true
@@ -347,7 +348,7 @@ Kirigami.ScrollablePage {
         }
         // Counts only Snitchwatch's own earlier rules: blocklist or
         // hand-written rules may apply to all apps too, so no "of N".
-        Controls.Label {
+        SelectableText {
             objectName: "allAppsCount"
             visible: page.showsAllAppsNotice
             Layout.fillWidth: true
@@ -360,8 +361,9 @@ Kirigami.ScrollablePage {
                     : page.model.legacyHostOnlyCount
                       + " rules saved by earlier Snitchwatch versions apply to all apps or to "
                       + "unidentified programs"
+            wrapMode: Text.NoWrap
         }
-        Controls.Label {
+        SelectableText {
             id: hitsSummaryLabel
             objectName: "hitsSummary"
             visible: text.length > 0
@@ -372,7 +374,7 @@ Kirigami.ScrollablePage {
             font: Kirigami.Theme.smallFont
             text: insightsText.hitsSummaryText(page.hitsInfo)
         }
-        Controls.Label {
+        SelectableText {
             id: hitsStorageLabel
             objectName: "hitsStorage"
             visible: text.length > 0
@@ -384,7 +386,7 @@ Kirigami.ScrollablePage {
             color: Kirigami.Theme.neutralTextColor
             text: insightsText.hitsStorageText(page.hitsInfo)
         }
-        Controls.Label {
+        SelectableText {
             id: analysisLabel
             objectName: "analysisSummary"
             visible: text.length > 0
@@ -396,7 +398,7 @@ Kirigami.ScrollablePage {
             text: insightsText.analysisText(page.analysisInfo)
         }
         // The last export or import outcome (P2.7), plain text.
-        Controls.Label {
+        SelectableText {
             id: ioStatus
             objectName: "rulesIoStatus"
             visible: page.showsIoStatus
@@ -406,7 +408,7 @@ Kirigami.ScrollablePage {
             text: rulesIo.statusText
             wrapMode: Text.Wrap
         }
-        Controls.Label {
+        SelectableText {
             objectName: "rulesNotShown"
             visible: page.showsNotShown
             Layout.fillWidth: true
@@ -416,7 +418,7 @@ Kirigami.ScrollablePage {
             text: page.model ? page.model.notShownText : ""
         }
         // Issue #65: fixed text, advice only (the list is not re-sent).
-        Controls.Label {
+        SelectableText {
             objectName: "rulesCountHint"
             visible: page.showsCountHint
             Layout.fillWidth: true
@@ -428,7 +430,7 @@ Kirigami.ScrollablePage {
             text: page.model ? page.model.countHintText : ""
         }
         // Each rule's last toggle or delete note (#152), plain text.
-        Controls.Label {
+        SelectableText {
             id: rulesCommandNote
             objectName: "rulesCommandNote"
             visible: page.showsCommandNote
@@ -439,7 +441,7 @@ Kirigami.ScrollablePage {
             wrapMode: Text.Wrap
         }
         // The rule editor's last result (P2.1), plain text.
-        Controls.Label {
+        SelectableText {
             objectName: "ruleEditorStatus"
             visible: page.showsEditorStatus
             Layout.fillWidth: true
@@ -541,6 +543,38 @@ Kirigami.ScrollablePage {
             onClicked: {
                 list.currentIndex = row.index;
                 page.openInspector(row);
+            }
+
+            // Every text the row shows, in the order shown (one per line);
+            // the row's Labels stay Labels so a click still opens the rule.
+            function copyLines() {
+                const lines = [row.ruleEnabled ? "●" : "○"];
+                lines.push(row.source === "blocklist" ? ("blocklist: " + row.blocklistId) : row.displayName);
+                if (row.source !== "blocklist" && row.operatorSummary.length > 0) {
+                    lines.push(row.operatorSummary);
+                }
+                const hits = insightsText.hitsRowText(row.hitsCounted, row.hitCount, row.lastHitMs,
+                                                      row.hitsNote, row.hitBadgeKind, row.hitBadgeMs);
+                if (hits.length > 0) {
+                    lines.push(hits);
+                }
+                if (row.shadowText.length > 0) {
+                    lines.push(row.shadowText);
+                }
+                if (row.appliesToAllApps) {
+                    lines.push(row.allAppsHint, row.flagBadge);
+                }
+                if (row.readOnlyReason.length > 0) {
+                    lines.push("read-only");
+                }
+                lines.push("#" + row.precedence, row.ruleAction);
+                return lines.filter(line => line.length > 0);
+            }
+
+            // Right-click Copy of the row's text (mouse only; the Menu key still
+            // opens the inspector, whose Copy buttons are the keyboard route).
+            RowCopyMenu {
+                copyText: row.copyLines().join("\n")
             }
 
             contentItem: RowLayout {

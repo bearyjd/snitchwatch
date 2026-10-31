@@ -147,14 +147,14 @@ SizedOverlaySheet {
         Layout.preferredWidth: sheet.preferredWidth
         spacing: Kirigami.Units.largeSpacing
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             opacity: 0.7
             font: Kirigami.Theme.smallFont
             text: "Evaluates a candidate connection against the currently cached rules, using opensnitchd's own precedence rules. This is a simulation over cached data, not a live daemon verdict. A blank field is unknown, so rules with a condition on it are reported as not evaluated instead of being guessed. To say a connection has no host name at all (it goes to a bare IP address), tick “No host name”."
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             opacity: 0.7
@@ -162,7 +162,7 @@ SizedOverlaySheet {
             text: "Regular expressions are matched the way opensnitchd's Go engine (RE2) does, as closely as this simulator can. A pattern it can't read is reported as not simulated. Inside [...], only these are simulated: a leading ^, ASCII letters and digits, ranges between two of them (a-z, 0-9), single punctuation marks other than \\ [ ] ^ and -, \\d \\w \\s and their capitals, and POSIX classes such as [:alpha:]. Anything else in a class, such as a dash outside a range, an escaped punctuation mark like \\., a space or non-ASCII text, is reported as not simulated."
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             visible: sheet.prefilled
             textFormat: Text.PlainText
@@ -237,7 +237,7 @@ SizedOverlaySheet {
             visible: false
             spacing: Kirigami.Units.largeSpacing
 
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 opacity: 0.7
@@ -310,7 +310,7 @@ SizedOverlaySheet {
                     Layout.fillWidth: true
                     Layout.preferredHeight: Kirigami.Units.gridUnit * 4
                 }
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     opacity: 0.7
@@ -391,14 +391,14 @@ SizedOverlaySheet {
             visible: sheet.simulateRan
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 opacity: 0.7
                 font: Kirigami.Theme.smallFont
                 text: "Simulated result: not a live daemon verdict."
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 font.bold: true
@@ -413,15 +413,16 @@ SizedOverlaySheet {
                        ? sheet.actionColor(sheet.simulateAction)
                        : Kirigami.Theme.neutralTextColor
             }
-            Controls.Label {
+            SelectableText {
                 visible: sheet.simulateMatchedRule.length > 0
                 textFormat: Text.PlainText
                 text: "Action: " + sheet.simulateAction + "  ·  Position " + (sheet.simulatePrecedence + 1)
                 color: sheet.simulateUndecided
                        ? Kirigami.Theme.neutralTextColor
                        : sheet.actionColor(sheet.simulateAction)
+                wrapMode: Text.NoWrap
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 visible: sheet.simulateMatchedRule.length === 0
                 wrapMode: Text.Wrap
@@ -429,7 +430,7 @@ SizedOverlaySheet {
                 font: Kirigami.Theme.smallFont
                 text: "What happens next depends on the daemon, which this simulation can't see. It usually asks you (if the Snitchwatch window is connected and no other prompt is open); otherwise the daemon's configured default action applies. That default is a setting the simulator doesn't know: Snitchwatch ships allow, as opensnitchd does, unless you opted in to deny."
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 visible: sheet.simulateWarnings.length > 0
                 wrapMode: Text.Wrap
@@ -439,7 +440,7 @@ SizedOverlaySheet {
                 textFormat: Text.PlainText
                 text: sheet.simulateWarnings
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 visible: sheet.simulateUnevaluated.length > 0
                 wrapMode: Text.Wrap
@@ -450,7 +451,7 @@ SizedOverlaySheet {
                 text: "Not evaluated, because an input was left blank. The result assumes these rules did not match:\n"
                       + sheet.simulateUnevaluated
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 visible: sheet.simulateInvalid.length > 0
                 wrapMode: Text.Wrap
@@ -461,7 +462,7 @@ SizedOverlaySheet {
                 text: "Not evaluated, because an input isn't valid. The result assumes these rules did not match:\n"
                       + sheet.simulateInvalid
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 visible: sheet.simulateUnsupported.length > 0
                 wrapMode: Text.Wrap
