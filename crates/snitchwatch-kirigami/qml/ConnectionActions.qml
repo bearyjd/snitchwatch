@@ -32,7 +32,42 @@ Item {
             rowId: row.rowId, pending: row.pending, header: row.isGroupHeader,
             level: row.groupLevel, program: row.ruleProgram, key: row.ruleKey, domain: row.groupParentKey,
             label: row.isGroupHeader ? row.groupLabel : row.process + " → " + row.host, count: row.groupPending, session: row.sourceSession,
+            rowText: actions.rowText(row),
             ruleState: row.levelRuleState, ruleName: row.levelRuleName, ruleReason: row.levelRuleReason };
+    }
+
+    // A ConnectionRow's texts: its Labels show these and "Copy row text"
+    // copies them all (selectable-text batch 8). Here, not on the row: a
+    // reused delegate of the virtualised list pays nothing until a menu opens.
+    function hostLine(row) {
+        return (row.repeatCount > 1 ? "×" + row.repeatCount + " · last seen " + Qt.formatTime(
+            new Date(row.lastSeenMs), "hh:mm:ss") + " · " : "") + row.host + ":" + row.port + "  " + row.protocol;
+    }
+    function heldBackText(row) {
+        return "notice held back " + row.retriedCount + (row.retriedCount === 1 ? " time" : " times") + " in the last hour";
+    }
+    function verdictText(row) {
+        return row.pending ? "pending"
+            : row.outcomeText !== "" ? row.outcomeText
+            : row.answeredWhilePaused ? "Allowed once (prompting was paused)"
+            : row.needsRule ? row.verdict + " once, needs a rule"
+            : row.verdict;
+    }
+    function totalText(row) {
+        return row.groupTotal + " connection" + (row.groupTotal === 1 ? "" : "s");
+    }
+    // Every text the row shows, in order and full length (the host line is
+    // elided on screen; an unverified label's path tail stands for the path).
+    function rowText(row) {
+        const label = row.programLabel + (row.programLabelUnverified ? " ?" : "");
+        const path = row.programLabelUnverified ? [row.programPathFull] : [];
+        const lines = row.isGroupHeader
+            ? [label].concat(path, [actions.totalText(row)],
+                row.groupPending > 0 ? [row.groupPending + " pending"] : [], [row.verdictCountsItem.summary])
+            : [actions.page.verdictGlyph(row.verdict, row.pending) + " " + label].concat(path,
+                [actions.hostLine(row)], row.pending && row.retriedCount > 0 ? [actions.heldBackText(row)] : [],
+                [actions.verdictText(row)]);
+        return lines.filter(line => line !== "").join("\n");
     }
 
     function show(target, anchor, x, y, rulesOnly) {
@@ -175,6 +210,16 @@ Item {
                 enabled: actions.valid() && value !== undefined && value !== null && String(value) !== "" && (modelData.key !== "dstPort" || String(value) !== "0")
                 onTriggered: if (actions.valid()) clipboard.copy(String(value))
             }
+        }
+        // Every text of the row, captured when the menu opened (batch 8).
+        GuardedMenuItem {
+            objectName: "copyRowText"
+            text: "Copy row text"
+            icon.name: "edit-copy"
+            visible: !actions.rulesOnly && !!actions.target
+            height: visible ? implicitHeight : 0
+            enabled: actions.valid() && actions.target.rowText !== ""
+            onTriggered: if (actions.valid()) clipboard.copy(actions.target.rowText)
         }
         Controls.MenuItem {
             objectName: "allowPendingAction"
