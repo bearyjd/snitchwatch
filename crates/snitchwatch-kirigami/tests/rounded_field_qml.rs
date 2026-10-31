@@ -135,6 +135,7 @@ Window {
         LayoutMirroring.childrenInherit: true
         RoundedTextArea { id: ltrArea; width: 200; wrapMode: TextEdit.Wrap; Accessible.name: "LTR area"
             text: "The quick brown fox jumps over the lazy dog and keeps running across the field" }
+        RoundedField { id: ltrField; y: 160; width: 200; text: "hello"; Accessible.name: "LTR field" }
     }
 
     function areaFacts(a) {
@@ -143,7 +144,8 @@ Window {
             const r = a.positionToRectangle(i);
             minX = Math.min(minX, r.x); maxX = Math.max(maxX, r.x);
         }
-        return { token: Theme.spacingMedium, mirrored: a.LayoutMirroring.enabled, w: a.width, h: a.height, left: a.leftPadding,
+        const p0 = a.positionToRectangle(0);
+        return { token: Theme.spacingMedium, p0x: p0.x, align: a.effectiveHorizontalAlignment, mirrored: a.LayoutMirroring.enabled, w: a.width, h: a.height, left: a.leftPadding,
                  right: a.rightPadding, minX: minX, maxX: maxX, lines: a.lineCount,
                  contentW: a.contentWidth, contentH: a.contentHeight,
                  top: a.topPadding, bottom: a.bottomPadding, code0: a.text.charCodeAt(0),
@@ -166,7 +168,9 @@ Window {
                          rtlArea: focusFacts(rtlArea), ltrArea: focusFacts(ltrArea) },
                 tabStops: { field: tabStops(field), area: tabStops(area), rtlArea: tabStops(rtlArea), ltrArea: tabStops(ltrArea), rtl: tabStops(rtlField) },
                 rtl: { code0: rtlField.text.charCodeAt(0), mirrored: rtlField.LayoutMirroring.enabled, w: rtlField.width, left: rtlField.leftPadding,
-                       right: rtlField.rightPadding, x0: r0.x, x1: r1.x,
+                       right: rtlField.rightPadding, x0: r0.x, x1: r1.x, align: rtlField.effectiveHorizontalAlignment,
+                       ltrX0: ltrField.positionToRectangle(0).x,
+                       ltrAlign: ltrField.effectiveHorizontalAlignment,
                        bodyW: rtlField.background.body.width, bodyX: rtlField.background.body.x },
                 areas: { rtl: areaFacts(rtlArea), ltr: areaFacts(ltrArea) },
                 dark: { highlight: dark.palette.highlight.toString(), base: dark.palette.base.toString() }
@@ -272,6 +276,18 @@ fn rounded_fields_hit_box_focus_ring_tab_stops_and_mirroring() {
     let (x0, x1) = (num(&r["x0"], &line), num(&r["x1"], &line));
     assert!(x0 > w / 2.0, "right-to-left text not at the right edge: {line}");
     assert!(x0 <= w - rp + 0.5 && x1 >= l - 0.5, "text outside the padding: {line}");
+    // Alignment: the mirrored field's text starts on the RIGHT padded edge
+    // (not centred), the LTR field's on the LEFT padded edge.
+    const ALIGN_LEFT: f64 = 1.0;
+    const ALIGN_RIGHT: f64 = 2.0;
+    assert_eq!(num(&r["align"], &line), ALIGN_RIGHT, "mirrored field not right-aligned: {line}");
+    // TextField cursor rectangles are in content coordinates (origin at the left padding).
+    assert!((x0 - (w - l - rp)).abs() < 2.0, "mirrored field text not on the right padded edge: {line}");
+    assert_eq!(num(&r["ltrAlign"], &line), ALIGN_LEFT, "LTR field not left-aligned: {line}");
+    assert!(
+        num(&r["ltrX0"], &line).abs() < 2.0,
+        "LTR field text not on the left padded edge: {line}"
+    );
     assert!(
         (num(&r["bodyW"], &line) - w).abs() < 0.5 && num(&r["bodyX"], &line).abs() < 0.5,
         "frame does not cover the mirrored field: {line}"
@@ -298,6 +314,16 @@ fn rounded_fields_hit_box_focus_ring_tab_stops_and_mirroring() {
             num(&a["minX"], &line) >= l - 0.5 && num(&a["maxX"], &line) <= w - rp + 0.5,
             "{name} area text outside the padding: {line}"
         );
+        // Alignment: first line starts on the start-side padded edge, and the
+        // widest wrapped line reaches it too (a centred area fails both).
+        let (edge, p0) = if rtl { (w - rp, num(&a["maxX"], &line)) } else { (l, num(&a["minX"], &line)) };
+        assert_eq!(
+            num(&a["align"], &line),
+            if rtl { ALIGN_RIGHT } else { ALIGN_LEFT },
+            "{name} area wrong alignment: {line}"
+        );
+        assert!((num(&a["p0x"], &line) - edge).abs() < 2.0, "{name} area first line not on the {edge} padded edge: {line}");
+        assert!((p0 - edge).abs() < 2.0, "{name} area text never reaches the start-side padded edge: {line}");
         let h = num(&a["h"], &line);
         assert!(h >= hit, "{name} area under Theme.hitMin high: {line}");
         assert!(
