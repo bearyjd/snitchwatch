@@ -110,6 +110,18 @@ pub const ALL_QML: &[(&str, &str)] = &[
         "GlobalDrawer.qml",
         include_str!("../../qml/GlobalDrawer.qml"),
     ),
+    (
+        "SelectableText.qml",
+        include_str!("../../qml/SelectableText.qml"),
+    ),
+    (
+        "RowCopyMenu.qml",
+        include_str!("../../qml/RowCopyMenu.qml"),
+    ),
+    (
+        "GuardedMenuItem.qml",
+        include_str!("../../qml/GuardedMenuItem.qml"),
+    ),
     ("AlertHost.qml", include_str!("../../qml/AlertHost.qml")),
     ("AlertWindow.qml", include_str!("../../qml/AlertWindow.qml")),
     (

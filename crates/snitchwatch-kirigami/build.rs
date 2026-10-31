@@ -108,6 +108,9 @@ fn main() {
                 "qml/DenyStatusSection.qml",
                 "qml/AboutPage.qml",
                 "qml/GlobalDrawer.qml",
+                "qml/SelectableText.qml",
+                "qml/RowCopyMenu.qml",
+                "qml/GuardedMenuItem.qml",
             ]),
     )
     .qt_module("Widgets")

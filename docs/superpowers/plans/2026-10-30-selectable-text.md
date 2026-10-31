@@ -73,7 +73,7 @@ box has **no `Kirigami.SelectableLabel`** (checked
 
 ## Pilots (this PR)
 
-- **Class A**: `AboutPage.qml` (four `Label`s: row labels and values).
+- **Class A**: `AboutPage.qml` (row labels, row values and the "Copied" note become `SelectableText`; the `Kirigami.Heading` stays until the heading decision below).
 - **Class C**: the `ProfilesPage.qml` row delegate (one `RowCopyMenu`; the
   page's other text is left for batch 4).
 
@@ -129,6 +129,13 @@ stays a `Label`.
   Flickable only off the text. Hence rows (C) are never converted, only
   given a right-click menu, and class A text inside a `ListView` header is
   checked per batch.
+- **Headings.** `Kirigami.Heading` scales its font by `level`; `SelectableText`
+  has no `level`. Decision for batch 1: add `property int level` that sets the
+  same point-size factor (Kirigami's `Heading` factors: 1: 1.35, 2: 1.20,
+  3: 1.15, ...), then convert the 18 headings. Not done in this PR.
+- **Cursor.** The brief asks for an arrow cursor (`HoverHandler`). An I-beam is
+  the usual hint that text is selectable; flip `cursorShape` if the owner
+  prefers it. Unverifiable headless.
 - **Honest-UI source guards** (`tests/honest_ui_*.rs`). They scan for
   `Controls.Label {` / `Kirigami.Heading {` blocks that show external text
   without `textFormat: Text.PlainText`, and several assert `>= N` such
