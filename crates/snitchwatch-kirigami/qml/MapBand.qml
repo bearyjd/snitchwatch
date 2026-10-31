@@ -100,8 +100,12 @@ ColumnLayout {
                 }
             }
         }
-        Controls.Label {
+        // Selectable (batch 8). The count and the scope below stay Labels:
+        // both elide in a row that cannot grow a line.
+        SelectableText {
             text: "Map"
+            textFormat: Text.PlainText
+            wrapMode: Text.NoWrap
             font.bold: true
         }
         Controls.Label {
@@ -199,6 +203,9 @@ ColumnLayout {
         Layout.margins: Kirigami.Units.smallSpacing
         spacing: 0
 
+        // The footer's two wrapping texts stay Labels (batch 8): a wrapping
+        // TextEdit reports a different implicitHeight, which feeds
+        // chromeHeight and so the SplitView sizes (map_split_drag_real_qml).
         Controls.Label {
             Layout.fillWidth: true
             visible: map.hierarchy.available
@@ -213,23 +220,31 @@ ColumnLayout {
         Flow {
             Layout.fillWidth: true
             spacing: Kirigami.Units.largeSpacing
-            Controls.Label {
+            SelectableText {
                 text: "● allowed"
+                textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
                 color: Theme.allow
                 font: Kirigami.Theme.smallFont
             }
-            Controls.Label {
+            SelectableText {
                 text: "■ denied"
+                textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
                 color: Theme.deny
                 font: Kirigami.Theme.smallFont
             }
-            Controls.Label {
+            SelectableText {
                 text: "◆ pending"
+                textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
                 color: Theme.pending
                 font: Kirigami.Theme.smallFont
             }
-            Controls.Label {
+            SelectableText {
                 text: "ring: mixed verdicts"
+                textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
                 font: Kirigami.Theme.smallFont
             }
         }

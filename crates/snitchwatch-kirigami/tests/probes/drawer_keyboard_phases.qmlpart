@@ -10,8 +10,8 @@
         { name: "Recommended background-service rules", title: "Recommended background-service rules", first: "FocusOrderListView" },
         { name: "Make rules from what I saw", title: "Make rules from what I saw", first: "ComboBox 'For how long: 24 hours (default)'" },
         { name: "Security Scan", title: "Security Scan", first: "GuardedButton 'Run Deep Scan'" },
-        { name: "Settings & Diagnostics", title: "Settings & Diagnostics", first: "Button 'Download optional DB-IP City Lite…'" },
-        { name: "Daemon Health", title: "Daemon Health", first: "Button 'Recheck'" },
+        { name: "Settings & Diagnostics", title: "Settings & Diagnostics", first: "RoundedButton 'Download optional DB-IP City Lite…'" },
+        { name: "Daemon Health", title: "Daemon Health", first: "RoundedButton 'Recheck'" },
         { name: "About", title: "About", first: "Button 'Copy version info'" }
     ]
     property var opener: null

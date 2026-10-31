@@ -653,6 +653,8 @@ fn the_styled_files_take_radii_and_colours_from_theme_and_the_palette() {
         ("RoundedFieldFrame", qml_source("RoundedFieldFrame")),
         ("RoundedField", qml_source("RoundedField")),
         ("RoundedTextArea", qml_source("RoundedTextArea")),
+        ("RoundedCheckBox", qml_source("RoundedCheckBox")),
+        ("RoundedComboBox", qml_source("RoundedComboBox")),
     ];
     for (name, src) in files {
         let code: String = src
