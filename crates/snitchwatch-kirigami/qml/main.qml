@@ -278,7 +278,9 @@ Kirigami.ApplicationWindow {
             rules: rulesPageComponent,
             blocklists: blocklistsPageComponent,
             curatedGroups: curatedGroupsPageComponent,
-            recommendedRules: recommendedRulesPageComponent
+            recommendedRules: recommendedRulesPageComponent,
+            about: aboutPageComponent,
+            silentMode: silentModePageComponent
         })
     }
 
