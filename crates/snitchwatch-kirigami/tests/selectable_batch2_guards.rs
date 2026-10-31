@@ -7,7 +7,9 @@
 //! Mouse only: converted texts must not add a Tab stop, so no
 //! `activeFocusOnTab` / `focus` override may appear in these files either.
 //! Layout unchanged: a TextEdit wraps by default and cannot elide, so every
-//! converted block names its `wrapMode` and none sets `elide`.
+//! converted block's `wrapMode` is pinned per block in `WRAPS` (changing any
+//! block's mode fails) and none sets `elide`. `activeFocusOnPress` (false in
+//! `SelectableText.qml`) may not be overridden: a click must not steal focus.
 mod qml_guard_support;
 use qml_guard_support::{blocks, code_lines};
 
@@ -55,6 +57,54 @@ const FILES: &[(&str, &str, usize, &[&str])] = &[
     ),
 ];
 
+/// (file, [(marker unique to one SelectableText block, its exact wrapMode)]).
+/// One entry per converted block, so the table also pins the block count.
+const WRAPS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "OnboardingPage.qml",
+        &[
+            ("wizardDetail", "Text.WordWrap"),
+            ("See docs/packaging/rpm-ostree-layering.md", "Text.WordWrap"),
+            ("Retrying automatically", "Text.WordWrap"),
+        ],
+    ),
+    (
+        "SilentModeChoice.qml",
+        &[("modelData.detail", "Text.Wrap"), ("notRunningNote", "Text.Wrap")],
+    ),
+    (
+        "LearningStartPanel.qml",
+        &[
+            ("Learning records which programs", "Text.Wrap"),
+            ("text: \"For\"", "Text.NoWrap"),
+            ("warningLabel", "Text.Wrap"),
+            ("errorLabel", "Text.Wrap"),
+        ],
+    ),
+    (
+        "LearningBanner.qml",
+        &[
+            ("summaryLabel", "Text.Wrap"),
+            ("incompleteLabel", "Text.Wrap"),
+            ("droppedLabel", "Text.Wrap"),
+            ("noticeLabel", "Text.Wrap"),
+            ("whereLabel", "Text.WrapAnywhere"),
+        ],
+    ),
+    ("PromptSlotBanner.qml", &[("holderLabel", "Text.Wrap")]),
+    (
+        "BackgroundGroupBar.qml",
+        &[
+            ("showingText", "Text.WordWrap"),
+            ("backgroundSummary", "Text.WordWrap"),
+            ("newProgramsText", "Text.WordWrap"),
+            ("baselineText", "Text.WordWrap"),
+        ],
+    ),
+    ("GroupPendingBadge.qml", &[]),
+    ("GroupVerdictCounts.qml", &[]),
+];
+
 #[test]
 fn batch_2_texts_are_selectable() {
     for (name, source, selectable, kept) in FILES {
@@ -82,7 +132,7 @@ fn batch_2_texts_are_selectable() {
 fn batch_2_adds_no_tab_stop() {
     for (name, source, _, _) in FILES {
         for block in blocks(&code_lines(source), "SelectableText {") {
-            for forbidden in ["activeFocusOnTab", "focus:", "KeyNavigation", "forceActiveFocus"] {
+            for forbidden in ["activeFocusOnTab", "focus:", "KeyNavigation", "forceActiveFocus", "activeFocusOnPress"] {
                 assert!(
                     !block.contains(forbidden),
                     "{name}: a SelectableText sets `{forbidden}` (mouse only):\n{block}"
@@ -95,14 +145,27 @@ fn batch_2_adds_no_tab_stop() {
 #[test]
 fn batch_2_keeps_layout_equivalent() {
     for (name, source, _, _) in FILES {
-        for block in blocks(&code_lines(source), "SelectableText {") {
-            assert!(
-                block.contains("wrapMode:"),
-                "{name}: a SelectableText names no wrapMode (TextEdit wraps by default):\n{block}"
-            );
+        let code = code_lines(source);
+        let converted = blocks(&code, "SelectableText {");
+        for block in &converted {
             assert!(
                 !block.contains("elide:"),
                 "{name}: a SelectableText sets `elide` (a TextEdit cannot elide):\n{block}"
+            );
+        }
+        let (_, expected) = WRAPS
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("{name}: missing from WRAPS"));
+        assert_eq!(converted.len(), expected.len(), "{name}: WRAPS entries vs blocks");
+        for (marker, wrap) in *expected {
+            let hits: Vec<&String> = converted.iter().filter(|b| b.contains(marker)).collect();
+            assert_eq!(hits.len(), 1, "{name}: marker `{marker}` must match one block");
+            let want = format!("wrapMode: {wrap}");
+            assert!(
+                hits[0].lines().any(|l| l.trim() == want),
+                "{name}: block `{marker}` must have `{want}`:\n{}",
+                hits[0]
             );
         }
     }
