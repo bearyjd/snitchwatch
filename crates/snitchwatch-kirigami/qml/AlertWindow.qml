@@ -391,6 +391,10 @@ Window {
             // Clicks, like keys, do nothing until armed.
             enabled: alert.armed
 
+            // Every text here stays a Label (selectable-text batch 7): a
+            // SelectableText brings a right-click menu that takes the focus
+            // (Esc would close it, not Deny) and a Ctrl+C shortcut into the
+            // prompt. The inspector copies the same data.
             // Identity first: icon, program, path.
             RowLayout {
                 Layout.fillWidth: true

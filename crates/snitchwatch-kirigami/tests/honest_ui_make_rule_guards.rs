@@ -78,8 +78,9 @@ fn make_rule_sheet_says_only_what_the_bridge_answered() {
     assert!(code.contains(
         "readonly property string result: !!sheet.controller && sheet.controller.rowId === sheet.rowId\n        ? sheet.controller.statusText : \"\""
     ));
-    let label = blocks(&code, "Controls.Label {")
-        .into_iter()
+    let label = ["Controls.Label {", "SelectableText {"]
+        .iter()
+        .flat_map(|open| blocks(&code, open))
         .find(|block| has_line(block, "objectName: \"makeRuleResult\""))
         .expect("the result label");
     assert!(has_line(&label, "textFormat: Text.PlainText"), "{label}");
@@ -87,8 +88,9 @@ fn make_rule_sheet_says_only_what_the_bridge_answered() {
 
     // While another row's request waits, Allow and Deny are disabled; one
     // fixed line says why.
-    let busy = blocks(&code, "Controls.Label {")
-        .into_iter()
+    let busy = ["Controls.Label {", "SelectableText {"]
+        .iter()
+        .flat_map(|open| blocks(&code, open))
         .find(|block| has_line(block, "objectName: \"makeRuleBusyElsewhere\""))
         .expect("the busy-elsewhere label");
     assert!(
@@ -182,8 +184,9 @@ fn the_two_rows_hint_is_one_fixed_plain_text_line() {
         "alsoListedByDefault: page.inspectAlsoListedByDefault"
     ));
     let code = code_lines(MAKE_RULE_SHEET);
-    let hints: Vec<String> = blocks(&code, "Controls.Label {")
-        .into_iter()
+    let hints: Vec<String> = ["Controls.Label {", "SelectableText {"]
+        .iter()
+        .flat_map(|open| blocks(&code, open))
         .filter(|block| has_line(block, "id: alsoListedNote"))
         .collect();
     assert_eq!(hints.len(), 1, "expected one two-rows hint label");

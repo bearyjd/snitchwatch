@@ -52,7 +52,7 @@ ColumnLayout {
         return sheet.visible && sheet.rowId === rowId;
     }
 
-    Controls.Label {
+    SelectableText {
         id: alsoListedNote
         Layout.fillWidth: true
         visible: sheet.alsoListedByDefault
@@ -76,7 +76,7 @@ ColumnLayout {
         }
     }
 
-    Controls.Label {
+    SelectableText {
         Layout.fillWidth: true
         visible: !sheet.bindableProcessPath
         wrapMode: Text.Wrap
@@ -92,7 +92,9 @@ ColumnLayout {
 
         RowLayout {
             Layout.fillWidth: true
-            Controls.Label {
+            SelectableText {
+                wrapMode: Text.NoWrap
+                textFormat: Text.PlainText
                 text: "Scope"
                 Layout.alignment: Qt.AlignVCenter
             }
@@ -112,7 +114,9 @@ ColumnLayout {
         }
         RowLayout {
             Layout.fillWidth: true
-            Controls.Label {
+            SelectableText {
+                wrapMode: Text.NoWrap
+                textFormat: Text.PlainText
                 text: "Duration"
                 Layout.alignment: Qt.AlignVCenter
             }
@@ -148,7 +152,7 @@ ColumnLayout {
         }
     }
 
-    Controls.Label {
+    SelectableText {
         id: blockNoteLabel
         Layout.fillWidth: true
         visible: form.visible && sheet.blockedForFiveMinutes
@@ -158,7 +162,7 @@ ColumnLayout {
         text: "This program's 5-minute block stays until it ends. Until then it wins over an Allow rule."
     }
 
-    Controls.Label {
+    SelectableText {
         id: busyElsewhereNote
         objectName: "makeRuleBusyElsewhere"
         Layout.fillWidth: true
@@ -169,7 +173,7 @@ ColumnLayout {
         text: "Another rule is still being sent. Try again in a moment."
     }
 
-    Controls.Label {
+    SelectableText {
         objectName: "makeRuleResult"
         Layout.fillWidth: true
         visible: sheet.result.length > 0
