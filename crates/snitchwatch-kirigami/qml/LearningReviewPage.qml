@@ -75,21 +75,21 @@ Kirigami.Page {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.smallSpacing
 
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     textFormat: Text.PlainText
                     text: "Programs recorded: " + (page.notices.programs === undefined ? 0 : page.notices.programs)
                         + ". Saved in " + (page.settings ? page.settings.learnedPath : "") + "."
                 }
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     textFormat: Text.PlainText
                     visible: page.notices.incomplete === true
                     text: "Some connections were missed under heavy load, so this record is not complete."
                 }
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     textFormat: Text.PlainText
@@ -97,7 +97,7 @@ Kirigami.Page {
                     text: "Programs not recorded or dropped to stay within the limits: " + page.notices.dropped
                         + " (" + page.notices.droppedFlagged + " of the last ones listed carried a flag)."
                 }
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     textFormat: Text.PlainText
@@ -105,7 +105,7 @@ Kirigami.Page {
                     visible: page.notices.classAFull === true
                     text: "The group of programs with flags is full, so new programs with flags are being refused."
                 }
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     textFormat: Text.PlainText
@@ -113,14 +113,14 @@ Kirigami.Page {
                     text: "Folders that hold more programs than an entry lists: " + page.notices.dirsFull
                         + ". The rest are only counted (" + page.notices.dirUnlistedConnections + " connections)."
                 }
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     textFormat: Text.PlainText
                     visible: page.notices.rulesRead === false
                     text: "The rules list could not be read, so programs you already have rules for are not hidden here. Identical rules are skipped when applying."
                 }
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     textFormat: Text.PlainText
@@ -169,7 +169,7 @@ Kirigami.Page {
                 visible: page.confirmingDelete && !page.learning && !page.applying
                 spacing: Kirigami.Units.smallSpacing
 
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     textFormat: Text.PlainText
@@ -194,7 +194,7 @@ Kirigami.Page {
                     }
                 }
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "learningStatusLabel"
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
@@ -206,7 +206,7 @@ Kirigami.Page {
                 Layout.fillWidth: true
                 controller: page.controller
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText

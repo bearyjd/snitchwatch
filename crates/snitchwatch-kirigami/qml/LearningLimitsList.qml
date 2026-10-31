@@ -23,7 +23,7 @@ ColumnLayout {
 
     Repeater {
         model: limits.lines
-        delegate: Controls.Label {
+        delegate: SelectableText {
             required property string modelData
             Layout.fillWidth: true
             wrapMode: Text.Wrap

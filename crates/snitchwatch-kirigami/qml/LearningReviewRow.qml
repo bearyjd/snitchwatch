@@ -30,6 +30,12 @@ Rectangle {
     border.width: 1
     radius: 3
 
+    readonly property string countsText: row.info.connections
+        + (row.info.connections === 1 ? " connection to " : " connections to ")
+        + row.info.distinct + (row.info.distinctExact ? "" : " or more")
+        + (row.info.distinct === 1 ? " destination" : " destinations")
+        + ". Last seen " + new Date(row.info.lastSeenMs).toLocaleString() + "."
+
     function present(kinds) {
         const names = {
             "allow-any": "any destination",
@@ -38,6 +44,31 @@ Rectangle {
             "directory": "any program file in a folder"
         };
         return kinds.map(k => names[k] || "a choice").join(", ");
+    }
+
+    // Right-click Copy of the whole program (mouse only: no focus, no Tab
+    // stop). The labels stay Labels: a second per-label menu would open
+    // beside this one, and a drag-select would fight the list's flick.
+    RowCopyMenu {
+        copyText: {
+            const i = row.info;
+            const lines = [i.programLabel + (i.programLabelUnverified ? " (name unverified)" : ""),
+                           i.programPathFull === undefined ? "" : i.programPathFull,
+                           row.countsText];
+            lines.push(...(i.flags === undefined ? [] : i.flags));
+            const hosts = row.more.length > 0 ? row.more : (i.top === undefined ? [] : i.top);
+            lines.push(...hosts.map(h => h.host + "  (" + h.count + ")"));
+            if (i.notSelectable !== undefined && i.notSelectable !== null) {
+                lines.push(i.notSelectable);
+            }
+            for (const c of (i.choices === undefined ? [] : i.choices)) {
+                lines.push(c.title);
+                if (c.hosts.length > 0) {
+                    lines.push("Only: " + c.hosts.join(", "));
+                }
+            }
+            return lines.filter(l => l !== "").join("\n");
+        }
     }
 
     ColumnLayout {
@@ -67,10 +98,7 @@ Rectangle {
             Layout.fillWidth: true
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: row.info.connections + (row.info.connections === 1 ? " connection to " : " connections to ")
-                + row.info.distinct + (row.info.distinctExact ? "" : " or more")
-                + (row.info.distinct === 1 ? " destination" : " destinations")
-                + ". Last seen " + new Date(row.info.lastSeenMs).toLocaleString() + "."
+            text: row.countsText
         }
 
         Repeater {

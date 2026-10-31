@@ -27,7 +27,7 @@ ColumnLayout {
 
     visible: list.progress !== null || (list.controller !== null && list.controller.applying === true)
 
-    Controls.Label {
+    SelectableText {
         id: summaryLabel
         Layout.fillWidth: true
         wrapMode: Text.Wrap
@@ -55,13 +55,13 @@ ColumnLayout {
             required property var modelData
             width: ListView.view.width - Kirigami.Units.gridUnit
             spacing: 0
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 wrapMode: Text.WrapAnywhere
                 textFormat: Text.PlainText
                 text: modelData.label
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 Layout.leftMargin: Kirigami.Units.gridUnit
                 wrapMode: Text.WrapAnywhere
