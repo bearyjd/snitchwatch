@@ -55,7 +55,7 @@ Window {
     readonly property var list: page.connectionList
     readonly property real t0: Date.now() - 60000
     property int ran: 0
-    readonly property int expectedSteps: 7
+    readonly property int expectedSteps: 9
 
     function clip() { sink.text = ""; sink.paste(); return sink.text; }
     function setClip(s) { sink.text = s; sink.selectAll(); sink.copy(); }
@@ -116,6 +116,31 @@ Window {
                      what + ": not in the shown order " + JSON.stringify(parts) + " -> " + JSON.stringify(at)
                      + " in " + JSON.stringify(text));
     }
+    // (Today may lack segments for a minute after local midnight, so only the
+    // Last hour window is guaranteed whole.)
+    // The verdict-count Labels the header really draws, in drawn (tree) order.
+    function drawnCounts(item, out) {
+        if (!item || !item.visible) return out;
+        if ((item.objectName === "verdictWindowLabel" || item.objectName === "verdictCount") && item.text !== "")
+            out.push(item.text);
+        for (let i = 0; i < item.children.length; i++) probe.drawnCounts(item.children[i], out);
+        return out;
+    }
+    // Every drawn count segment sits in the copy in the drawn order: each is
+    // searched for after the previous one, so reversed segments cannot pass.
+    function expectCountsInDrawnOrder(h, what) {
+        const drawn = probe.drawnCounts(h.verdictCountsItem, []);
+        probe.expect(drawn.length >= 4, what + ": too few drawn counts " + JSON.stringify(drawn));
+        const text = probe.copyOf(h);
+        let from = 0;
+        for (const part of drawn) {
+            const at = text.indexOf(part.replace(/:$/, ""), from);
+            probe.expect(at >= 0, what + ": '" + part + "' missing or out of drawn order after " + from
+                         + " in " + JSON.stringify(text) + " drawn " + JSON.stringify(drawn));
+            if (at < 0) return;
+            from = at + part.length - (part.endsWith(":") ? 1 : 0);
+        }
+    }
     function menuItem(name) {
         for (let i = 0; i < probe.actions.menu.count; ++i) {
             const item = probe.actions.menu.itemAt(i);
@@ -136,7 +161,14 @@ Window {
                 probe.row("event-1", "curl", "/usr/bin/curl", "deny.example", "deny", probe.t0 + 2000),
                 probe.row("event-2", "curl", "/usr/bin/curl", "deny.example", "deny", probe.t0 + 3000),
                 probe.row("event-3", "curl", "/usr/bin/curl", "deny.example", "deny", probe.t0 + 4000),
-                probe.row("ver-1", "claude", probe.longPath, "v.example", "allow", probe.t0 + 5000)] }));
+                probe.row("ver-1", "claude", probe.longPath, "v.example", "allow", probe.t0 + 5000),
+                // One header with three verdict kinds and distinct counts.
+                probe.row("mix-a", "mixer", "/usr/bin/mixer", "a.example", "allow", probe.t0 + 6000),
+                probe.row("mix-d1", "mixer", "/usr/bin/mixer", "d1.example", "deny", probe.t0 + 7000),
+                probe.row("mix-d2", "mixer", "/usr/bin/mixer", "d2.example", "deny", probe.t0 + 8000),
+                probe.row("mix-p1", "mixer", "/usr/bin/mixer", "p1.example", null, probe.t0 + 9000),
+                probe.row("mix-p2", "mixer", "/usr/bin/mixer", "p2.example", null, probe.t0 + 10000),
+                probe.row("mix-p3", "mixer", "/usr/bin/mixer", "p3.example", null, probe.t0 + 11000)] }));
             model.holdBackNoticesForTests("/usr/bin/python3", "example.com", 3, 3600);
         });
         probe.step("leaf copies hold every shown text", () => {
@@ -207,6 +239,28 @@ Window {
             const quietText = probe.expectHoldsShown(quiet, "header, nothing pending", 4);
             probe.expect(quietText.indexOf(" pending") < 0, "nothing pending, yet: " + quietText);
             model.toggleProcessGroup("/usr/bin/python3");
+        });
+        probe.step("headers: mixed verdicts, collapsed", () => {
+            const h = probe.headerFor(0, "/usr/bin/mixer");
+            return h && !h.expanded && h.verdictCountsItem.pieces.length >= 4 ? "" : "mixed header";
+        }, function () {
+            probe.ran++;
+            const h = probe.headerFor(0, "/usr/bin/mixer");
+            const kinds = h.verdictCountsItem.windows[0].segments.map(s => s.kind);
+            probe.expect(kinds.length >= 3, "fixture: verdict kinds " + JSON.stringify(kinds));
+            probe.expectHoldsShown(h, "mixed header, collapsed", 5);
+            probe.expectCountsInDrawnOrder(h, "mixed header, collapsed");
+            model.toggleProcessGroup("/usr/bin/mixer");
+        });
+        probe.step("headers: mixed verdicts, expanded", () => {
+            const h = probe.headerFor(0, "/usr/bin/mixer");
+            return h && h.expanded ? "" : "mixed header expanded";
+        }, function () {
+            probe.ran++;
+            const h = probe.headerFor(0, "/usr/bin/mixer");
+            probe.expectHoldsShown(h, "mixed header, expanded", 5);
+            probe.expectCountsInDrawnOrder(h, "mixed header, expanded");
+            model.toggleProcessGroup("/usr/bin/mixer");
         });
         probe.step("headers: expanded and domain", () => {
             const h = probe.headerFor(0, "/usr/bin/python3");

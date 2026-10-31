@@ -9,6 +9,10 @@
 //     moving focus), so the Tab itinerary, the arrow keys and the reading order
 //     are unchanged. Ctrl+C is a Shortcut on the one text that holds the
 //     selection (SelectionRegistry), off while a text field has focus;
+//   * dims like a disabled Label (the item palette's disabled windowText, which
+//     is what Label draws with) and, as with any disabled item, takes no mouse
+//     input: no selecting, no context menu. A disabled text is not for copying,
+//     as with a disabled Label. A caller's own `color` still wins;
 //   * reports the StaticText role, not EditableText;
 //   * `level` (0 = none, the default) makes it a heading like
 //     Kirigami.Heading.level: the same point-size factor and the Heading role.
@@ -33,7 +37,7 @@ TextEdit {
     focus: false
     textFormat: TextEdit.PlainText
     wrapMode: TextEdit.Wrap
-    color: Kirigami.Theme.textColor
+    color: root.enabled ? Kirigami.Theme.textColor : root.palette.disabled.windowText
     selectedTextColor: Kirigami.Theme.highlightedTextColor
     selectionColor: Kirigami.Theme.highlightColor
     Accessible.role: root.level > 0 ? Accessible.Heading : Accessible.StaticText
