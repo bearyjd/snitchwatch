@@ -42,6 +42,7 @@ Window {
     property int ticks: 0
     property bool focusDone: false
     property var focusResult: []
+    property var mirrors: []
     readonly property var interactive: [Accessible.Button, Accessible.CheckBox,
         Accessible.RadioButton, Accessible.ComboBox]
 
@@ -96,6 +97,35 @@ Window {
         }
         return out;
     }
+    function effectiveOpacity(item, stopAt) {
+        let o = 1;
+        for (let i = item; i && i !== stopAt.parent; i = i.parent) o *= i.opacity;
+        return o;
+    }
+    function overlaps(a, b) {
+        return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+    }
+    // Where the selected text (its painted extent) and the chevron / box sit, in the control's space.
+    function mirrorRow(rtl, kind, c) {
+        const text = c.contentItem;
+        const mark = c.indicator;
+        const t = text.mapToItem(c, 0, 0);
+        const m = mark.mapToItem(c, 0, 0);
+        // The Text's own padding (the box's side) is not part of where the glyphs go.
+        const avail = text.width - text.leftPadding - text.rightPadding;
+        const textRect = { x: t.x + text.leftPadding, y: t.y, width: Math.min(text.paintedWidth, avail), height: text.height };
+        const markRect = { x: m.x, y: m.y, width: mark.width, height: mark.height };
+        return { rtl: rtl, kind: kind, mirrored: c.mirrored, overlap: overlaps(textRect, markRect),
+                 elided: text.paintedWidth > 0 && text.truncated, w: c.width,
+                 textRight: textRect.x + textRect.width, markLeft: markRect.x, textLeft: textRect.x,
+                 markRight: markRect.x + markRect.width,
+                 textInside: textRect.x >= -0.5 && textRect.x + textRect.width <= c.width + 0.5 };
+    }
+    function mirrorChecks() {
+        const out = [];
+        for (const m of mirrors) out.push(mirrorRow(m.rtl, "combo", m.combo), mirrorRow(m.rtl, "check", m.check));
+        return out;
+    }
     function focusChecks(all) {
         const out = [];
         for (const c of all) {
@@ -106,9 +136,11 @@ Window {
             const contrast = s ? ringContrast(s) : [-1];
             const prominentClash = !!s && s.prominent
                 && Qt.colorEqual(s.focusRing.border.color, s.control.palette.highlight);
+            const ringBorder = s ? s.focusRing.border.width : -1;
+            const ringOpacity = s ? effectiveOpacity(s.focusRing, c) * s.focusRing.border.color.a : -1;
             c.focus = false;
             c.forceActiveFocus(Qt.MouseFocusReason);
-            out.push({ name: describe(c).name, on: on, contrast: contrast, prominentClash: prominentClash,
+            out.push({ name: describe(c).name, on: on, ringBorder: ringBorder, ringOpacity: ringOpacity, contrast: contrast, prominentClash: prominentClash,
                        radiusOk: !!s && s.body.radius === s.focusRing.radius,
                        mouseOff: !!s && !s.focusRing.visible });
         }
@@ -118,11 +150,12 @@ Window {
         const fixtureControls = controlsOf(fixture);
         const pageControls = pages.map(p => controlsOf(p).map(describe));
         console.warn("ROUNDED_BATCH_C_RESULT " + JSON.stringify({
-            state: state, hitMin: Theme.hitMin,
+            state: state, hitMin: Theme.hitMin, focusRingWidth: Theme.focusRingWidth,
             fixture: fixtureControls.map(describe),
             fixtureTabStops: tabStops(fixture),
             pages: pageControls,
-            focus: focusResult
+            focus: focusResult,
+            mirror: mirrorChecks()
         }));
         Qt.quit();
     }
@@ -133,10 +166,26 @@ Window {
             return c.createObject(contentItem, props);
         };
         fixture = fixtureComp.createObject(contentItem, { x: 0, y: 0, width: 900 });
+        mirrors = [false, true].map(rtl => mirrorComp.createObject(contentItem, { x: 0, y: 820, rtl: rtl }));
+        mirrors.forEach((m, i) => { m.x = i * 450; });
         const base = "qrc:/qt/qml/com/snitchwatch/shell/qml/";
         pages = [
             make(base + "DiagnosticsPage.qml", { x: 0, y: 100, width: 600, height: 700 })
         ];
+    }
+    // The same long text in both directions (LayoutMirroring is inherited by the children).
+    Component {
+        id: mirrorComp
+        Item {
+            property bool rtl: false
+            property alias combo: mirrorCombo
+            property alias check: mirrorCheck
+            width: 400; height: 100
+            LayoutMirroring.enabled: rtl
+            LayoutMirroring.childrenInherit: true
+            RoundedComboBox { id: mirrorCombo; width: 180; model: ["A very long selected choice that cannot fit"] }
+            RoundedCheckBox { id: mirrorCheck; y: 50; width: 180; text: "A very long check box label that cannot fit" }
+        }
     }
     Component {
         id: fixtureComp
@@ -270,6 +319,13 @@ fn the_new_components_and_swapped_sites_are_big_rounded_and_show_a_focus_ring() 
         assert_eq!(f["mouseOff"], true, "focus ring shown for mouse focus: {f}");
         assert_eq!(f["radiusOk"], true, "ring radius differs from the body: {f}");
         assert_eq!(f["prominentClash"], false, "ring equals a prominent fill: {f}");
+        // A zero-width or transparent ring would pass the checks above.
+        assert_eq!(f["ringBorder"], v["focusRingWidth"], "ring width is not Theme.focusRingWidth: {f}");
+        assert!(f["ringBorder"].as_f64().unwrap() > 0.0, "focus ring has no width: {f}");
+        assert!(
+            f["ringOpacity"].as_f64().unwrap() > 0.5,
+            "focus ring is (nearly) transparent: {f}"
+        );
         assert!(
             f["contrast"]
                 .as_array()
@@ -278,6 +334,15 @@ fn the_new_components_and_swapped_sites_are_big_rounded_and_show_a_focus_ring() 
                 .all(|c| c.as_f64().unwrap() >= 2.0),
             "focus ring does not contrast with its fill: {f}"
         );
+    }
+    // Long text, both directions: the text must clear the chevron / box.
+    let rows = v["mirror"].as_array().unwrap();
+    assert_eq!(rows.len(), 4, "mirror rows: {line}");
+    for r in rows {
+        assert_eq!(r["mirrored"], r["rtl"], "LayoutMirroring did not reach the control: {r}");
+        assert_eq!(r["elided"], true, "text was meant to be too long to fit: {r}");
+        assert_eq!(r["overlap"], false, "text overlaps the chevron / box: {r}");
+        assert_eq!(r["textInside"], true, "text leaves the control: {r}");
     }
 }
 

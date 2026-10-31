@@ -15,8 +15,9 @@ Controls.ComboBox {
 
     implicitWidth: Math.max(Theme.hitMin, implicitContentWidth + leftPadding + rightPadding)
     implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
-    leftPadding: Theme.controlPaddingH / 2
-    rightPadding: Theme.controlPaddingH / 2 + Theme.hitMin / 2
+    // The chevron's room is on the side it sits on: right, or left when mirrored.
+    leftPadding: Theme.controlPaddingH / 2 + (mirrored ? Theme.hitMin / 2 : 0)
+    rightPadding: Theme.controlPaddingH / 2 + (mirrored ? 0 : Theme.hitMin / 2)
 
     background: RoundedSurface {
         control: control
@@ -37,7 +38,7 @@ Controls.ComboBox {
         objectName: "comboChevron"
         implicitWidth: Theme.hitMin / 2
         implicitHeight: Theme.hitMin / 2
-        x: control.mirrored ? control.leftPadding : control.width - width - Theme.controlPaddingH / 4
+        x: control.mirrored ? Theme.controlPaddingH / 4 : control.width - width - Theme.controlPaddingH / 4
         y: control.topPadding + (control.availableHeight - height) / 2
         opacity: control.enabled ? 1 : Theme.disabledOpacity
         Item {
