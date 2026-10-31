@@ -108,14 +108,16 @@ stays a `Label`.
   `StaticText` is not in its interactive list, so no name is demanded.
   The pilot test asserts the role at runtime. **Orca reading it twice** (item
   text and the label) cannot be tested headless: real-desktop check.
-- **Focus.** `activeFocusOnTab: false`, `focus: false`, no focus ring (a
-  `TextEdit` draws none). Decision: `activeFocusOnPress: true`, so a click
-  gives focus and Ctrl+C works; the cost is that arrow keys then move a caret
-  in that text instead of scrolling the page. If the owner dislikes that, flip
-  to `false`: the right-click Copy still works because the selection is
-  persistent. A Tab press from a clicked text moves to the next *existing*
-  stop, so the itineraries (which start from a known item) do not change; the
-  existing page tests run unchanged as the proof.
+- **Focus.** Selectable text never takes active focus: `activeFocusOnTab:
+  false`, `activeFocusOnPress: false`, `focus: false`, `persistentSelection`
+  (the selection stays visible). A click or drag leaves `activeFocusItem`
+  exactly where it was, so Tab, Shift+Tab and the arrow keys behave as before
+  (tested with real events). Ctrl+C: each text has a `Shortcut` enabled only
+  while it is the one in `SelectionRegistry` (last selected wins, the others are
+  cleared), has a selection, and no text control has focus. Qt already lets a
+  focused TextField claim Ctrl+C first; the focus condition is belt and braces
+  (its mutant survives, stated in the PR). Right-click Copy / Select all work
+  from the menu.
 - **Layout equivalence.** `TextEdit` has no default `elide`, a different
   implicit size rule (no `implicitWidth` clipping), no `Label` palette/`font`
   inheritance from Controls (we bind `font` and `color` to the Controls
@@ -133,9 +135,7 @@ stays a `Label`.
   has no `level`. Decision for batch 1: add `property int level` that sets the
   same point-size factor (Kirigami's `Heading` factors: 1: 1.35, 2: 1.20,
   3: 1.15, ...), then convert the 18 headings. Not done in this PR.
-- **Cursor.** The brief asks for an arrow cursor (`HoverHandler`). An I-beam is
-  the usual hint that text is selectable; flip `cursorShape` if the owner
-  prefers it. Unverifiable headless.
+- **Cursor.** I-beam over selectable text (owner, 2026-10-30). Unverifiable headless.
 - **Honest-UI source guards** (`tests/honest_ui_*.rs`). They scan for
   `Controls.Label {` / `Kirigami.Heading {` blocks that show external text
   without `textFormat: Text.PlainText`, and several assert `>= N` such
@@ -160,7 +160,6 @@ stays a `Label`.
 - **Connections list** (`ConnectionList.qml:99`): the Menu key / Shift+F10
   opens the row's actions. Same: unchanged; right-click Copy is added beside
   it in batch 8.
-- Arrow keys after clicking selectable text move a caret (see Focus).
 
 ## Verification of this PR
 

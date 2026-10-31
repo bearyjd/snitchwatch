@@ -30,6 +30,7 @@ const DONE_MARKER: &str = "SELECTABLE_TEXT_PROBE_DONE";
 const QML: &str = r#"
 import QtQuick
 import QtQuick.Window
+import QtQuick.Controls
 import QtTest
 import com.snitchwatch.shell
 
@@ -57,6 +58,8 @@ Window {
         model: profiles
     }
     TextEdit { id: sink; visible: false }
+    TextField { id: field; x: 700; y: 850; width: 200; activeFocusOnTab: false; Accessible.name: "Test field"; text: "FIELDTEXT" }
+    function copyButton() { return probe.find(about, it => it.objectName === "aboutCopyButton"); }
 
     function clip() { sink.text = ""; sink.paste(); return sink.text; }
     function setClip(s) { sink.text = s; sink.selectAll(); sink.copy(); }
@@ -106,6 +109,34 @@ Window {
             probe.expect(JSON.stringify(names) === JSON.stringify(["Copy version info", "Home (active)", "Work"]),
                          "Tab visits " + JSON.stringify(names));
         });
+        probe.step("a click never takes focus", null, function () {
+            const btn = probe.copyButton();
+            const v = probe.value("gui_version");
+            btn.forceActiveFocus();
+            const before = probe.focused();
+            probe.expect(before === btn, "setup: focus is on " + probe.nameOf(before));
+            tc.mouseClick(v, 5, v.height / 2);
+            probe.expect(probe.focused() === before, "a click moved focus to " + probe.nameOf(probe.focused()));
+            probe.expect(v.activeFocus === false, "the text has active focus");
+            probe.key(Qt.Key_Tab);
+            probe.expect(probe.nameOf(probe.focused()) === "Home (active)", "Tab after a click went to " + probe.nameOf(probe.focused()));
+            probe.key(Qt.Key_Backtab);
+            probe.expect(probe.focused() === btn, "Shift+Tab went to " + probe.nameOf(probe.focused()));
+            tc.mouseDrag(v, 2, v.height / 2, v.contentWidth + 4, 0);
+            probe.expect(probe.focused() === btn, "a drag moved focus to " + probe.nameOf(probe.focused()));
+            probe.expect(v.selectedText === v.text, "no selection without focus: '" + v.selectedText + "'");
+            const f = probe.value("flatpak");
+            tc.mouseDoubleClickSequence(f, 5, f.height / 2);
+            probe.expect(f.selectedText.length > 0, "a double click selected nothing");
+            probe.expect(probe.focused() === btn, "a double click moved focus to " + probe.nameOf(probe.focused()));
+        });
+        probe.step("arrow keys still reach the page", null, function () {
+            const v = probe.value("gui_version");
+            probe.row(0).forceActiveFocus();
+            tc.mouseClick(v, 5, v.height / 2);
+            probe.key(Qt.Key_Down);
+            probe.expect(probe.nameOf(probe.focused()) === "Work", "Down after a click went to " + probe.nameOf(probe.focused()));
+        });
         probe.step("drag selects, Ctrl+C copies", null, function () {
             const v = probe.value("gui_version");
             probe.setClip("SENTINEL");
@@ -114,6 +145,29 @@ Window {
             probe.expect(v.selectedText === v.text, "selected '" + v.selectedText + "' of '" + v.text + "'");
             tc.keyClick(Qt.Key_C, Qt.ControlModifier);
             probe.expect(probe.clip() === v.text, "Ctrl+C put '" + probe.clip() + "' on the clipboard, not '" + v.text + "'");
+        });
+        probe.step("Ctrl+C in a field copies the field", null, function () {
+            const v = probe.value("gui_version");
+            probe.expect(v.selectedText.length > 0, "setup: nothing selected");
+            probe.setClip("SENTINEL");
+            field.forceActiveFocus();
+            field.selectAll();
+            tc.keyClick(Qt.Key_C, Qt.ControlModifier);
+            probe.expect(probe.clip() === "FIELDTEXT", "Ctrl+C in a field put '" + probe.clip() + "' on the clipboard");
+            field.deselect();
+            probe.setClip("SENTINEL");
+            tc.keyClick(Qt.Key_C, Qt.ControlModifier);
+            probe.expect(probe.clip() === "SENTINEL", "Ctrl+C in a field with no selection copied '" + probe.clip() + "' from a label");
+        });
+        probe.step("a new selection clears the old one", null, function () {
+            const v = probe.value("gui_version"), d = probe.value("daemon_version");
+            probe.copyButton().forceActiveFocus();
+            tc.mouseDrag(v, 2, v.height / 2, v.contentWidth + 4, 0);
+            tc.mouseDrag(d, 2, d.height / 2, d.contentWidth + 4, 0);
+            probe.expect(v.selectedText === "" && d.selectedText === d.text, "selections: '" + v.selectedText + "' / '" + d.selectedText + "'");
+            probe.setClip("SENTINEL");
+            tc.keyClick(Qt.Key_C, Qt.ControlModifier);
+            probe.expect(probe.clip() === d.text, "Ctrl+C copied '" + probe.clip() + "', not the latest selection");
         });
         probe.step("right-click Copy copies the selection", null, function () {
             const v = probe.value("daemon_version");

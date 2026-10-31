@@ -5,10 +5,10 @@
 //   * `textFormat` defaults to PlainText (external text must never be
 //     markup; callers still write `textFormat: Text.PlainText` explicitly,
 //     which the honest-UI guards look for);
-//   * mouse only: not a Tab stop and no focus ring, so the Tab itinerary and
-//     the reading order are unchanged. A click does focus it, so Ctrl+C
-//     works; the selection is kept when focus leaves, so the right-click menu
-//     can still copy it;
+//   * mouse only: it never takes active focus (a click or drag selects without
+//     moving focus), so the Tab itinerary, the arrow keys and the reading order
+//     are unchanged. Ctrl+C is a Shortcut on the one text that holds the
+//     selection (SelectionRegistry), off while a text field has focus;
 //   * reports the StaticText role, not EditableText.
 // Right-click opens "Copy" and "Select all" (made on first use).
 import QtQuick
@@ -24,6 +24,8 @@ TextEdit {
     selectByMouse: true
     persistentSelection: true
     activeFocusOnTab: false
+    activeFocusOnPress: false
+    focus: false
     textFormat: TextEdit.PlainText
     wrapMode: TextEdit.Wrap
     color: Kirigami.Theme.textColor
@@ -33,7 +35,37 @@ TextEdit {
     Accessible.name: root.text
 
     HoverHandler {
-        cursorShape: Qt.ArrowCursor
+        cursorShape: Qt.IBeamCursor
+    }
+
+    // The last text selected owns Ctrl+C and clears the others.
+    onSelectedTextChanged: {
+        if (root.selectedText.length === 0) {
+            return;
+        }
+        const previous = SelectionRegistry.current;
+        SelectionRegistry.current = root;
+        if (previous && previous !== root) {
+            previous.deselect();
+        }
+    }
+    Component.onDestruction: {
+        if (SelectionRegistry.current === root) {
+            SelectionRegistry.current = null;
+        }
+    }
+
+    // A focused text control keeps its own Ctrl+C.
+    readonly property bool fieldHasFocus: {
+        const f = root.Window.activeFocusItem;
+        return !!f && f !== root && f.selectedText !== undefined
+            && (!f.readOnly || f.selectedText.length > 0);
+    }
+    Shortcut {
+        sequences: [StandardKey.Copy]
+        enabled: root.visible && SelectionRegistry.current === root
+            && root.selectedText.length > 0 && !root.fieldHasFocus
+        onActivated: root.copy()
     }
 
     TapHandler {
