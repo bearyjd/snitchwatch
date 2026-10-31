@@ -80,7 +80,8 @@ fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
         &["couldn't read its saved blocklists"],
     );
     keyed("!page.storagePersistent", &["restart"]);
-    let labels = blocks(&header[0], "Controls.Label {");
+    let mut labels = blocks(&header[0], "Controls.Label {");
+    labels.extend(blocks(&header[0], "SelectableText {"));
     let reasons: Vec<_> = labels
         .iter()
         .filter(|l| l.contains("page.storageReason"))

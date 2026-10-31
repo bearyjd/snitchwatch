@@ -47,7 +47,9 @@ fn the_message_is_fixed_text_and_every_dynamic_label_is_plain_text() {
         "{sentence}"
     );
 
-    let labels = blocks(&code, "Controls.Label {");
+    // Selectable-text batch 2: the labels are `SelectableText` now.
+    let mut labels = blocks(&code, "Controls.Label {");
+    labels.extend(blocks(&code, "SelectableText {"));
     assert_eq!(labels.len(), 5, "the labels moved: {}", labels.len());
     for label in &labels {
         assert!(

@@ -80,7 +80,7 @@ Kirigami.ScrollablePage {
             text: page.controller && page.controller.errorTitle.length > 0
                 ? page.controller.errorTitle : "The deep scan failed."
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             Layout.leftMargin: Kirigami.Units.largeSpacing
             Layout.rightMargin: Kirigami.Units.largeSpacing
@@ -118,7 +118,7 @@ Kirigami.ScrollablePage {
             text: "Scanning…"
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             text: "Runs a one-shot, on-demand privileged scan (rootkit signatures, " +
@@ -184,18 +184,20 @@ Kirigami.ScrollablePage {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        Kirigami.Heading {
+        SelectableText {
+            wrapMode: Text.NoWrap
             level: 3
             text: section.title + " (" + section.entries.length + ")"
         }
-        Controls.Label {
+        SelectableText {
+            wrapMode: Text.NoWrap
             visible: section.entries.length === 0
             text: section.emptyText
             opacity: 0.7
         }
         Repeater {
             model: section.entries
-            delegate: Controls.Label {
+            delegate: SelectableText {
                 objectName: "scannerFindingPath"
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap

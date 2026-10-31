@@ -28,7 +28,7 @@ ColumnLayout {
     property alias understood: understoodBox
     property alias warning: warningLabel
 
-    Controls.Label {
+    SelectableText {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         textFormat: Text.PlainText
@@ -40,7 +40,8 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        Controls.Label {
+        SelectableText {
+            wrapMode: Text.NoWrap
             height: lengthBox.height
             verticalAlignment: Text.AlignVCenter
             textFormat: Text.PlainText
@@ -55,7 +56,7 @@ ColumnLayout {
         }
     }
 
-    Controls.Label {
+    SelectableText {
         id: warningLabel
         Layout.fillWidth: true
         wrapMode: Text.Wrap
@@ -106,7 +107,7 @@ ColumnLayout {
         }
     }
 
-    Controls.Label {
+    SelectableText {
         id: errorLabel
         Layout.fillWidth: true
         wrapMode: Text.Wrap

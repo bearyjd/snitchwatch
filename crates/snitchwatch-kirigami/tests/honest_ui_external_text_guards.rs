@@ -246,7 +246,10 @@ fn violations(name: &str, source: &str, exprs: &[&str]) -> Vec<String> {
         "SelectableText {",
     ] {
         for block in blocks(&code, open) {
-            if shows(&text_binding(&block)) && !block.contains("textFormat: Text.PlainText") {
+            let plain = ["textFormat: Text.PlainText", "textFormat: TextEdit.PlainText"]
+                .iter()
+                .any(|f| block.contains(f));
+            if shows(&text_binding(&block)) && !plain {
                 found.push(format!(
                     "{name}: `{open}` shows external text without `textFormat: Text.PlainText` \
                      (issue #51):\n{block}"
@@ -301,6 +304,7 @@ fn the_checker_flags_external_text_in_items_other_than_labels() {
     let exprs = ["controller.detail"];
     let bad = [
         "Controls.Label {\n    text: controller.detail\n}",
+        "SelectableText {\n    textFormat: Text.RichText\n    text: controller.detail\n}",
         "Kirigami.Heading {\n    text: controller.detail\n}",
         "Text {\n    text: \"x\" + controller.detail\n}",
         "Kirigami.PlaceholderMessage {\n    text: \"t\"\n    explanation: controller.detail\n}",
@@ -318,6 +322,8 @@ fn the_checker_flags_external_text_in_items_other_than_labels() {
         "Controls.Label {\n    textFormat: Text.PlainText\n    text: controller.detail\n}",
         "Kirigami.Heading {\n    textFormat: Text.PlainText\n    text: controller.detail\n}",
         "Text {\n    textFormat: Text.PlainText\n    text: controller.detail\n}",
+        "SelectableText {\n    textFormat: TextEdit.PlainText\n    text: controller.detail\n}",
+        "SelectableText {\n    textFormat: Text.PlainText\n    text: controller.detail\n}",
         "Kirigami.PlaceholderMessage {\n    text: \"Fixed\"\n    explanation: \"Also fixed\"\n}",
         "Controls.Label {\n    text: \"fixed\"\n}",
         "SubText {\n    text: controller.detail\n}",
