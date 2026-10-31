@@ -83,11 +83,12 @@ Kirigami.Page {
             }
         }
 
-        Kirigami.Heading {
+        SelectableText {
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             level: 2
             wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
             text: {
                 switch (page.controller ? page.controller.state : "") {
                 case "unitMissing": return "Daemon not installed";

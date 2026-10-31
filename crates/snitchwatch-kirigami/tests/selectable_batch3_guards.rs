@@ -39,14 +39,14 @@ const FILES: &[(&str, &str, usize, usize, &[&str])] = &[
     ("LearningProgressList.qml", include_str!("../qml/LearningProgressList.qml"), 3, 0, &[]),
     ("LearningLimitsList.qml", include_str!("../qml/LearningLimitsList.qml"), 1, 0, &[]),
     // Class C: the group rows. Title, description and the entry texts stay
-    // Labels (the entry's program is elided: ElideMiddle). Heading: no `level`.
+    // Labels (the entry's program is elided: ElideMiddle). The level-2
+    // "Recommended rules" Heading is a SelectableText { level: 2 }.
     (
         "CuratedGroupsStep.qml",
         include_str!("../qml/CuratedGroupsStep.qml"),
-        3,
+        4,
         1,
         &[
-            "Recommended rules",
             "groupRow.modelData.title",
             "groupDescription-",
             "entryProgram",
@@ -88,6 +88,7 @@ const WRAPS: &[(&str, &[(&str, &str)])] = &[
     (
         "CuratedGroupsStep.qml",
         &[
+            ("Recommended rules", "Text.WordWrap"),
             ("Optional. Each switch adds", "Text.Wrap"),
             ("cannot accept reviewed DNS consent", "Text.Wrap"),
             ("consentResult", "Text.Wrap"),
@@ -143,6 +144,29 @@ fn is_literal_empty(expr: &str) -> bool {
         .collect();
     let bare = bare.strip_prefix("return").unwrap_or(&bare);
     matches!(bare, "" | "\"\"" | "''" | "``")
+}
+
+/// (file, [(marker unique to one converted Heading block, its exact level)]).
+const LEVELS: &[(&str, &[(&str, u32)])] = &[("CuratedGroupsStep.qml", &[("Recommended rules", 2)])];
+
+#[test]
+fn batch_3_headings_keep_their_level() {
+    for (name, source, ..) in FILES {
+        let converted = blocks(&code_lines(source), "SelectableText {");
+        let expected = LEVELS.iter().find(|(n, _)| n == name).map_or(&[][..], |(_, l)| *l);
+        let leveled = converted.iter().filter(|b| b.lines().any(|l| l.trim().starts_with("level:"))).count();
+        assert_eq!(leveled, expected.len(), "{name}: SelectableText blocks with a `level:`");
+        for (marker, level) in expected {
+            let hits: Vec<&String> = converted.iter().filter(|b| b.contains(marker)).collect();
+            assert_eq!(hits.len(), 1, "{name}: marker `{marker}` must match one block");
+            let want = format!("level: {level}");
+            assert!(
+                hits[0].lines().any(|l| l.trim() == want),
+                "{name}: heading `{marker}` must have `{want}`:\n{}",
+                hits[0]
+            );
+        }
+    }
 }
 
 #[test]
