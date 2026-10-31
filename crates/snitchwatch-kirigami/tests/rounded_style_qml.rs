@@ -650,6 +650,8 @@ fn the_styled_files_take_radii_and_colours_from_theme_and_the_palette() {
         ("GuardedToolButton", qml_source("GuardedToolButton")),
         ("GuardedSwitch", qml_source("GuardedSwitch")),
         ("GuardedRadioButton", qml_source("GuardedRadioButton")),
+        ("RoundedCheckBox", qml_source("RoundedCheckBox")),
+        ("RoundedComboBox", qml_source("RoundedComboBox")),
     ];
     for (name, src) in files {
         let code: String = src

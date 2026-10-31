@@ -96,7 +96,7 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        Controls.Button {
+        RoundedButton {
             objectName: "geoCityDownloadButton"
             text: "Download optional DB-IP City Lite…"
             icon.name: "download"
@@ -105,7 +105,7 @@ ColumnLayout {
                     browserError.visible = true;
             }
         }
-        Controls.Button {
+        RoundedButton {
             objectName: "geoDownloadButton"
             text: "Download DB-IP Country Lite…"
             icon.name: "download"
@@ -114,21 +114,21 @@ ColumnLayout {
                     browserError.visible = true;
             }
         }
-        Controls.Button {
+        RoundedButton {
             text: "MaxMind downloads…"
             onClicked: {
                 if (!Qt.openUrlExternally("https://www.maxmind.com/en/accounts/current/geoip/downloads"))
                     browserError.visible = true;
             }
         }
-        Controls.Button {
+        RoundedButton {
             objectName: "geoInstallButton"
             text: "Import Country database…"
             icon.name: "document-open"
             enabled: settings.model && !settings.model.dbInstallBusy
             onClicked: { settings.cityImport = false; databaseFile.open(); }
         }
-        Controls.Button {
+        RoundedButton {
             objectName: "geoCityInstallButton"
             text: "Import optional City database…"
             icon.name: "document-open"
