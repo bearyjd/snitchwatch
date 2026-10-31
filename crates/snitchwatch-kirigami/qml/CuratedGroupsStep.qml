@@ -46,7 +46,7 @@ ColumnLayout {
         text: "Recommended rules"
     }
 
-    Controls.Label {
+    SelectableText {
         objectName: "groupsIntro"
         Layout.fillWidth: true
         wrapMode: Text.Wrap
@@ -66,7 +66,7 @@ ColumnLayout {
         text: "This Snitchwatch service doesn't add recommended rules, so nothing here can be "
             + "turned on."
     }
-    Controls.Label {
+    SelectableText {
         objectName: "dnsUnsupported"
         Layout.fillWidth: true
         textFormat: Text.PlainText
@@ -75,7 +75,7 @@ ColumnLayout {
         text: "This service cannot accept reviewed DNS consent, so the name-resolution rule "
             + "cannot be turned on from here."
     }
-    Controls.Label {
+    SelectableText {
         objectName: "dnsChoiceResult"
         Layout.fillWidth: true
         textFormat: Text.PlainText
@@ -93,6 +93,20 @@ ColumnLayout {
             property bool expanded: false
             Layout.fillWidth: true
             spacing: Kirigami.Units.smallSpacing
+
+            // Right-click Copy of the whole group (title, description and,
+            // when shown, its entries). Mouse only: no focus, no Tab stop.
+            RowCopyMenu {
+                copyText: {
+                    const lines = [groupRow.modelData.title, groupRow.modelData.description];
+                    if (groupRow.expanded) {
+                        for (const e of groupRow.modelData.entries) {
+                            lines.push(e.program + ": " + e.allows, e.why, e.statusText);
+                        }
+                    }
+                    return lines.join("\n");
+                }
+            }
 
             RowLayout {
                 Layout.fillWidth: true
