@@ -30,6 +30,7 @@ Item {
     readonly property color ink: control.palette.windowText
     readonly property alias body: body
     readonly property alias focusRing: ring
+    readonly property alias wash: wash
     // The ring is chosen against the fill it sits on: a primary button is
     // filled with `highlight`, so a `highlight` ring would vanish on it.
     readonly property color ringColor: prominent ? control.palette.highlightedText
@@ -53,6 +54,7 @@ Item {
 
     // Hover and pressed wash.
     Rectangle {
+        id: wash
         objectName: "stateWash"
         anchors.fill: parent
         radius: surface.cornerRadius

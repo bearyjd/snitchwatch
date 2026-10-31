@@ -124,45 +124,99 @@ batch C.
 
 ## 5. Rollout (no two batches touch the same files)
 
-- **PR A (this PR):** `Theme` tokens, `RoundedSurface`, `RoundedButton`, the
-  four Guarded wrappers, probe + source guard, pilot pages **About** (in-place restyle of its plain button) and
-  **Silent-mode choice** (uses Guarded radio + buttons), screenshot runner
-  entries.
-- **B:** `SegmentedChoice`, alert window and `PendingDecisionSheet` buttons.
-- **C:** `RoundedCheckBox`, `RoundedComboBox`; Diagnostics, Geo, Settings sites.
-- **D:** `RoundedField`; Rules/Make-rule/Blocklists/Import sheets.
-- **E:** list rows, cards, drawer entries (after the SelectableText branch
-  lands to avoid Label conflicts).
-- **F:** badges, chips, `HoverTip`, last polish.
+Restyle batches (the generator reads this table; every file a batch edits is
+listed; `RoundedCheckBox.qml`, `RoundedComboBox.qml` and `RoundedField.qml` are
+new files in C and D and overlap nothing):
 
-### File ownership against the selectable-text rollout
+<!-- RESTYLE-BATCHES -->
+| Batch | Files |
+|---|---|
+| A | `Theme.qml`, `RoundedSurface.qml`, `RoundedButton.qml`, `GuardedButton.qml`, `GuardedToolButton.qml`, `GuardedSwitch.qml`, `GuardedRadioButton.qml`, `AboutPage.qml`, `build.rs`, `sources.rs` (every later batch that adds a component appends to both) |
+| B | `SegmentedChoice.qml`, `AlertWindow.qml`, `PendingDecisionSheet.qml`, `SizedOverlaySheet.qml` |
+| C | `DiagnosticsPage.qml`, `GeoPage.qml`, `GeoDatabaseSettings.qml`, `DaemonHealthPage.qml`, `DenyStatusSection.qml`, `ScannerPage.qml`, `SilentModeChoice.qml`, `TrafficPage.qml` |
+| D | `RulesPage.qml`, `RuleEditorSheet.qml`, `RulesImportSheet.qml`, `RuleSimulatorSheet.qml`, `RulesInspectorSheet.qml`, `MakeRuleSheet.qml`, `BlocklistsPage.qml`, `ProfilesPage.qml`, `RecommendedRulesPage.qml` |
+| E | `ConnectionRow.qml`, `ConnectionList.qml`, `LearningReviewRow.qml`, `LearningReviewPage.qml`, `CuratedGroupsStep.qml`, `InspectorPanel.qml`, `OnboardingPage.qml` |
+| F | `GroupPendingBadge.qml`, `GroupVerdictCounts.qml`, `HoverTip.qml`, `BackgroundGroupBar.qml`, `MapMarker.qml`, `LearningBanner.qml` |
+<!-- /RESTYLE-BATCHES -->
 
-The SelectableText conversion (PR #284, `docs/superpowers/plans/2026-10-30-selectable-text.md`
-on `feat/selectable-text-infra`) edits `Label` lines in many of the same pages.
-Files both rollouts touch:
+### File ownership against the selectable-text rollout (PR #284)
 
-| File(s) | Restyle batch | Selectable batch | Owner PR |
+Source: `docs/superpowers/plans/2026-10-30-selectable-text.md` on
+`feat/selectable-text-infra`. The table is generated, not hand-written:
+`docs/superpowers/plans/tools/ownership_table.py` unions both plans' file lists
+(plus the two append-only lists `build.rs` and `tests/qml_guard_support/sources.rs`).
+
+**Rule (final): selectable text goes first for every overlapping file.**
+- #284 merges before #286; #286 then rebases. On `AboutPage.qml` (selectable
+  pilot A) the restyle edit (the copy `Button` block) and the selectable edits
+  (labels, "Copied" note) are different regions: resolve on rebase.
+- `build.rs` and `sources.rs` are append-only lists both rollouts extend: keep
+  both sides on rebase.
+- For restyle batches B-F: a file that is also in a selectable batch is
+  restyled only after that selectable batch has merged, inside the restyle PR,
+  never in parallel. Files in no selectable batch can be restyled any time.
+- Why selectable first: it is already open, larger and mechanical (a `Label`
+  becomes `SelectableText`); a restyle edit is a few lines and rebases cleanly.
+
+<!-- OWNERSHIP -->
+| File | Selectable text | Restyle | Order |
 |---|---|---|---|
-| `AlertWindow.qml`, `PendingDecisionSheet.qml` | B | 7 | the selectable batch 7 PR |
-| `DiagnosticsPage.qml`, `GeoPage.qml` | C | 1 / 5 | the selectable batch 1 / 5 PR |
-| `BlocklistsPage.qml`, Rules / import sheets, `MakeRuleSheet.qml` | D | 5-7 | the selectable batch 5-7 PRs |
-| `GroupPendingBadge.qml` | F | 2 | the selectable batch 2 PR |
-| `Theme.qml`, `Guarded*.qml`, `Rounded*.qml`, `SegmentedChoice.qml`, `CheckBox`/`ComboBox`/`Field` wrappers | A, B, C, D | none | restyle |
-| `AboutPage.qml`, `SilentModeChoice.qml` | A (done) | check on rebase | restyle (A); selectable rebases on top |
-
-**Sequencing rule (decision: selectable first).** A file touched by both
-rollouts is changed by exactly **one** PR at a time, never in parallel, and the
-selectable-text batch goes first. Why: it is already open, larger and purely
-mechanical (a `Label` becomes `SelectableText`), so it is the costlier one to
-rebase; the restyle edit on a shared file is a few lines (swap the type or add
-a `background:`), so it rebases trivially on top of a merged selectable batch.
-Concretely: (1) the restyle batch for a file set waits until the matching
-selectable batch has merged; (2) that restyle PR then carries the shared-file
-swaps; (3) files in the table owned by the selectable PR get their restyle swap
-folded into the selectable PR only if its author agrees, otherwise they wait
-for the restyle batch. Files with no overlap (`Theme`, wrappers,
-`SegmentedChoice`) are restyled any time. PR A touched `AboutPage.qml` by one
-`Button` block, no `Label` line.
+| `AboutPage.qml` | pilot (#284) | A | selectable (pilot (#284)) merges first, then restyle A in the restyle PR |
+| `AlertWindow.qml` | batch 7 | B | selectable (batch 7) merges first, then restyle B in the restyle PR |
+| `BackgroundGroupBar.qml` | batch 2 | F | selectable (batch 2) merges first, then restyle F in the restyle PR |
+| `BlocklistsPage.qml` | batch 5 | D | selectable (batch 5) merges first, then restyle D in the restyle PR |
+| `ConnectionExplanation.qml` | batch 7 | - | selectable only |
+| `ConnectionList.qml` | batch 8 | E | selectable (batch 8) merges first, then restyle E in the restyle PR |
+| `ConnectionRow.qml` | batch 8 | E | selectable (batch 8) merges first, then restyle E in the restyle PR |
+| `ConnectionsFilterBar.qml` | batch 8 | - | selectable only |
+| `ConnectionsHeader.qml` | batch 8 | - | selectable only |
+| `CuratedGroupsStep.qml` | batch 3 | E | selectable (batch 3) merges first, then restyle E in the restyle PR |
+| `DaemonHealthPage.qml` | batch 1 | C | selectable (batch 1) merges first, then restyle C in the restyle PR |
+| `DenyStatusSection.qml` | batch 1 | C | selectable (batch 1) merges first, then restyle C in the restyle PR |
+| `DiagnosticsPage.qml` | batch 1 | C | selectable (batch 1) merges first, then restyle C in the restyle PR |
+| `GeoDatabaseSettings.qml` | batch 1 | C | selectable (batch 1) merges first, then restyle C in the restyle PR |
+| `GeoPage.qml` | batch 5 | C | selectable (batch 5) merges first, then restyle C in the restyle PR |
+| `GroupPendingBadge.qml` | batch 2 | F | selectable (batch 2) merges first, then restyle F in the restyle PR |
+| `GroupVerdictCounts.qml` | batch 2 | F | selectable (batch 2) merges first, then restyle F in the restyle PR |
+| `GuardedButton.qml` | - | A | restyle only, any time |
+| `GuardedRadioButton.qml` | - | A | restyle only, any time |
+| `GuardedSwitch.qml` | - | A | restyle only, any time |
+| `GuardedToolButton.qml` | - | A | restyle only, any time |
+| `HoverTip.qml` | - | F | restyle only, any time |
+| `InspectorPanel.qml` | batch 7 | E | selectable (batch 7) merges first, then restyle E in the restyle PR |
+| `LearningBanner.qml` | batch 2 | F | selectable (batch 2) merges first, then restyle F in the restyle PR |
+| `LearningLimitsList.qml` | batch 3 | - | selectable only |
+| `LearningProgressList.qml` | batch 3 | - | selectable only |
+| `LearningReviewPage.qml` | batch 3 | E | selectable (batch 3) merges first, then restyle E in the restyle PR |
+| `LearningReviewRow.qml` | batch 3 | E | selectable (batch 3) merges first, then restyle E in the restyle PR |
+| `LearningStartPanel.qml` | batch 2 | - | selectable only |
+| `LevelRuleActions.qml` | batch 7 | - | selectable only |
+| `MakeRuleSheet.qml` | batch 7 | D | selectable (batch 7) merges first, then restyle D in the restyle PR |
+| `MapBand.qml` | batch 8 | - | selectable only |
+| `MapMarker.qml` | batch 8 | F | selectable (batch 8) merges first, then restyle F in the restyle PR |
+| `MapView.qml` | batch 1 | - | selectable only |
+| `OnboardingPage.qml` | batch 2 | E | selectable (batch 2) merges first, then restyle E in the restyle PR |
+| `PendingDecisionSheet.qml` | batch 7 | B | selectable (batch 7) merges first, then restyle B in the restyle PR |
+| `ProfilesPage.qml` | pilot (#284) + batch 4 | D | selectable (pilot (#284) + batch 4) merges first, then restyle D in the restyle PR |
+| `ProgramLabel.qml` | batch 8 | - | selectable only |
+| `PromptSlotBanner.qml` | batch 2 | - | selectable only |
+| `RecommendedRulesPage.qml` | batch 4 | D | selectable (batch 4) merges first, then restyle D in the restyle PR |
+| `RoundedButton.qml` | - | A | restyle only, any time |
+| `RoundedSurface.qml` | - | A | restyle only, any time |
+| `RuleEditorSheet.qml` | batch 6 | D | selectable (batch 6) merges first, then restyle D in the restyle PR |
+| `RuleSimulatorSheet.qml` | batch 6 | D | selectable (batch 6) merges first, then restyle D in the restyle PR |
+| `RulesImportSheet.qml` | batch 6 | D | selectable (batch 6) merges first, then restyle D in the restyle PR |
+| `RulesInspectorSheet.qml` | batch 6 | D | selectable (batch 6) merges first, then restyle D in the restyle PR |
+| `RulesPage.qml` | batch 6 | D | selectable (batch 6) merges first, then restyle D in the restyle PR |
+| `ScannerPage.qml` | batch 1 | C | selectable (batch 1) merges first, then restyle C in the restyle PR |
+| `SegmentedChoice.qml` | - | B | restyle only, any time |
+| `SilentModeChoice.qml` | batch 2 | C | selectable (batch 2) merges first, then restyle C in the restyle PR |
+| `SizedOverlaySheet.qml` | batch 7 | B | selectable (batch 7) merges first, then restyle B in the restyle PR |
+| `Theme.qml` | - | A | restyle only, any time |
+| `TrafficPage.qml` | batch 1 | C | selectable (batch 1) merges first, then restyle C in the restyle PR |
+| `build.rs` | every batch (append-only list) | A | append-only: keep both sides on rebase |
+| `sources.rs` | every batch (append-only list) | A | append-only: keep both sides on rebase |
+<!-- /OWNERSHIP -->
 
 Each batch: tests first (hit-box probe over the pages it touches), existing
 keyboard tests unchanged, screenshots attached, `just check` + kirigami tests.

@@ -95,11 +95,27 @@ Window {
         const x = lum(a), y = lum(b);
         return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
     }
-    // The fill the ring sits on: the body colour (with its alpha) over the window.
-    function effectiveFill(s) {
-        const f = s.body.visible ? s.body.color : Qt.rgba(0, 0, 0, 0);
-        const w = s.control.palette.window;
-        return Qt.rgba(f.r * f.a + w.r * (1 - f.a), f.g * f.a + w.g * (1 - f.a), f.b * f.a + w.b * (1 - f.a), 1);
+    function over(top, bottom) {
+        const a = top.a;
+        return Qt.rgba(top.r * a + bottom.r * (1 - a), top.g * a + bottom.g * (1 - a),
+                       top.b * a + bottom.b * (1 - a), 1);
+    }
+    // Composite fill (with its alpha) over the window, then the hover or
+    // pressed wash over that, as drawn: wash is 0 (resting), hoverOpacity or
+    // pressedOpacity.
+    function fillWith(s, washOpacity) {
+        const base = s.body.visible ? over(s.body.color, s.control.palette.window) : s.control.palette.window;
+        const w = s.wash.color;
+        return over(Qt.rgba(w.r, w.g, w.b, washOpacity), base);
+    }
+    // Contrast of the ring AS DRAWN (its own alpha included) against each state.
+    function ringContrast(s) {
+        const out = [];
+        for (const wash of [0, Theme.hoverOpacity, Theme.pressedOpacity]) {
+            const fill = fillWith(s, wash);
+            out.push(ratio(over(s.focusRing.border.color, fill), fill));
+        }
+        return out;
     }
     function focusChecks(all) {
         const out = [];
@@ -110,11 +126,12 @@ Window {
             const s = surfacesOf(c).filter(x => x.control === c);
             const on = s.length > 0 && s[0].focusRing.visible && c.visualFocus;
             const ringWidth = s.length > 0 ? s[0].focusRing.border.width : -1;
-            const contrast = s.length > 0 ? ratio(s[0].focusRing.border.color, effectiveFill(s[0])) : -1;
+            const contrast = s.length > 0 ? ringContrast(s[0]) : [-1];
+            const ringAlpha = s.length > 0 ? s[0].focusRing.border.color.a * s[0].focusRing.opacity : -1;
             c.focus = false;
             c.forceActiveFocus(Qt.MouseFocusReason);
             const mouseOff = s.length > 0 && !s[0].focusRing.visible;
-            out.push({ a2: c.activeFocus, vf2: c.visualFocus, r2: c.focusReason, ring2: s.length > 0 && s[0].focusRing.visible, name: describe(c).name, surface: s.length, on: on, contrast: contrast, mouseOff: mouseOff, ringWidth: ringWidth });
+            out.push({ a2: c.activeFocus, vf2: c.visualFocus, r2: c.focusReason, ring2: s.length > 0 && s[0].focusRing.visible, name: describe(c).name, surface: s.length, on: on, contrast: contrast, ringAlpha: ringAlpha, mouseOff: mouseOff, ringWidth: ringWidth });
         }
         return out;
     }
@@ -284,9 +301,14 @@ fn the_pilot_controls_are_big_rounded_and_show_a_focus_ring() {
         // The ring must stand out from the fill it sits on, in a light or a
         // dark palette, on a primary (highlight-filled) button or not.
         assert!(
-            f["contrast"].as_f64().unwrap() >= 2.0,
-            "focus ring does not contrast with its fill: {f}"
+            f["contrast"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c.as_f64().unwrap() >= 2.0),
+            "focus ring does not contrast with its resting, hover and pressed fill: {f}"
         );
+        assert_eq!(f["ringAlpha"], 1.0, "focus ring is not opaque: {f}");
     }
 
     // The ring, wash and fill are role-less and unfocusable: no extra Tab stop
@@ -307,44 +329,119 @@ fn qml_source(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// True when a QML line fixes a colour instead of reading the palette: a
-/// string literal (hex or named) on a colour line, `Qt.rgba(`, `Qt.color(`
-/// or a quoted `#hex`. `"transparent"` is allowed.
-fn literal_colour(line: &str) -> bool {
-    let t = line.trim();
-    if t.contains("Qt.rgba(") || t.contains("Qt.color(") || t.contains("\"#") {
+/// True when `lines[i]` (trimmed) starts a new QML binding, item or block end
+/// rather than continuing a multi-line expression: `name:`, `a.b:`, `}`,
+/// `Type {`. A ternary continuation starts with `?` or `:` or an operand.
+fn starts_new_statement(trimmed: &str) -> bool {
+    if trimmed.starts_with('}') {
         return true;
     }
-    // Any string literal on a colour line, other than "transparent".
-    t.contains("olor")
-        && t.split('"')
-            .skip(1)
-            .step_by(2)
-            .any(|lit| lit != "transparent")
+    let word: String = trimmed
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '.' || *c == '_')
+        .collect();
+    let after = trimmed[word.len()..].trim_start();
+    !word.is_empty()
+        && (after.starts_with(':')
+            || (after.starts_with('{') && word.starts_with(|c: char| c.is_uppercase())))
+}
+
+/// Every colour-valued property expression in `src`, joined across its
+/// continuation lines (comments dropped): the text after `...olor:` up to the
+/// next statement or `;`.
+fn colour_expressions(src: &str) -> Vec<String> {
+    let lines: Vec<&str> = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let mut from = 0;
+        while let Some(at) = line[from..].find("olor:") {
+            let start = from + at + "olor:".len();
+            let mut expr = line[start..].to_string();
+            let mut j = i + 1;
+            while !expr.contains(';') && j < lines.len() && !starts_new_statement(lines[j].trim()) {
+                expr.push(' ');
+                expr.push_str(lines[j].trim());
+                j += 1;
+            }
+            out.push(expr.split(';').next().unwrap_or("").to_string());
+            from = start;
+        }
+    }
+    out
+}
+
+/// True when a colour expression fixes a colour instead of reading the
+/// palette: any string literal (single, double or template quoted) other than
+/// "transparent" (also inside `Qt.alpha(`), `Qt.rgba(`, `Qt.color(`, or a bare
+/// `#hex`.
+fn literal_colour(expr: &str) -> bool {
+    if expr.contains("Qt.rgba(") || expr.contains("Qt.color(") || expr.contains('#') {
+        return true;
+    }
+    let mut quote: Option<char> = None;
+    let mut lit = String::new();
+    for c in expr.chars() {
+        match quote {
+            None if matches!(c, '"' | '\'' | '`') => {
+                quote = Some(c);
+                lit.clear();
+            }
+            Some(q) if c == q => {
+                if lit != "transparent" {
+                    return true;
+                }
+                quote = None;
+            }
+            Some(_) => lit.push(c),
+            None => {}
+        }
+    }
+    quote.is_some()
+}
+
+/// All literal-colour violations in a QML source.
+fn colour_violations(src: &str) -> Vec<String> {
+    colour_expressions(src)
+        .into_iter()
+        .filter(|e| literal_colour(e))
+        .collect()
 }
 
 #[test]
 fn the_colour_guard_rejects_literals_and_allows_the_palette() {
     for bad in [
-        r#"color: "red""#,
-        r#"border.color: "white""#,
-        r##"color: "#ff0000""##,
-        r#"color: Qt.rgba(1, 0, 0, 1)"#,
-        r#"icon.color: "black""#,
-        r#"color: control.down ? "red" : control.palette.base"#,
-        r#"x: 1; color: "navy""#,
-        r#"color: Qt.color("blue")"#,
+        "color: \"red\"",
+        "border.color: \"white\"",
+        "border.color: 'red'",
+        "color: \"#ff0000\"",
+        "color: Qt.rgba(1, 0, 0, 1)",
+        "icon.color: \"black\"",
+        "color: control.down ? \"red\" : control.palette.base",
+        "color: control.down\n    ? control.palette.base\n    : \"red\"",
+        "color: control.down\n    ? control.palette.base\n    : 'navy'",
+        "color: Qt.alpha(\"red\", 0.5)",
+        "color: Qt.alpha('red', 0.5)",
+        "color: `red`",
+        "x: 1; color: \"navy\"",
+        "color: Qt.color(\"blue\")",
+        "color: Qt.alpha(\"#ff0000\", 0.2)",
     ] {
-        assert!(literal_colour(bad), "should reject: {bad}");
+        assert!(!colour_violations(bad).is_empty(), "should reject: {bad}");
     }
     for ok in [
-        r#"color: "transparent""#,
-        r#"border.color: "transparent""#,
+        "color: \"transparent\"",
+        "border.color: 'transparent'",
         "color: control.palette.highlight",
         "color: Qt.alpha(control.palette.windowText, Theme.fillOpacity)",
+        "color: control.down\n    ? control.palette.base\n    : control.palette.highlight\nradius: Theme.radiusSmall",
+        "color: x ? \"transparent\" : control.palette.base",
         "border.color: surface.ringColor",
+        "text: \"red herring\"",
     ] {
-        assert!(!literal_colour(ok), "should allow: {ok}");
+        assert!(colour_violations(ok).is_empty(), "should allow: {ok}");
     }
 }
 
@@ -366,6 +463,11 @@ fn the_styled_files_take_radii_and_colours_from_theme_and_the_palette() {
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(
+            colour_violations(&code).is_empty(),
+            "{name}: literal colour: {:?}",
+            colour_violations(&code)
+        );
         for (n, line) in code.lines().enumerate() {
             let t = line.trim();
             assert!(
@@ -375,7 +477,6 @@ fn the_styled_files_take_radii_and_colours_from_theme_and_the_palette() {
                         .starts_with(|c: char| c.is_ascii_digit())),
                 "{name}:{n}: literal radius: {t}"
             );
-            assert!(!literal_colour(t), "{name}:{n}: literal colour: {t}");
             assert!(
                 !t.starts_with("MouseArea") && !t.starts_with("TapHandler"),
                 "{name}:{n}: the visuals must take no input of their own: {t}"
