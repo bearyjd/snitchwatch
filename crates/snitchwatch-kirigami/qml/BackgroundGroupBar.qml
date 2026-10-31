@@ -8,6 +8,7 @@ import QtQuick
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
+import com.snitchwatch.shell
 
 ColumnLayout {
     id: bar
@@ -38,7 +39,12 @@ ColumnLayout {
                   : ""
         }
         Controls.Button {
+            id: showAllButton
             objectName: "showAllButton"
+            // Restyled in place (type name stays `Button` for the focus tests).
+            implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+            horizontalPadding: Theme.controlPaddingH
+            background: RoundedSurface { control: showAllButton }
             text: "Show all"
             onClicked: bar.model.setNeedsAttention(false)
         }
@@ -69,7 +75,12 @@ ColumnLayout {
                     + "in the list, subject to the other filters"
         }
         Controls.Button {
+            id: backgroundToggle
             objectName: "backgroundToggle"
+            // Restyled in place (type name stays `Button` for the focus tests).
+            implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+            horizontalPadding: Theme.controlPaddingH
+            background: RoundedSurface { control: backgroundToggle }
             text: bar.collapsing ? "Expand" : "Collapse"
             onClicked: bar.model.setNeedsAttention(!bar.collapsing)
         }
@@ -88,7 +99,12 @@ ColumnLayout {
                   + " first seen this session: always shown until you mark them as seen"
         }
         Controls.Button {
+            id: markSeenButton
             objectName: "markSeenButton"
+            // Restyled in place (type name stays `Button` for the focus tests).
+            implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+            horizontalPadding: Theme.controlPaddingH
+            background: RoundedSurface { control: markSeenButton }
             text: "Mark as seen"
             onClicked: bar.model.markNewProgramsSeen()
         }
@@ -106,7 +122,12 @@ ColumnLayout {
             text: bar.notice
         }
         Controls.Button {
+            id: dismissBaseline
             objectName: "dismissBaseline"
+            // Restyled in place (type name stays `Button` for the focus tests).
+            implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+            horizontalPadding: Theme.controlPaddingH
+            background: RoundedSurface { control: dismissBaseline }
             text: "Dismiss"
             onClicked: bar.model.dismissBaselineNotice()
         }
