@@ -89,13 +89,8 @@ Kirigami.ScrollablePage {
         Kirigami.FormLayout {
             Layout.fillWidth: true
 
-            Controls.ComboBox {
+            RoundedComboBox {
                 objectName: "defaultDurationBox"
-                // An arrow, Home, End or Space still held (auto-repeating) must not walk
-                // through the choices: each step would save one.
-                Keys.priority: Keys.BeforeItem
-                Keys.onPressed: event => { if (event.isAutoRepeat) event.accepted = true; }
-                Keys.onReleased: event => { if (event.isAutoRepeat) event.accepted = true; }
                 Kirigami.FormData.label: "Allow remembers for"
                 Accessible.name: "Allow remembers for: " + displayText
                 textRole: "label"
@@ -112,13 +107,8 @@ Kirigami.ScrollablePage {
                 wrapMode: Text.Wrap
                 text: "Used by the alert, the Allow buttons and notifications. The firewall stores only \"Forever\" rules; a program Snitchwatch cannot identify is always answered once."
             }
-            Controls.ComboBox {
+            RoundedComboBox {
                 objectName: "silentModeBox"
-                // An arrow, Home, End or Space still held (auto-repeating) must not walk
-                // through the choices: each step would save one.
-                Keys.priority: Keys.BeforeItem
-                Keys.onPressed: event => { if (event.isAutoRepeat) event.accepted = true; }
-                Keys.onReleased: event => { if (event.isAutoRepeat) event.accepted = true; }
                 Kirigami.FormData.label: "New connections"
                 Accessible.name: "New connections: " + displayText
                 textRole: "label"
@@ -152,7 +142,7 @@ Kirigami.ScrollablePage {
                 text: "Upstream opensnitch-ui coexistence"
             }
 
-            Controls.Button {
+            RoundedButton {
                 text: "Check again"
                 icon.name: "view-refresh"
                 enabled: page.controller && !page.controller.busy
@@ -201,7 +191,7 @@ Kirigami.ScrollablePage {
                 implicitHeight: Kirigami.Units.iconSizes.small
             }
 
-            Controls.Button {
+            RoundedButton {
                 text: "Refresh"
                 icon.name: "view-refresh"
                 enabled: page.controller && !page.controller.busy
