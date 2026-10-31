@@ -30,6 +30,10 @@ Item {
     readonly property color ink: control.palette.windowText
     readonly property alias body: body
     readonly property alias focusRing: ring
+    // The ring is chosen against the fill it sits on: a primary button is
+    // filled with `highlight`, so a `highlight` ring would vanish on it.
+    readonly property color ringColor: prominent ? control.palette.highlightedText
+        : control.palette.highlight
 
     implicitWidth: Theme.hitMin
     implicitHeight: Theme.hitMin
@@ -57,7 +61,7 @@ Item {
             : surface.control.hovered ? Theme.hoverOpacity : 0
     }
 
-    // Keyboard focus ring, inside the bounds so a clipping parent never hides it.
+    // Keyboard focus ring (`ringColor` contrasts with the fill), inside the bounds so a clipping parent never hides it.
     Rectangle {
         id: ring
         objectName: "focusRing"
@@ -66,6 +70,6 @@ Item {
         color: "transparent"
         visible: surface.control.visualFocus
         border.width: Theme.focusRingWidth
-        border.color: surface.control.palette.highlight
+        border.color: surface.ringColor
     }
 }

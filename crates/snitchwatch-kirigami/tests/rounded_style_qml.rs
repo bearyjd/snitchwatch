@@ -27,7 +27,7 @@ use common::{capture_stderr, init_headless_qt_env};
 
 const MARKER: &str = "ROUNDED_STYLE_RESULT";
 
-const QML: &str = r#"
+const QML: &str = r##"
 import QtQuick
 import QtQuick.Window
 import QtQuick.Layouts
@@ -87,6 +87,20 @@ Window {
     function tabStops(root) {
         return walk(root, [], new Set()).filter(i => i.activeFocusOnTab === true && drawn(i)).length;
     }
+    function lum(c) {
+        const f = v => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+    }
+    function ratio(a, b) {
+        const x = lum(a), y = lum(b);
+        return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+    }
+    // The fill the ring sits on: the body colour (with its alpha) over the window.
+    function effectiveFill(s) {
+        const f = s.body.visible ? s.body.color : Qt.rgba(0, 0, 0, 0);
+        const w = s.control.palette.window;
+        return Qt.rgba(f.r * f.a + w.r * (1 - f.a), f.g * f.a + w.g * (1 - f.a), f.b * f.a + w.b * (1 - f.a), 1);
+    }
     function focusChecks(all) {
         const out = [];
         for (const c of all) {
@@ -96,10 +110,11 @@ Window {
             const s = surfacesOf(c).filter(x => x.control === c);
             const on = s.length > 0 && s[0].focusRing.visible && c.visualFocus;
             const ringWidth = s.length > 0 ? s[0].focusRing.border.width : -1;
+            const contrast = s.length > 0 ? ratio(s[0].focusRing.border.color, effectiveFill(s[0])) : -1;
             c.focus = false;
             c.forceActiveFocus(Qt.MouseFocusReason);
             const mouseOff = s.length > 0 && !s[0].focusRing.visible;
-            out.push({ a2: c.activeFocus, vf2: c.visualFocus, r2: c.focusReason, ring2: s.length > 0 && s[0].focusRing.visible, name: describe(c).name, surface: s.length, on: on, mouseOff: mouseOff, ringWidth: ringWidth });
+            out.push({ a2: c.activeFocus, vf2: c.visualFocus, r2: c.focusReason, ring2: s.length > 0 && s[0].focusRing.visible, name: describe(c).name, surface: s.length, on: on, contrast: contrast, mouseOff: mouseOff, ringWidth: ringWidth });
         }
         return out;
     }
@@ -138,6 +153,12 @@ Window {
             GuardedToolButton { objectName: "hToolText"; Accessible.name: "Tool text"; text: "Tool" }
             GuardedButton { objectName: "hGuarded"; text: "Guarded"; Accessible.name: "Guarded" }
             GuardedButton { objectName: "hGuardedPrimary"; text: "Primary"; highlighted: true; Accessible.name: "Primary" }
+            GuardedButton { objectName: "hDark"; text: "Dark"; Accessible.name: "Dark"
+                palette.window: "#202326"; palette.windowText: "#eff0f1"; palette.buttonText: "#eff0f1"
+                palette.highlight: "#3daee9"; palette.highlightedText: "#ffffff" }
+            GuardedButton { objectName: "hDarkPrimary"; text: "Dark primary"; highlighted: true; Accessible.name: "Dark primary"
+                palette.window: "#202326"; palette.windowText: "#eff0f1"; palette.buttonText: "#eff0f1"
+                palette.highlight: "#3daee9"; palette.highlightedText: "#ffffff" }
             RoundedButton { objectName: "hRounded"; text: "Plain rounded"; Accessible.name: "Plain rounded" }
             GuardedRadioButton { objectName: "hRadio"; text: "Radio"; Accessible.name: "Radio" }
         }
@@ -149,7 +170,7 @@ Window {
             try {
                 if (!about || !silent || !harness) return;
                 const ready = controlsOf(about).length >= 1 && controlsOf(silent).length >= 5
-                    && controlsOf(harness).length >= 8;
+                    && controlsOf(harness).length >= 10;
                 if (!ready) return;
                 if (!focusDone) {
                     focusDone = true;
@@ -172,7 +193,7 @@ Window {
         onTriggered: report("timeout")
     }
 }
-"#;
+"##;
 
 fn run_probe() -> serde_json::Value {
     init_headless_qt_env();
@@ -231,8 +252,8 @@ fn the_pilot_controls_are_big_rounded_and_show_a_focus_ring() {
         .iter()
         .map(|c| c.as_u64().unwrap())
         .collect();
-    // About: copy. Silent mode: 3 radios, review, continue. Harness: 8.
-    assert_eq!(counts, vec![1, 5, 8], "controls found per page: {line}");
+    // About: copy. Silent mode: 3 radios, review, continue. Harness: 10.
+    assert_eq!(counts, vec![1, 5, 10], "controls found per page: {line}");
 
     for c in v["controls"].as_array().unwrap() {
         let (w, h) = (c["w"].as_f64().unwrap(), c["h"].as_f64().unwrap());
@@ -251,7 +272,7 @@ fn the_pilot_controls_are_big_rounded_and_show_a_focus_ring() {
 
     let focus = v["focus"].as_array().unwrap();
     // Review and Continue are disabled here (no settings controller).
-    assert_eq!(focus.len(), 12, "focus checks: {line}");
+    assert_eq!(focus.len(), 14, "focus checks: {line}");
     for f in focus {
         assert_eq!(f["surface"], 1, "no rounded surface behind {f}");
         assert_eq!(f["on"], true, "no focus ring on keyboard focus: {f}");
@@ -259,6 +280,12 @@ fn the_pilot_controls_are_big_rounded_and_show_a_focus_ring() {
         assert!(
             f["ringWidth"].as_f64().unwrap() >= 2.0,
             "ring too thin: {f}"
+        );
+        // The ring must stand out from the fill it sits on, in a light or a
+        // dark palette, on a primary (highlight-filled) button or not.
+        assert!(
+            f["contrast"].as_f64().unwrap() >= 2.0,
+            "focus ring does not contrast with its fill: {f}"
         );
     }
 
@@ -278,6 +305,47 @@ fn qml_source(name: &str) -> String {
         .join("qml")
         .join(format!("{name}.qml"));
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// True when a QML line fixes a colour instead of reading the palette: a
+/// string literal (hex or named) on a colour line, `Qt.rgba(`, `Qt.color(`
+/// or a quoted `#hex`. `"transparent"` is allowed.
+fn literal_colour(line: &str) -> bool {
+    let t = line.trim();
+    if t.contains("Qt.rgba(") || t.contains("Qt.color(") || t.contains("\"#") {
+        return true;
+    }
+    // Any string literal on a colour line, other than "transparent".
+    t.contains("olor")
+        && t.split('"')
+            .skip(1)
+            .step_by(2)
+            .any(|lit| lit != "transparent")
+}
+
+#[test]
+fn the_colour_guard_rejects_literals_and_allows_the_palette() {
+    for bad in [
+        r#"color: "red""#,
+        r#"border.color: "white""#,
+        r##"color: "#ff0000""##,
+        r#"color: Qt.rgba(1, 0, 0, 1)"#,
+        r#"icon.color: "black""#,
+        r#"color: control.down ? "red" : control.palette.base"#,
+        r#"x: 1; color: "navy""#,
+        r#"color: Qt.color("blue")"#,
+    ] {
+        assert!(literal_colour(bad), "should reject: {bad}");
+    }
+    for ok in [
+        r#"color: "transparent""#,
+        r#"border.color: "transparent""#,
+        "color: control.palette.highlight",
+        "color: Qt.alpha(control.palette.windowText, Theme.fillOpacity)",
+        "border.color: surface.ringColor",
+    ] {
+        assert!(!literal_colour(ok), "should allow: {ok}");
+    }
 }
 
 /// The styled files hold no literal radii or colours, and no input area.
@@ -307,11 +375,7 @@ fn the_styled_files_take_radii_and_colours_from_theme_and_the_palette() {
                         .starts_with(|c: char| c.is_ascii_digit())),
                 "{name}:{n}: literal radius: {t}"
             );
-            assert!(!t.contains("\"#"), "{name}:{n}: literal colour: {t}");
-            assert!(
-                !t.contains("Qt.rgba") && !t.contains("Qt.color"),
-                "{name}:{n}: literal colour: {t}"
-            );
+            assert!(!literal_colour(t), "{name}:{n}: literal colour: {t}");
             assert!(
                 !t.starts_with("MouseArea") && !t.starts_with("TapHandler"),
                 "{name}:{n}: the visuals must take no input of their own: {t}"

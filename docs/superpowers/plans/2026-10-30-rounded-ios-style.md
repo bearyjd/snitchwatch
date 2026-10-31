@@ -68,7 +68,7 @@ described as if it did.
 | `hitMin` | `max(44, gridUnit*2.5)` | minimum hit AND visible control height |
 | `controlPaddingH` | `2 * largeSpacing` | pill buttons need horizontal air |
 | `borderWidth` / `separatorWidth` | 1 / 1 | hairlines, alpha of text colour |
-| `focusRingWidth` | 2 | drawn inside the bounds so a clipping parent never hides it |
+| `focusRingWidth` | 2 | drawn inside the bounds so a clipping parent never hides it; colour is `highlight`, or `highlightedText` on a primary (highlight-filled) button so it never matches its fill |
 | `hoverOpacity` / `pressedOpacity` | 0.08 / 0.16 | overlay of the text colour |
 | `fillOpacity` | 0.08 | resting fill of a secondary control |
 | `disabledOpacity` | 0.4 | |
@@ -134,6 +134,35 @@ batch C.
 - **E:** list rows, cards, drawer entries (after the SelectableText branch
   lands to avoid Label conflicts).
 - **F:** badges, chips, `HoverTip`, last polish.
+
+### File ownership against the selectable-text rollout
+
+The SelectableText conversion (PR #284, `docs/superpowers/plans/2026-10-30-selectable-text.md`
+on `feat/selectable-text-infra`) edits `Label` lines in many of the same pages.
+Files both rollouts touch:
+
+| File(s) | Restyle batch | Selectable batch | Owner PR |
+|---|---|---|---|
+| `AlertWindow.qml`, `PendingDecisionSheet.qml` | B | 7 | the selectable batch 7 PR |
+| `DiagnosticsPage.qml`, `GeoPage.qml` | C | 1 / 5 | the selectable batch 1 / 5 PR |
+| `BlocklistsPage.qml`, Rules / import sheets, `MakeRuleSheet.qml` | D | 5-7 | the selectable batch 5-7 PRs |
+| `GroupPendingBadge.qml` | F | 2 | the selectable batch 2 PR |
+| `Theme.qml`, `Guarded*.qml`, `Rounded*.qml`, `SegmentedChoice.qml`, `CheckBox`/`ComboBox`/`Field` wrappers | A, B, C, D | none | restyle |
+| `AboutPage.qml`, `SilentModeChoice.qml` | A (done) | check on rebase | restyle (A); selectable rebases on top |
+
+**Sequencing rule (decision: selectable first).** A file touched by both
+rollouts is changed by exactly **one** PR at a time, never in parallel, and the
+selectable-text batch goes first. Why: it is already open, larger and purely
+mechanical (a `Label` becomes `SelectableText`), so it is the costlier one to
+rebase; the restyle edit on a shared file is a few lines (swap the type or add
+a `background:`), so it rebases trivially on top of a merged selectable batch.
+Concretely: (1) the restyle batch for a file set waits until the matching
+selectable batch has merged; (2) that restyle PR then carries the shared-file
+swaps; (3) files in the table owned by the selectable PR get their restyle swap
+folded into the selectable PR only if its author agrees, otherwise they wait
+for the restyle batch. Files with no overlap (`Theme`, wrappers,
+`SegmentedChoice`) are restyled any time. PR A touched `AboutPage.qml` by one
+`Button` block, no `Label` line.
 
 Each batch: tests first (hit-box probe over the pages it touches), existing
 keyboard tests unchanged, screenshots attached, `just check` + kirigami tests.
