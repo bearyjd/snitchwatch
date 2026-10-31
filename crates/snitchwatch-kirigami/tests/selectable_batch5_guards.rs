@@ -17,12 +17,8 @@ const FILES: &[(&str, &str, usize, &[&str])] = &[
     (
         "BlocklistsPage.qml",
         include_str!("../qml/BlocklistsPage.qml"),
-        14,
+        16,
         &[
-            // Page title and the sheet's "Entries" caption: Kirigami.Heading
-            // (SelectableText has no `level` on this branch; batch 1 owns it).
-            "text: page.title",
-            "text: \"Entries\"",
             // Row delegate (class C): the row's RowCopyMenu copies them.
             "text: row.displayName",
             "text: row.url",
@@ -59,6 +55,8 @@ const WRAPS: &[(&str, &[(&str, &str)])] = &[
     (
         "BlocklistsPage.qml",
         &[
+            ("text: page.title", "Text.NoWrap"),
+            ("text: \"Entries\"", "Text.NoWrap"),
             ("\"leftoverText\"", "Text.Wrap"),
             ("\"leftoverConfirmText\"", "Text.Wrap"),
             ("page.leftoverReason", "Text.Wrap"),
@@ -83,6 +81,32 @@ const WRAPS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
 ];
+
+/// (file, [(marker unique to one converted Heading block, its exact level)]).
+const LEVELS: &[(&str, &[(&str, u32)])] = &[(
+    "BlocklistsPage.qml",
+    &[("text: page.title", 1), ("text: \"Entries\"", 3)],
+)];
+
+#[test]
+fn batch_5_headings_keep_their_level() {
+    for (name, source, ..) in FILES {
+        let converted = blocks(&code_lines(source), "SelectableText {");
+        let expected = LEVELS.iter().find(|(n, _)| n == name).map_or(&[][..], |(_, l)| *l);
+        let leveled = converted.iter().filter(|b| b.lines().any(|l| l.trim().starts_with("level:"))).count();
+        assert_eq!(leveled, expected.len(), "{name}: SelectableText blocks with a `level:`");
+        for (marker, level) in expected {
+            let hits: Vec<&String> = converted.iter().filter(|b| b.contains(marker)).collect();
+            assert_eq!(hits.len(), 1, "{name}: marker `{marker}` must match one block");
+            let want = format!("level: {level}");
+            assert!(
+                hits[0].lines().any(|l| l.trim() == want),
+                "{name}: heading `{marker}` must have `{want}`:\n{}",
+                hits[0]
+            );
+        }
+    }
+}
 
 #[test]
 fn batch_5_texts_are_selectable() {

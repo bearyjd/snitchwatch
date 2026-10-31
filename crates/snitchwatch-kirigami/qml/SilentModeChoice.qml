@@ -28,10 +28,11 @@ ColumnLayout {
     // The choice was saved; the caller moves on.
     signal chosen()
 
-    Kirigami.Heading {
+    SelectableText {
         Layout.fillWidth: true
         level: 2
         wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
         text: "When a program wants the network"
     }
 
