@@ -39,10 +39,11 @@ ColumnLayout {
     DnsConsentDialog { id: dnsConsent; consentModel: step.model }
     Component.onDestruction: if (step.model) step.model.cancelBroadConsent()
 
-    Kirigami.Heading {
+    SelectableText {
         Layout.fillWidth: true
         level: 2
         wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
         text: "Recommended rules"
     }
 
