@@ -329,105 +329,294 @@ fn qml_source(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// True when `lines[i]` (trimmed) starts a new QML binding, item or block end
-/// rather than continuing a multi-line expression: `name:`, `a.b:`, `}`,
-/// `Type {`. A ternary continuation starts with `?` or `:` or an operand.
-fn starts_new_statement(trimmed: &str) -> bool {
-    if trimmed.starts_with('}') {
-        return true;
+/// The 148 SVG / CSS named colours (lower case).
+const NAMED_COLOURS: [&str; 148] = [
+    "aliceblue",
+    "antiquewhite",
+    "aqua",
+    "aquamarine",
+    "azure",
+    "beige",
+    "bisque",
+    "black",
+    "blanchedalmond",
+    "blue",
+    "blueviolet",
+    "brown",
+    "burlywood",
+    "cadetblue",
+    "chartreuse",
+    "chocolate",
+    "coral",
+    "cornflowerblue",
+    "cornsilk",
+    "crimson",
+    "cyan",
+    "darkblue",
+    "darkcyan",
+    "darkgoldenrod",
+    "darkgray",
+    "darkgreen",
+    "darkgrey",
+    "darkkhaki",
+    "darkmagenta",
+    "darkolivegreen",
+    "darkorange",
+    "darkorchid",
+    "darkred",
+    "darksalmon",
+    "darkseagreen",
+    "darkslateblue",
+    "darkslategray",
+    "darkslategrey",
+    "darkturquoise",
+    "darkviolet",
+    "deeppink",
+    "deepskyblue",
+    "dimgray",
+    "dimgrey",
+    "dodgerblue",
+    "firebrick",
+    "floralwhite",
+    "forestgreen",
+    "fuchsia",
+    "gainsboro",
+    "ghostwhite",
+    "gold",
+    "goldenrod",
+    "gray",
+    "grey",
+    "green",
+    "greenyellow",
+    "honeydew",
+    "hotpink",
+    "indianred",
+    "indigo",
+    "ivory",
+    "khaki",
+    "lavender",
+    "lavenderblush",
+    "lawngreen",
+    "lemonchiffon",
+    "lightblue",
+    "lightcoral",
+    "lightcyan",
+    "lightgoldenrodyellow",
+    "lightgray",
+    "lightgreen",
+    "lightgrey",
+    "lightpink",
+    "lightsalmon",
+    "lightseagreen",
+    "lightskyblue",
+    "lightslategray",
+    "lightslategrey",
+    "lightsteelblue",
+    "lightyellow",
+    "lime",
+    "limegreen",
+    "linen",
+    "magenta",
+    "maroon",
+    "mediumaquamarine",
+    "mediumblue",
+    "mediumorchid",
+    "mediumpurple",
+    "mediumseagreen",
+    "mediumslateblue",
+    "mediumspringgreen",
+    "mediumturquoise",
+    "mediumvioletred",
+    "midnightblue",
+    "mintcream",
+    "mistyrose",
+    "moccasin",
+    "navajowhite",
+    "navy",
+    "oldlace",
+    "olive",
+    "olivedrab",
+    "orange",
+    "orangered",
+    "orchid",
+    "palegoldenrod",
+    "palegreen",
+    "paleturquoise",
+    "palevioletred",
+    "papayawhip",
+    "peachpuff",
+    "peru",
+    "pink",
+    "plum",
+    "powderblue",
+    "purple",
+    "rebeccapurple",
+    "red",
+    "rosybrown",
+    "royalblue",
+    "saddlebrown",
+    "salmon",
+    "sandybrown",
+    "seagreen",
+    "seashell",
+    "sienna",
+    "silver",
+    "skyblue",
+    "slateblue",
+    "slategray",
+    "slategrey",
+    "snow",
+    "springgreen",
+    "steelblue",
+    "tan",
+    "teal",
+    "thistle",
+    "tomato",
+    "turquoise",
+    "violet",
+    "wheat",
+    "white",
+    "whitesmoke",
+    "yellow",
+    "yellowgreen",
+];
+
+/// `src` without `//` and `/* */` comments, string literals kept intact.
+fn strip_comments(src: &str) -> String {
+    let cs: Vec<char> = src.chars().collect();
+    let (mut out, mut i, mut quote) = (String::new(), 0, None);
+    while i < cs.len() {
+        let c = cs[i];
+        if let Some(q) = quote {
+            out.push(c);
+            if c == '\\' && i + 1 < cs.len() {
+                out.push(cs[i + 1]);
+                i += 1;
+            } else if c == q {
+                quote = None;
+            }
+        } else if matches!(c, '"' | '\'' | '`') {
+            quote = Some(c);
+            out.push(c);
+        } else if c == '/' && cs.get(i + 1) == Some(&'/') {
+            while i < cs.len() && cs[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        } else if c == '/' && cs.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        } else {
+            out.push(c);
+        }
+        i += 1;
     }
-    let word: String = trimmed
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '.' || *c == '_')
-        .collect();
-    let after = trimmed[word.len()..].trim_start();
-    !word.is_empty()
-        && (after.starts_with(':')
-            || (after.starts_with('{') && word.starts_with(|c: char| c.is_uppercase())))
+    out
 }
 
-/// Every colour-valued property expression in `src`, joined across its
-/// continuation lines (comments dropped): the text after `...olor:` up to the
-/// next statement or `;`.
-fn colour_expressions(src: &str) -> Vec<String> {
-    let lines: Vec<&str> = src
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("//"))
-        .collect();
-    let mut out = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        let mut from = 0;
-        while let Some(at) = line[from..].find("olor:") {
-            let start = from + at + "olor:".len();
-            let mut expr = line[start..].to_string();
-            let mut j = i + 1;
-            while !expr.contains(';') && j < lines.len() && !starts_new_statement(lines[j].trim()) {
-                expr.push(' ');
-                expr.push_str(lines[j].trim());
-                j += 1;
+/// The contents of every quoted string literal (single, double, backtick).
+fn string_literals(code: &str) -> Vec<String> {
+    let (mut out, mut cur, mut quote) = (Vec::new(), String::new(), None);
+    let mut chars = code.chars();
+    while let Some(c) = chars.next() {
+        match quote {
+            None if matches!(c, '"' | '\'' | '`') => {
+                quote = Some(c);
+                cur.clear();
             }
-            out.push(expr.split(';').next().unwrap_or("").to_string());
-            from = start;
+            Some(q) if c == q => {
+                out.push(std::mem::take(&mut cur));
+                quote = None;
+            }
+            Some(_) => {
+                if c == '\\' {
+                    if let Some(n) = chars.next() {
+                        cur.push(n);
+                    }
+                } else {
+                    cur.push(c);
+                }
+            }
+            None => {}
         }
     }
     out
 }
 
-/// True when a colour expression fixes a colour instead of reading the
-/// palette: any string literal (single, double or template quoted) other than
-/// "transparent" (also inside `Qt.alpha(`), `Qt.rgba(`, `Qt.color(`, or a bare
-/// `#hex`.
-fn literal_colour(expr: &str) -> bool {
-    if expr.contains("Qt.rgba(") || expr.contains("Qt.color(") || expr.contains('#') {
-        return true;
-    }
-    let mut quote: Option<char> = None;
-    let mut lit = String::new();
-    for c in expr.chars() {
-        match quote {
-            None if matches!(c, '"' | '\'' | '`') => {
-                quote = Some(c);
-                lit.clear();
-            }
-            Some(q) if c == q => {
-                if lit != "transparent" {
-                    return true;
-                }
-                quote = None;
-            }
-            Some(_) => lit.push(c),
-            None => {}
-        }
-    }
-    quote.is_some()
+fn is_colour_text(lit: &str) -> bool {
+    let t = lit.trim().to_ascii_lowercase();
+    let hex = t.strip_prefix('#').is_some_and(|h| {
+        !h.is_empty()
+            && h.chars().all(|c| c.is_ascii_hexdigit())
+            && matches!(h.len(), 3 | 4 | 6 | 8)
+    });
+    hex || ["rgb(", "rgba(", "hsl(", "hsla(", "hsv(", "hsva("]
+        .iter()
+        .any(|f| t.contains(f))
+        || NAMED_COLOURS.contains(&t.as_str())
 }
 
-/// All literal-colour violations in a QML source.
+/// Colour literals anywhere in a styled QML file. A lint against ACCIDENTAL
+/// literals, not a proof: a colour could still arrive from a non-literal
+/// source (a number, a computed string, another file). The rule is file-wide,
+/// so how a literal reaches a `color` (property, function, array, whitespace
+/// before the colon) does not matter. Forbidden, outside comments: a quoted
+/// string that is a named colour, `#hex` or `rgb(`/`hsl(` text; any
+/// `Qt.rgba(`, `Qt.color(`, `Qt.hsla(`, `Qt.hsva(`; and `Qt.tint(`,
+/// `Qt.lighter(`, `Qt.darker(` with a quoted literal argument. "transparent"
+/// and every other string are allowed.
 fn colour_violations(src: &str) -> Vec<String> {
-    colour_expressions(src)
+    let code = strip_comments(src);
+    let mut out: Vec<String> = string_literals(&code)
         .into_iter()
-        .filter(|e| literal_colour(e))
-        .collect()
+        .filter(|l| is_colour_text(l))
+        .map(|l| format!("literal colour {l:?}"))
+        .collect();
+    for f in ["Qt.rgba(", "Qt.color(", "Qt.hsla(", "Qt.hsva("] {
+        if code.contains(f) {
+            out.push(format!("call {f}"));
+        }
+    }
+    for f in ["Qt.tint(", "Qt.lighter(", "Qt.darker("] {
+        for (at, _) in code.match_indices(f) {
+            let args = code[at + f.len()..].split(')').next().unwrap_or("");
+            if args.contains(['"', '\'', '`']) {
+                out.push(format!("{f} with a literal"));
+            }
+        }
+    }
+    out
 }
 
 #[test]
 fn the_colour_guard_rejects_literals_and_allows_the_palette() {
     for bad in [
         "color: \"red\"",
-        "border.color: \"white\"",
+        "color : \"red\"",
+        "border.color:\t'white'",
         "border.color: 'red'",
         "color: \"#ff0000\"",
+        "color: \"#FFF\"",
+        "color: \"rgb(1, 2, 3)\"",
+        "color: `hsl(0, 100%%, 50%%)`",
         "color: Qt.rgba(1, 0, 0, 1)",
-        "icon.color: \"black\"",
+        "color: Qt.hsla(0, 1, 0.5, 1)",
         "color: control.down ? \"red\" : control.palette.base",
-        "color: control.down\n    ? control.palette.base\n    : \"red\"",
         "color: control.down\n    ? control.palette.base\n    : 'navy'",
         "color: Qt.alpha(\"red\", 0.5)",
-        "color: Qt.alpha('red', 0.5)",
-        "color: `red`",
-        "x: 1; color: \"navy\"",
+        "color: Qt.alpha('Red', 0.5)",
         "color: Qt.color(\"blue\")",
-        "color: Qt.alpha(\"#ff0000\", 0.2)",
+        "color: Qt.lighter(\"green\", 1.2)",
+        "color: Qt.tint(palette.base, \"orange\")",
+        "property string fixed: \"red\"\ncolor: fixed",
+        "function fixed() { return \"red\"; }\ncolor: fixed()",
+        "property var shades: [\"red\", \"blue\"]\ncolor: shades[0]",
+        "readonly property color c: 'tomato'",
+        "/* note */ color: \"white\" // trailing",
     ] {
         assert!(!colour_violations(bad).is_empty(), "should reject: {bad}");
     }
@@ -436,12 +625,18 @@ fn the_colour_guard_rejects_literals_and_allows_the_palette() {
         "border.color: 'transparent'",
         "color: control.palette.highlight",
         "color: Qt.alpha(control.palette.windowText, Theme.fillOpacity)",
-        "color: control.down\n    ? control.palette.base\n    : control.palette.highlight\nradius: Theme.radiusSmall",
-        "color: x ? \"transparent\" : control.palette.base",
-        "border.color: surface.ringColor",
+        "color: Qt.lighter(control.palette.base, 1.2)",
+        "// color: \"red\" in a comment only",
+        "/* color: \"#ff0000\"\n   Qt.rgba(1,0,0,1) */\ncolor: control.palette.base",
         "text: \"red herring\"",
+        "objectName: \"focusRing\"",
+        "Accessible.name: \"Tan\\u00e9\" // not a colour",
     ] {
-        assert!(colour_violations(ok).is_empty(), "should allow: {ok}");
+        assert!(
+            colour_violations(ok).is_empty(),
+            "should allow: {ok}: {:?}",
+            colour_violations(ok)
+        );
     }
 }
 
@@ -464,9 +659,9 @@ fn the_styled_files_take_radii_and_colours_from_theme_and_the_palette() {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            colour_violations(&code).is_empty(),
+            colour_violations(&src).is_empty(),
             "{name}: literal colour: {:?}",
-            colour_violations(&code)
+            colour_violations(&src)
         );
         for (n, line) in code.lines().enumerate() {
             let t = line.trim();
