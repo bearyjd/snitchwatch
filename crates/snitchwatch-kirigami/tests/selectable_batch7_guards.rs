@@ -12,7 +12,9 @@
 //! move the buttons under the pointer) and its countdown is re-written every
 //! second. The same data is copyable from the inspector.
 //!
-//! None of these files has a clickable row (class C), so no `RowCopyMenu`.
+//! None of these files has a clickable row (class C), so no `RowCopyMenu`, and
+//! no converted text sits inside a click target (`CLICK_TARGETS`) or has one
+//! inside it. `selectable_batch7_focus_qml.rs` checks the focus side at runtime.
 //!
 //! Mouse only: no converted text may add a Tab stop or override
 //! `activeFocusOnPress` (false in `SelectableText.qml`). PlainText stays
@@ -201,6 +203,44 @@ fn batch_7_has_no_row_menus() {
             blocks(&code_lines(source), "RowCopyMenu {").is_empty(),
             "{name}: no clickable rows in this batch, so no RowCopyMenu"
         );
+    }
+}
+
+/// Types that react to a click. `Button {` also matches `ToolButton {`,
+/// `Controls.Button {` and the like; `ItemDelegate {` also matches
+/// `Controls.ItemDelegate {`.
+const CLICK_TARGETS: &[&str] = &[
+    "ItemDelegate {",
+    "MouseArea {",
+    "TapHandler {",
+    "Button {",
+    "AbstractListItem {",
+    "BasicListItem {",
+    "SwipeListItem {",
+];
+
+#[test]
+fn batch_7_texts_are_not_inside_click_targets() {
+    for (name, source, _, _) in FILES {
+        let code = code_lines(source);
+        for target in CLICK_TARGETS {
+            for block in blocks(&code, target) {
+                assert!(
+                    !block.contains("SelectableText"),
+                    "{name}: a SelectableText sits inside `{target}` (a click on it would \
+                     be a click on the row; that needs a RowCopyMenu):\n{block}"
+                );
+            }
+        }
+        // And none has a click target of its own inside it.
+        for text in blocks(&code, "SelectableText {") {
+            for target in CLICK_TARGETS {
+                assert!(
+                    !text.contains(target),
+                    "{name}: a SelectableText contains `{target}`:\n{text}"
+                );
+            }
+        }
     }
 }
 
