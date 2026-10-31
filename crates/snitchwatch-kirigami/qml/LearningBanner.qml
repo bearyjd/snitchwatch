@@ -7,6 +7,11 @@
 // the saved list's state. "Review" asks the host to open the review page
 // (`reviewRequested`); "Stop learning" ends the window through
 // SettingsController.stopLearning(), which restores the mode it replaced.
+//
+// Restyle (rounded style, batch F): nothing here needs a change. The
+// Kirigami.InlineMessage is Kirigami-drawn; its two buttons are GuardedButton
+// (already 44 px capsules); the details strip below is text only and takes no
+// input.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
