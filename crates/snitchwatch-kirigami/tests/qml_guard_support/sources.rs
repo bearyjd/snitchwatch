@@ -331,6 +331,14 @@ pub const ALL_QML: &[(&str, &str)] = &[
         include_str!("../../qml/GuardedRadioButton.qml"),
     ),
     (
+        "RoundedCheckBox.qml",
+        include_str!("../../qml/RoundedCheckBox.qml"),
+    ),
+    (
+        "RoundedComboBox.qml",
+        include_str!("../../qml/RoundedComboBox.qml"),
+    ),
+    (
         "GeoDatabaseSettings.qml",
         include_str!("../../qml/GeoDatabaseSettings.qml"),
     ),

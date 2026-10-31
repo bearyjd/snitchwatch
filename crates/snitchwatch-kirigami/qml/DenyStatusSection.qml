@@ -80,7 +80,7 @@ ColumnLayout {
                 textFormat: Text.PlainText
                 text: modelData
             }
-            Controls.Button {
+            RoundedButton {
                 objectName: "copyDenyCommand"
                 text: "Copy"
                 Accessible.name: "Copy " + modelData
