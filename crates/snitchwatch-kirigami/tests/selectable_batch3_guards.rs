@@ -57,6 +57,44 @@ const FILES: &[(&str, &str, usize, usize, &[&str])] = &[
     ),
 ];
 
+/// (file, [(marker unique to one SelectableText block, its exact wrapMode)]).
+/// One entry per converted block, so the table also pins the block count.
+const WRAPS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "LearningReviewPage.qml",
+        &[
+            ("Programs recorded:", "Text.Wrap"),
+            ("Some connections were missed", "Text.Wrap"),
+            ("Programs not recorded or dropped", "Text.Wrap"),
+            ("group of programs with flags is full", "Text.Wrap"),
+            ("Folders that hold more programs", "Text.Wrap"),
+            ("rules list could not be read", "Text.Wrap"),
+            ("controller.fileNotice", "Text.Wrap"),
+            ("This deletes everything recorded", "Text.Wrap"),
+            ("controller.statusText", "Text.Wrap"),
+            ("Nothing has been recorded.", "Text.Wrap"),
+        ],
+    ),
+    ("LearningReviewRow.qml", &[]),
+    (
+        "LearningProgressList.qml",
+        &[
+            ("summaryLabel", "Text.Wrap"),
+            ("modelData.label", "Text.WrapAnywhere"),
+            ("modelData.status", "Text.WrapAnywhere"),
+        ],
+    ),
+    ("LearningLimitsList.qml", &[("text: modelData", "Text.Wrap")]),
+    (
+        "CuratedGroupsStep.qml",
+        &[
+            ("Optional. Each switch adds", "Text.Wrap"),
+            ("cannot accept reviewed DNS consent", "Text.Wrap"),
+            ("consentResult", "Text.Wrap"),
+        ],
+    ),
+];
+
 /// Per file with a `RowCopyMenu`: what its `copyText` expression must
 /// reference (every text the row shows, so the copy is the whole record).
 const COPY_TOKENS: &[(&str, &[&str])] = &[
@@ -180,5 +218,34 @@ fn batch_3_adds_no_tab_stop() {
             !code.contains("activeFocusOnTab"),
             "{name}: sets activeFocusOnTab (Tab itineraries must not change)"
         );
+    }
+}
+
+#[test]
+fn batch_3_keeps_layout_equivalent() {
+    for (name, source, ..) in FILES {
+        let code = code_lines(source);
+        let converted = blocks(&code, "SelectableText {");
+        for block in &converted {
+            assert!(
+                !block.contains("elide:"),
+                "{name}: a SelectableText sets `elide` (a TextEdit cannot elide):\n{block}"
+            );
+        }
+        let (_, expected) = WRAPS
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("{name}: missing from WRAPS"));
+        assert_eq!(converted.len(), expected.len(), "{name}: WRAPS entries vs blocks");
+        for (marker, wrap) in *expected {
+            let hits: Vec<&String> = converted.iter().filter(|b| b.contains(marker)).collect();
+            assert_eq!(hits.len(), 1, "{name}: marker `{marker}` must match one block");
+            let want = format!("wrapMode: {wrap}");
+            assert!(
+                hits[0].lines().any(|l| l.trim() == want),
+                "{name}: block `{marker}` must have `{want}`:\n{}",
+                hits[0]
+            );
+        }
     }
 }
