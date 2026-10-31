@@ -138,7 +138,7 @@ ColumnLayout {
         implicitHeight: holderLabel.implicitHeight + Kirigami.Units.smallSpacing * 2
         color: Kirigami.Theme.backgroundColor
 
-        Controls.Label {
+        SelectableText {
             id: holderLabel
             anchors.fill: parent
             anchors.margins: Kirigami.Units.smallSpacing

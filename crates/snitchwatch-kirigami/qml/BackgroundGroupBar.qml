@@ -28,7 +28,7 @@ ColumnLayout {
         objectName: "showingRow"
         visible: bar.collapsing && bar.background > 0
         Layout.fillWidth: true
-        Controls.Label {
+        SelectableText {
             objectName: "showingText"
             Layout.fillWidth: true
             textFormat: Text.PlainText
@@ -55,7 +55,7 @@ ColumnLayout {
             implicitWidth: Kirigami.Units.iconSizes.small
             implicitHeight: Kirigami.Units.iconSizes.small
         }
-        Controls.Label {
+        SelectableText {
             objectName: "backgroundSummary"
             Layout.fillWidth: true
             textFormat: Text.PlainText
@@ -79,7 +79,7 @@ ColumnLayout {
         objectName: "newProgramsRow"
         visible: bar.newPrograms > 0
         Layout.fillWidth: true
-        Controls.Label {
+        SelectableText {
             objectName: "newProgramsText"
             Layout.fillWidth: true
             textFormat: Text.PlainText
@@ -98,7 +98,7 @@ ColumnLayout {
         objectName: "baselineNotice"
         visible: bar.notice.length > 0
         Layout.fillWidth: true
-        Controls.Label {
+        SelectableText {
             objectName: "baselineText"
             Layout.fillWidth: true
             textFormat: Text.PlainText
