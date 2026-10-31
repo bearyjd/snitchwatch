@@ -58,7 +58,10 @@ fn the_profiles_page_says_whether_profiles_are_applied() {
         "Warning",
         &["memory only", "restart"],
     );
-    assert_header_labels(&blocks(&header[0], "Controls.Label {"));
+    // Batch 4: these notes are `SelectableText` now (same PlainText rule).
+    let mut labels = blocks(&header[0], "Controls.Label {");
+    labels.extend(blocks(&header[0], "SelectableText {"));
+    assert_header_labels(&labels);
 }
 
 fn assert_fixed_and_undismissable(banner: &str) {
@@ -125,6 +128,7 @@ fn profiles_page_labels_showing_profile_data_are_plain_text() {
         &[
             "row.name",
             "row.networkMatchers",
+            "row.matchersText",
             "page.storageReason",
             "page.notAppliedReason",
             "page.profileNote",
@@ -147,7 +151,8 @@ fn a_refused_profile_change_is_shown_as_plain_text() {
     assert!(code.contains(
         "readonly property string profileNote: page.model ? page.model.profileNote : \"\""
     ));
-    let labels = blocks(&code, "Controls.Label {");
+    let mut labels = blocks(&code, "Controls.Label {");
+    labels.extend(blocks(&code, "SelectableText {"));
     let note = labels
         .iter()
         .find(|b| b.contains("objectName: \"profileNote\""))

@@ -208,7 +208,7 @@ Window {
             probe.stray(Qt.Key_Space);
             probe.expect(probe.clip() === "SENTINEL", "a held Space pressed Copy: '" + probe.clip() + "'");
             tc.mouseClick(copy);
-            probe.expect(probe.clip() === "Work\nOffice*",
+            probe.expect(probe.clip() === "\u25cb\nWork\nOffice*",
                          "row Copy put '" + probe.clip() + "' on the clipboard");
         });
         probe.step("a left click still opens the row", function () { return probe.handlerOf(probe.row(1)).menu.visible ? "the menu to close" : ""; }, function () {
