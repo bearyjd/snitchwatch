@@ -118,7 +118,9 @@ pub fn assert_data_labels_plain_text(
 ) {
     let code = code_lines(source);
     let mut checked = 0;
-    for block in blocks(&code, "Controls.Label {") {
+    let mut texts = blocks(&code, "Controls.Label {");
+    texts.extend(blocks(&code, "SelectableText {"));
+    for block in texts {
         let Some(binding) = text_binding(&block) else {
             continue;
         };
