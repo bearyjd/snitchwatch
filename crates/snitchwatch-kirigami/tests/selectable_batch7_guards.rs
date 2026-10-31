@@ -14,7 +14,9 @@
 //!
 //! None of these files has a clickable row (class C), so no `RowCopyMenu`, and
 //! no converted text sits inside a click target (`CLICK_TARGETS`) or has one
-//! inside it. `selectable_batch7_focus_qml.rs` checks the focus side at runtime.
+//! inside it, and no block holding one has a sibling TapHandler / MouseArea /
+//! DragHandler / PointHandler / HoverHandler (those target the shared parent).
+//! `selectable_batch7_focus_qml.rs` checks the focus side at runtime.
 //!
 //! Mouse only: no converted text may add a Tab stop or override
 //! `activeFocusOnPress` (false in `SelectableText.qml`). PlainText stays
@@ -301,6 +303,263 @@ fn batch_7_selectable_root_components_are_not_inside_click_targets() {
             }
         }
     }
+}
+
+/// A direct `Type { ... }` child of a QML body. `deferred` children are
+/// templates (`property Component x:`, `delegate:`, `sourceComponent:`, a
+/// `Component {}`), not items instantiated under the parent.
+struct Kid {
+    name: String,
+    body: String,
+    deferred: bool,
+    /// Bound to `delegate:` (what a `Repeater` instantiates).
+    delegate: bool,
+}
+
+/// `body` with comments removed and the contents of "..." / '...' strings
+/// blanked (quotes kept, escapes honoured), so braces in either are inert.
+fn mask_strings_and_comments(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '/' if chars.peek() == Some(&'/') => {
+                while chars.peek().is_some_and(|c| *c != '\n') {
+                    chars.next();
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            '"' | '\'' | '`' => {
+                out.push(ch);
+                while let Some(c) = chars.next() {
+                    if c == '\\' {
+                        chars.next();
+                    } else if c == ch {
+                        break;
+                    }
+                }
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Direct `Type { ... }` children of a QML body (brace counting on the masked
+/// text) plus the body's own text, one statement per line, with child blocks
+/// removed but a non-type block's header (`onClicked:`) kept. A `prop: Type {`
+/// or list-entry (`[A {}, B {}]`) header yields the type. A `Repeater`'s
+/// delegates are hoisted: they become children of the Repeater's parent.
+fn split_body(body: &str) -> (Vec<Kid>, String) {
+    let body = mask_strings_and_comments(body);
+    let (mut kids, mut own) = (Vec::new(), String::new());
+    let (mut depth, mut seg_start, mut open_at) = (0usize, 0usize, 0usize);
+    let mut header = String::new();
+    for (i, ch) in body.char_indices() {
+        match ch {
+            '{' => {
+                if depth == 0 {
+                    open_at = i;
+                    header = body[seg_start..i].to_string();
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    let name = header.rsplit([':', '[', ',']).next().unwrap_or("").trim();
+                    let is_type = !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
+                        && last_segment(name).starts_with(char::is_uppercase);
+                    if is_type {
+                        let key = header.trim_end().strip_suffix(name).unwrap_or("");
+                        let delegate = key.trim_end().ends_with("delegate:");
+                        let deferred = key
+                            .split_whitespace()
+                            .any(|t| t == "Component" || t == "component")
+                            || delegate
+                            || name == "Component";
+                        let inner = body[open_at + 1..i].to_string();
+                        if last_segment(name) == "Repeater" {
+                            kids.extend(
+                                split_body(&inner)
+                                    .0
+                                    .into_iter()
+                                    .filter(|k| k.delegate)
+                                    .flat_map(|k| {
+                                        if last_segment(&k.name) == "Component" {
+                                            split_body(&k.body).0
+                                        } else {
+                                            vec![k]
+                                        }
+                                    })
+                                    .map(|k| Kid {
+                                        deferred: false,
+                                        ..k
+                                    }),
+                            );
+                        } else {
+                            kids.push(Kid {
+                                name: name.to_string(),
+                                body: inner,
+                                deferred,
+                                delegate,
+                            });
+                        }
+                    } else {
+                        own.push_str(header.trim());
+                        own.push('\n');
+                    }
+                    seg_start = i + 1;
+                }
+            }
+            '\n' if depth == 0 && body[i + 1..].trim_start().starts_with('{') => {}
+            '\n' | ';' if depth == 0 => {
+                own.push_str(body[seg_start..i].trim());
+                own.push('\n');
+                seg_start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(depth, 0, "unbalanced braces (a regex literal?):\n{body}");
+    own.push_str(body[seg_start.min(body.len())..].trim());
+    (kids, own)
+}
+
+/// Types that capture presses on their parent item (a sibling of a selectable
+/// text, not a container of it). A Button/ToolButton sibling in a layout does
+/// not, so those are not listed.
+const SIBLING_CAPTURES: &[&str] = &[
+    "TapHandler",
+    "MouseArea",
+    "DragHandler",
+    "PointHandler",
+    "HoverHandler",
+];
+/// Types that are themselves clickable, as the PARENT of a selectable text.
+const CLICKABLE_PARENTS: &[&str] = &[
+    "ItemDelegate",
+    "MouseArea",
+    "Button",
+    "AbstractListItem",
+    "BasicListItem",
+    "SwipeListItem",
+];
+const PARENT_CLICK_HANDLERS: &[&str] = &[
+    "onClicked:",
+    "onTapped:",
+    "onPressed:",
+    "onDoubleClicked:",
+    "onPressAndHold:",
+];
+
+fn last_segment(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+/// Every block that directly contains a selectable text (a `SelectableText`
+/// or a use of a selectable-root component) must itself not be clickable, have
+/// no `onClicked`-style handler of its own, and have no sibling handler child.
+fn sibling_capture_violations(
+    parent: &str,
+    body: &str,
+    selectable: &[String],
+    out: &mut Vec<String>,
+) {
+    let (kids, own) = split_body(body);
+    let is_text = |n: &str| {
+        let l = last_segment(n);
+        l == "SelectableText" || selectable.iter().any(|s| s == l)
+    };
+    let live: Vec<&Kid> = kids.iter().filter(|k| !k.deferred).collect();
+    if let Some(text) = live.iter().find(|k| is_text(&k.name)).map(|k| &k.name) {
+        if CLICKABLE_PARENTS
+            .iter()
+            .any(|c| last_segment(parent).ends_with(c))
+        {
+            out.push(format!("`{text}` sits directly in clickable `{parent}`"));
+        }
+        for line in own.lines().map(|l| l.replace([' ', '\t'], "")) {
+            if PARENT_CLICK_HANDLERS.iter().any(|h| line.starts_with(h)) {
+                out.push(format!("`{parent}` holding `{text}` has `{line}`"));
+            }
+        }
+        for k in &live {
+            if SIBLING_CAPTURES.contains(&last_segment(&k.name)) {
+                out.push(format!(
+                    "`{}` is a sibling of `{text}` in `{parent}`",
+                    k.name
+                ));
+            }
+        }
+    }
+    for k in &kids {
+        sibling_capture_violations(&k.name, &k.body, selectable, out);
+    }
+}
+
+#[test]
+fn batch_7_texts_have_no_sibling_click_capture() {
+    let components = selectable_root_components();
+    for (name, source, _, _) in FILES {
+        let mut out = Vec::new();
+        sibling_capture_violations("<file>", &code_lines(source), &components, &mut out);
+        assert!(out.is_empty(), "{name}: {out:#?}");
+    }
+}
+
+#[test]
+fn batch_7_sibling_guard_self_test() {
+    let comps = vec!["ConnectionExplanation".to_string()];
+    let run = |src: &str| {
+        let mut out = Vec::new();
+        sibling_capture_violations("<file>", src, &comps, &mut out);
+        out
+    };
+    let bad = [
+        "Item {\n    ConnectionExplanation {\n        x: 1\n    }\n    TapHandler {\n        onTapped: page.dismissInspector()\n    }\n}",
+        "Item {\n    SelectableText {\n        text: \"a\"\n    }\n    MouseArea {\n        anchors.fill: parent\n    }\n}",
+        "Controls.ItemDelegate {\n    contentItem: Item {\n        SelectableText {\n        }\n    }\n    Controls.ItemDelegate {\n        SelectableText {\n        }\n    }\n}",
+        "Item {\n    SelectableText {\n    }\n    HoverHandler {\n    }\n}",
+        "Item {\n    onClicked: foo()\n    SelectableText {\n    }\n}",
+        "Item\n{\n    SelectableText {\n    }\n    TapHandler\n    {\n    }\n}",
+        "Item {\n    onClicked  \t: foo()\n    SelectableText {\n    }\n}",
+        "Item {\n    property Item componentText: SelectableText {\n    }\n    TapHandler {\n    }\n}",
+        "Item {\n    onTapped : foo()\n    SelectableText {\n    }\n}",
+        "Item {\n    Repeater {\n        delegate: Component {\n            SelectableText {\n            }\n        }\n    }\n    TapHandler {\n    }\n}",
+        "Item {\n    onClicked: { foo() }\n    SelectableText {\n    }\n}",
+        "Item {\n    property bool f: true; onClicked: foo()\n    SelectableText {\n    }\n}",
+        "Item {\n    property string l: '{'\n    SelectableText {\n    }\n    TapHandler {\n    }\n}",
+        "Item {\n    property string l: \"a\\\"{\"\n    SelectableText {\n    }\n    TapHandler {\n    }\n}",
+        "Item {\n    data: [SelectableText {}, TapHandler {}]\n}",
+        "Item {\n    Repeater {\n        delegate: SelectableText {\n        }\n    }\n    TapHandler {\n    }\n}",
+        "Item {\n    /* { */ SelectableText {\n    }\n    TapHandler {\n    } // }\n}",
+    ];
+    for src in bad {
+        assert!(!run(src).is_empty(), "bad fixture not flagged:\n{src}");
+    }
+    let good = "RowLayout {\n    SelectableText {\n        text: \"a { b\"\n    }\n    Controls.Button {\n        onClicked: { go() }\n    }\n    ConnectionExplanation {\n    }\n}";
+    assert_eq!(run(good), Vec::<String>::new());
+    // A deferred template is not an instantiated sibling.
+    let deferred = "Item {\n    property Component preview: SelectableText {\n    }\n    TapHandler {\n    }\n}";
+    assert_eq!(run(deferred), Vec::<String>::new());
+    let unrelated = "Item {\n    Repeater {\n        delegate: Item {\n        }\n        property Component p: SelectableText {\n        }\n    }\n    TapHandler {\n    }\n}";
+    assert_eq!(run(unrelated), Vec::<String>::new());
+    let inline =
+        "Item {\n    component MyText: SelectableText {\n    }\n    TapHandler {\n    }\n}";
+    assert_eq!(run(inline), Vec::<String>::new());
 }
 
 #[test]
