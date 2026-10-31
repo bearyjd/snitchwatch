@@ -43,7 +43,10 @@ Item {
         // The map band collapsed (header only), then a narrow, short window
         // where the band must give way before the list does.
         { name: "connections-map-collapsed", page: "connections", mapCollapsed: true },
-        { name: "connections-map-narrow", page: "connections", mapCollapsed: false, size: [440, 520] }
+        { name: "connections-map-narrow", page: "connections", mapCollapsed: false, size: [440, 520] },
+        // Pilot pages of the rounded style pass.
+        { name: "about", page: "about" },
+        { name: "silent-mode", page: "silentMode" }
     ]
     property string sizedFor: ""
 
