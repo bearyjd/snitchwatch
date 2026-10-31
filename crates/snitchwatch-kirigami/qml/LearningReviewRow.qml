@@ -36,6 +36,25 @@ Rectangle {
         + (row.info.distinct === 1 ? " destination" : " destinations")
         + ". Last seen " + new Date(row.info.lastSeenMs).toLocaleString() + "."
 
+    // The warnings and per-choice lines, shared by their Labels and the row's
+    // Copy text so the two cannot drift. "" = not shown.
+    readonly property string dualUseText: row.info.dualUse === true
+        ? "This program can run other programs or scripts." : ""
+    readonly property string highFanOutText: row.info.highFanOut === true
+        ? "It connected to " + row.info.distinct + " or more destinations, so no destination list is chosen for it." : ""
+    readonly property string alreadyPresentText: row.info.alreadyPresent !== undefined && row.info.alreadyPresent.length > 0
+        ? "A rule you already have makes: " + row.present(row.info.alreadyPresent) + "." : ""
+
+    function hostLine(h) {
+        return h.host + "  (" + h.count + ")";
+    }
+    function onlyText(c) {
+        return c.hosts.length > 0 ? "Only: " + c.hosts.join(", ") : "";
+    }
+    function noteText(c) {
+        return c.note === null || c.note === undefined ? "" : c.note;
+    }
+
     function present(kinds) {
         const names = {
             "allow-any": "any destination",
@@ -57,15 +76,14 @@ Rectangle {
                            row.countsText];
             lines.push(...(i.flags === undefined ? [] : i.flags));
             const hosts = row.more.length > 0 ? row.more : (i.top === undefined ? [] : i.top);
-            lines.push(...hosts.map(h => h.host + "  (" + h.count + ")"));
+            lines.push(row.dualUseText, row.highFanOutText);
+            lines.push(...hosts.map(h => row.hostLine(h)));
             if (i.notSelectable !== undefined && i.notSelectable !== null) {
                 lines.push(i.notSelectable);
             }
+            lines.push(row.alreadyPresentText);
             for (const c of (i.choices === undefined ? [] : i.choices)) {
-                lines.push(c.title);
-                if (c.hosts.length > 0) {
-                    lines.push("Only: " + c.hosts.join(", "));
-                }
+                lines.push(c.title, row.onlyText(c), row.noteText(c));
             }
             return lines.filter(l => l !== "").join("\n");
         }
@@ -114,17 +132,17 @@ Rectangle {
         }
         Controls.Label {
             Layout.fillWidth: true
-            visible: row.info.dualUse === true
+            visible: row.dualUseText !== ""
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: "This program can run other programs or scripts."
+            text: row.dualUseText
         }
         Controls.Label {
             Layout.fillWidth: true
-            visible: row.info.highFanOut === true
+            visible: row.highFanOutText !== ""
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: "It connected to " + row.info.distinct + " or more destinations, so no destination list is chosen for it."
+            text: row.highFanOutText
         }
 
         Repeater {
@@ -134,7 +152,7 @@ Rectangle {
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
                 wrapMode: Text.WrapAnywhere
-                text: modelData.host + "  (" + modelData.count + ")"
+                text: row.hostLine(modelData)
             }
         }
         Controls.Button {
@@ -153,10 +171,10 @@ Rectangle {
         }
         Controls.Label {
             Layout.fillWidth: true
-            visible: row.info.alreadyPresent !== undefined && row.info.alreadyPresent.length > 0
+            visible: row.alreadyPresentText !== ""
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: visible ? "A rule you already have makes: " + row.present(row.info.alreadyPresent) + "." : ""
+            text: row.alreadyPresentText
         }
 
         Repeater {
@@ -201,10 +219,10 @@ Rectangle {
                 Controls.Label {
                     Layout.fillWidth: true
                     Layout.leftMargin: Kirigami.Units.gridUnit * 2
-                    visible: modelData.hosts.length > 0
+                    visible: row.onlyText(modelData) !== ""
                     textFormat: Text.PlainText
                     wrapMode: Text.WrapAnywhere
-                    text: "Only: " + modelData.hosts.join(", ")
+                    text: row.onlyText(modelData)
                 }
                 Controls.Label {
                     Layout.fillWidth: true
@@ -213,7 +231,7 @@ Rectangle {
                     textFormat: Text.PlainText
                     wrapMode: Text.WrapAnywhere
                     opacity: 0.8
-                    text: modelData.note === null || modelData.note === undefined ? "" : modelData.note
+                    text: row.noteText(modelData)
                 }
             }
         }

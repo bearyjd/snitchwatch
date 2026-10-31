@@ -26,14 +26,14 @@ const FILES: &[(&str, &str, usize, usize, &[&str])] = &[
             "row.info.programPathFull",
             "row.countsText",
             "font.bold: true\n                text: modelData\n",
-            "row.info.dualUse === true",
-            "row.info.highFanOut === true",
-            "modelData.host",
+            "row.dualUseText",
+            "row.highFanOutText",
+            "row.hostLine(modelData)",
             "id: notSelectable",
-            "row.info.alreadyPresent",
+            "row.alreadyPresentText",
             "modelData.title",
-            "modelData.hosts.join",
-            "modelData.note",
+            "row.onlyText(modelData)",
+            "row.noteText(modelData)",
         ],
     ),
     ("LearningProgressList.qml", include_str!("../qml/LearningProgressList.qml"), 3, 0, &[]),
@@ -56,6 +56,56 @@ const FILES: &[(&str, &str, usize, usize, &[&str])] = &[
         ],
     ),
 ];
+
+/// Per file with a `RowCopyMenu`: what its `copyText` expression must
+/// reference (every text the row shows, so the copy is the whole record).
+const COPY_TOKENS: &[(&str, &[&str])] = &[
+    (
+        "LearningReviewRow.qml",
+        &[
+            "i.programLabel",
+            "i.programPathFull",
+            "row.countsText",
+            "i.flags",
+            "row.dualUseText",
+            "row.highFanOutText",
+            "row.hostLine(",
+            "i.notSelectable",
+            "row.alreadyPresentText",
+            "c.title",
+            "row.onlyText(",
+            "row.noteText(",
+        ],
+    ),
+    (
+        "CuratedGroupsStep.qml",
+        &[
+            "modelData.title",
+            "modelData.description",
+            "modelData.entries",
+            "e.program",
+            "e.allows",
+            "e.why",
+            "e.statusText",
+        ],
+    ),
+];
+
+/// The `copyText:` binding of a `RowCopyMenu` block, to the end of the block.
+fn copy_expression(block: &str) -> Option<&str> {
+    let at = block.find("copyText:")?;
+    Some(block[at + "copyText:".len()..].trim())
+}
+
+/// A copy expression that is empty or only a literal empty string.
+fn is_literal_empty(expr: &str) -> bool {
+    let bare: String = expr
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '{' | '}' | ';'))
+        .collect();
+    let bare = bare.strip_prefix("return").unwrap_or(&bare);
+    matches!(bare, "" | "\"\"" | "''" | "``")
+}
 
 #[test]
 fn batch_3_texts_are_selectable_or_justified() {
@@ -88,13 +138,28 @@ fn batch_3_rows_have_a_copy_menu_with_text() {
     for (name, source, _, menus, _) in FILES {
         let found = blocks(&code_lines(source), "RowCopyMenu {");
         assert_eq!(found.len(), *menus, "{name}: RowCopyMenu blocks");
+        let tokens = COPY_TOKENS.iter().find(|(n, _)| n == name).map(|(_, t)| *t);
+        assert_eq!(tokens.is_some(), *menus > 0, "{name}: COPY_TOKENS entry");
         for block in found {
-            let has_copy_text = block
-                .lines()
-                .any(|l| l.trim().starts_with("copyText:") && l.trim().len() > "copyText:".len());
-            assert!(has_copy_text, "{name}: a RowCopyMenu without copyText:\n{block}");
+            let expr = copy_expression(&block)
+                .unwrap_or_else(|| panic!("{name}: a RowCopyMenu without copyText:\n{block}"));
+            assert!(!is_literal_empty(expr), "{name}: an empty copyText:\n{block}");
+            for token in tokens.unwrap_or(&[]) {
+                assert!(
+                    expr.contains(token),
+                    "{name}: copyText does not reference `{token}`:\n{block}"
+                );
+            }
         }
     }
+}
+
+#[test]
+fn the_copy_text_guard_can_fail() {
+    for empty in ["\"\"", "{ return \"\"; }", "{\n  return '';\n}", ""] {
+        assert!(is_literal_empty(empty), "`{empty}` should be empty");
+    }
+    assert!(!is_literal_empty("{ return row.dualUseText; }"));
 }
 
 #[test]
@@ -103,7 +168,7 @@ fn batch_3_adds_no_tab_stop() {
         let code = code_lines(source);
         for open in ["SelectableText {", "RowCopyMenu {"] {
             for block in blocks(&code, open) {
-                for forbidden in ["activeFocusOnTab", "focus:", "KeyNavigation", "forceActiveFocus"] {
+                for forbidden in ["activeFocusOnTab", "activeFocusOnPress", "focus:", "KeyNavigation", "forceActiveFocus"] {
                     assert!(
                         !block.contains(forbidden),
                         "{name}: a `{open}` sets `{forbidden}` (mouse only):\n{block}"
