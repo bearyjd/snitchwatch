@@ -3,7 +3,8 @@
 // Display only, plus one button that puts the same facts on the clipboard as
 // plain text. All values come from `AboutModel` (Rust, see `about.rs`), which
 // strips control characters and caps lengths; they are still shown as
-// `Text.PlainText`. The daemon version is injected by main.qml from the
+// `Text.PlainText`. The text is mouse-selectable (`SelectableText`; the Copy
+// button stays the keyboard way). The daemon version is injected by main.qml from the
 // Traffic model, which already receives it; the bridge's own version is not
 // on the wire and so is not shown.
 import QtQuick
@@ -74,7 +75,7 @@ Kirigami.ScrollablePage {
                         id: row
                         width: parent.width
                         spacing: Kirigami.Units.largeSpacing
-                        Controls.Label {
+                        SelectableText {
                             objectName: "aboutLabel_" + modelData.key
                             Layout.preferredWidth: Kirigami.Units.gridUnit * 12
                             Layout.alignment: Qt.AlignTop
@@ -83,7 +84,7 @@ Kirigami.ScrollablePage {
                             textFormat: Text.PlainText
                             text: modelData.label
                         }
-                        Controls.Label {
+                        SelectableText {
                             objectName: "aboutValue_" + modelData.key
                             Layout.fillWidth: true
                             wrapMode: Text.WrapAnywhere
@@ -114,7 +115,7 @@ Kirigami.ScrollablePage {
                     page.copied = true;
                 }
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "aboutCopiedNote"
                 visible: page.copied
                 textFormat: Text.PlainText

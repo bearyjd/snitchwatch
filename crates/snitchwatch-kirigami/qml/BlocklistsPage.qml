@@ -144,7 +144,7 @@ Kirigami.ScrollablePage {
             visible: page.leftoverRules > 0
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Label {
+            SelectableText {
                 objectName: "leftoverText"
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
@@ -180,7 +180,7 @@ Kirigami.ScrollablePage {
                 }
             }
             // A removal that failed, or left some behind.
-            Controls.Label {
+            SelectableText {
                 objectName: "leftoverReasonText"
                 Layout.fillWidth: true
                 visible: page.leftoverReason.length > 0
@@ -192,7 +192,7 @@ Kirigami.ScrollablePage {
             RowLayout {
                 visible: page.confirmingLeftover
                 spacing: Kirigami.Units.largeSpacing
-                Controls.Label {
+                SelectableText {
                     objectName: "leftoverConfirmText"
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
@@ -222,7 +222,7 @@ Kirigami.ScrollablePage {
                 }
             }
         }
-        Controls.Label {
+        SelectableText {
             objectName: "leftoverFilesLeftText"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -267,7 +267,7 @@ Kirigami.ScrollablePage {
                 + "the firewall and are lost when Snitchwatch's background service restarts (for "
                 + "example on logout or reboot)."
         }
-        Controls.Label {
+        SelectableText {
             objectName: "exactMatchNote"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -276,7 +276,7 @@ Kirigami.ScrollablePage {
             opacity: 0.7
             text: "Hosts are matched by exact name, not subdomains."
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
             visible: page.storageReason.length > 0
@@ -328,6 +328,11 @@ Kirigami.ScrollablePage {
             Accessible.name: row.displayName
             Accessible.description: row.url + ". " + row.entryCount + " hosts. " + row.statusLabel
                 + ". " + row.enforcementLabel
+
+            // Right-click Copy of the row's text (mouse only; selectable-text plan, class C).
+            RowCopyMenu {
+                copyText: row.Accessible.name + "\n" + row.Accessible.description
+            }
 
             required property string listId
             required property string displayName
@@ -442,41 +447,47 @@ Kirigami.ScrollablePage {
 
             Kirigami.FormLayout {
                 Layout.fillWidth: true
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "URL"
                     textFormat: Text.PlainText
                     text: page.inspectUrl
-                    elide: Text.ElideMiddle
+                    // A TextEdit cannot elide: wrap the whole URL instead.
+                    wrapMode: Text.WrapAnywhere
+                    Layout.fillWidth: true
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Entries"
                     text: page.inspectEntryCount
+                    wrapMode: Text.NoWrap
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Download"
                     textFormat: Text.PlainText
                     text: page.inspectStatusLabel
                     color: page.statusColor(page.inspectStatus)
+                    wrapMode: Text.NoWrap
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Blocking"
                     textFormat: Text.PlainText
                     text: page.inspectEnforcementLabel
+                    wrapMode: Text.NoWrap
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Why"
                     visible: page.inspectEnforcementReason.length > 0
                     textFormat: Text.PlainText
                     text: page.inspectEnforcementReason
                     wrapMode: Text.Wrap
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Last updated"
                     visible: page.inspectLastUpdated.length > 0
                     textFormat: Text.PlainText
                     text: page.inspectLastUpdated
+                    wrapMode: Text.NoWrap
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Last failure"
                     visible: (page.inspectStatus === "failed" || page.inspectStatus === "refused")
                         && page.inspectLastFailureReason.length > 0
@@ -522,12 +533,13 @@ Kirigami.ScrollablePage {
                 }
             }
 
-            Controls.Label {
+            SelectableText {
                 visible: page.entriesModel && page.entriesModel.subscriptionId === page.inspectId
                 text: page.entriesModel
                     ? "Showing " + page.entriesModel.count + " of " + page.entriesModel.total + " hosts"
                     : ""
                 opacity: 0.7
+                wrapMode: Text.NoWrap
             }
 
             GuardedButton {
