@@ -10,6 +10,7 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
+import QtQuick.Controls.impl as Impl
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
@@ -106,6 +107,18 @@ Kirigami.ScrollablePage {
                 implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
                 horizontalPadding: Theme.controlPaddingH
                 background: RoundedSurface { control: copyButton }
+                // org.kde.desktop draws a Button's label inside the background
+                // replaced above; without its own label it would render blank.
+                contentItem: Impl.IconLabel {
+                    objectName: "inPlaceButtonLabel"
+                    spacing: copyButton.spacing
+                    mirrored: copyButton.mirrored
+                    display: copyButton.display
+                    icon: copyButton.icon
+                    text: copyButton.text
+                    font: copyButton.font
+                    color: copyButton.palette.buttonText
+                }
                 text: "Copy version info"
                 icon.name: "edit-copy"
                 Accessible.name: "Copy version info"
