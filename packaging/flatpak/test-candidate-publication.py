@@ -301,20 +301,37 @@ class Publication(unittest.TestCase):
 
     def test_newer_in_flight_ci_run_does_not_mask_completed_run(self):
         # listWorkflowRuns is newest-first. The candidate push starts its own newer
-        # ci.yml run on the same SHA; only completed runs are judged, newest first.
+        # first-attempt ci.yml run on the same SHA; only that kind of unfinished run
+        # is skipped. An unfinished rerun (attempt > 1 or unknown) is judged and holds.
         def runs(*newest_first):
+            def build(i, branch, status, conclusion, attempt=1):
+                run = {**self.fixture()[3]['runs'][0], 'id': 13 + len(newest_first) - i,
+                       'head_branch': branch, 'status': status, 'conclusion': conclusion,
+                       'run_attempt': attempt}
+                if attempt is None:
+                    del run['run_attempt']
+                return run
             return lambda a, e, p, s: s.update({'runs': [
-                {**s['runs'][0], 'id': 13 + len(newest_first) - i, 'head_branch': branch,
-                 'status': status, 'conclusion': conclusion}
-                for i, (branch, status, conclusion) in enumerate(newest_first)]})
+                build(i, *run) for i, run in enumerate(newest_first)]})
         in_flight = ('r16-candidate', 'in_progress', None)
         main_green = ('main', 'completed', 'success')
-        result = self.exercise(runs(in_flight, main_green))
-        self.assertTrue(result['ok'], result)
+        for accepted in [(in_flight, main_green),
+                         (('r16-candidate', 'queued', None), main_green),
+                         (('', 'in_progress', None, 1), main_green)]:
+            with self.subTest(accepted=accepted):
+                result = self.exercise(runs(*accepted))
+                self.assertTrue(result['ok'], result)
         for newest_first in [(('r16-candidate', 'completed', 'failure'), main_green),
                              (('r16-candidate', 'completed', 'cancelled'), main_green),
                              (in_flight, ('main', 'completed', 'failure')),
-                             (in_flight, ('main', 'queued', None))]:
+                             (in_flight, ('main', 'queued', None)),
+                             # A failed/cancelled newer run that is re-run must not expose green A.
+                             (('r16-candidate', 'in_progress', None, 2), main_green),
+                             (('r16-candidate', 'queued', None, 2), main_green),
+                             (in_flight, ('r16-candidate', 'in_progress', None, 3), main_green),
+                             # Unknown attempt on an unfinished run fails closed.
+                             (('r16-candidate', 'in_progress', None, None), main_green),
+                             (('r16-candidate', 'in_progress', None, '1'), main_green)]:
             with self.subTest(runs=newest_first):
                 self.refused(self.exercise(runs(*newest_first)))
 

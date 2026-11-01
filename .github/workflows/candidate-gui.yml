@@ -3,8 +3,8 @@ name: r16 System GUI Candidate
 on:
   # Primary sets this repository variable to the independently reviewed SHA
   # only after exact-head native/QML CI passes, then pushes that exact head.
-  # The publisher judges the newest completed exact-head ci.yml run, so the
-  # ci.yml run this push itself starts cannot mask or replace that evidence.
+  # The publisher skips only unfinished first-attempt exact-head ci.yml runs
+  # (like the one this push itself starts); an unfinished rerun still holds.
   # No default-branch publication prerequisite or user-chosen destination.
   push:
     branches: [r16-candidate]
@@ -178,10 +178,11 @@ jobs:
             if (branch.data.object.sha !== sha) fail('candidate branch moved');
             const runs = await github.rest.actions.listWorkflowRuns({owner, repo, workflow_id: 'ci.yml',
               head_sha: sha, per_page: 100});
-            // Newest-first. Skip only still-running runs (the candidate push starts one on this SHA);
-            // the newest completed run must itself be green, so a newer failure still holds.
+            // Newest-first. Skip only an unfinished FIRST attempt (the candidate push starts one on
+            // this SHA). An unfinished rerun (run_attempt > 1, or missing) is not skipped: it may be
+            // retrying a failure, so it is judged and holds. The judged run must itself be green.
             const ci = runs.data.workflow_runs.find(run => run.head_sha === sha && ['push', 'pull_request'].includes(run.event) &&
-              run.status === 'completed');
+              (run.status === 'completed' || run.run_attempt !== 1));
             if (!ci || ci.status !== 'completed' || ci.conclusion !== 'success' || ci.repository.full_name !== 'bearyjd/snitchwatch')
               fail('exact-head native CI missing or failed');
             const jobs = await github.rest.actions.listJobsForWorkflowRun({owner, repo, run_id: ci.id, filter: 'latest', per_page: 100});
