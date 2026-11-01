@@ -102,18 +102,21 @@ ColumnLayout {
                 text: page.inspectIp.length > 0 ? page.inspectIp : "unavailable"
                 elide: Text.ElideMiddle
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Port"
+                wrapMode: Text.NoWrap
                 textFormat: Text.PlainText
                 text: page.inspectPort
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Protocol"
+                wrapMode: Text.NoWrap
                 textFormat: Text.PlainText
                 text: page.inspectProtocol
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Verdict"
+                wrapMode: Text.NoWrap
                 textFormat: Text.PlainText
                 text: page.inspectVerdictText
                 color: page.inspectNoLongerPending
