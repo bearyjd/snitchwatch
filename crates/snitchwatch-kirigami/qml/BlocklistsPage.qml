@@ -100,7 +100,7 @@ Kirigami.ScrollablePage {
             textFormat: Text.PlainText
             Layout.alignment: Qt.AlignVCenter
         }
-        Controls.TextField {
+        RoundedField {
             id: subscribeUrl
             Layout.fillWidth: true
             placeholderText: "Blocklist URL to subscribe…"

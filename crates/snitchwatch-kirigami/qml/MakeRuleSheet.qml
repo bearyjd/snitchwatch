@@ -63,7 +63,7 @@ ColumnLayout {
             + "as decided by its default action."
     }
 
-    Controls.Button {
+    RoundedButton {
         id: openButton
         Layout.fillWidth: true
         visible: sheet.bindableProcessPath && !form.visible
@@ -98,7 +98,7 @@ ColumnLayout {
                 text: "Scope"
                 Layout.alignment: Qt.AlignVCenter
             }
-            Controls.ComboBox {
+            RoundedComboBox {
                 id: scopeBox
                 objectName: "makeRuleScope"
                 Layout.fillWidth: true
@@ -120,7 +120,7 @@ ColumnLayout {
                 text: "Duration"
                 Layout.alignment: Qt.AlignVCenter
             }
-            Controls.ComboBox {
+            RoundedComboBox {
                 id: durationBox
                 objectName: "makeRuleDuration"
                 Layout.fillWidth: true
@@ -135,14 +135,14 @@ ColumnLayout {
         }
         RowLayout {
             Layout.fillWidth: true
-            Controls.Button {
+            RoundedButton {
                 Layout.fillWidth: true
                 enabled: !!sheet.controller && !sheet.controller.busy
                 text: "Allow"
                 icon.name: "dialog-ok-apply"
                 onClicked: sheet.make("allow")
             }
-            Controls.Button {
+            RoundedButton {
                 Layout.fillWidth: true
                 enabled: !!sheet.controller && !sheet.controller.busy
                 text: "Deny"

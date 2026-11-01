@@ -70,7 +70,7 @@ SizedOverlaySheet {
                       + "checks rules (turned-off rules are counted, but skipped). "
                       + host.inspectHowItDecides
             }
-            Controls.Switch {
+            GuardedSwitch {
                 id: inspectEnabledSwitch
                 Kirigami.FormData.label: "Enabled"
                 Accessible.name: Kirigami.FormData.label
@@ -88,7 +88,7 @@ SizedOverlaySheet {
                 wrapMode: Text.Wrap
                 text: host.inspectCommandNote
             }
-            Controls.Button {
+            RoundedButton {
                 objectName: "reenableDnsButton"
                 visible: host.inspectManagedDns && !host.inspectEnabled && host.inspectToggleable
                 enabled: host.curatedModel && host.curatedModel.broadSupported
@@ -116,7 +116,7 @@ SizedOverlaySheet {
             Layout.fillWidth: true
         }
 
-        Controls.Button {
+        RoundedButton {
             id: inspectEditButton
             objectName: "inspectEditButton"
             Layout.fillWidth: true
@@ -138,7 +138,7 @@ SizedOverlaySheet {
 
         // Two-step confirmation kept inline (no separate dialog type
         // introduced) — mirrors the sheet's existing button-row pattern.
-        Controls.Button {
+        RoundedButton {
             id: inspectDeleteButton
             Layout.fillWidth: true
             visible: !host.confirmingDelete
@@ -162,12 +162,12 @@ SizedOverlaySheet {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.largeSpacing
-                Controls.Button {
+                RoundedButton {
                     Layout.fillWidth: true
                     text: "Cancel"
                     onClicked: host.confirmingDelete = false
                 }
-                Controls.Button {
+                RoundedButton {
                     Layout.fillWidth: true
                     text: "Confirm delete"
                     icon.name: "edit-delete-remove"
