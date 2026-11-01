@@ -32,6 +32,7 @@ import QtQuick
 import QtQuick.Window
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
+import QtQuick.Controls.impl as Impl
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
@@ -511,6 +512,22 @@ Window {
                     Layout.column: 1
                     Layout.fillWidth: true
                     Layout.preferredWidth: 1
+                    // Restyled in place (type name stays `Button` for the focus
+                    // tests); the same look for both, neither prominent.
+                    implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+                    horizontalPadding: Theme.controlPaddingH
+                    background: RoundedSurface { control: allowButton }
+                    // The platform style (org.kde.desktop) draws the label inside
+                    // its own background; with that replaced, draw it here.
+                    contentItem: Impl.IconLabel {
+                        spacing: allowButton.spacing
+                        mirrored: allowButton.mirrored
+                        display: allowButton.display
+                        icon: allowButton.icon
+                        text: allowButton.text
+                        font: allowButton.font
+                        color: allowButton.palette.buttonText
+                    }
                     text: "Allow"
                     icon.name: "dialog-ok-apply"
                     palette.buttonText: Theme.allow
@@ -526,6 +543,22 @@ Window {
                     Layout.column: 0
                     Layout.fillWidth: true
                     Layout.preferredWidth: 1
+                    // Restyled in place (type name stays `Button` for the focus
+                    // tests); the same look for both, neither prominent.
+                    implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+                    horizontalPadding: Theme.controlPaddingH
+                    background: RoundedSurface { control: denyButton }
+                    // The platform style (org.kde.desktop) draws the label inside
+                    // its own background; with that replaced, draw it here.
+                    contentItem: Impl.IconLabel {
+                        spacing: denyButton.spacing
+                        mirrored: denyButton.mirrored
+                        display: denyButton.display
+                        icon: denyButton.icon
+                        text: denyButton.text
+                        font: denyButton.font
+                        color: denyButton.palette.buttonText
+                    }
                     text: "Deny"
                     icon.name: "edit-delete-remove"
                     palette.buttonText: Theme.deny
