@@ -5,7 +5,11 @@
 //!     heading (default type: Normal weight, as Heading.qml);
 //!   * level 0 (the default) is exactly the old SelectableText: same font as a
 //!     plain TextEdit, StaticText role;
-//!   * a leveled text is still no Tab stop and never takes focus.
+//!   * a leveled text is still no Tab stop and never takes focus;
+//!   * disabled, it draws in the colour a disabled Controls.Label draws in under
+//!     the same palette (and an enabled one in the theme text colour); a
+//!     disabled text takes no mouse selection, like a disabled Label; a caller's
+//!     explicit `color` is kept.
 //!
 //! Run headless with `QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic`.
 #[allow(unused_imports)]
@@ -50,6 +54,17 @@ Window {
                 SelectableText { objectName: "sel" + parent.modelData; x: 150; level: parent.modelData; text: "Heading" }
             }
         }
+        Pane {
+            id: dimmed
+            padding: 0
+            palette.windowText: "red"
+            palette.disabled.windowText: "blue"
+            Column {
+                Label { id: dimLabel; text: "label" }
+                SelectableText { id: dimText; text: "selectable" }
+                SelectableText { id: dimOwn; text: "own"; color: "green" }
+            }
+        }
         SelectableText { id: plain; objectName: "plain"; text: "plain" }
         TextEdit { id: bare; text: "plain"; visible: false }
     }
@@ -77,6 +92,23 @@ Window {
                          && plain.font.weight === bare.font.weight,
                          "level 0 changed the font: " + plain.font.pointSize + " vs " + bare.font.pointSize);
             probe.expect(plain.Accessible.role === Accessible.StaticText, "level 0 role " + plain.Accessible.role);
+        });
+        probe.step("enabled and disabled colour", null, function () {
+            probe.expect(Qt.colorEqual(dimLabel.color, "red"), "setup: enabled Label " + dimLabel.color);
+            probe.expect(plain.color === Kirigami.Theme.textColor, "enabled text is not the theme colour: " + plain.color);
+            probe.expect(dimText.color === Kirigami.Theme.textColor, "enabled text in a pane: " + dimText.color);
+            dimmed.enabled = false;
+            probe.expect(Qt.colorEqual(dimLabel.color, "blue"), "setup: disabled Label " + dimLabel.color);
+            probe.expect(Qt.colorEqual(dimText.color, dimLabel.color),
+                         "disabled text " + dimText.color + " != disabled Label " + dimLabel.color);
+            probe.expect(Qt.colorEqual(dimOwn.color, "green"), "an explicit color was overridden: " + dimOwn.color);
+            // Disabled is not mouse-selectable, as a disabled Label; nothing else changes.
+            tc.mouseDrag(dimText, 2, dimText.height / 2, dimText.contentWidth + 4, 0);
+            probe.expect(dimText.selectedText === "", "a disabled text was selected: '" + dimText.selectedText + "'");
+            probe.expect(dimText.Accessible.role === Accessible.StaticText && dimText.activeFocusOnTab === false,
+                         "disabling changed role or Tab behaviour");
+            dimmed.enabled = true;
+            probe.expect(dimText.color === Kirigami.Theme.textColor, "re-enabled text stays dim: " + dimText.color);
         });
         probe.step("a leveled text is no Tab stop", null, function () {
             start.forceActiveFocus();
