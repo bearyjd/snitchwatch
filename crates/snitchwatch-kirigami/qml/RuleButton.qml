@@ -117,7 +117,7 @@ Item {
         }
     }
 
-    Controls.Button {
+    RoundedButton {
         id: button
         objectName: "ruleButton"
         flat: true
