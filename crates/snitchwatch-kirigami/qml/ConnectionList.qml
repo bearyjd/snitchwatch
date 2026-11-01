@@ -61,6 +61,21 @@ Item {
         // Qt 6.10/6.11 can cancel a stale async cache index after a shrinking
         // model reset. Render visible rows synchronously; keep delegate reuse.
         cacheBuffer: 0
+        highlightMoveDuration: 0
+        highlightResizeDuration: 0
+        // One rounded, inset selection highlight for the whole list (not per
+        // row); a focus ring joins it only while the list has keyboard focus.
+        highlight: Item {
+            Rectangle {
+                objectName: "selectionHighlight"
+                anchors.fill: parent
+                anchors.margins: Theme.spacingSmall
+                radius: Theme.radiusMedium
+                color: Qt.alpha(Kirigami.Theme.highlightColor, 0.12)
+                border.width: list.activeFocus ? Theme.focusRingWidth : 0
+                border.color: Kirigami.Theme.highlightColor
+            }
+        }
         Controls.ScrollBar.vertical: Controls.ScrollBar {}
 
         // Explicit map selection belongs to the list that materializes the

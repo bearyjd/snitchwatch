@@ -13,7 +13,7 @@ Item {
     property var page
     readonly property var verdictHelper: row.page.inlineVerdicts
     width: ListView.view ? ListView.view.width : implicitWidth
-    implicitHeight: content.implicitHeight + verdictCounts.height + Kirigami.Units.smallSpacing * 2
+    implicitHeight: Math.max(Theme.hitMin, content.implicitHeight + verdictCounts.height + Kirigami.Units.smallSpacing * 2)
 
     required property int index
     required property string rowId
@@ -265,7 +265,7 @@ Item {
             visible: row.isGroupHeader && row.groupPending > 0
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Button {
+            RoundedButton {
                 id: batchAllowButton
                 Keys.onBacktabPressed: row.ListView.view.focusCurrent()
                 flat: true
@@ -274,7 +274,7 @@ Item {
                 icon.name: "dialog-ok-apply"
                 onClicked: row.decideOnce("allow", true)
             }
-            Controls.Button {
+            RoundedButton {
                 id: batchDenyButton
                 flat: true
                 enabled: !row.submitted
@@ -308,7 +308,7 @@ Item {
             visible: !row.isGroupHeader && row.pending
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Button {
+            RoundedButton {
                 id: rowAllowButton
                 Keys.onBacktabPressed: row.ListView.view.focusCurrent()
                 flat: true
@@ -317,7 +317,7 @@ Item {
                 icon.name: "dialog-ok-apply"
                 onClicked: row.decideOnce("allow", false)
             }
-            Controls.Button {
+            RoundedButton {
                 id: rowDenyButton
                 flat: true
                 enabled: !row.submitted
@@ -374,7 +374,7 @@ Item {
             onRemoveRequested: (level, program, key, label) => row.page.levelRules.remove(
                 level, program, key, label)
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "groupActionsButton"
             visible: row.isGroupHeader
             text: "Actions"

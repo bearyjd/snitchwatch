@@ -146,7 +146,7 @@ ColumnLayout {
                         opacity: 0.7
                         Layout.fillWidth: true
                     }
-                    Controls.Button {
+                    RoundedButton {
                         objectName: "groupDetails-" + groupRow.modelData.id
                         flat: true
                         text: groupRow.expanded ? "Hide details" : "Details"
@@ -196,7 +196,7 @@ ColumnLayout {
         }
     }
 
-    Controls.Button {
+    RoundedButton {
         objectName: "groupsFinish"
         Layout.alignment: Qt.AlignRight
         text: step.anyOn ? "Continue" : "Skip"
