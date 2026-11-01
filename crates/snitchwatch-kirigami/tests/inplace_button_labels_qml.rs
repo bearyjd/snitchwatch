@@ -115,7 +115,7 @@ fn top_level_props(code: &str, open: usize) -> Vec<String> {
             _ if depth == 1 && line_start => {
                 line.push(c);
                 let t = line.trim_start();
-                if let Some(name) = t.strip_suffix(':') {
+                if let Some(name) = t.strip_suffix(':').map(str::trim_end) {
                     if !name.is_empty()
                         && name
                             .chars()
@@ -124,7 +124,7 @@ fn top_level_props(code: &str, open: usize) -> Vec<String> {
                         props.push(name.to_string());
                         line_start = false;
                     }
-                } else if t.contains([' ', '(', '{', '[']) && !t.ends_with(' ') {
+                } else if t.contains([' ', '(', '{', '[']) && !t.ends_with(char::is_whitespace) {
                     line_start = false;
                 }
             }
@@ -173,6 +173,10 @@ fn the_label_guard_rejects_a_bare_background_and_accepts_an_own_label() {
         "Controls.ComboBox {\n    background: Rectangle {}\n    popup: Controls.Popup {\n        \
          contentItem: ListView {}\n    }\n}\n",
         "Item { Controls.Button { background: Rectangle {}; text: \"x\" } }",
+        // Whitespace before the colon must not hide the property name.
+        "Controls.ToolButton { background : Rectangle {} }",
+        "Controls.ToolButton {\n    background\t: Rectangle {}\n}\n",
+        "Controls.Button {\n    background :\n        Rectangle {}\n}\n",
     ];
     for src in bad {
         assert_eq!(blank_label_blocks(src).len(), 1, "should reject:\n{src}");
@@ -186,6 +190,9 @@ fn the_label_guard_rejects_a_bare_background_and_accepts_an_own_label() {
         "RoundedButton { background: Rectangle {} }\nText { text: \"Controls.Button { background: x }\" }\n",
         // Check box family: org.kde.desktop's own Label contentItem survives.
         "Controls.Switch { background: Rectangle {} }",
+        // Spaced / tabbed colons on a valid control.
+        "Controls.Button {\n    background : Rectangle {}\n    contentItem : Text {}\n}\n",
+        "Controls.Button {\n    background\t: Rectangle {}\n    contentItem\t:\n        Text {}\n}\n",
     ];
     for src in good {
         assert!(blank_label_blocks(src).is_empty(), "should accept:\n{src}");

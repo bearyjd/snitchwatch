@@ -263,7 +263,10 @@ fn run_probe() -> serde_json::Value {
         }
     });
     drop(guard);
-    assert!(root_ok.load(Ordering::SeqCst), "probe failed to load: {captured}");
+    assert!(
+        root_ok.load(Ordering::SeqCst),
+        "probe failed to load: {captured}"
+    );
     assert!(!captured.contains("ROUNDED_BATCH_C_ERROR"), "{captured}");
     let line = captured
         .lines()
@@ -286,7 +289,10 @@ fn the_new_components_and_swapped_sites_are_big_rounded_and_show_a_focus_ring() 
     let v = run_probe();
     let line = v.to_string();
     assert_eq!(v["state"], "ready", "not ready in time: {line}");
-    assert!(v["hitMin"].as_f64().unwrap() >= 44.0, "Theme.hitMin: {line}");
+    assert!(
+        v["hitMin"].as_f64().unwrap() >= 44.0,
+        "Theme.hitMin: {line}"
+    );
 
     let fixture = v["fixture"].as_array().unwrap();
     assert_eq!(fixture.len(), 6, "fixture controls: {line}");
@@ -317,11 +323,23 @@ fn the_new_components_and_swapped_sites_are_big_rounded_and_show_a_focus_ring() 
     for f in focus {
         assert_eq!(f["on"], true, "no focus ring on keyboard focus: {f}");
         assert_eq!(f["mouseOff"], true, "focus ring shown for mouse focus: {f}");
-        assert_eq!(f["radiusOk"], true, "ring radius differs from the body: {f}");
-        assert_eq!(f["prominentClash"], false, "ring equals a prominent fill: {f}");
+        assert_eq!(
+            f["radiusOk"], true,
+            "ring radius differs from the body: {f}"
+        );
+        assert_eq!(
+            f["prominentClash"], false,
+            "ring equals a prominent fill: {f}"
+        );
         // A zero-width or transparent ring would pass the checks above.
-        assert_eq!(f["ringBorder"], v["focusRingWidth"], "ring width is not Theme.focusRingWidth: {f}");
-        assert!(f["ringBorder"].as_f64().unwrap() > 0.0, "focus ring has no width: {f}");
+        assert_eq!(
+            f["ringBorder"], v["focusRingWidth"],
+            "ring width is not Theme.focusRingWidth: {f}"
+        );
+        assert!(
+            f["ringBorder"].as_f64().unwrap() > 0.0,
+            "focus ring has no width: {f}"
+        );
         assert!(
             f["ringOpacity"].as_f64().unwrap() > 0.5,
             "focus ring is (nearly) transparent: {f}"
@@ -339,8 +357,14 @@ fn the_new_components_and_swapped_sites_are_big_rounded_and_show_a_focus_ring() 
     let rows = v["mirror"].as_array().unwrap();
     assert_eq!(rows.len(), 4, "mirror rows: {line}");
     for r in rows {
-        assert_eq!(r["mirrored"], r["rtl"], "LayoutMirroring did not reach the control: {r}");
-        assert_eq!(r["elided"], true, "text was meant to be too long to fit: {r}");
+        assert_eq!(
+            r["mirrored"], r["rtl"],
+            "LayoutMirroring did not reach the control: {r}"
+        );
+        assert_eq!(
+            r["elided"], true,
+            "text was meant to be too long to fit: {r}"
+        );
         assert_eq!(r["overlap"], false, "text overlaps the chevron / box: {r}");
         assert_eq!(r["textInside"], true, "text leaves the control: {r}");
     }
@@ -356,7 +380,9 @@ fn qml_source(name: &str) -> String {
 /// Count `needle` at the start of a (trimmed) code line, so `Controls.Button`
 /// does not match `GuardedButton`.
 fn sites(code: &str, needle: &str) -> usize {
-    code.lines().filter(|l| l.trim_start().starts_with(needle)).count()
+    code.lines()
+        .filter(|l| l.trim_start().starts_with(needle))
+        .count()
 }
 
 /// (file, plain controls left: (Controls.Button, Controls.Switch, RadioButton,
@@ -389,8 +415,16 @@ fn the_batch_files_keep_no_plain_swappable_control() {
         for (kind, want) in kinds.iter().zip(plain) {
             assert_eq!(sites(&code, kind), *want, "{name}: plain `{kind}` left");
         }
-        assert_eq!(sites(&code, "RoundedButton {"), swapped[0], "{name}: RoundedButton sites");
-        assert_eq!(sites(&code, "RoundedComboBox {"), swapped[1], "{name}: RoundedComboBox sites");
+        assert_eq!(
+            sites(&code, "RoundedButton {"),
+            swapped[0],
+            "{name}: RoundedButton sites"
+        );
+        assert_eq!(
+            sites(&code, "RoundedComboBox {"),
+            swapped[1],
+            "{name}: RoundedComboBox sites"
+        );
     }
 }
 
@@ -405,7 +439,10 @@ fn the_selector_keeps_the_held_key_guard_and_the_sites_do_not_repeat_it() {
         assert!(combo.contains(needle), "RoundedComboBox lost `{needle}`");
     }
     let page = code_lines(&qml_source("DiagnosticsPage"));
-    assert!(!page.contains("Keys.onPressed"), "DiagnosticsPage repeats the guard");
+    assert!(
+        !page.contains("Keys.onPressed"),
+        "DiagnosticsPage repeats the guard"
+    );
 }
 
 #[test]
@@ -420,7 +457,9 @@ fn the_new_components_add_no_input_area_and_no_literal_radius() {
             );
             assert!(
                 !(t.starts_with("radius:")
-                    && t["radius:".len()..].trim().starts_with(|c: char| c.is_ascii_digit())),
+                    && t["radius:".len()..]
+                        .trim()
+                        .starts_with(|c: char| c.is_ascii_digit())),
                 "{name}:{n}: literal radius: {t}"
             );
         }

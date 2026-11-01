@@ -13,7 +13,13 @@ use qml_guard_support::{blocks, code_lines};
 /// (file, source, SelectableText blocks, RowCopyMenu blocks, snippets that
 /// identify each text still left as a Label/Heading: one per remaining block).
 const FILES: &[(&str, &str, usize, usize, &[&str])] = &[
-    ("LearningReviewPage.qml", include_str!("../qml/LearningReviewPage.qml"), 10, 0, &[]),
+    (
+        "LearningReviewPage.qml",
+        include_str!("../qml/LearningReviewPage.qml"),
+        10,
+        0,
+        &[],
+    ),
     // Class C: every Label in the row stays (a drag-select would fight the
     // list's flick, and a second right-click menu would open beside the row's).
     // The tick title also carries the row's TapHandler.
@@ -36,8 +42,20 @@ const FILES: &[(&str, &str, usize, usize, &[&str])] = &[
             "row.noteText(modelData)",
         ],
     ),
-    ("LearningProgressList.qml", include_str!("../qml/LearningProgressList.qml"), 3, 0, &[]),
-    ("LearningLimitsList.qml", include_str!("../qml/LearningLimitsList.qml"), 1, 0, &[]),
+    (
+        "LearningProgressList.qml",
+        include_str!("../qml/LearningProgressList.qml"),
+        3,
+        0,
+        &[],
+    ),
+    (
+        "LearningLimitsList.qml",
+        include_str!("../qml/LearningLimitsList.qml"),
+        1,
+        0,
+        &[],
+    ),
     // Class C: the group rows. Title, description and the entry texts stay
     // Labels (the entry's program is elided: ElideMiddle). The level-2
     // "Recommended rules" Heading is a SelectableText { level: 2 }.
@@ -84,7 +102,10 @@ const WRAPS: &[(&str, &[(&str, &str)])] = &[
             ("modelData.status", "Text.WrapAnywhere"),
         ],
     ),
-    ("LearningLimitsList.qml", &[("text: modelData", "Text.Wrap")]),
+    (
+        "LearningLimitsList.qml",
+        &[("text: modelData", "Text.Wrap")],
+    ),
     (
         "CuratedGroupsStep.qml",
         &[
@@ -153,12 +174,26 @@ const LEVELS: &[(&str, &[(&str, u32)])] = &[("CuratedGroupsStep.qml", &[("Recomm
 fn batch_3_headings_keep_their_level() {
     for (name, source, ..) in FILES {
         let converted = blocks(&code_lines(source), "SelectableText {");
-        let expected = LEVELS.iter().find(|(n, _)| n == name).map_or(&[][..], |(_, l)| *l);
-        let leveled = converted.iter().filter(|b| b.lines().any(|l| l.trim().starts_with("level:"))).count();
-        assert_eq!(leveled, expected.len(), "{name}: SelectableText blocks with a `level:`");
+        let expected = LEVELS
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(&[][..], |(_, l)| *l);
+        let leveled = converted
+            .iter()
+            .filter(|b| b.lines().any(|l| l.trim().starts_with("level:")))
+            .count();
+        assert_eq!(
+            leveled,
+            expected.len(),
+            "{name}: SelectableText blocks with a `level:`"
+        );
         for (marker, level) in expected {
             let hits: Vec<&String> = converted.iter().filter(|b| b.contains(marker)).collect();
-            assert_eq!(hits.len(), 1, "{name}: marker `{marker}` must match one block");
+            assert_eq!(
+                hits.len(),
+                1,
+                "{name}: marker `{marker}` must match one block"
+            );
             let want = format!("level: {level}");
             assert!(
                 hits[0].lines().any(|l| l.trim() == want),
@@ -205,7 +240,10 @@ fn batch_3_rows_have_a_copy_menu_with_text() {
         for block in found {
             let expr = copy_expression(&block)
                 .unwrap_or_else(|| panic!("{name}: a RowCopyMenu without copyText:\n{block}"));
-            assert!(!is_literal_empty(expr), "{name}: an empty copyText:\n{block}");
+            assert!(
+                !is_literal_empty(expr),
+                "{name}: an empty copyText:\n{block}"
+            );
             for token in tokens.unwrap_or(&[]) {
                 assert!(
                     expr.contains(token),
@@ -230,7 +268,13 @@ fn batch_3_adds_no_tab_stop() {
         let code = code_lines(source);
         for open in ["SelectableText {", "RowCopyMenu {"] {
             for block in blocks(&code, open) {
-                for forbidden in ["activeFocusOnTab", "activeFocusOnPress", "focus:", "KeyNavigation", "forceActiveFocus"] {
+                for forbidden in [
+                    "activeFocusOnTab",
+                    "activeFocusOnPress",
+                    "focus:",
+                    "KeyNavigation",
+                    "forceActiveFocus",
+                ] {
                     assert!(
                         !block.contains(forbidden),
                         "{name}: a `{open}` sets `{forbidden}` (mouse only):\n{block}"
@@ -260,10 +304,18 @@ fn batch_3_keeps_layout_equivalent() {
             .iter()
             .find(|(n, _)| n == name)
             .unwrap_or_else(|| panic!("{name}: missing from WRAPS"));
-        assert_eq!(converted.len(), expected.len(), "{name}: WRAPS entries vs blocks");
+        assert_eq!(
+            converted.len(),
+            expected.len(),
+            "{name}: WRAPS entries vs blocks"
+        );
         for (marker, wrap) in *expected {
             let hits: Vec<&String> = converted.iter().filter(|b| b.contains(marker)).collect();
-            assert_eq!(hits.len(), 1, "{name}: marker `{marker}` must match one block");
+            assert_eq!(
+                hits.len(),
+                1,
+                "{name}: marker `{marker}` must match one block"
+            );
             let want = format!("wrapMode: {wrap}");
             assert!(
                 hits[0].lines().any(|l| l.trim() == want),

@@ -92,12 +92,26 @@ const LEVELS: &[(&str, &[(&str, u32)])] = &[(
 fn batch_5_headings_keep_their_level() {
     for (name, source, ..) in FILES {
         let converted = blocks(&code_lines(source), "SelectableText {");
-        let expected = LEVELS.iter().find(|(n, _)| n == name).map_or(&[][..], |(_, l)| *l);
-        let leveled = converted.iter().filter(|b| b.lines().any(|l| l.trim().starts_with("level:"))).count();
-        assert_eq!(leveled, expected.len(), "{name}: SelectableText blocks with a `level:`");
+        let expected = LEVELS
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(&[][..], |(_, l)| *l);
+        let leveled = converted
+            .iter()
+            .filter(|b| b.lines().any(|l| l.trim().starts_with("level:")))
+            .count();
+        assert_eq!(
+            leveled,
+            expected.len(),
+            "{name}: SelectableText blocks with a `level:`"
+        );
         for (marker, level) in expected {
             let hits: Vec<&String> = converted.iter().filter(|b| b.contains(marker)).collect();
-            assert_eq!(hits.len(), 1, "{name}: marker `{marker}` must match one block");
+            assert_eq!(
+                hits.len(),
+                1,
+                "{name}: marker `{marker}` must match one block"
+            );
             let want = format!("level: {level}");
             assert!(
                 hits[0].lines().any(|l| l.trim() == want),

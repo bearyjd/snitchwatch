@@ -210,7 +210,10 @@ fn run_probe() -> serde_json::Value {
         }
     });
     drop(guard);
-    assert!(root_ok.load(Ordering::SeqCst), "probe failed to load: {captured}");
+    assert!(
+        root_ok.load(Ordering::SeqCst),
+        "probe failed to load: {captured}"
+    );
     assert!(!captured.contains("ROUNDED_FIELD_ERROR"), "{captured}");
     assert!(!captured.contains("Error:"), "QML error: {captured}");
     let line = captured
@@ -233,8 +236,14 @@ fn rounded_fields_hit_box_focus_ring_tab_stops_and_mirroring() {
 
     // Hit box: every field and area, including the compact-style fixtures.
     for (name, s) in v["sized"].as_object().unwrap() {
-        assert!(num(&s["h"], &line) >= hit, "{name} under Theme.hitMin high: {line}");
-        assert!(num(&s["ih"], &line) >= hit, "{name} implicit height: {line}");
+        assert!(
+            num(&s["h"], &line) >= hit,
+            "{name} under Theme.hitMin high: {line}"
+        );
+        assert!(
+            num(&s["ih"], &line) >= hit,
+            "{name} implicit height: {line}"
+        );
         // A field with no width of its own must not collapse to a 44 px stub.
         // (The compact fixtures replace the frame, so they have none to give.)
         assert!(
@@ -246,18 +255,33 @@ fn rounded_fields_hit_box_focus_ring_tab_stops_and_mirroring() {
     // Focus ring: keyboard and mouse focus, both palettes, field and area.
     for (name, f) in v["focus"].as_object().unwrap() {
         assert_eq!(f["before"], false, "{name}: ring without focus: {line}");
-        assert_eq!(f["after"], false, "{name}: ring stuck after focus left: {line}");
+        assert_eq!(
+            f["after"], false,
+            "{name}: ring stuck after focus left: {line}"
+        );
         for how in ["tab", "mouse"] {
             let r = &f[how];
             assert_eq!(r["visible"], true, "{name}/{how}: no focus ring: {line}");
-            assert!(num(&r["width"], &line) > 0.0, "{name}/{how}: ring width 0: {line}");
-            assert!(num(&r["eff"], &line) > 0.5, "{name}/{how}: ring effectively transparent: {line}");
+            assert!(
+                num(&r["width"], &line) > 0.0,
+                "{name}/{how}: ring width 0: {line}"
+            );
+            assert!(
+                num(&r["eff"], &line) > 0.5,
+                "{name}/{how}: ring effectively transparent: {line}"
+            );
             assert!(
                 num(&r["contrast"], &line) >= 2.0,
                 "{name}/{how}: ring contrast under 2.0: {line}"
             );
-            assert_eq!(r["equalsFill"], false, "{name}/{how}: ring equals its fill: {line}");
-            assert_eq!(r["radiusOk"], true, "{name}/{how}: radius not Theme.radiusSmall: {line}");
+            assert_eq!(
+                r["equalsFill"], false,
+                "{name}/{how}: ring equals its fill: {line}"
+            );
+            assert_eq!(
+                r["radiusOk"], true,
+                "{name}/{how}: radius not Theme.radiusSmall: {line}"
+            );
         }
     }
 
@@ -270,20 +294,47 @@ fn rounded_fields_hit_box_focus_ring_tab_stops_and_mirroring() {
     // frame still covers the whole field.
     let r = &v["rtl"];
     assert_eq!(r["mirrored"], true, "layout not mirrored: {line}");
-    assert_eq!(r["code0"], 0x0645, "the mirrored fixture is not Arabic text: {line}");
-    let (w, l, rp) = (num(&r["w"], &line), num(&r["left"], &line), num(&r["right"], &line));
-    assert!((l - rp).abs() < 0.01 && l > 0.0, "padding not symmetric: {line}");
+    assert_eq!(
+        r["code0"], 0x0645,
+        "the mirrored fixture is not Arabic text: {line}"
+    );
+    let (w, l, rp) = (
+        num(&r["w"], &line),
+        num(&r["left"], &line),
+        num(&r["right"], &line),
+    );
+    assert!(
+        (l - rp).abs() < 0.01 && l > 0.0,
+        "padding not symmetric: {line}"
+    );
     let (x0, x1) = (num(&r["x0"], &line), num(&r["x1"], &line));
-    assert!(x0 > w / 2.0, "right-to-left text not at the right edge: {line}");
-    assert!(x0 <= w - rp + 0.5 && x1 >= l - 0.5, "text outside the padding: {line}");
+    assert!(
+        x0 > w / 2.0,
+        "right-to-left text not at the right edge: {line}"
+    );
+    assert!(
+        x0 <= w - rp + 0.5 && x1 >= l - 0.5,
+        "text outside the padding: {line}"
+    );
     // Alignment: the mirrored field's text starts on the RIGHT padded edge
     // (not centred), the LTR field's on the LEFT padded edge.
     const ALIGN_LEFT: f64 = 1.0;
     const ALIGN_RIGHT: f64 = 2.0;
-    assert_eq!(num(&r["align"], &line), ALIGN_RIGHT, "mirrored field not right-aligned: {line}");
+    assert_eq!(
+        num(&r["align"], &line),
+        ALIGN_RIGHT,
+        "mirrored field not right-aligned: {line}"
+    );
     // TextField cursor rectangles are in content coordinates (origin at the left padding).
-    assert!((x0 - (w - l - rp)).abs() < 2.0, "mirrored field text not on the right padded edge: {line}");
-    assert_eq!(num(&r["ltrAlign"], &line), ALIGN_LEFT, "LTR field not left-aligned: {line}");
+    assert!(
+        (x0 - (w - l - rp)).abs() < 2.0,
+        "mirrored field text not on the right padded edge: {line}"
+    );
+    assert_eq!(
+        num(&r["ltrAlign"], &line),
+        ALIGN_LEFT,
+        "LTR field not left-aligned: {line}"
+    );
     assert!(
         num(&r["ltrX0"], &line).abs() < 2.0,
         "LTR field text not on the left padded edge: {line}"
@@ -299,13 +350,29 @@ fn rounded_fields_hit_box_focus_ring_tab_stops_and_mirroring() {
         let a = &v["areas"][name];
         assert_eq!(a["mirrored"], rtl, "{name} area mirroring: {line}");
         if rtl {
-            assert_eq!(a["code0"], 0x0645, "the mirrored area is not Arabic text: {line}");
+            assert_eq!(
+                a["code0"], 0x0645,
+                "the mirrored area is not Arabic text: {line}"
+            );
         }
-        let (w, l, rp) = (num(&a["w"], &line), num(&a["left"], &line), num(&a["right"], &line));
-        assert!((l - rp).abs() < 0.01, "{name} area padding not symmetric: {line}");
+        let (w, l, rp) = (
+            num(&a["w"], &line),
+            num(&a["left"], &line),
+            num(&a["right"], &line),
+        );
+        assert!(
+            (l - rp).abs() < 0.01,
+            "{name} area padding not symmetric: {line}"
+        );
         let tok = num(&a["token"], &line);
-        assert!(tok > 0.0 && l >= tok && rp >= tok, "{name} area padding under the token: {line}");
-        assert!(num(&a["lines"], &line) > 1.0, "{name} area text did not wrap: {line}");
+        assert!(
+            tok > 0.0 && l >= tok && rp >= tok,
+            "{name} area padding under the token: {line}"
+        );
+        assert!(
+            num(&a["lines"], &line) > 1.0,
+            "{name} area text did not wrap: {line}"
+        );
         assert!(
             num(&a["contentW"], &line) <= w - l - rp + 0.5,
             "{name} area content wider than the padded box: {line}"
@@ -316,18 +383,29 @@ fn rounded_fields_hit_box_focus_ring_tab_stops_and_mirroring() {
         );
         // Alignment: first line starts on the start-side padded edge, and the
         // widest wrapped line reaches it too (a centred area fails both).
-        let (edge, p0) = if rtl { (w - rp, num(&a["maxX"], &line)) } else { (l, num(&a["minX"], &line)) };
+        let (edge, p0) = if rtl {
+            (w - rp, num(&a["maxX"], &line))
+        } else {
+            (l, num(&a["minX"], &line))
+        };
         assert_eq!(
             num(&a["align"], &line),
             if rtl { ALIGN_RIGHT } else { ALIGN_LEFT },
             "{name} area wrong alignment: {line}"
         );
-        assert!((num(&a["p0x"], &line) - edge).abs() < 2.0, "{name} area first line not on the {edge} padded edge: {line}");
-        assert!((p0 - edge).abs() < 2.0, "{name} area text never reaches the start-side padded edge: {line}");
+        assert!(
+            (num(&a["p0x"], &line) - edge).abs() < 2.0,
+            "{name} area first line not on the {edge} padded edge: {line}"
+        );
+        assert!(
+            (p0 - edge).abs() < 2.0,
+            "{name} area text never reaches the start-side padded edge: {line}"
+        );
         let h = num(&a["h"], &line);
         assert!(h >= hit, "{name} area under Theme.hitMin high: {line}");
         assert!(
-            h >= num(&a["contentH"], &line) + num(&a["top"], &line) + num(&a["bottom"], &line) - 0.5,
+            h >= num(&a["contentH"], &line) + num(&a["top"], &line) + num(&a["bottom"], &line)
+                - 0.5,
             "{name} area text taller than the box: {line}"
         );
         assert!(

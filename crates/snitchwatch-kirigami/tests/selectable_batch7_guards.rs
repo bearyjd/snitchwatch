@@ -305,6 +305,11 @@ fn batch_7_selectable_root_components_are_not_inside_click_targets() {
     }
 }
 
+/// Model containers whose delegates are instantiated per item as siblings of
+/// the container (their default property is the delegate). Not `Instantiator`:
+/// it parents its objects to itself, so they never share the container's parent.
+const HOISTING_CONTAINERS: &[&str] = &["Repeater"];
+
 /// A direct `Type { ... }` child of a QML body. `deferred` children are
 /// templates (`property Component x:`, `delegate:`, `sourceComponent:`, a
 /// `Component {}`), not items instantiated under the parent.
@@ -314,6 +319,9 @@ struct Kid {
     deferred: bool,
     /// Bound to `delegate:` (what a `Repeater` instantiates).
     delegate: bool,
+    /// Written with no `name:` key: a Repeater's default
+    /// property is its delegate, so a bare child is instantiated per item.
+    bare: bool,
 }
 
 /// `body` with comments removed and the contents of "..." / '...' strings
@@ -358,7 +366,9 @@ fn mask_strings_and_comments(body: &str) -> String {
 /// text) plus the body's own text, one statement per line, with child blocks
 /// removed but a non-type block's header (`onClicked:`) kept. A `prop: Type {`
 /// or list-entry (`[A {}, B {}]`) header yields the type. A `Repeater`'s
-/// delegates are hoisted: they become children of the Repeater's parent.
+/// delegates (explicit `delegate:` or implicit bare children) are hoisted: they
+/// become children of the Repeater's parent. Accepted limits: regex literals
+/// are not masked, and a delegate referenced by `id` is not followed.
 fn split_body(body: &str) -> (Vec<Kid>, String) {
     let body = mask_strings_and_comments(body);
     let (mut kids, mut own) = (Vec::new(), String::new());
@@ -385,18 +395,19 @@ fn split_body(body: &str) -> (Vec<Kid>, String) {
                     if is_type {
                         let key = header.trim_end().strip_suffix(name).unwrap_or("");
                         let delegate = key.trim_end().ends_with("delegate:");
+                        let bare = key.trim().is_empty();
                         let deferred = key
                             .split_whitespace()
                             .any(|t| t == "Component" || t == "component")
                             || delegate
                             || name == "Component";
                         let inner = body[open_at + 1..i].to_string();
-                        if last_segment(name) == "Repeater" {
+                        if HOISTING_CONTAINERS.contains(&last_segment(name)) {
                             kids.extend(
                                 split_body(&inner)
                                     .0
                                     .into_iter()
-                                    .filter(|k| k.delegate)
+                                    .filter(|k| k.delegate || k.bare)
                                     .flat_map(|k| {
                                         if last_segment(&k.name) == "Component" {
                                             split_body(&k.body).0
@@ -415,6 +426,7 @@ fn split_body(body: &str) -> (Vec<Kid>, String) {
                                 body: inner,
                                 deferred,
                                 delegate,
+                                bare,
                             });
                         }
                     } else {
@@ -545,6 +557,8 @@ fn batch_7_sibling_guard_self_test() {
         "Item {\n    property string l: \"a\\\"{\"\n    SelectableText {\n    }\n    TapHandler {\n    }\n}",
         "Item {\n    data: [SelectableText {}, TapHandler {}]\n}",
         "Item {\n    Repeater {\n        delegate: SelectableText {\n        }\n    }\n    TapHandler {\n    }\n}",
+        // Implicit (bare) Repeater delegate is an instantiated sibling.
+        "Item {\n    SelectableText {\n    }\n    Repeater {\n        model: 1\n        MouseArea {\n            anchors.fill: parent\n            onClicked: sheet.submit(\"deny\")\n        }\n    }\n}",
         "Item {\n    /* { */ SelectableText {\n    }\n    TapHandler {\n    } // }\n}",
     ];
     for src in bad {
@@ -553,6 +567,8 @@ fn batch_7_sibling_guard_self_test() {
     let good = "RowLayout {\n    SelectableText {\n        text: \"a { b\"\n    }\n    Controls.Button {\n        onClicked: { go() }\n    }\n    ConnectionExplanation {\n    }\n}";
     assert_eq!(run(good), Vec::<String>::new());
     // A deferred template is not an instantiated sibling.
+    let implicit_ok = "Item {\n    SelectableText {\n    }\n    Repeater {\n        model: 1\n        Controls.Button {\n            onClicked: sheet.submit(\"deny\")\n        }\n    }\n}";
+    assert_eq!(run(implicit_ok), Vec::<String>::new());
     let deferred = "Item {\n    property Component preview: SelectableText {\n    }\n    TapHandler {\n    }\n}";
     assert_eq!(run(deferred), Vec::<String>::new());
     let unrelated = "Item {\n    Repeater {\n        delegate: Item {\n        }\n        property Component p: SelectableText {\n        }\n    }\n    TapHandler {\n    }\n}";

@@ -6,7 +6,6 @@
 // BlocklistsPage's inspector, so it behaves identically at every width.
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 

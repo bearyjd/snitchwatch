@@ -112,7 +112,10 @@ const WRAPS: &[(&str, &[(&str, &str)])] = &[
         "RuleEditorSheet.qml",
         &[
             ("Conditions: the rule matches", "Text.Wrap"),
-            ("text: \"Match upper and lower case exactly\"", "Text.NoWrap"),
+            (
+                "text: \"Match upper and lower case exactly\"",
+                "Text.NoWrap",
+            ),
             ("objectName: \"editorOperandHelp\"", "Text.Wrap"),
             ("objectName: \"editorProblem\"", "Text.Wrap"),
             ("objectName: \"editorWarning\"", "Text.Wrap"),
@@ -134,7 +137,10 @@ const WRAPS: &[(&str, &[(&str, &str)])] = &[
             ("text: \"Action: \"", "Text.NoWrap"),
             ("What happens next depends on the daemon", "Text.Wrap"),
             ("text: sheet.simulateWarnings", "Text.Wrap"),
-            ("Not evaluated, because an input was left blank", "Text.Wrap"),
+            (
+                "Not evaluated, because an input was left blank",
+                "Text.Wrap",
+            ),
             ("Not evaluated, because an input isn't valid", "Text.Wrap"),
             ("Can't simulate these conditions", "Text.Wrap"),
         ],
@@ -278,7 +284,11 @@ fn batch_6_row_copy_text_names_every_shown_text() {
 #[test]
 fn batch_6_menu_key_is_unchanged() {
     let code = code_lines(PAGE);
-    assert_eq!(code.matches("Keys.onMenuPressed: list.openCurrent()").count(), 1);
+    assert_eq!(
+        code.matches("Keys.onMenuPressed: list.openCurrent()")
+            .count(),
+        1
+    );
     assert_eq!(code.matches("Keys.onMenuPressed").count(), 1);
 }
 

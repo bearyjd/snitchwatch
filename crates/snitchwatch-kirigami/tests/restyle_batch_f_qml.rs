@@ -171,7 +171,10 @@ fn run_probe() -> serde_json::Value {
         }
     });
     drop(guard);
-    assert!(root_ok.load(Ordering::SeqCst), "probe failed to load: {captured}");
+    assert!(
+        root_ok.load(Ordering::SeqCst),
+        "probe failed to load: {captured}"
+    );
     assert!(!captured.contains("RESTYLE_F_ERROR"), "{captured}");
     assert!(!captured.contains("Error:"), "QML error: {captured}");
     let line = captured
@@ -182,10 +185,16 @@ fn run_probe() -> serde_json::Value {
 }
 
 fn all_true(v: &serde_json::Value) -> bool {
-    v.as_array().unwrap().iter().all(|b| b.as_bool() == Some(true))
+    v.as_array()
+        .unwrap()
+        .iter()
+        .all(|b| b.as_bool() == Some(true))
 }
 fn all_false(v: &serde_json::Value) -> bool {
-    v.as_array().unwrap().iter().all(|b| b.as_bool() == Some(false))
+    v.as_array()
+        .unwrap()
+        .iter()
+        .all(|b| b.as_bool() == Some(false))
 }
 
 #[test]
@@ -201,26 +210,53 @@ fn restyle_batch_f_geometry_and_focus() {
     for m in markers {
         let (w, h) = (m["w"].as_f64().unwrap(), m["h"].as_f64().unwrap());
         let expect = m["diameter"].as_f64().unwrap() + 2.0 * m["small"].as_f64().unwrap();
-        assert!((w - expect).abs() < 0.01 && (h - expect).abs() < 0.01, "visual size changed: {m}");
+        assert!(
+            (w - expect).abs() < 0.01 && (h - expect).abs() < 0.01,
+            "visual size changed: {m}"
+        );
         any_small |= w < hit;
-        assert!(all_true(&m["cornersIn"]), "hit region corners under hitMin: {m}");
-        assert!(all_true(&m["sidesIn"]), "hit region sides under hitMin: {m}");
-        assert!(all_true(&m["childAtIn"]), "scene hit test misses the extension: {m}");
-        assert!(all_false(&m["outside"]), "hit region far larger than needed: {m}");
-        assert!(all_false(&m["childAtOut"]), "scene hit test beyond the region: {m}");
+        assert!(
+            all_true(&m["cornersIn"]),
+            "hit region corners under hitMin: {m}"
+        );
+        assert!(
+            all_true(&m["sidesIn"]),
+            "hit region sides under hitMin: {m}"
+        );
+        assert!(
+            all_true(&m["childAtIn"]),
+            "scene hit test misses the extension: {m}"
+        );
+        assert!(
+            all_false(&m["outside"]),
+            "hit region far larger than needed: {m}"
+        );
+        assert!(
+            all_false(&m["childAtOut"]),
+            "scene hit test beyond the region: {m}"
+        );
         assert_eq!(m["focusable"], true, "{m}");
         assert_eq!(m["role"].as_i64(), Some(43), "marker role is Button: {m}");
         // The focus halo is drawn outside the verdict shape and never has its colour.
         assert_eq!(m["haloCount"].as_i64(), Some(1), "{m}");
-        assert_eq!(m["haloIsVerdict"], false, "halo equals the verdict fill: {m}");
+        assert_eq!(
+            m["haloIsVerdict"], false,
+            "halo equals the verdict fill: {m}"
+        );
     }
-    assert!(any_small, "fixture must include a marker whose visual is under hitMin: {v}");
+    assert!(
+        any_small,
+        "fixture must include a marker whose visual is under hitMin: {v}"
+    );
 
     // Badge: capsule, small, no focus.
     let b = &v["badge"];
     assert_eq!(b["surfaces"].as_i64(), Some(1), "{b}");
     assert_eq!(b["pill"], true, "{b}");
-    assert!(b["h"].as_f64().unwrap() < hit, "badge must not be inflated to hitMin: {b}");
+    assert!(
+        b["h"].as_f64().unwrap() < hit,
+        "badge must not be inflated to hitMin: {b}"
+    );
     assert!(b["radius"].as_f64().unwrap() > 0.0, "{b}");
     assert_eq!(b["tab"], false, "{b}");
     assert_eq!(b["focusPolicy"].as_i64(), Some(0), "{b}");
@@ -229,16 +265,25 @@ fn restyle_batch_f_geometry_and_focus() {
     let c = &v["counts"];
     assert!(c["surfaces"].as_i64().unwrap() >= 2, "{c}");
     assert_eq!(c["allPill"], true, "{c}");
-    assert!(c["maxH"].as_f64().unwrap() < hit, "chips must not be inflated: {c}");
+    assert!(
+        c["maxH"].as_f64().unwrap() < hit,
+        "chips must not be inflated: {c}"
+    );
     assert_eq!(c["tabs"].as_i64(), Some(0), "{c}");
 
     // BackgroundGroupBar buttons: >= hitMin, restyled in place.
     for b in v["bar"].as_array().unwrap() {
         assert_eq!(b["found"], true, "{b}");
         assert!(b["h"].as_f64().unwrap() >= hit, "button under hitMin: {b}");
-        assert!(b["w"].as_f64().unwrap() >= b["iw"].as_f64().unwrap() - 0.01, "label cut: {b}");
+        assert!(
+            b["w"].as_f64().unwrap() >= b["iw"].as_f64().unwrap() - 0.01,
+            "label cut: {b}"
+        );
         // The style's own Button (what the keyboard probes name `Button`), not Rounded*/Guarded*.
-        assert!(b["type"].as_str().unwrap().starts_with("Button_QMLTYPE"), "type name changed: {b}");
+        assert!(
+            b["type"].as_str().unwrap().starts_with("Button_QMLTYPE"),
+            "type name changed: {b}"
+        );
         assert_eq!(b["surfaces"].as_i64(), Some(1), "{b}");
         assert_eq!(b["pill"], true, "{b}");
     }
@@ -268,9 +313,16 @@ fn colour_violations(code: &str) -> Vec<String> {
             let h: String = r.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
             matches!(h.len(), 3 | 4 | 6 | 8)
         });
-        let ctor = ["Qt.rgba(", "Qt.color(", "Qt.hsla(", "Qt.hsva(", "rgb(", "hsl("]
-            .iter()
-            .any(|f| t.contains(f));
+        let ctor = [
+            "Qt.rgba(",
+            "Qt.color(",
+            "Qt.hsla(",
+            "Qt.hsva(",
+            "rgb(",
+            "hsl(",
+        ]
+        .iter()
+        .any(|f| t.contains(f));
         let named = (t.starts_with("color:") || t.starts_with("border.color:"))
             && t.contains(['"', '\''])
             && !t.contains("\"transparent\"");
@@ -283,10 +335,19 @@ fn colour_violations(code: &str) -> Vec<String> {
 
 #[test]
 fn the_colour_lint_rejects_literals_and_allows_the_palette() {
-    for bad in ["color: \"#ff0000\"", "color: \"red\"", "border.color: Qt.rgba(1,0,0,1)", "x: \"#abc\""] {
+    for bad in [
+        "color: \"#ff0000\"",
+        "color: \"red\"",
+        "border.color: Qt.rgba(1,0,0,1)",
+        "x: \"#abc\"",
+    ] {
         assert!(!colour_violations(bad).is_empty(), "should reject {bad}");
     }
-    for ok in ["color: \"transparent\"", "color: tip.palette.toolTipBase", "color: Qt.alpha(a.palette.windowText, 0.1)"] {
+    for ok in [
+        "color: \"transparent\"",
+        "color: tip.palette.toolTipBase",
+        "color: Qt.alpha(a.palette.windowText, 0.1)",
+    ] {
         assert!(colour_violations(ok).is_empty(), "should allow {ok}");
     }
 }
@@ -294,12 +355,20 @@ fn the_colour_lint_rejects_literals_and_allows_the_palette() {
 #[test]
 fn batch_f_sources_use_theme_radii_palette_colours_and_no_input_area() {
     let files = [
-        "GroupPendingBadge", "GroupVerdictCounts", "HoverTip",
-        "BackgroundGroupBar", "MapMarker", "LearningBanner",
+        "GroupPendingBadge",
+        "GroupVerdictCounts",
+        "HoverTip",
+        "BackgroundGroupBar",
+        "MapMarker",
+        "LearningBanner",
     ];
     for name in files {
         let code = code_of(&qml_source(name));
-        assert!(colour_violations(&code).is_empty(), "{name}: {:?}", colour_violations(&code));
+        assert!(
+            colour_violations(&code).is_empty(),
+            "{name}: {:?}",
+            colour_violations(&code)
+        );
         assert!(!code.contains("MouseArea"), "{name}: MouseArea");
         assert!(!code.contains("TapHandler"), "{name}: TapHandler");
     }
@@ -309,27 +378,52 @@ fn batch_f_sources_use_theme_radii_palette_colours_and_no_input_area() {
     assert!(counts.contains("RoundedSurface"), "counts: RoundedSurface");
     // Capsules come from RoundedSurface's default (`pill: true` = radiusPill).
     let surface = code_of(&qml_source("RoundedSurface"));
-    assert!(surface.contains("pill ? Theme.radiusPill"), "RoundedSurface pill radius");
+    assert!(
+        surface.contains("pill ? Theme.radiusPill"),
+        "RoundedSurface pill radius"
+    );
     for (name, code) in [("badge", &badge), ("counts", &counts)] {
         assert!(!code.contains("pill: false"), "{name}: must stay a capsule");
     }
     let tip = code_of(&qml_source("HoverTip"));
-    assert!(tip.contains("radius: Theme.radiusSmall"), "HoverTip radiusSmall");
+    assert!(
+        tip.contains("radius: Theme.radiusSmall"),
+        "HoverTip radiusSmall"
+    );
     let marker = code_of(&qml_source("MapMarker"));
     assert!(marker.contains("containmentMask"), "MapMarker hit area");
-    assert!(marker.contains("Theme.hitMin"), "MapMarker hit area uses hitMin");
-    assert!(marker.contains("objectName: \"focusHalo\""), "MapMarker focus halo");
+    assert!(
+        marker.contains("Theme.hitMin"),
+        "MapMarker hit area uses hitMin"
+    );
+    assert!(
+        marker.contains("objectName: \"focusHalo\""),
+        "MapMarker focus halo"
+    );
     let bar = code_of(&qml_source("BackgroundGroupBar"));
-    assert_eq!(bar.matches("background: RoundedSurface").count(), 4, "bar buttons");
+    assert_eq!(
+        bar.matches("background: RoundedSurface").count(),
+        4,
+        "bar buttons"
+    );
     assert_eq!(bar.matches("Theme.hitMin").count(), 4, "bar buttons hitMin");
     // LearningBanner: Kirigami draws the InlineMessage; its buttons are GuardedButton.
     let banner = code_of(&qml_source("LearningBanner"));
     assert!(banner.contains("Kirigami.InlineMessage"), "banner");
-    assert!(!banner.contains("Controls.Button"), "banner: plain buttons would need restyling");
+    assert!(
+        !banner.contains("Controls.Button"),
+        "banner: plain buttons would need restyling"
+    );
     // The documented non-tappable decision stays written down.
     for name in ["GroupPendingBadge", "GroupVerdictCounts"] {
         let src = qml_source(name);
-        assert!(src.contains("NOT independently tappable"), "{name}: missing the not-tappable note");
-        assert!(src.contains("Theme.hitMin"), "{name}: note must name the row's hit minimum");
+        assert!(
+            src.contains("NOT independently tappable"),
+            "{name}: missing the not-tappable note"
+        );
+        assert!(
+            src.contains("Theme.hitMin"),
+            "{name}: note must name the row's hit minimum"
+        );
     }
 }

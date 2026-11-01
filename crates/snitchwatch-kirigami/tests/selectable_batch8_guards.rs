@@ -44,8 +44,18 @@ const FILES: &[(&str, &str, usize, &[&str])] = &[
     ),
     // Only a Kirigami PlaceholderMessage (class E) and the row delegate.
     ("ConnectionList.qml", LIST, 0, &[]),
-    ("ConnectionsHeader.qml", include_str!("../qml/ConnectionsHeader.qml"), 1, &[]),
-    ("ConnectionsFilterBar.qml", include_str!("../qml/ConnectionsFilterBar.qml"), 1, &[]),
+    (
+        "ConnectionsHeader.qml",
+        include_str!("../qml/ConnectionsHeader.qml"),
+        1,
+        &[],
+    ),
+    (
+        "ConnectionsFilterBar.qml",
+        include_str!("../qml/ConnectionsFilterBar.qml"),
+        1,
+        &[],
+    ),
     // On the row's click target, and both elided; the row's copy has them.
     (
         "ProgramLabel.qml",
@@ -77,12 +87,21 @@ const FILES: &[(&str, &str, usize, &[&str])] = &[
         "MapMarker.qml",
         include_str!("../qml/MapMarker.qml"),
         0,
-        &["marker.glyph", "marker.cluster.members[0].name", "marker.cluster.summary"],
+        &[
+            "marker.glyph",
+            "marker.cluster.members[0].name",
+            "marker.cluster.summary",
+        ],
     ),
     // Both sit (z: 1) on a group header's toggle/right-click MouseArea, and
     // the header already uses right-click for its actions: kept, and copied
     // by the header's "Copy row text".
-    ("GroupPendingBadge.qml", include_str!("../qml/GroupPendingBadge.qml"), 0, &["badge.count"]),
+    (
+        "GroupPendingBadge.qml",
+        include_str!("../qml/GroupPendingBadge.qml"),
+        0,
+        &["badge.count"],
+    ),
     (
         "GroupVerdictCounts.qml",
         include_str!("../qml/GroupVerdictCounts.qml"),
@@ -97,7 +116,10 @@ const WRAPS: &[(&str, &[(&str, &str)])] = &[
     ("ConnectionRow.qml", &[]),
     ("ConnectionList.qml", &[]),
     ("ConnectionsHeader.qml", &[("header.title", "Text.NoWrap")]),
-    ("ConnectionsFilterBar.qml", &[("\"Filter: \"", "Text.WordWrap")]),
+    (
+        "ConnectionsFilterBar.qml",
+        &[("\"Filter: \"", "Text.WordWrap")],
+    ),
     ("ProgramLabel.qml", &[]),
     (
         "MapBand.qml",
@@ -193,7 +215,10 @@ fn batch_8_adds_no_tab_stop_and_no_focus() {
                 );
             }
         }
-        let want = TAB_STOPS.iter().find(|(n, _)| n == name).map_or(0, |(_, c)| *c);
+        let want = TAB_STOPS
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(0, |(_, c)| *c);
         assert_eq!(
             code.matches("activeFocusOnTab").count(),
             want,
@@ -213,7 +238,9 @@ fn batch_8_keeps_layout_equivalent_and_plain_text() {
                 "{name}: a SelectableText sets `elide` (a TextEdit cannot elide):\n{block}"
             );
             assert!(
-                block.lines().any(|l| l.trim() == "textFormat: Text.PlainText"),
+                block
+                    .lines()
+                    .any(|l| l.trim() == "textFormat: Text.PlainText"),
                 "{name}: a SelectableText without `textFormat: Text.PlainText`:\n{block}"
             );
         }
@@ -221,10 +248,18 @@ fn batch_8_keeps_layout_equivalent_and_plain_text() {
             .iter()
             .find(|(n, _)| n == name)
             .unwrap_or_else(|| panic!("{name}: missing from WRAPS"));
-        assert_eq!(converted.len(), expected.len(), "{name}: WRAPS entries vs blocks");
+        assert_eq!(
+            converted.len(),
+            expected.len(),
+            "{name}: WRAPS entries vs blocks"
+        );
         for (marker, wrap) in *expected {
             let hits: Vec<&String> = converted.iter().filter(|b| b.contains(marker)).collect();
-            assert_eq!(hits.len(), 1, "{name}: marker `{marker}` must match one block");
+            assert_eq!(
+                hits.len(),
+                1,
+                "{name}: marker `{marker}` must match one block"
+            );
             let want = format!("wrapMode: {wrap}");
             assert!(
                 hits[0].lines().any(|l| l.trim() == want),
@@ -280,11 +315,18 @@ fn batch_8_row_copy_costs_nothing_per_delegate() {
         "rowText",
         "property string copyText",
     ] {
-        assert!(!row.contains(forbidden), "ConnectionRow.qml: `{forbidden}` adds per-row cost");
+        assert!(
+            !row.contains(forbidden),
+            "ConnectionRow.qml: `{forbidden}` adds per-row cost"
+        );
     }
     let list = code_lines(LIST);
     let delegate = blocks(&list, "delegate: ConnectionRow {");
-    assert_eq!(delegate.len(), 1, "ConnectionList.qml: the row delegate moved");
+    assert_eq!(
+        delegate.len(),
+        1,
+        "ConnectionList.qml: the row delegate moved"
+    );
     assert_eq!(
         delegate[0].split_whitespace().collect::<Vec<_>>(),
         ["page:", "pane.page"],
@@ -309,7 +351,10 @@ fn batch_8_row_copy_text_has_every_shown_text() {
     let body = function_body(&actions, "rowText").expect("ConnectionActions.qml: no rowText(row)");
     assert!(!is_literal_empty(&body), "rowText(row) is empty:\n{body}");
     for token in COPY_TOKENS {
-        assert!(body.contains(token), "rowText(row) does not use `{token}`:\n{body}");
+        assert!(
+            body.contains(token),
+            "rowText(row) does not use `{token}`:\n{body}"
+        );
     }
     let row = code_lines(ROW);
     for shown in [
@@ -318,7 +363,11 @@ fn batch_8_row_copy_text_has_every_shown_text() {
         "text: row.actions.verdictText(row)",
         "text: row.actions.totalText(row)",
     ] {
-        assert_eq!(row.matches(shown).count(), 1, "ConnectionRow.qml: a Label no longer shows `{shown}`");
+        assert_eq!(
+            row.matches(shown).count(),
+            1,
+            "ConnectionRow.qml: a Label no longer shows `{shown}`"
+        );
     }
     assert!(row.contains("property alias verdictCountsItem: verdictCounts"));
     for helper in ["hostLine", "heldBackText", "verdictText", "totalText"] {
@@ -348,9 +397,17 @@ fn batch_8_actions_menu_copies_the_row_text() {
         "enabled: actions.valid() && actions.target.rowText !== \"\"",
         "onTriggered: if (actions.valid()) clipboard.copy(actions.target.rowText)",
     ] {
-        assert!(item.contains(needed), "copyRowText lacks `{needed}`:\n{item}");
+        assert!(
+            item.contains(needed),
+            "copyRowText lacks `{needed}`:\n{item}"
+        );
     }
-    for forbidden in ["activeFocusOnTab", "activeFocusOnPress", "focus:", "forceActiveFocus"] {
+    for forbidden in [
+        "activeFocusOnTab",
+        "activeFocusOnPress",
+        "focus:",
+        "forceActiveFocus",
+    ] {
         assert!(!item.contains(forbidden), "copyRowText sets `{forbidden}`");
     }
 }
@@ -362,7 +419,9 @@ fn the_copy_text_guard_can_fail() {
     }
     assert!(!is_literal_empty("{ return row.hostLine(); }"));
     assert_eq!(
-        function_body("function f(a) {\n    return a;\n}\n", "f").as_deref().map(str::trim),
+        function_body("function f(a) {\n    return a;\n}\n", "f")
+            .as_deref()
+            .map(str::trim),
         Some("return a;")
     );
 }

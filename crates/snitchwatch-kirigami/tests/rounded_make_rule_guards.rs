@@ -19,6 +19,10 @@ fn make_rule_sheet_uses_rounded_controls_only() {
     assert_eq!(count(&src, "RoundedComboBox {"), 2);
     // Held-key semantics unchanged: the sheet never used GuardedButton.
     assert_eq!(count(&src, "GuardedButton {"), 0);
-    assert_eq!(count(&src, "Controls."), 0, "a plain Controls.* control is back");
+    assert_eq!(
+        count(&src, "Controls."),
+        0,
+        "a plain Controls.* control is back"
+    );
     assert_eq!(count(&src, "SelectableText {"), 7);
 }

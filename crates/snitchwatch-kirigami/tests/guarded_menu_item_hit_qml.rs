@@ -75,7 +75,10 @@ fn guarded_menu_item_is_at_least_hit_min_under_a_compact_style() {
         }
     });
     drop(guard);
-    assert!(root_ok.load(Ordering::SeqCst), "probe failed to load: {captured}");
+    assert!(
+        root_ok.load(Ordering::SeqCst),
+        "probe failed to load: {captured}"
+    );
     let line = captured
         .lines()
         .find_map(|l| l.split_once(MARKER).map(|(_, r)| r.trim().to_string()))
@@ -84,6 +87,9 @@ fn guarded_menu_item_is_at_least_hit_min_under_a_compact_style() {
     let hit = v["hitMin"].as_f64().unwrap();
     assert!(hit >= 44.0, "Theme.hitMin: {line}");
     for k in ["ih", "iw", "h", "w"] {
-        assert!(v[k].as_f64().unwrap() >= hit, "{k} under Theme.hitMin: {line}");
+        assert!(
+            v[k].as_f64().unwrap() >= hit,
+            "{k} under Theme.hitMin: {line}"
+        );
     }
 }
