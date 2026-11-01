@@ -217,7 +217,7 @@ fn import_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
             "RulesImportSheet.qml has a label without PlainText:\n{block}"
         );
     }
-    let checkboxes = blocks(&code, "Controls.CheckBox {");
+    let checkboxes = blocks(&code, "RoundedCheckBox {");
     assert!(!checkboxes.is_empty());
     for block in checkboxes {
         assert!(
@@ -242,7 +242,7 @@ fn editor_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
             "RuleEditorSheet.qml has a label without PlainText:\n{block}"
         );
     }
-    let checkboxes = blocks(&code, "Controls.CheckBox {");
+    let checkboxes = blocks(&code, "RoundedCheckBox {");
     assert!(!checkboxes.is_empty());
     for block in checkboxes {
         assert!(

@@ -650,6 +650,9 @@ fn the_styled_files_take_radii_and_colours_from_theme_and_the_palette() {
         ("GuardedToolButton", qml_source("GuardedToolButton")),
         ("GuardedSwitch", qml_source("GuardedSwitch")),
         ("GuardedRadioButton", qml_source("GuardedRadioButton")),
+        ("RoundedFieldFrame", qml_source("RoundedFieldFrame")),
+        ("RoundedField", qml_source("RoundedField")),
+        ("RoundedTextArea", qml_source("RoundedTextArea")),
         ("RoundedCheckBox", qml_source("RoundedCheckBox")),
         ("RoundedComboBox", qml_source("RoundedComboBox")),
     ];
