@@ -27,6 +27,18 @@ Controls.ToolButton {
         flat: true
         tinted: button.checked
     }
+    // org.kde.desktop draws a ToolButton's label inside the background
+    // replaced above; without its own label it would render blank.
+    contentItem: Impl.IconLabel {
+        objectName: "toolButtonLabel"
+        spacing: button.spacing
+        mirrored: button.mirrored
+        display: button.display
+        icon: button.icon
+        text: button.text
+        font: button.font
+        color: button.palette.buttonText
+    }
     Keys.priority: Keys.BeforeItem
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Space && event.isAutoRepeat) {
