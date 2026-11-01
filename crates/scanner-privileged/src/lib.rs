@@ -28,6 +28,7 @@
 
 pub mod checks;
 pub mod command;
+pub mod containment;
 pub mod error;
 pub mod facts;
 pub mod model;
