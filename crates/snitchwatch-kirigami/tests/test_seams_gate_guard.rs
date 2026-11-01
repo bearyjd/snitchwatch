@@ -53,17 +53,29 @@ fn the_feature_is_not_a_default_and_only_the_dev_dependency_enables_it() {
         .and_then(|s| s.split("\n[").next())
         .expect("[features] section");
     assert!(
-        features.lines().any(|l| l.trim_start().starts_with("test-seams")),
+        features
+            .lines()
+            .any(|l| l.trim_start().starts_with("test-seams")),
         "test-seams feature missing"
     );
     assert!(
-        !features.lines().any(|l| l.trim_start().starts_with("default")),
+        !features
+            .lines()
+            .any(|l| l.trim_start().starts_with("default")),
         "a default feature set would ship the test seams"
     );
-    let (_, dev) = MANIFEST.split_once("[dev-dependencies]").expect("dev-dependencies");
-    assert!(dev.contains("features = [\"test-seams\"]"), "dev-dependency self-reference missing");
+    let (_, dev) = MANIFEST
+        .split_once("[dev-dependencies]")
+        .expect("dev-dependencies");
+    assert!(
+        dev.contains("features = [\"test-seams\"]"),
+        "dev-dependency self-reference missing"
+    );
     let (normal, _) = MANIFEST.split_once("[dev-dependencies]").unwrap();
-    assert!(!normal.contains("test-seams\"]"), "test-seams enabled outside dev-dependencies");
+    assert!(
+        !normal.contains("test-seams\"]"),
+        "test-seams enabled outside dev-dependencies"
+    );
 }
 
 /// The auto-repeat key filter (C++ bridge) is compiled only for the feature,
@@ -73,9 +85,15 @@ fn the_key_repeat_bridge_is_compiled_only_under_the_feature() {
     let build = include_str!("../build.rs");
     let needle = "\"src/key_repeat_test.rs\"";
     let hits: Vec<_> = build.match_indices(needle).collect();
-    assert_eq!(hits.len(), 1, "key_repeat bridge should be registered exactly once");
+    assert_eq!(
+        hits.len(),
+        1,
+        "key_repeat bridge should be registered exactly once"
+    );
     let before = &build[..hits[0].0];
-    let gate = before.rfind("CARGO_FEATURE_TEST_SEAMS").expect("bridge is not behind the feature check");
+    let gate = before
+        .rfind("CARGO_FEATURE_TEST_SEAMS")
+        .expect("bridge is not behind the feature check");
     assert!(
         before[gate..].matches('{').count() > before[gate..].matches('}').count(),
         "bridge registration is outside the CARGO_FEATURE_TEST_SEAMS block"
@@ -84,6 +102,9 @@ fn the_key_repeat_bridge_is_compiled_only_under_the_feature() {
         ("lib.rs", include_str!("../src/lib.rs")),
         ("main.rs", include_str!("../src/main.rs")),
     ] {
-        assert!(!src.contains("key_repeat"), "{name} references the test-only key filter");
+        assert!(
+            !src.contains("key_repeat"),
+            "{name} references the test-only key filter"
+        );
     }
 }

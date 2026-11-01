@@ -18,7 +18,6 @@
 // it, under the same arming.
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 

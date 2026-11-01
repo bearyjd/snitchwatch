@@ -3,7 +3,6 @@
 // Country-only models retain the original cluster interface for isolated probes.
 import QtQuick
 import QtQuick.Shapes
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 

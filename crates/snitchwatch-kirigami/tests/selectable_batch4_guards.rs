@@ -90,7 +90,12 @@ const COPY_TOKENS: &[(&str, &[&[&str]])] = &[
     (
         "ProfilesPage.qml",
         &[
-            &["row.dotText", "row.name", "row.matchersText", "row.activeText"],
+            &[
+                "row.dotText",
+                "row.name",
+                "row.matchersText",
+                "row.activeText",
+            ],
             &["ruleRow.modelData.action", "ruleRow.modelData.conditions"],
         ],
     ),
@@ -177,7 +182,10 @@ fn batch_4_rows_have_a_copy_menu_with_every_text() {
         for block in &found {
             let expr = copy_expression(block)
                 .unwrap_or_else(|| panic!("{name}: a RowCopyMenu without copyText:\n{block}"));
-            assert!(!is_literal_empty(expr), "{name}: an empty copyText:\n{block}");
+            assert!(
+                !is_literal_empty(expr),
+                "{name}: an empty copyText:\n{block}"
+            );
         }
         for set in *sets {
             let hits = found
@@ -187,7 +195,10 @@ fn batch_4_rows_have_a_copy_menu_with_every_text() {
                     set.iter().all(|t| expr.contains(t))
                 })
                 .count();
-            assert_eq!(hits, 1, "{name}: exactly one copyText must reference all of {set:?}");
+            assert_eq!(
+                hits, 1,
+                "{name}: exactly one copyText must reference all of {set:?}"
+            );
         }
     }
 }
@@ -240,10 +251,18 @@ fn batch_4_keeps_layout_equivalent() {
             .iter()
             .find(|(n, _)| n == name)
             .unwrap_or_else(|| panic!("{name}: missing from WRAPS"));
-        assert_eq!(converted.len(), expected.len(), "{name}: WRAPS entries vs blocks");
+        assert_eq!(
+            converted.len(),
+            expected.len(),
+            "{name}: WRAPS entries vs blocks"
+        );
         for (marker, wrap) in *expected {
             let hits: Vec<&String> = converted.iter().filter(|b| b.contains(marker)).collect();
-            assert_eq!(hits.len(), 1, "{name}: marker `{marker}` must match one block");
+            assert_eq!(
+                hits.len(),
+                1,
+                "{name}: marker `{marker}` must match one block"
+            );
             let want = format!("wrapMode: {wrap}");
             assert!(
                 hits[0].lines().any(|l| l.trim() == want),

@@ -12,16 +12,46 @@ use qml_guard_support::{blocks, code_lines};
 /// (file, source, SelectableText blocks expected, snippets that identify each
 /// text still left as a Label/Heading: one per remaining block, in any order).
 const FILES: &[(&str, &str, usize, &[&str])] = &[
-    ("DaemonHealthPage.qml", include_str!("../qml/DaemonHealthPage.qml"), 4, &[]),
+    (
+        "DaemonHealthPage.qml",
+        include_str!("../qml/DaemonHealthPage.qml"),
+        4,
+        &[],
+    ),
     // Left: the Crash log TextArea (class F, not a Label) and the heading row's
     // Button/BusyIndicator are not text items. Headings and Labels all convert.
-    ("DiagnosticsPage.qml", include_str!("../qml/DiagnosticsPage.qml"), 7, &[]),
-    ("ScannerPage.qml", include_str!("../qml/ScannerPage.qml"), 5, &[]),
-    ("DenyStatusSection.qml", include_str!("../qml/DenyStatusSection.qml"), 7, &[]),
+    (
+        "DiagnosticsPage.qml",
+        include_str!("../qml/DiagnosticsPage.qml"),
+        7,
+        &[],
+    ),
+    (
+        "ScannerPage.qml",
+        include_str!("../qml/ScannerPage.qml"),
+        5,
+        &[],
+    ),
+    (
+        "DenyStatusSection.qml",
+        include_str!("../qml/DenyStatusSection.qml"),
+        7,
+        &[],
+    ),
     // The two short field captions ("Manual ... fallback location", "Current
     // database") are converted too.
-    ("GeoDatabaseSettings.qml", include_str!("../qml/GeoDatabaseSettings.qml"), 15, &[]),
-    ("TrafficPage.qml", include_str!("../qml/TrafficPage.qml"), 3, &[]),
+    (
+        "GeoDatabaseSettings.qml",
+        include_str!("../qml/GeoDatabaseSettings.qml"),
+        15,
+        &[],
+    ),
+    (
+        "TrafficPage.qml",
+        include_str!("../qml/TrafficPage.qml"),
+        3,
+        &[],
+    ),
     ("MapView.qml", include_str!("../qml/MapView.qml"), 2, &[]),
 ];
 
@@ -44,8 +74,14 @@ fn batch_1_texts_are_selectable() {
             .iter()
             .filter(|b| b.lines().any(|l| l.trim() == "level: 3"))
             .count();
-        let expected = HEADINGS.iter().find(|(n, _)| n == name).map_or(0, |(_, c)| *c);
-        assert_eq!(leveled, expected, "{name}: SelectableText blocks with `level: 3`");
+        let expected = HEADINGS
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(0, |(_, c)| *c);
+        assert_eq!(
+            leveled, expected,
+            "{name}: SelectableText blocks with `level: 3`"
+        );
         let mut left = blocks(&code, "Controls.Label {");
         left.extend(blocks(&code, "Kirigami.Heading {"));
         assert_eq!(
@@ -67,7 +103,12 @@ fn batch_1_texts_are_selectable() {
 fn batch_1_adds_no_tab_stop() {
     for (name, source, _, _) in FILES {
         for block in blocks(&code_lines(source), "SelectableText {") {
-            for forbidden in ["activeFocusOnTab", "focus:", "KeyNavigation", "forceActiveFocus"] {
+            for forbidden in [
+                "activeFocusOnTab",
+                "focus:",
+                "KeyNavigation",
+                "forceActiveFocus",
+            ] {
                 assert!(
                     !block.contains(forbidden),
                     "{name}: a SelectableText sets `{forbidden}` (mouse only):\n{block}"

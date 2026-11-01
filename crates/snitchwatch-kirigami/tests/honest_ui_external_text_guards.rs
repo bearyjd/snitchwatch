@@ -246,9 +246,12 @@ fn violations(name: &str, source: &str, exprs: &[&str]) -> Vec<String> {
         "SelectableText {",
     ] {
         for block in blocks(&code, open) {
-            let plain = ["textFormat: Text.PlainText", "textFormat: TextEdit.PlainText"]
-                .iter()
-                .any(|f| block.contains(f));
+            let plain = [
+                "textFormat: Text.PlainText",
+                "textFormat: TextEdit.PlainText",
+            ]
+            .iter()
+            .any(|f| block.contains(f));
             if shows(&text_binding(&block)) && !plain {
                 found.push(format!(
                     "{name}: `{open}` shows external text without `textFormat: Text.PlainText` \

@@ -3,7 +3,6 @@
 // only: the commands are for the user to copy and run themselves. There are
 // no action buttons, and nothing here asks for privilege or starts a process.
 import QtQuick
-import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import org.kde.kirigami as Kirigami

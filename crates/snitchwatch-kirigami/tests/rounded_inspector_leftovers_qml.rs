@@ -184,7 +184,10 @@ fn run_probe() -> serde_json::Value {
         }
     });
     drop(guard);
-    assert!(root_ok.load(Ordering::SeqCst), "probe failed to load: {captured}");
+    assert!(
+        root_ok.load(Ordering::SeqCst),
+        "probe failed to load: {captured}"
+    );
     assert!(!captured.contains("ROUNDED_INSP_ERROR"), "{captured}");
     assert!(!captured.contains("TypeError"), "{captured}");
     let line = captured
@@ -201,7 +204,14 @@ fn inspector_decide_later_and_rule_buttons_meet_the_rounded_spec() {
     let hit = v["hitMin"].as_f64().unwrap();
     assert!(hit >= 44.0, "Theme.hitMin: {line}");
     let items = v["items"].as_array().unwrap();
-    for tag in ["standLater", "standNone", "standAllow", "close", "simulate", "showRule"] {
+    for tag in [
+        "standLater",
+        "standNone",
+        "standAllow",
+        "close",
+        "simulate",
+        "showRule",
+    ] {
         for sfx in ["", "Rtl"] {
             let name = format!("{tag}{sfx}");
             let it = items
@@ -209,17 +219,41 @@ fn inspector_decide_later_and_rule_buttons_meet_the_rounded_spec() {
                 .find(|i| i["tag"] == name.as_str())
                 .unwrap_or_else(|| panic!("{name} not measured: {line}"));
             assert!(it["missing"].is_null(), "{name} not found: {line}");
-            assert!(it["w"].as_f64().unwrap() >= hit, "{name} narrower than hitMin: {it}");
-            assert!(it["h"].as_f64().unwrap() >= hit, "{name} shorter than hitMin: {it}");
-            assert_eq!(it["hasSurface"], true, "{name} is not drawn by a RoundedSurface: {it}");
-            assert_eq!(it["ringOn"], true, "{name}: no ring on keyboard focus: {it}");
-            assert!(it["ringWidth"].as_f64().unwrap() > 0.0, "{name} ring width: {it}");
-            assert!(it["ringAlpha"].as_f64().unwrap() > 0.5, "{name} ring too transparent: {it}");
+            assert!(
+                it["w"].as_f64().unwrap() >= hit,
+                "{name} narrower than hitMin: {it}"
+            );
+            assert!(
+                it["h"].as_f64().unwrap() >= hit,
+                "{name} shorter than hitMin: {it}"
+            );
+            assert_eq!(
+                it["hasSurface"], true,
+                "{name} is not drawn by a RoundedSurface: {it}"
+            );
+            assert_eq!(
+                it["ringOn"], true,
+                "{name}: no ring on keyboard focus: {it}"
+            );
+            assert!(
+                it["ringWidth"].as_f64().unwrap() > 0.0,
+                "{name} ring width: {it}"
+            );
+            assert!(
+                it["ringAlpha"].as_f64().unwrap() > 0.5,
+                "{name} ring too transparent: {it}"
+            );
             assert_eq!(it["ringEqFill"], false, "{name} ring equals fill: {it}");
-            assert!(it["contrast"].as_f64().unwrap() >= 2.0, "{name} ring contrast: {it}");
+            assert!(
+                it["contrast"].as_f64().unwrap() >= 2.0,
+                "{name} ring contrast: {it}"
+            );
         }
     }
-    assert_eq!(v["glyphRightOfLabel"], true, "RuleButton content did not mirror: {line}");
+    assert_eq!(
+        v["glyphRightOfLabel"], true,
+        "RuleButton content did not mirror: {line}"
+    );
     assert!(
         v["rootH"].as_f64().unwrap() >= hit && v["rootImplicitH"].as_f64().unwrap() >= hit,
         "RuleButton root under hitMin: {line}"
@@ -227,7 +261,9 @@ fn inspector_decide_later_and_rule_buttons_meet_the_rounded_spec() {
 }
 
 fn qml_source(name: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("qml").join(format!("{name}.qml"));
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("qml")
+        .join(format!("{name}.qml"));
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
@@ -261,13 +297,24 @@ fn the_three_files_hold_no_plain_buttons_and_no_literal_colours() {
         ] {
             assert_eq!(count(&src, plain), 0, "{file}: plain `{plain}`");
         }
-        assert_eq!(count(&src, "RoundedButton {"), rounded, "{file}: RoundedButton");
-        assert_eq!(count(&src, "GuardedToolButton {"), guarded_tool, "{file}: GuardedToolButton");
+        assert_eq!(
+            count(&src, "RoundedButton {"),
+            rounded,
+            "{file}: RoundedButton"
+        );
+        assert_eq!(
+            count(&src, "GuardedToolButton {"),
+            guarded_tool,
+            "{file}: GuardedToolButton"
+        );
         let code: String = src
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(!code.contains("Qt.rgba(") && !code.contains("\"#"), "{file}: literal colour");
+        assert!(
+            !code.contains("Qt.rgba(") && !code.contains("\"#"),
+            "{file}: literal colour"
+        );
     }
 }

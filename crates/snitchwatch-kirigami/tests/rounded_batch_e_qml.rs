@@ -173,7 +173,10 @@ fn run_probe() -> serde_json::Value {
         }
     });
     drop(guard);
-    assert!(root_ok.load(Ordering::SeqCst), "probe failed to load: {captured}");
+    assert!(
+        root_ok.load(Ordering::SeqCst),
+        "probe failed to load: {captured}"
+    );
     assert!(!captured.contains("ROUNDED_E_ERROR"), "{captured}");
     assert!(!captured.contains("TypeError"), "{captured}");
     let line = captured
@@ -190,11 +193,23 @@ fn rows_buttons_and_highlight_meet_the_rounded_spec() {
     let hit = v["hitMin"].as_f64().unwrap();
     assert!(hit >= 44.0, "Theme.hitMin: {line}");
     let rows = v["rows"].as_array().unwrap();
-    assert!(rows.iter().any(|r| r["header"] == false), "no leaf rows measured: {line}");
-    assert!(rows.iter().any(|r| r["header"] == true), "no header rows measured: {line}");
-    assert!(rows.iter().any(|r| r["pending"] == true), "no pending row measured: {line}");
+    assert!(
+        rows.iter().any(|r| r["header"] == false),
+        "no leaf rows measured: {line}"
+    );
+    assert!(
+        rows.iter().any(|r| r["header"] == true),
+        "no header rows measured: {line}"
+    );
+    assert!(
+        rows.iter().any(|r| r["pending"] == true),
+        "no pending row measured: {line}"
+    );
     for r in rows {
-        assert!(r["h"].as_f64().unwrap() >= hit, "row under Theme.hitMin: {r}");
+        assert!(
+            r["h"].as_f64().unwrap() >= hit,
+            "row under Theme.hitMin: {r}"
+        );
         for b in r["buttons"].as_array().unwrap() {
             assert!(
                 b["w"].as_f64().unwrap() >= hit && b["h"].as_f64().unwrap() >= hit,
@@ -202,20 +217,45 @@ fn rows_buttons_and_highlight_meet_the_rounded_spec() {
             );
         }
     }
-    let buttons: usize = rows.iter().map(|r| r["buttons"].as_array().unwrap().len()).sum();
+    let buttons: usize = rows
+        .iter()
+        .map(|r| r["buttons"].as_array().unwrap().len())
+        .sum();
     assert!(buttons >= 5, "buttons found: {buttons}: {line}");
 
     for tag in ["hl", "hlRtl"] {
         let h = &v[tag];
         assert!(h.is_object(), "no selection highlight ({tag}): {line}");
-        assert_eq!(h["radius"].as_f64().unwrap(), 10.0, "radius is not radiusMedium: {h}");
-        assert!(h["x"].as_f64().unwrap() > 0.0 && h["w"].as_f64().unwrap() < h["hostW"].as_f64().unwrap(), "not inset: {h}");
+        assert_eq!(
+            h["radius"].as_f64().unwrap(),
+            10.0,
+            "radius is not radiusMedium: {h}"
+        );
+        assert!(
+            h["x"].as_f64().unwrap() > 0.0
+                && h["w"].as_f64().unwrap() < h["hostW"].as_f64().unwrap(),
+            "not inset: {h}"
+        );
         assert_eq!(h["focused"], true, "list lost focus: {h}");
-        assert_eq!(h["mirrored"], tag == "hlRtl", "mirroring did not reach the highlight: {h}");
+        assert_eq!(
+            h["mirrored"],
+            tag == "hlRtl",
+            "mirroring did not reach the highlight: {h}"
+        );
         assert!(h["ringWidth"].as_f64().unwrap() > 0.0, "ring width: {h}");
-        assert!(h["ringAlpha"].as_f64().unwrap() > 0.5, "ring too transparent: {h}");
+        assert!(
+            h["ringAlpha"].as_f64().unwrap() > 0.5,
+            "ring too transparent: {h}"
+        );
         assert_eq!(h["ringEqFill"], false, "ring equals fill: {h}");
-        assert!(h["contrast"].as_f64().unwrap() >= 2.0, "ring vs fill contrast: {h}");
+        assert!(
+            h["contrast"].as_f64().unwrap() >= 2.0,
+            "ring vs fill contrast: {h}"
+        );
     }
-    assert_eq!(v["hlOff"].as_f64().unwrap(), 0.0, "ring shown without list focus");
+    assert_eq!(
+        v["hlOff"].as_f64().unwrap(),
+        0.0,
+        "ring shown without list focus"
+    );
 }
