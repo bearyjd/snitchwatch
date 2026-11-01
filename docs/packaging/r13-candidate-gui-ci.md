@@ -56,9 +56,13 @@ A separate fresh publisher job runs only pinned trusted actions and inline
 reviewed validation. It downloads the same-run artifact, accepts nine fixed,
 bounded regular filenames, hashes every byte, and validates source/tree/
 gitlink/manifest/lock/generator identities against immutable GitHub source
-responses. It requires the latest returned exact-head native CI run and every
-required job in its latest attempt to succeed. Missing, skipped, failed or
-still-running jobs hold publication. The publisher never checks out source,
+responses. It requires the newest *completed* exact-head push/pull_request
+native CI run and every required job in its latest attempt to succeed. The
+candidate push itself starts a newer `ci.yml` run on the same SHA, still
+running when the publisher looks; in-flight runs are skipped so it cannot mask
+the completed evidence. No completed run, a newer completed failed or cancelled
+run, or missing, skipped, failed or stale-attempt jobs hold publication. Push
+the candidate branch only after main or PR CI on that exact SHA is green. The publisher never checks out source,
 restores caches, unpacks a Flatpak or executes candidate code. The write token
 is repository-wide; fixed reviewed publisher code enforces the target boundary.
 

@@ -299,6 +299,25 @@ class Publication(unittest.TestCase):
             with self.subTest(i=i):
                 self.refused(self.exercise(lambda a, e, p, s: variant(s)))
 
+    def test_newer_in_flight_ci_run_does_not_mask_completed_run(self):
+        # listWorkflowRuns is newest-first. The candidate push starts its own newer
+        # ci.yml run on the same SHA; only completed runs are judged, newest first.
+        def runs(*newest_first):
+            return lambda a, e, p, s: s.update({'runs': [
+                {**s['runs'][0], 'id': 13 + len(newest_first) - i, 'head_branch': branch,
+                 'status': status, 'conclusion': conclusion}
+                for i, (branch, status, conclusion) in enumerate(newest_first)]})
+        in_flight = ('r16-candidate', 'in_progress', None)
+        main_green = ('main', 'completed', 'success')
+        result = self.exercise(runs(in_flight, main_green))
+        self.assertTrue(result['ok'], result)
+        for newest_first in [(('r16-candidate', 'completed', 'failure'), main_green),
+                             (('r16-candidate', 'completed', 'cancelled'), main_green),
+                             (in_flight, ('main', 'completed', 'failure')),
+                             (in_flight, ('main', 'queued', None))]:
+            with self.subTest(runs=newest_first):
+                self.refused(self.exercise(runs(*newest_first)))
+
     def test_branch_tag_release_refusals(self):
         for change in [{'branch': 'f' * 40}, {'tag': {'type': 'commit', 'sha': 'f' * 40}},
                        {'tag': {'type': 'tag', 'sha': SHA}}, {'releaseExists': True}]:
