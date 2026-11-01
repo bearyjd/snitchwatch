@@ -7,7 +7,8 @@
 //! mention in prose does not count as a use). Known limit: an unaliased
 //! `import QtQuick.Controls` is not checked.
 
-/// `src` without `//` and `/* */` comments and with string contents blanked.
+/// `src` without `//` and `/* */` comments and with string (incl. backtick
+/// template, `${}` included) contents blanked.
 fn code_only(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let mut chars = src.chars().peekable();
@@ -27,7 +28,7 @@ fn code_only(src: &str) -> String {
                     }
                 }
             }
-            '"' | '\'' => {
+            '"' | '\'' | '`' => {
                 out.push(c);
                 while let Some(n) = chars.next() {
                     if n == '\\' {
@@ -79,6 +80,7 @@ fn the_unused_import_guard_flags_only_an_unused_alias() {
         "import QtQuick.Controls as C\n/* C.Button */\nItem {}\n",
         "import QtQuick.Controls   as   Controls\nItem {}\n",
         "import QtQuick.Controls 2.15 as Controls\nItem {}\n",
+        "import QtQuick.Controls as Controls\nItem { property string s: `Controls.Button` }\n",
     ];
     for src in bad {
         assert_eq!(unused_controls_aliases(src).len(), 1, "should flag:\n{src}");
@@ -88,7 +90,7 @@ fn the_unused_import_guard_flags_only_an_unused_alias() {
         "import QtQuick.Controls as Controls\nItem { property var p: Controls.Label }\n",
         "import QtQuick.Controls as C\nItem { C.Button {} }\n",
         "import QtQuick\nItem {}\n",
-        "import QtQuick.Controls as Controls\nItem { property string s: `${Controls.Popup.CloseOnEscape}` }\n",
+        "import QtQuick.Controls as Controls\nItem { property string s: `x`; property var p: Controls.Popup.CloseOnEscape }\n",
         "import QtQuick.Controls.impl as Impl\nItem {}\n",
     ];
     for src in good {

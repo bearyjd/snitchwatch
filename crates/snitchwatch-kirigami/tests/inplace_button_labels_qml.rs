@@ -94,12 +94,16 @@ fn top_level_props(code: &str, open: usize) -> Vec<String> {
     let mut depth = 0usize;
     let mut line_start = true;
     let mut line = String::new();
+    // Last identifier seen at the start of a statement; a following `:`
+    // (after any whitespace, newlines included) makes it a property name.
+    let mut pending: Option<String> = None;
     for c in code[open..].chars() {
         match c {
             '{' => {
                 depth += 1;
                 line_start = depth == 1;
                 line.clear();
+                pending = None;
             }
             '}' => {
                 depth -= 1;
@@ -107,25 +111,36 @@ fn top_level_props(code: &str, open: usize) -> Vec<String> {
                     break;
                 }
                 line.clear();
+                pending = None;
             }
-            ';' | '\n' if depth == 1 => {
+            ';' if depth == 1 => {
                 line_start = true;
                 line.clear();
+                pending = None;
+            }
+            '\n' if depth == 1 => {
+                if pending.is_none() {
+                    line_start = true;
+                    line.clear();
+                }
+            }
+            ':' if depth == 1 && pending.is_some() => {
+                props.extend(pending.take());
+                line_start = false;
             }
             _ if depth == 1 && line_start => {
                 line.push(c);
-                let t = line.trim_start();
-                if let Some(name) = t.strip_suffix(':').map(str::trim_end) {
-                    if !name.is_empty()
-                        && name
-                            .chars()
-                            .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '.')
-                    {
-                        props.push(name.to_string());
+                let t = line.trim();
+                if !t.is_empty()
+                    && t.chars()
+                        .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '.')
+                {
+                    pending = Some(t.to_string());
+                } else {
+                    pending = None;
+                    if t.contains([' ', '(', '{', '[']) {
                         line_start = false;
                     }
-                } else if t.contains([' ', '(', '{', '[']) && !t.ends_with(char::is_whitespace) {
-                    line_start = false;
                 }
             }
             _ => {}
@@ -177,6 +192,8 @@ fn the_label_guard_rejects_a_bare_background_and_accepts_an_own_label() {
         "Controls.ToolButton { background : Rectangle {} }",
         "Controls.ToolButton {\n    background\t: Rectangle {}\n}\n",
         "Controls.Button {\n    background :\n        Rectangle {}\n}\n",
+        // A newline before the colon must not hide it either.
+        "Controls.Button {\n    background\n    : Rectangle {}\n}\n",
     ];
     for src in bad {
         assert_eq!(blank_label_blocks(src).len(), 1, "should reject:\n{src}");
@@ -193,6 +210,7 @@ fn the_label_guard_rejects_a_bare_background_and_accepts_an_own_label() {
         // Spaced / tabbed colons on a valid control.
         "Controls.Button {\n    background : Rectangle {}\n    contentItem : Text {}\n}\n",
         "Controls.Button {\n    background\t: Rectangle {}\n    contentItem\t:\n        Text {}\n}\n",
+        "Controls.Button {\n    background: Rectangle {}\n    contentItem\n    : Text {}\n}\n",
     ];
     for src in good {
         assert!(blank_label_blocks(src).is_empty(), "should accept:\n{src}");
