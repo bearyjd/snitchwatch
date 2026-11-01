@@ -1,8 +1,8 @@
 //! Restyle batch D source guard: in each batch-D file, how many controls are
 //! now rounded and exactly which plain `Controls.*` ones remain, and why. A
 //! swap that is undone, or a new plain control, changes a count and fails
-//! here. `MakeRuleSheet.qml` is deferred (selectable batch 7 owns it first)
-//! and must stay untouched. Also: the new text components hold no literal
+//! here. `MakeRuleSheet.qml` (swapped after selectable batch 7) is pinned in
+//! `rounded_make_rule_guards.rs`. Also: the new text components hold no literal
 //! colour or radius and no input area of their own.
 use std::path::Path;
 
@@ -74,14 +74,6 @@ fn batch_d_files_use_the_rounded_controls_and_keep_only_the_documented_plain_one
             assert_eq!(count(&src, opener), want, "{}: plain `{opener}`", e.file);
         }
     }
-}
-
-#[test]
-fn make_rule_sheet_is_deferred_and_untouched() {
-    let src = qml_source("MakeRuleSheet");
-    assert_eq!(count(&src, "Controls.Button {"), 3);
-    assert_eq!(count(&src, "Controls.ComboBox {"), 2);
-    assert_eq!(count(&src, "RoundedButton {"), 0);
 }
 
 #[test]
