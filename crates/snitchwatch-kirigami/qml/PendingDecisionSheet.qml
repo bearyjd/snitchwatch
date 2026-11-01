@@ -23,7 +23,6 @@
 // exists.
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
@@ -136,7 +135,7 @@ ColumnLayout {
             text: "Scope"
             Layout.alignment: Qt.AlignVCenter
         }
-        Controls.ComboBox {
+        RoundedComboBox {
             id: scopeBox
             objectName: "scopeSelector"
             Layout.fillWidth: true
@@ -170,7 +169,7 @@ ColumnLayout {
             text: "Duration"
             Layout.alignment: Qt.AlignVCenter
         }
-        Controls.ComboBox {
+        RoundedComboBox {
             id: durationBox
             objectName: "durationSelector"
             Layout.fillWidth: true
@@ -320,13 +319,13 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        Controls.Button {
+        RoundedButton {
             Layout.fillWidth: true
             text: "Allow"
             icon.name: "dialog-ok-apply"
             onClicked: sheet.submit("allow")
         }
-        Controls.Button {
+        RoundedButton {
             Layout.fillWidth: true
             text: "Deny"
             icon.name: "edit-delete-remove"
