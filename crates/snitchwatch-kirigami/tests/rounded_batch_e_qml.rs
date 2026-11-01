@@ -5,8 +5,8 @@
 //! highlight is rounded from `Theme`, inset, ringed only while the list has
 //! keyboard focus, and its ring is opaque, wider than 0, not equal to its
 //! fill and contrasts with the list background by >= 2.0; the same holds
-//! mirrored (RTL). `DecideLaterButton` and `RuleButton` (its inner `ruleButton`) belong to no restyle
-//! batch yet and are reported, not asserted.
+//! mirrored (RTL). `DecideLaterButton` and `RuleButton` (its inner `ruleButton`)
+//! are measured and asserted too (also in `rounded_inspector_leftovers_qml.rs`).
 //! Run headless with `QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic`.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -83,8 +83,8 @@ Controls.ApplicationWindow {
             const it = list.itemAtIndex(i);
             if (!it) continue;
             const buttons = walk(it, []).filter(x => x.down !== undefined
-                && x.visible && x.width > 0 && x.objectName !== "decideLaterButton"
-                && x.objectName !== "headerRuleButton" && x.objectName !== "ruleButton" && x.hovered !== undefined && x.clicked !== undefined)
+                && x.visible && x.width > 0
+                && x.objectName !== "headerRuleButton" && x.hovered !== undefined && x.clicked !== undefined)
                 .map(b => ({ name: b.objectName || b.text, w: b.width, h: b.height }));
             rows.push({ tag: tag, header: it.isGroupHeader, pending: it.pending || it.groupPending > 0,
                         h: it.height, ih: it.implicitHeight, buttons: buttons });
