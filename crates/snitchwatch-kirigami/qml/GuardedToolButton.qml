@@ -4,12 +4,24 @@
 // key's own final release still clicks it once; Return and Enter never do.
 import QtQuick
 import QtQuick.Controls as Controls
+import QtQuick.Controls.impl as Impl
 import com.snitchwatch.shell
 
 Controls.ToolButton {
     id: button
     implicitWidth: Math.max(Theme.hitMin, implicitContentWidth + leftPadding + rightPadding)
     implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+    // KDE's native style draws the label inside its background, so a
+    // replaced background needs its own content or the button is blank.
+    contentItem: Impl.IconLabel {
+        spacing: button.spacing
+        mirrored: button.mirrored
+        display: button.display
+        icon: button.icon
+        text: button.text
+        font: button.font
+        color: button.palette.buttonText
+    }
     background: RoundedSurface {
         control: button
         flat: true

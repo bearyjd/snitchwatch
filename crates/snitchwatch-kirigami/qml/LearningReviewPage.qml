@@ -133,29 +133,29 @@ Kirigami.Page {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.smallSpacing
 
-                Controls.Button {
+                RoundedButton {
                     objectName: "learningSuggestButton"
                     text: "Select suggested"
                     enabled: !page.applying
                     onClicked: page.controller.selectSuggested()
                 }
-                Controls.Button {
+                RoundedButton {
                     text: "Untick all"
                     enabled: !page.applying && page.tickCount > 0
                     onClicked: page.controller.untickAll()
                 }
-                Controls.Button {
+                RoundedButton {
                     text: "Refresh"
                     enabled: !page.applying
                     onClicked: page.controller.refresh()
                 }
-                Controls.Button {
+                RoundedButton {
                     objectName: "learningClearButton"
                     text: "Delete the recorded list"
                     enabled: !page.learning && !page.applying
                     onClicked: page.confirmingDelete = true
                 }
-                Controls.Button {
+                RoundedButton {
                     objectName: "learningReviewButton"
                     text: "Review the ticked choices"
                     highlighted: true
@@ -187,7 +187,7 @@ Kirigami.Page {
                             page.controller.clearData();
                         }
                     }
-                    Controls.Button {
+                    RoundedButton {
                         objectName: "learningDeleteNo"
                         text: "Keep it"
                         onClicked: page.confirmingDelete = false

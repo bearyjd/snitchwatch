@@ -8,6 +8,7 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
+import com.snitchwatch.shell
 
 Rectangle {
     id: row
@@ -28,7 +29,7 @@ Rectangle {
     color: row.selected !== "" ? Qt.alpha(Kirigami.Theme.highlightColor, 0.12) : "transparent"
     border.color: Kirigami.Theme.disabledTextColor
     border.width: 1
-    radius: 3
+    radius: Theme.radiusMedium
 
     readonly property string countsText: row.info.connections
         + (row.info.connections === 1 ? " connection to " : " connections to ")
@@ -155,7 +156,7 @@ Rectangle {
                 text: row.hostLine(modelData)
             }
         }
-        Controls.Button {
+        RoundedButton {
             visible: row.info.destinationsHidden === true && row.more.length === 0
             text: "Show the busiest destinations"
             onClicked: row.more = JSON.parse(row.controller.destinations(row.info.key)).slice(0, 25)
@@ -186,7 +187,7 @@ Rectangle {
 
                 RowLayout {
                     Layout.fillWidth: true
-                    Controls.CheckBox {
+                    RoundedCheckBox {
                         id: tickBox
                         objectName: "tick-" + modelData.kind
                         enabled: !row.locked

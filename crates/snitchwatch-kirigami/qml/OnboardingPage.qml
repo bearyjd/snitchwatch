@@ -147,13 +147,13 @@ Kirigami.Page {
                 enabled: page.controller && !page.controller.busy
                 onClicked: page.controller.startUnit()
             }
-            Controls.Button {
+            RoundedButton {
                 text: "Retry"
                 icon.name: "view-refresh"
                 enabled: page.controller && !page.controller.busy
                 onClicked: page.controller.probe()
             }
-            Controls.Button {
+            RoundedButton {
                 text: "Continue anyway"
                 flat: true
                 onClicked: page.dismissed()

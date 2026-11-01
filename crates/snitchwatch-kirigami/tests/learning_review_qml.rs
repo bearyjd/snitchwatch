@@ -88,9 +88,11 @@ const VERDICT_WORDS: [&str; 24] = [
     "threat",
 ];
 
-/// Every button block: plain ones and the held-key-guarded ones.
+/// Every button block: plain ones, the rounded ones (restyle batch E) and the
+/// held-key-guarded ones.
 fn buttons(code: &str) -> Vec<String> {
     let mut found = blocks(code, "Controls.Button {");
+    found.extend(blocks(code, "RoundedButton {"));
     found.extend(blocks(code, "GuardedButton {"));
     found
 }
@@ -173,7 +175,9 @@ fn buttons_carry_fixed_text_and_tick_boxes_none() {
                 assert!(is_fixed_text(&text), "{name}: a button shows data: {text}");
             }
         }
-        for block in blocks(&code, "Controls.CheckBox {") {
+        let mut boxes = blocks(&code, "Controls.CheckBox {");
+        boxes.extend(blocks(&code, "RoundedCheckBox {"));
+        for block in boxes {
             assert!(
                 text_binding(&block).is_none(),
                 "{name}: a tick box text would render as markup:\n{block}"
@@ -217,7 +221,7 @@ fn nothing_is_ticked_by_default_and_only_the_owner_ticks() {
     assert_eq!(row.matches("setTick(").count(), 1);
     let page = code_lines(source("LearningReviewPage.qml"));
     assert_eq!(page.matches("selectSuggested()").count(), 1);
-    let suggest = blocks(&page, "Controls.Button {")
+    let suggest = buttons(&page)
         .into_iter()
         .find(|b| b.contains("selectSuggested()"))
         .expect("the button");
@@ -405,7 +409,7 @@ fn the_limits_are_eight_lines_each_scanned_and_the_button_rows_wrap() {
         let code = code_lines(source(name));
         for row in blocks(&code, "RowLayout {") {
             assert!(
-                !row.contains("Controls.Button {"),
+                !row.contains("Controls.Button {") && !row.contains("RoundedButton {"),
                 "{name}: a RowLayout of buttons clips"
             );
         }
