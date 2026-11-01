@@ -299,6 +299,42 @@ class Publication(unittest.TestCase):
             with self.subTest(i=i):
                 self.refused(self.exercise(lambda a, e, p, s: variant(s)))
 
+    def test_newer_in_flight_ci_run_does_not_mask_completed_run(self):
+        # listWorkflowRuns is newest-first. The candidate push starts its own newer
+        # first-attempt ci.yml run on the same SHA; only that kind of unfinished run
+        # is skipped. An unfinished rerun (attempt > 1 or unknown) is judged and holds.
+        def runs(*newest_first):
+            def build(i, branch, status, conclusion, attempt=1):
+                run = {**self.fixture()[3]['runs'][0], 'id': 13 + len(newest_first) - i,
+                       'head_branch': branch, 'status': status, 'conclusion': conclusion,
+                       'run_attempt': attempt}
+                if attempt is None:
+                    del run['run_attempt']
+                return run
+            return lambda a, e, p, s: s.update({'runs': [
+                build(i, *run) for i, run in enumerate(newest_first)]})
+        in_flight = ('r16-candidate', 'in_progress', None)
+        main_green = ('main', 'completed', 'success')
+        for accepted in [(in_flight, main_green),
+                         (('r16-candidate', 'queued', None), main_green),
+                         (('', 'in_progress', None, 1), main_green)]:
+            with self.subTest(accepted=accepted):
+                result = self.exercise(runs(*accepted))
+                self.assertTrue(result['ok'], result)
+        for newest_first in [(('r16-candidate', 'completed', 'failure'), main_green),
+                             (('r16-candidate', 'completed', 'cancelled'), main_green),
+                             (in_flight, ('main', 'completed', 'failure')),
+                             (in_flight, ('main', 'queued', None)),
+                             # A failed/cancelled newer run that is re-run must not expose green A.
+                             (('r16-candidate', 'in_progress', None, 2), main_green),
+                             (('r16-candidate', 'queued', None, 2), main_green),
+                             (in_flight, ('r16-candidate', 'in_progress', None, 3), main_green),
+                             # Unknown attempt on an unfinished run fails closed.
+                             (('r16-candidate', 'in_progress', None, None), main_green),
+                             (('r16-candidate', 'in_progress', None, '1'), main_green)]:
+            with self.subTest(runs=newest_first):
+                self.refused(self.exercise(runs(*newest_first)))
+
     def test_branch_tag_release_refusals(self):
         for change in [{'branch': 'f' * 40}, {'tag': {'type': 'commit', 'sha': 'f' * 40}},
                        {'tag': {'type': 'tag', 'sha': SHA}}, {'releaseExists': True}]:
