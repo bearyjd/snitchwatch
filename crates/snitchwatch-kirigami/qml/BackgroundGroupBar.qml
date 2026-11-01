@@ -6,6 +6,7 @@
 // sits under Show all, Expand/Collapse and the filter bar's Full list switch.
 import QtQuick
 import QtQuick.Controls as Controls
+import QtQuick.Controls.impl as Impl
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
@@ -45,6 +46,18 @@ ColumnLayout {
             implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
             horizontalPadding: Theme.controlPaddingH
             background: RoundedSurface { control: showAllButton }
+            // org.kde.desktop draws a Button's label inside the background
+            // replaced above; without its own label it would render blank.
+            contentItem: Impl.IconLabel {
+                objectName: "inPlaceButtonLabel"
+                spacing: showAllButton.spacing
+                mirrored: showAllButton.mirrored
+                display: showAllButton.display
+                icon: showAllButton.icon
+                text: showAllButton.text
+                font: showAllButton.font
+                color: showAllButton.palette.buttonText
+            }
             text: "Show all"
             onClicked: bar.model.setNeedsAttention(false)
         }
@@ -81,6 +94,18 @@ ColumnLayout {
             implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
             horizontalPadding: Theme.controlPaddingH
             background: RoundedSurface { control: backgroundToggle }
+            // org.kde.desktop draws a Button's label inside the background
+            // replaced above; without its own label it would render blank.
+            contentItem: Impl.IconLabel {
+                objectName: "inPlaceButtonLabel"
+                spacing: backgroundToggle.spacing
+                mirrored: backgroundToggle.mirrored
+                display: backgroundToggle.display
+                icon: backgroundToggle.icon
+                text: backgroundToggle.text
+                font: backgroundToggle.font
+                color: backgroundToggle.palette.buttonText
+            }
             text: bar.collapsing ? "Expand" : "Collapse"
             onClicked: bar.model.setNeedsAttention(!bar.collapsing)
         }
@@ -105,6 +130,18 @@ ColumnLayout {
             implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
             horizontalPadding: Theme.controlPaddingH
             background: RoundedSurface { control: markSeenButton }
+            // org.kde.desktop draws a Button's label inside the background
+            // replaced above; without its own label it would render blank.
+            contentItem: Impl.IconLabel {
+                objectName: "inPlaceButtonLabel"
+                spacing: markSeenButton.spacing
+                mirrored: markSeenButton.mirrored
+                display: markSeenButton.display
+                icon: markSeenButton.icon
+                text: markSeenButton.text
+                font: markSeenButton.font
+                color: markSeenButton.palette.buttonText
+            }
             text: "Mark as seen"
             onClicked: bar.model.markNewProgramsSeen()
         }
@@ -128,6 +165,18 @@ ColumnLayout {
             implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
             horizontalPadding: Theme.controlPaddingH
             background: RoundedSurface { control: dismissBaseline }
+            // org.kde.desktop draws a Button's label inside the background
+            // replaced above; without its own label it would render blank.
+            contentItem: Impl.IconLabel {
+                objectName: "inPlaceButtonLabel"
+                spacing: dismissBaseline.spacing
+                mirrored: dismissBaseline.mirrored
+                display: dismissBaseline.display
+                icon: dismissBaseline.icon
+                text: dismissBaseline.text
+                font: dismissBaseline.font
+                color: dismissBaseline.palette.buttonText
+            }
             text: "Dismiss"
             onClicked: bar.model.dismissBaselineNotice()
         }
