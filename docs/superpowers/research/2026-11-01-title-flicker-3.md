@@ -40,7 +40,8 @@ attempt changes those conditions:
   The probe fails when a field leaves the value it has held for 120 ms and
   returns to it within 120 ms, whatever values it passed through on the way,
   provided the item was on screen at some point. That is the flicker's
-  signature. It also asserts that the banner heading was sampled on screen and,
+  signature. An item created mid-run starts from "absent", so one that
+  appears and goes again within 120 ms counts too. It also asserts that the banner heading was sampled on screen and,
   for the overflowing Security Scan rows, that the wheel moved `contentY`.
 
 Result: zero transients on Basic, Fusion and Material, and no binding-loop
@@ -59,8 +60,9 @@ Synthetic wheel events also don't fully reproduce a real pointer hovering.
   This covers the probe's sizes and styles and both "Decide later" layouts.
 - An `InlineMessage` layout flip (label line count / actions row moving) while
   the holder text ticks.
-- "working" as app or Kirigami text: no user-visible string in `qml/` or
-  `src/` contains "working". `strings` over every Kirigami and QtQuick.Controls
+- "working" as app or Kirigami text: the only user-visible string in `qml/`
+  or `src/` with "working" is demo-mode data (`src/demo.rs`, "keep the clock and
+  the network working"). Nothing that can show on these two pages has it. `strings` over every Kirigami and QtQuick.Controls
   plugin `.so` in `/usr/lib64/qt6/qml` finds no "working" or "waiting" either.
   Either the word is a misread of the fast flash, or it comes from the
   owner's Breeze style (`org.kde.desktop`, not installable here) or from the

@@ -176,8 +176,15 @@ Item {
                 const value = f[name] === undefined ? "-" : f[name];
                 let st = rec[name];
                 if (st === undefined) {
-                    rec[name] = { stable: value, cur: value, since: now, left: -1, seen: false };
-                    continue;
+                    if (samples === 1) {
+                        rec[name] = { stable: value, cur: value, since: now, left: -1, seen: false };
+                        continue;
+                    }
+                    // Created mid-run: its stable baseline is "absent", so an
+                    // item that shows up and goes again is a transient too.
+                    st = { stable: gone[name], cur: gone[name], since: now - transientMs,
+                           left: -1, seen: false };
+                    rec[name] = st;
                 }
                 if (value !== st.cur) {
                     if (value === st.stable && st.left >= 0) {
