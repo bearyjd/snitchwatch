@@ -11,6 +11,8 @@ Window {
     height: 1100
     property var failures: []
     property int step: 0
+    // Timer ticks fired from inside a click's nested event loop must not re-enter a step.
+    property bool inStep: false
     property string path: "/opt/<b>my app</b>/bin/run & go"
     property string host: "<img src=x> & host.example"
     property string ip: "2001:db8::cafe"
@@ -316,6 +318,7 @@ Window {
         running: true
         repeat: true
         onTriggered: {
+            if (inStep) return;
             if (step >= steps.length) {
                 stop();
                 if (failures.length) console.error("connection clarity failures: " + failures.join("; "));
@@ -327,7 +330,9 @@ Window {
             stalls = 0;
             if (waiting !== "") failures.push("step " + step + " never ready for " + waiting);
             else {
+                inStep = true;
                 try { steps[step](); } catch(e) { failures.push("step " + step + ": " + e); }
+                finally { inStep = false; }
             }
             ++step;
         }
