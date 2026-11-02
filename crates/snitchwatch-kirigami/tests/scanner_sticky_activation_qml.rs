@@ -125,6 +125,8 @@ Window {
     TestCase { id: tc; name: "scan"; when: false; windowShown: true }
     property int step: 0
     property int waited: 0
+    // Clicks spin the event loop: a tick must not re-enter a step still running.
+    property bool inTick: false
     property string failTitle: ""
     property string failSummary: ""
     function walk(root, out, seen) {
@@ -151,6 +153,8 @@ Window {
     Timer {
         interval: 100; running: true; repeat: true
         onTriggered: {
+            if (win.inTick) return;
+            win.inTick = true;
             try {
                 waited += 1;
                 if (step === 0) {                       // idle: Space starts scan 1 (fails)
@@ -192,6 +196,7 @@ Window {
                     report("stuck", "step=" + step + " busy=" + controller.busy + " err=" + controller.errorTitle);
                 }
             } catch (e) { report("error", String(e)); }
+            finally { win.inTick = false; }
         }
     }
     Timer { interval: 20000; running: true; onTriggered: report("timeout", "step=" + step) }

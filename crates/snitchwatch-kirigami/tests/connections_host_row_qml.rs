@@ -45,6 +45,8 @@ Window {
     height: 600
     property var failures: []
     property int phase: 0
+    // Timer ticks fired from inside a click's nested event loop must not re-enter a phase.
+    property bool inTick: false
 
     QtObject {
         id: feedStub
@@ -113,6 +115,8 @@ Window {
         running: true
         repeat: true
         onTriggered: {
+            if (probe.inTick) return;
+            probe.inTick = true;
             let done = false;
             try {
                 const rows = probe.rowsBefore[probe.phase];
@@ -174,6 +178,8 @@ Window {
             } catch (e) {
                 probe.failures.push("phase " + probe.phase + " threw: " + e);
                 done = true;
+            } finally {
+                probe.inTick = false;
             }
             if (done) {
                 stop();
