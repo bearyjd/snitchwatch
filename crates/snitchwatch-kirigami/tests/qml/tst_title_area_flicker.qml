@@ -34,6 +34,8 @@ Item {
     // banner heading was sampled on screen.
     property real maxContentY: 0
     property bool sawHeading: false
+    property bool sawHolder: false
+    property bool sawPageText: false
 
     QtObject {
         id: statusStub
@@ -139,6 +141,12 @@ Item {
             out[path] = fields;
             if (fields.vis === "V" && item.text === "A connection is waiting for your answer.") {
                 host.sawHeading = true;
+            }
+            if (fields.vis === "V" && item.text.indexOf("has been waiting for your answer") >= 0) {
+                host.sawHolder = true;
+            }
+            if (fields.vis === "V" && !anchored && item.text.length > 0) {
+                host.sawPageText = true;
             }
         }
         const kids = item.children;
@@ -274,9 +282,13 @@ Item {
             host.samples = 0;
             host.maxContentY = 0;
             host.sawHeading = false;
+            host.sawHolder = false;
+            host.sawPageText = false;
             run(data.page, data.width, data.height, data.dl);
             verify(banner.visible, "the prompt-slot banner is not on screen");
             verify(host.sawHeading, "the banner heading was never sampled on screen");
+            verify(host.sawHolder, "the banner holder line was never sampled on screen");
+            verify(host.sawPageText, "no page text was ever sampled on screen");
             if (data.page === scannerPage && data.height < 400) {
                 verify(host.maxContentY > 0, "the wheel never moved the Security Scan page");
             }

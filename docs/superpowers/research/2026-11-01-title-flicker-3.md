@@ -34,14 +34,15 @@ attempt changes those conditions:
 - Each case sends 12 wheel events at each of four places: the banner heading
   row, the banner middle, just under the banner (the page header) and the
   body. At 300 px Security Scan overflows, so the wheel really moves it.
-- On every `frameSwapped` and every 4 ms it records each text item in the
+- On every `frameSwapped` and on a 4 ms Timer it records each text item in the
   window and in `Overlay.overlay`: text, effective visibility, opacity product
   and height, plus y for the banner subtree. Each field is tracked on its own.
   The probe fails when a field leaves the value it has held for 120 ms and
   returns to it within 120 ms, whatever values it passed through on the way,
   provided the item was on screen at some point. That is the flicker's
   signature. An item created mid-run starts from "absent", so one that
-  appears and goes again within 120 ms counts too. It also asserts that the banner heading was sampled on screen and,
+  appears and goes again within 120 ms counts too. It also asserts that the banner heading, the banner holder line and some page
+text were each sampled on screen (so the run is not vacuous) and,
   for the overflowing Security Scan rows, that the wheel moved `contentY`.
 
 Result: zero transients on Basic, Fusion and Material, and no binding-loop
@@ -51,8 +52,10 @@ same handler dipping the heading's opacity to 0.4 failed 14 of 18.
 
 ## Ruled out (in this sandbox, within the probe's limits)
 
-Limits: the probe samples properties every frame and every 4 ms. It does not
-see rendering-only artefacts (a scene-graph glitch with unchanged properties).
+Limits: the probe samples properties on every frame and on a 4 ms Timer. That
+Timer follows the animation clock, so it does not guarantee 4 ms sampling; the
+per-frame sample is the stronger check, and a flicker shorter than a frame can
+fall between samples. It does not see rendering-only artefacts (a scene-graph glitch with unchanged properties).
 Synthetic wheel events also don't fully reproduce a real pointer hovering.
 
 - A wheel- or scroll-driven change of any text, visibility, opacity or
@@ -69,6 +72,10 @@ Synthetic wheel events also don't fully reproduce a real pointer hovering.
   desktop/compositor.
 
 ## Remaining hypotheses
+
+These are untested candidates, not findings. The probe only shows that none
+of the property changes it can see happen on scroll; it does not show a banner
+repaint, so nothing here is evidence for or against any of them.
 
 1. **State-driven, not scroll-driven.** `PromptSlotStatus.held` goes true
    then false within one frame or a few, for example a short-lived daemon
