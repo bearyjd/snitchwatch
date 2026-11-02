@@ -275,9 +275,21 @@ impl qobject::BridgeFeed {
             return;
         };
         let qt_thread = self.qt_thread();
+        let runtime = handles.runtime().clone();
+        // Refresh `ok`/`linkState` on every link change, so they (and
+        // main.qml's `onOkChanged` resets) stay current while the window is
+        // hidden and its 1 s banner tick is stopped (perf/gui-idle-wakeups).
+        let link_thread = qt_thread.clone();
+        let mut link_rx = crate::bridge_runtime::link_wake::subscribe();
+        runtime.spawn(async move {
+            while link_rx.changed().await.is_ok() {
+                if link_thread.queue(|qobject| qobject.refresh()).is_err() {
+                    break;
+                }
+            }
+        });
         // An event, not state: no snapshot resync, so a lag only skips some.
         let mut rx = handles.subscribe();
-        let runtime = handles.runtime().clone();
         runtime.spawn(async move {
             use tokio::sync::broadcast::error::RecvError;
             loop {

@@ -310,6 +310,7 @@ fn set_status(status: &Arc<Mutex<LinkStatus>>, state: LinkState, detail: impl In
         state,
         detail: detail.into(),
     };
+    link_wake::bump();
 }
 
 fn start_inner() -> anyhow::Result<ClientRuntime> {
@@ -558,6 +559,7 @@ fn mark_connected_with(
     state.curated_broad_opt_in = false;
     state.analysis_export = false;
     state.pending_rows.clear();
+    link_wake::bump();
     state.connection_id
 }
 
@@ -609,6 +611,7 @@ fn disconnect_and_discard(
         state.curated_broad_opt_in = false;
         state.analysis_export = false;
         state.pending_rows.clear();
+        link_wake::bump();
     }
     while inbound_rx.try_recv().is_ok() {}
 }
@@ -802,6 +805,8 @@ pub use held_back::HeldBackNotices;
 #[path = "bridge_runtime/link.rs"]
 mod link;
 pub use link::{LinkState, LinkStatus};
+#[path = "bridge_runtime/link_wake.rs"]
+pub mod link_wake;
 
 #[cfg(test)]
 #[path = "bridge_runtime/curated_consent_tests.rs"]

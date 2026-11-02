@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use snitchwatch_bridge::filter_pause::PauseState;
 use snitchwatch_bridge::tray_state::TrayState;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 use crate::tray_health::FirewallSeen;
 
@@ -96,7 +96,25 @@ pub fn link_key(connected: bool, session: u64) -> LinkKey {
 /// `reconcile` returns false (the Qt object is gone).
 pub async fn watch_sessions<L, R>(
     link: L,
+    reconcile: R,
+    period: Duration,
+    stop: oneshot::Receiver<()>,
+) where
+    L: Fn() -> LinkKey,
+    R: FnMut() -> bool,
+{
+    // Never bumped: only `period` wakes this watch.
+    let (_never, wake) = watch::channel(0);
+    watch_sessions_woken(link, reconcile, wake, period, stop).await;
+}
+
+/// [`watch_sessions`], but also re-checks `link` whenever `wake` changes, so
+/// `period` can be a long fallback instead of a poll: the link is checked
+/// when it changes, not several times a second while idle.
+pub async fn watch_sessions_woken<L, R>(
+    link: L,
     mut reconcile: R,
+    mut wake: watch::Receiver<u64>,
     period: Duration,
     mut stop: oneshot::Receiver<()>,
 ) where
@@ -105,7 +123,11 @@ pub async fn watch_sessions<L, R>(
 {
     let mut seen = None;
     let mut first = true;
+    let mut wake_open = true;
     loop {
+        // Mark the count seen before reading the link, so a change made
+        // after this read wakes the next wait.
+        wake.borrow_and_update();
         let now = Some(link());
         if first || now != seen {
             first = false;
@@ -117,6 +139,7 @@ pub async fn watch_sessions<L, R>(
         tokio::select! {
             _ = &mut stop => return,
             () = tokio::time::sleep(period) => {}
+            changed = wake.changed(), if wake_open => wake_open = changed.is_ok(),
         }
     }
 }
@@ -320,5 +343,50 @@ mod tests {
         ));
         tokio::task::yield_now().await;
         assert!(handle.is_finished());
+    }
+
+    /// The production watch (perf/gui-idle-wakeups): a link change is seen at
+    /// the wake, with no time passing, and an idle link is not re-read before
+    /// the long fallback.
+    #[tokio::test(start_paused = true)]
+    async fn a_woken_watch_reacts_at_the_wake_and_does_not_poll_while_idle() {
+        let live = Arc::new(AtomicU64::new(1));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (wake_tx, wake_rx) = watch::channel(0_u64);
+        let (_stop, stop_rx) = oneshot::channel();
+        let (l, r, c) = (live.clone(), reads.clone(), calls.clone());
+        let _handle = tokio::spawn(watch_sessions_woken(
+            move || {
+                r.fetch_add(1, Ordering::SeqCst);
+                link_key(true, l.load(Ordering::SeqCst))
+            },
+            move || {
+                c.fetch_add(1, Ordering::SeqCst);
+                true
+            },
+            wake_rx,
+            Duration::from_secs(30),
+            stop_rx,
+        ));
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let reads_before = reads.load(Ordering::SeqCst);
+        tokio::time::advance(Duration::from_secs(25)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            reads_before,
+            "the idle link was polled"
+        );
+        live.store(2, Ordering::SeqCst);
+        wake_tx.send_modify(|n| *n += 1);
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the wake did not reconcile"
+        );
     }
 }
