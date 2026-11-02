@@ -3,3 +3,4 @@ singleton Theme 1.0 ../../../../../../qml/Theme.qml
 singleton MapBandState 1.0 ../../../../../../qml/MapBandState.qml
 singleton SelectionRegistry 1.0 ../../../../../../qml/SelectionRegistry.qml
 NativeClipboard 1.0 NativeClipboard.qml
+ScannerController 1.0 ScannerController.qml
