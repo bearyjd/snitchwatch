@@ -5,12 +5,12 @@
 ## 2026-11-01 — selectable text and rounded restyle merged, r16 candidate published
 
 - **Source:** `origin/main` at `03c187e9` (docs-only learning merge #310 on top of `a75214b3`, the merge of #309).
-- **Merged since 2026-10-30**, all in `crates/snitchwatch-kirigami` (QML + tests) plus the candidate CI config; bridge, scanner and packaging code are unchanged by this work:
+- **Merged since 2026-10-30**, mostly in `crates/snitchwatch-kirigami` (QML + tests), plus the candidate publish tooling and CI config (#308/#309); bridge and scanner code are unchanged by this work:
   - Selectable text: batches 1-8 (#288, #289, #290, #294, #291, #292, #293, #296), headings follow-up #295, LOW fixes #300, housekeeping #306/#307.
   - Rounded 44 px iOS/Little Snitch restyle: PR A #286, batches B #302, C #297, D #299, E #304, F #298, MakeRuleSheet #301, InspectorPanel + DecideLaterButton + RuleButton #305.
   - Blank-label fix for the KDE native style (#303); CI race hardening of the candidate publish guard (#308 r16 prep, #309); docs #287, #310.
 - **r16 GUI release:** candidate PUBLISHED as pre-release https://github.com/bearyjd/snitchwatch/releases/tag/r16-candidate from `a75214b358625cbda88e9e7431f01ae41645acfa` (candidate run 41315786846). NOT promoted: final r16 needs a separate owner go given to the bazzite-tower session. A published candidate cannot be replaced under the same name. Recover from a publish race with a FULL rerun, never `--failed`: a failed-jobs-only rerun can never pass (`run_attempt` is pinned).
-- **GUI rebuild (owner runs it outside the agent sandbox):** copy `dist/q01-complete-build-2/rebuild-local.py` to a NEW `dist/<name>-build`, change only the bundle file name, then after `git fetch origin` run `python3 rebuild-local.py --execute "$(git -C ../.. rev-parse origin/main)"`. Install with `flatpak install --user --reinstall <bundle>`.
+- **GUI rebuild (owner runs it outside the agent sandbox):** copy `dist/q01-complete-build-2/rebuild-local.py` to a NEW `dist/<name>-build`, change only the bundle file name, then `cd` into it, run `git fetch origin`, and run `python3 rebuild-local.py --execute "$(git -C ../.. rev-parse origin/main)"`. Install with `flatpak install --user --reinstall <bundle>`.
 - **Needs the owner:**
   - Install and check the CI-built candidate on Plasma (labels on every restyled button, connections list highlight, focus rings, Orca, drag-select), then promote via the tower.
   - #252 scanner watchdog: parked draft.
