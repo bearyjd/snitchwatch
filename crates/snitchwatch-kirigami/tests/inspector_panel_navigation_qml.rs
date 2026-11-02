@@ -210,6 +210,7 @@ Kirigami.ApplicationWindow {
                 probe.failures.push("step " + probe.step + " threw: " + e);
             } finally {
                 probe.step++;
+                probe.lastRowPos = "";
                 probe.inStep = false;
             }
         }

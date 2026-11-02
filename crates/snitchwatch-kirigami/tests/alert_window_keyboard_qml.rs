@@ -38,6 +38,8 @@ Window {
     property var failures: []
     property int phase: 0
     property int stalls: 0
+    // Key events spin the event loop: a tick must not re-enter a phase still typing.
+    property bool inTick: false
     readonly property int maxStalls: 200
     // @a11y-guard
 
@@ -328,6 +330,8 @@ Window {
         running: true
         repeat: true
         onTriggered: {
+            if (probe.inTick) return;
+            probe.inTick = true;
             let done = false;
             try {
                 const s = probe.stages[(probe.phase - 1) >> 1];
@@ -351,6 +355,8 @@ Window {
             } catch (e) {
                 probe.failures.push("phase " + probe.phase + " threw: " + e);
                 done = true;
+            } finally {
+                probe.inTick = false;
             }
             if (done) {
                 stop();

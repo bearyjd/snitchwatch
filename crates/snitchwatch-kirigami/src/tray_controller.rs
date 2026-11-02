@@ -25,7 +25,7 @@ use crate::tray::{
     live_slot_holders, menu_label_token, startup_tooltip,
 };
 use crate::tray_health::{compose_tooltip, firewall_report};
-use crate::tray_session::{cleanup_job, link_key, watch_sessions, TraySession};
+use crate::tray_session::{cleanup_job, link_key, watch_sessions_woken, TraySession};
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
 #[cxx_qt::bridge]
@@ -276,9 +276,10 @@ fn spawn_diagnostics_feed(handles: &BridgeHandles, qt_thread: TrayThread) {
     );
 }
 
-/// How often the tray checks for a disconnect or a new session. The link has
-/// no change notification; `BridgeFeed`'s banner polls it every second.
-const SESSION_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+/// A fallback re-check for a disconnect or a new session. The tray is woken
+/// on every link change (`bridge_runtime::link_wake`), so this is not a poll:
+/// it only bounds the cost of a missed wake.
+const SESSION_FALLBACK: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Forget what a session that's no longer live reported, on the first pass
 /// and on every disconnect or session change, so the tray never shows it as
@@ -288,7 +289,8 @@ fn spawn_session_watch(handles: &BridgeHandles, qt_thread: TrayThread) -> onesho
     let (stop_tx, stop_rx) = oneshot::channel();
     let watch_handles = handles.clone();
     let job_handles = handles.clone();
-    handles.runtime().spawn(watch_sessions(
+    let wake = crate::bridge_runtime::link_wake::subscribe();
+    handles.runtime().spawn(watch_sessions_woken(
         move || {
             let (connected, session) = watch_handles.link_generation();
             link_key(connected, session)
@@ -304,7 +306,8 @@ fn spawn_session_watch(handles: &BridgeHandles, qt_thread: TrayThread) -> onesho
                 })
                 .is_ok()
         },
-        SESSION_POLL,
+        wake,
+        SESSION_FALLBACK,
         stop_rx,
     ));
     stop_tx

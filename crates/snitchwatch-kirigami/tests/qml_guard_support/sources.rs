@@ -209,6 +209,7 @@ pub const ALL_QML: &[(&str, &str)] = &[
         "PendingAgeTicker.qml",
         include_str!("../../qml/PendingAgeTicker.qml"),
     ),
+    ("ShownTicker.qml", include_str!("../../qml/ShownTicker.qml")),
     (
         "ProgramLabel.qml",
         include_str!("../../qml/ProgramLabel.qml"),

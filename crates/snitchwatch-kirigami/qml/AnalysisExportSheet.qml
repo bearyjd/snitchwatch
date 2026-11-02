@@ -51,11 +51,17 @@ Controls.Dialog {
     onClosed: {
         if (!controller.saving) controller.cancel();
     }
+    // False while the window is hidden or minimized (main.qml).
+    property bool windowShown: true
+    property alias pollTimer: pollTimer
     Timer {
-        // Always runs while the page owns this dialog, including an open preview
-        // or admitted Save with no subsequent bridge messages.
+        id: pollTimer
+        // Runs while the window is shown, and whenever the dialog is open or a
+        // request, preview or Save is in flight, so expiry, session changes and
+        // Save never wait on the window (perf/gui-idle-wakeups).
         interval: 100
-        running: true
+        running: sheet.windowShown || sheet.opened || sheet.controller.busy
+            || sheet.controller.saving || sheet.controller.previewReady
         repeat: true
         onTriggered: sheet.controller.poll()
     }

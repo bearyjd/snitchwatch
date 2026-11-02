@@ -25,6 +25,7 @@ fn strip(src: &str) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i < c.len() {
+        let start = i;
         if c[i] == '/' && c.get(i + 1).copied() == Some('/') {
             while i < c.len() && c[i] != '\n' {
                 i += 1;
@@ -71,7 +72,9 @@ fn strip(src: &str) -> String {
             && (c.get(i + 1).copied() == Some('\\') || c.get(i + 2).copied() == Some('\''))
         {
             // A char literal, not a lifetime.
-            i += 2;
+            // An escape (`'\''`, `'\\'`) consumes the character after the
+            // backslash, so an escaped apostrophe does not end the literal.
+            i += if c[i + 1] == '\\' { 3 } else { 2 };
             while i < c.len() && c[i] != '\'' {
                 i += 1;
             }
@@ -80,6 +83,11 @@ fn strip(src: &str) -> String {
         } else {
             out.push(c[i]);
             i += 1;
+        }
+        // Blanking must not join lines: keep every newline it swallowed, or
+        // a `pub mod` line could hide the next line from the scan.
+        if i > start + 1 {
+            out.extend(c[start..i.min(c.len())].iter().filter(|&&ch| ch == '\n'));
         }
     }
     out
@@ -171,4 +179,19 @@ fn scanner_ignores_comments_and_strings() {
     assert!(!offending("/* x */ use crate::history::pins::PinId;").is_empty());
     // A lifetime is not a char literal.
     assert!(!offending("fn f<'a>(x: &'a ReaderGate) {}").is_empty());
+}
+
+#[test]
+fn scanner_sees_a_call_after_an_escaped_apostrophe_char_literal() {
+    let src = "fn f() { let _q = ['\\'','\"']; let _g: ReaderGate; }";
+    assert!(!offending(src).is_empty());
+    assert!(!offending("fn f() { let _b = '\\\\'; let _g: PinRegistry; }").is_empty());
+}
+
+#[test]
+fn a_block_comment_does_not_join_lines_and_hide_the_next_use() {
+    let src = "pub mod a; /* one\ntwo */\nuse crate::history::pins::PinId;";
+    assert!(!offending(src).is_empty());
+    let multi = "pub mod a; /* one\ntwo\nthree */ use crate::history::pins::PinId;";
+    assert!(!offending(multi).is_empty());
 }

@@ -36,19 +36,10 @@ Kirigami.ApplicationWindow {
     PromptSlotStatus {
         id: promptSlotStatus
     }
-    // The service can restart independently of this GUI. Polling is cheap
-    // (one mutex-backed string read) and makes the existing banner accurately
-    // report both disconnects and reconnects without adding a Qt event bridge.
-    Timer {
-        interval: 1000
-        running: true
-        repeat: true
-        onTriggered: {
-            bridgeFeed.refresh();
-            // Also ticks the prompt-slot banner's wait time.
-            promptSlotStatus.refresh();
-        }
-    }
+    // Banner tick, only while the window is shown (ShownTicker.qml).
+    ShownTicker { id: shownTicker; window: root; feed: bridgeFeed; slot: promptSlotStatus }
+    readonly property alias shownTickerRef: shownTicker
+    readonly property alias alertHostRef: alertHost
     // QML ids are lexical names, not properties on `root`. Components below
     // need explicitly named root properties to inject these objects without
     // accidentally self-binding a same-named page property.
@@ -82,7 +73,7 @@ Kirigami.ApplicationWindow {
     property var makeRuleControllerRef: makeRuleController
     // Page replacement must not destroy an admitted local Save or its outcome.
     AnalysisExportController { id: analysisExportController; objectName: "analysisExportController"; Component.onCompleted: startBridgeFeed() }
-    AnalysisExportSheet { id: analysisExportSheet; controller: analysisExportController }
+    AnalysisExportSheet { id: analysisExportSheet; controller: analysisExportController; windowShown: shownTicker.shown }
     readonly property alias analysisExport: analysisExportSheet
     MakeRuleOutcomes {
         controller: makeRuleController

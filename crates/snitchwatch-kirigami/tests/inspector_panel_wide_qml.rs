@@ -56,6 +56,8 @@ Window {
     height: 700
     property var failures: []
     property int step: 0
+    // Timer ticks fired from inside a click's nested event loop must not re-enter a step.
+    property bool inStep: false
     property var submitted: []
     property var simulated: []
     property var shownRules: []
@@ -345,6 +347,7 @@ Window {
         running: true
         repeat: true
         onTriggered: {
+            if (probe.inStep) return;
             if (probe.step >= probe.steps.length) {
                 stop();
                 try {
@@ -357,12 +360,15 @@ Window {
                 }
                 return;
             }
+            probe.inStep = true;
             try {
                 probe.steps[probe.step]();
             } catch (e) {
                 probe.failures.push("step " + probe.step + " threw: " + e);
+            } finally {
+                probe.step++;
+                probe.inStep = false;
             }
-            probe.step++;
         }
     }
 }
