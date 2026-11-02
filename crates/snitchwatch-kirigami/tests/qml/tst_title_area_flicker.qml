@@ -48,6 +48,9 @@ Item {
     QtObject {
         id: modelStub
         property int pendingCount: 1
+        signal dataChanged()
+        signal modelReset()
+        signal rowsRemoved()
         function isPendingRow(id) { return id === statusStub.rowId; }
         function rowDetailsJson(id) { return "{}"; }
         function inlineDurationFor(id, choice, appBound, token) { return "this_time"; }
@@ -228,7 +231,7 @@ Item {
             win.height = height;
             feedStub.decideLater = decideLater;
             win.pageStack.clear();
-            win.pageStack.push(page);
+            win.pageStack.push(page.createObject(win.pageStack));
             wait(300);
             host.history = {};
             host.recording = true;
