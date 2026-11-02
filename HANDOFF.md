@@ -1,16 +1,31 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-10-30)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-11-01)
 
-> Start with the 2026-10-30 section below and local `.omc/STATE.md`. Earlier sections are dated history.
+> Start with the 2026-11-01 section below. The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are dated history.
 
-## 2026-10-30 — overnight run 3: Q01 keyboard work complete, history still dormant, GUI rebuild pending
+## 2026-11-01 — selectable text and rounded restyle merged, r16 candidate published
+
+- **Source:** `origin/main` at `03c187e9` (docs-only learning merge #310 on top of `a75214b3`, the merge of #309).
+- **Merged since 2026-10-30**, all in `crates/snitchwatch-kirigami` (QML + tests) plus the candidate CI config; bridge, scanner and packaging code are unchanged by this work:
+  - Selectable text: batches 1-8 (#288, #289, #290, #294, #291, #292, #293, #296), headings follow-up #295, LOW fixes #300, housekeeping #306/#307.
+  - Rounded 44 px iOS/Little Snitch restyle: PR A #286, batches B #302, C #297, D #299, E #304, F #298, MakeRuleSheet #301, InspectorPanel + DecideLaterButton + RuleButton #305.
+  - Blank-label fix for the KDE native style (#303); CI race hardening of the candidate publish guard (#308 r16 prep, #309); docs #287, #310.
+- **r16 GUI release:** candidate PUBLISHED as pre-release https://github.com/bearyjd/snitchwatch/releases/tag/r16-candidate from `a75214b358625cbda88e9e7431f01ae41645acfa` (candidate run 41315786846). NOT promoted: final r16 needs a separate owner go given to the bazzite-tower session. A published candidate cannot be replaced under the same name. Recover from a publish race with a FULL rerun, never `--failed`: a failed-jobs-only rerun can never pass (`run_attempt` is pinned).
+- **GUI rebuild (owner runs it outside the agent sandbox):** copy `dist/q01-complete-build-2/rebuild-local.py` to a NEW `dist/<name>-build`, change only the bundle file name, then after `git fetch origin` run `python3 rebuild-local.py --execute "$(git -C ../.. rev-parse origin/main)"`. Install with `flatpak install --user --reinstall <bundle>`.
+- **Needs the owner:**
+  - Install and check the CI-built candidate on Plasma (labels on every restyled button, connections list highlight, focus rings, Orca, drag-select), then promote via the tower.
+  - #252 scanner watchdog: parked draft.
+  - Combo-box key auto-repeat: `RoundedComboBox` ignores held-key repeat; a `repeatGuard` property would restore it. Decision pending.
+  - Click-ology cleanup request: details pending from the owner.
+  - Flicker on the Daemon Health / Security Scan title area: owner to send `RUST_LOG=snitchwatch_kirigami=debug` lines (target `snitchwatch_kirigami::health`).
+  - Worktree `q01-s3` (stale WIP): keep or drop decision.
+
+## 2026-10-30 — overnight run 3: Q01 keyboard work complete, history still dormant (history)
 
 - **Source:** `main` at `fd54e8d`, CI green (kirigami job included). Open PRs: only #252 (scanner watchdog, parked draft by the owner).
 - **Q01 keyboard and screen-reader work is merged end to end:** prompt (#258), answer surfaces (#253), Rules page (#270), learning review (#271), status/settings/first-run pages (#273), Connections map (#275), list pages (#278), global drawer (#277, drawer only, no page shortcuts per D3). Shared helpers: `GuardedButton`/`GuardedSwitch`/`GuardedRadioButton`/`GuardedToolButton` swallow Space auto-repeat (Qt clicks a button on release of an auto-repeated Space); the key-repeat test injector is gated behind the off-by-default `test-seams` cargo feature (#263).
 - **Also merged:** Deep Scan outcome announcements and sticky failures (#260, #264), About page (#265), reader rename-race fixes (#268), flaky-probe hardening (#276, #279), main-CI repair after two PRs collided (#280), eBPF Q05/Q06 preparation plan plus read-only `scripts/ebpf/measure.py` (#272), scan-page flicker research note (#274, cause not found; needs the owner's answers).
 - **Connection history is dormant on main and OFF:** store (#261), writer and page budget with the full-journal fallback (#262), lifecycle primitives (#267), pure rule identity (#269). No production call sites; guard tests enforce it. PR 3b/4b (durable parts) are not started and need the owner's go-ahead. Recorded LOWs: the #267 dormant-guard scanner (escaped apostrophe, block-comment newlines), and the unsalted `rule_hash` must never be logged or exported.
 - **Tower:** images `ca868f9f` then `e97d231c` published (pin still `5860dcd`); nothing to merge on our side; Bridge-touching merges since the pin: `2c5e510` (#261), `c8108a9` (#267) and `e3f2473` (#269) are dormant history code; **`3cdbbfa` (#262) is NOT purely dormant**: besides the dormant writer it changed the shared `state_file::read` (bridge) to retry when the opened file was replaced by a rename (link count 0), which affects live readers (rule-hit cache, curated store). It only removes spurious 'hard link elsewhere' errors during a concurrent save, but it is a runtime behaviour change, so the next bridge image should include it; tell the tower before any pin move (it dry-runs the repin tool first).
-- **GUI rebuild:** the build must run outside the agent tool sandbox (nested bwrap cannot bind `/etc/resolv.conf` there). Prepared: `dist/q01-complete-build-2/` with `rebuild-local.py`; command: `cd dist/q01-complete-build-2 && python3 rebuild-local.py --execute fd54e8d3d73a6dd3a16b0fc6a8a23296b07e72c2`. It writes `dist/snitchwatch-system-r15.1-q01-complete.flatpak`, installs nothing. `dist/q01-complete-build/` is a failed partial attempt (safe to delete). The installed GUI is still the stale `a05c1b4` build.
-- **Needs the owner:** desktop checks that tests cannot prove (Orca on the new names and the scan-outcome announcement, Breeze focus rings, tray by keyboard, prompt focus, real X11/Wayland auto-repeat flags); the Security Scan flicker details (see `docs/superpowers/research/2026-10-29-scan-page-flicker.md`); eBPF host steps and open questions in `docs/superpowers/plans/2026-10-29-ebpf-q05-q06.md`; whether history goes past dormant.
 - **Known flakes:** `inspector_panel_narrow_qml` and the status-pages Geography step are hardened (#276), `inspector_panel_navigation_qml` too (#279); #259 (learned/silent tests) is still open; seven other Timer-driven probes lack the re-entrancy guard (listed in #279).
 
 ## 2026-10-26 — clarity counts in review, new bridge image published
