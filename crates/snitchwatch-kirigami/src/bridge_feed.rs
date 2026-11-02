@@ -282,6 +282,12 @@ impl qobject::BridgeFeed {
         let link_thread = qt_thread.clone();
         let mut link_rx = crate::bridge_runtime::link_wake::subscribe();
         runtime.spawn(async move {
+            // Refresh once after subscribing: a change between main.qml's
+            // first refresh() and the subscription is otherwise never seen,
+            // and the shown-only tick may not run (started hidden).
+            if link_thread.queue(|qobject| qobject.refresh()).is_err() {
+                return;
+            }
             while link_rx.changed().await.is_ok() {
                 if link_thread.queue(|qobject| qobject.refresh()).is_err() {
                     break;
