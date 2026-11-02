@@ -30,6 +30,7 @@ fn main() {
                 "qml/ConnectionsPage.qml",
                 "qml/ConnectionRow.qml",
                 "qml/PendingAgeTicker.qml",
+                "qml/ShownTicker.qml",
                 "qml/ConnectionActions.qml",
                 "qml/ClipboardCopy.qml",
                 "qml/ConnectionDetailsCopy.qml",
