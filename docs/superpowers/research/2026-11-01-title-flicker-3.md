@@ -17,8 +17,9 @@ attempt changes those conditions:
 
 - The window-level banners in `main.qml` (`bridgeBanner`,
   `daemonHealthBanner`, `pendingExposureBanner`, `PromptSlotBanner`,
-  `LearningBanner`) are anchored at the window top with `z: 999`. They lie on
-  top of the page's title area. Pointer "over the title area" while a banner is
+  `LearningBanner`) are stacked from the window top, each anchored under the
+  visible one before it, with `z: 999` (`LearningBanner` 998). The first one up
+  lies on top of the page's title area. Pointer "over the title area" while a banner is
   up means pointer over the banner.
 - The probe shows the real `PromptSlotBanner` ("A connection is waiting for
   your answer." plus the holder line "... has been waiting for your answer for
@@ -35,16 +36,25 @@ attempt changes those conditions:
   body. At 300 px Security Scan overflows, so the wheel really moves it.
 - On every `frameSwapped` and every 4 ms it records each text item in the
   window and in `Overlay.overlay`: text, effective visibility, opacity product
-  and height, plus y for the banner subtree. It fails on any visible A-B-A
-  change that reverts within 120 ms. That pattern is the flicker's signature.
+  and height, plus y for the banner subtree. Each field is tracked on its own.
+  The probe fails when a field leaves the value it has held for 120 ms and
+  returns to it within 120 ms, whatever values it passed through on the way,
+  provided the item was on screen at some point. That is the flicker's
+  signature. It also asserts that the banner heading was sampled on screen and,
+  for the overflowing Security Scan rows, that the wheel moved `contentY`.
 
 Result: zero transients on Basic, Fusion and Material, and no binding-loop
-warnings. A mutant check proved the detector works: a 16 ms wheel-driven hide
-of the banner heading (see the commit message) made the probe fail at once.
+warnings. Two mutant checks show the detector works. A `WheelHandler` on the
+banner that hid its heading for 16 ms per wheel event failed 16 of 18 rows. The
+same handler dipping the heading's opacity to 0.4 failed 14 of 18.
 
-## Ruled out (in this sandbox)
+## Ruled out (in this sandbox, within the probe's limits)
 
-- A wheel-, hover- or scroll-driven change of any text, visibility, opacity or
+Limits: the probe samples properties every frame and every 4 ms. It does not
+see rendering-only artefacts (a scene-graph glitch with unchanged properties).
+Synthetic wheel events also don't fully reproduce a real pointer hovering.
+
+- A wheel- or scroll-driven change of any text, visibility, opacity or
   height on either page, in the prompt-slot banner, or in a tooltip/overlay.
   This covers the probe's sizes and styles and both "Decide later" layouts.
 - An `InlineMessage` layout flip (label line count / actions row moving) while

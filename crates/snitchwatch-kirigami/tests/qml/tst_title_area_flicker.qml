@@ -30,6 +30,10 @@ Item {
     property var transients: []
     property int samples: 0
     property bool recording: false
+    // Proof the run was not vacuous: the wheel moved the page, and the
+    // banner heading was sampled on screen.
+    property real maxContentY: 0
+    property bool sawHeading: false
 
     QtObject {
         id: statusStub
@@ -120,9 +124,19 @@ Item {
         const op = opacity * item.opacity;
         const anchored = inBanner || item === banner;
         if (typeof item.text === "string" && item.lineCount !== undefined) {
-            const p = item.mapToItem(null, 0, 0);
-            out[path] = (item.visible && op > 0.01 ? "V" : "H") + "|" + Math.round(op * 10)
-                + (anchored ? "|y" + Math.round(p.y) : "") + "|h" + Math.round(item.height) + "|" + item.text;
+            const fields = {
+                vis: item.visible && op > 0.01 ? "V" : "H",
+                op: String(Math.round(op * 10)),
+                h: String(Math.round(item.height)),
+                text: item.text
+            };
+            if (anchored) {
+                fields.y = String(Math.round(item.mapToItem(null, 0, 0).y));
+            }
+            out[path] = fields;
+            if (fields.vis === "V" && item.text === "A connection is waiting for your answer.") {
+                host.sawHeading = true;
+            }
         }
         const kids = item.children;
         for (let i = 0; i < kids.length; ++i) {
@@ -130,36 +144,62 @@ Item {
         }
     }
 
+    // Per item and per field: the last value held for at least
+    // `transientMs` is "stable". A field that leaves its stable value and
+    // returns to it within `transientMs` is a transient, however many
+    // intermediate values it passed through (an opacity dip, a hide across a
+    // text tick). Changes to an item hidden before and after don't count.
     function sample() {
         if (!recording) {
             return;
         }
         samples += 1;
         const now = Date.now();
+        const page = win.pageStack.currentItem;
+        if (page && page.flickable) {
+            maxContentY = Math.max(maxContentY, page.flickable.contentY);
+        }
         const snap = {};
         walk(win.contentItem, "c", snap, 1, false);
         if (win.Controls.Overlay.overlay) {
             walk(win.Controls.Overlay.overlay, "o", snap, 1, false);
         }
+        const gone = { vis: "H", op: "0", h: "-", text: "<gone>", y: "-" };
         const keys = Object.keys(snap).concat(Object.keys(history));
         for (let i = 0; i < keys.length; ++i) {
             const key = keys[i];
-            const value = snap[key] === undefined ? "<gone>" : snap[key];
-            const h = history[key] || [];
-            if (h.length === 0 || h[h.length - 1].v !== value) {
-                h.push({ t: now, v: value });
-                const n = h.length;
-                // A change that stays hidden throughout can't be seen.
-                const seen = value.startsWith("V") || (n >= 2 && h[n - 2].v.startsWith("V"));
-                if (n >= 3 && seen && h[n - 3].v === value && now - h[n - 2].t < transientMs) {
-                    transients.push(key + ": " + h[n - 3].v + " -> " + h[n - 2].v
-                                    + " (" + (now - h[n - 2].t) + " ms) -> back");
+            const f = snap[key] || gone;
+            const rec = history[key] || {};
+            const names = ["vis", "op", "h", "text", "y"];
+            for (let j = 0; j < names.length; ++j) {
+                const name = names[j];
+                const value = f[name] === undefined ? "-" : f[name];
+                let st = rec[name];
+                if (st === undefined) {
+                    rec[name] = { stable: value, cur: value, since: now, left: -1, seen: false };
+                    continue;
                 }
-                while (h.length > 3) {
-                    h.shift();
+                if (value !== st.cur) {
+                    if (value === st.stable && st.left >= 0) {
+                        if (now - st.left < transientMs && (st.seen || f.vis === "V")) {
+                            transients.push(key + " " + name + ": " + st.stable + " -> " + st.cur
+                                            + " (" + (now - st.left) + " ms) -> back");
+                        }
+                        st.left = -1;
+                    } else if (value !== st.stable && st.left < 0) {
+                        st.left = now;
+                        st.seen = (rec.vis ? rec.vis.cur : f.vis) === "V" || f.vis === "V";
+                    } else if (f.vis === "V") {
+                        st.seen = true;
+                    }
+                    st.cur = value;
+                    st.since = now;
+                } else if (st.cur !== st.stable && now - st.since >= transientMs) {
+                    st.stable = st.cur;
+                    st.left = -1;
                 }
-                history[key] = h;
             }
+            history[key] = rec;
         }
     }
 
@@ -222,8 +262,14 @@ Item {
         function test_no_transient_text_while_scrolling_over_title_area(data) {
             host.transients = [];
             host.samples = 0;
+            host.maxContentY = 0;
+            host.sawHeading = false;
             run(data.page, data.width, data.height, data.dl);
             verify(banner.visible, "the prompt-slot banner is not on screen");
+            verify(host.sawHeading, "the banner heading was never sampled on screen");
+            if (data.page === scannerPage && data.height < 400) {
+                verify(host.maxContentY > 0, "the wheel never moved the Security Scan page");
+            }
             verify(host.samples > 100, "too few samples: " + host.samples);
             compare(host.transients.length, 0, host.transients.slice(0, 5).join("\n"));
         }
