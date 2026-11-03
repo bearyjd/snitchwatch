@@ -685,6 +685,7 @@ Kirigami.ApplicationWindow {
 
     // SNITCHWATCH_TEXT_TRACE=1 only: logs on-screen text changes (TextTrace.qml).
     Loader {
+        objectName: "textTraceLoader"
         active: appInfo.textTrace
         sourceComponent: TextTrace {
             target: root.contentItem

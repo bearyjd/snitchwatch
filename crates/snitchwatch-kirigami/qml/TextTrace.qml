@@ -7,7 +7,9 @@
 // Change-driven: it samples on the window's frameSwapped, no timer. Each
 // sample walks `target` (the window content) and `overlay` (popups and
 // tooltips) and diffs every text item against the previous sample. Items
-// hidden before and after a change are skipped.
+// hidden before and after a change are skipped. Lines go out through
+// console.warn: console.log is a debug-level message and is dropped in a
+// default Qt build, so a flatpak run would show nothing.
 import QtQuick
 
 Item {
@@ -19,7 +21,7 @@ Item {
     // The tray tooltip is not an item, so main.qml hands the string in.
     property string trayTooltip: ""
 
-    // One finished log line; also written with console.log.
+    // One finished log line; also written with console.warn.
     signal traced(string line)
 
     readonly property int maxText: 120
@@ -34,7 +36,7 @@ Item {
 
     function emit(message) {
         const line = "text-trace t=" + (Date.now() - startMs) + "ms " + message;
-        console.log(line);
+        console.warn(line);
         traced(line);
     }
 

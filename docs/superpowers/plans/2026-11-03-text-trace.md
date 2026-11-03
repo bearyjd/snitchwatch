@@ -23,7 +23,7 @@ app itself must say which item flashes.
   sample walks the window content and `Controls.Overlay.overlay` (popups,
   tooltips) and keeps, per text item (anything with string `text` and
   `lineCount`), effective visibility, effective opacity and text.
-- Logs only diffs, one line each, via `console.log` (stderr, so it reaches the
+- Logs only diffs, one line each, via `console.warn` (stderr, so it reaches the
   terminal/journal without `SNITCHWATCH_LOG`):
   `text-trace t=<ms> <path> <field>: <old> -> <new>`, plus `+`/`-` lines for
   items that appear/disappear. Path = per-level `Type#childIndex[objectName]`.
