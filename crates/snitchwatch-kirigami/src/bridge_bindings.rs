@@ -25,6 +25,8 @@ pub mod qobject {
         #[qproperty(bool, demo_mode, cxx_name = "demoMode")]
         /// Screenshot output directory; empty unless demo mode is on.
         #[qproperty(QString, screenshot_dir, cxx_name = "screenshotDir")]
+        /// `SNITCHWATCH_TEXT_TRACE=1`: log on-screen text changes (`TextTrace.qml`).
+        #[qproperty(bool, text_trace, cxx_name = "textTrace")]
         type AppInfo = super::AppInfoRust;
     }
 }
@@ -35,6 +37,14 @@ pub struct AppInfoRust {
     version: cxx_qt_lib::QString,
     demo_mode: bool,
     screenshot_dir: cxx_qt_lib::QString,
+    text_trace: bool,
+}
+
+/// Env var that turns the on-screen text change log on (exactly `1`).
+pub const ENV_TEXT_TRACE: &str = "SNITCHWATCH_TEXT_TRACE";
+
+fn text_trace_flag(value: Option<&str>) -> bool {
+    value == Some("1")
 }
 
 impl Default for AppInfoRust {
@@ -48,6 +58,7 @@ impl Default for AppInfoRust {
                     .map(|d| d.display().to_string())
                     .unwrap_or_default(),
             ),
+            text_trace: text_trace_flag(std::env::var(ENV_TEXT_TRACE).ok().as_deref()),
         }
     }
 }
@@ -55,6 +66,14 @@ impl Default for AppInfoRust {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_exactly_one_enables_text_trace() {
+        assert!(text_trace_flag(Some("1")));
+        for v in [None, Some(""), Some("0"), Some("true"), Some("yes")] {
+            assert!(!text_trace_flag(v), "{v:?}");
+        }
+    }
 
     #[test]
     fn app_info_default_carries_name_and_crate_version() {

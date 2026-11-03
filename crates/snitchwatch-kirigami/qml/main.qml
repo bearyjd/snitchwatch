@@ -683,6 +683,16 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    // SNITCHWATCH_TEXT_TRACE=1 only: logs on-screen text changes (TextTrace.qml).
+    Loader {
+        active: appInfo.textTrace
+        sourceComponent: TextTrace {
+            target: root.contentItem
+            overlay: Controls.Overlay.overlay
+            trayTooltip: trayController.tooltip
+        }
+    }
+
     // Task 18 tray icon. `Qt.labs.platform.SystemTrayIcon` (verified present
     // at /usr/lib64/qt6/qml/Qt/labs/platform in this environment) renders via
     // the platform's StatusNotifierItem support on Plasma — no cxx-qt/KDE

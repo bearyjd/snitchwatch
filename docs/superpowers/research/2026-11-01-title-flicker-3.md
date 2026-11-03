@@ -115,3 +115,25 @@ repaint, so nothing here is evidence for or against any of them.
 Next code step if (1) points at hypothesis 1: add a debug log of
 `PromptSlotStatus` `held` flips (the way PR #285 did for health), then
 look at the timestamps.
+
+## How to capture a text-change trace (SNITCHWATCH_TEXT_TRACE)
+
+Opt-in debug mode (off by default, nothing is instantiated without the flag).
+It logs every change of on-screen text, visibility and opacity of every text
+item in the window and its popups/tooltips, plus tray tooltip changes, with a
+millisecond timestamp and the item's path. Run:
+
+    flatpak run --env=SNITCHWATCH_TEXT_TRACE=1 \
+      --env=SNITCHWATCH_LOG=snitchwatch_kirigami=debug \
+      org.snitchwatch.Snitchwatch 2>&1 | tee trace.log
+
+Then, with the window at the size where you see the flicker, open Daemon
+Health, scroll the wheel with the pointer over the title area for about 20 s,
+then do the same on Security Scan. Send `trace.log` (grep for `text-trace`).
+
+Line format: `text-trace t=<ms>ms <path> <field>: <old> -> <new> text: "..."`,
+where field is `vis` (V visible / H hidden), `op` (opacity x10) or `text`;
+`+`/`-` lines are items that appeared/disappeared; `tray.tooltip:` lines are
+the tray tooltip. A flash shows up as a `vis: H -> V` (or a `text:` change to
+"working"/"waiting") followed within a few ms by the reverse; the path names
+the item (`Type#childIndex[objectName]` per level).
