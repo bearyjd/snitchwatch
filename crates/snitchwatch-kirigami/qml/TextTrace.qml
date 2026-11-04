@@ -80,15 +80,18 @@ Item {
         if (old.vis === "H" && cur.vis === "H") {
             return;
         }
+        // Only text that was actually on screen is printed: the side that was
+        // visible, never a string set while the item was hidden.
+        const shown = cur.vis === "V" ? cur.text : old.text;
         const names = ["vis", "op"];
         for (let i = 0; i < names.length; ++i) {
             if (old[names[i]] !== cur[names[i]]) {
                 emit(path + " " + names[i] + ": " + old[names[i]] + " -> " + cur[names[i]]
-                     + " text: " + quote(cur.text));
+                     + " text: " + quote(shown));
             }
         }
-        if (old.text !== cur.text) {
-            emit(path + " text: " + quote(old.text) + " -> " + quote(cur.text) + " vis: " + cur.vis);
+        if (old.vis === "V" && cur.vis === "V" && old.text !== cur.text) {
+            emit(path + " text: " + quote(old.text) + " -> " + quote(cur.text) + " vis: V");
         }
     }
 

@@ -118,10 +118,18 @@ look at the timestamps.
 
 ## How to capture a text-change trace (SNITCHWATCH_TEXT_TRACE)
 
-Opt-in debug mode (off by default, nothing is instantiated without the flag).
-It logs every change of on-screen text, visibility and opacity of every text
-item in the window and its popups/tooltips, plus tray tooltip changes, with a
-millisecond timestamp and the item's path. Run:
+Opt-in debug mode (off by default: without the flag the tracer is never
+created and never samples; only an inactive `Loader` and one environment
+lookup at startup remain). It samples once per rendered frame and logs the
+changes it sees in on-screen text, visibility and opacity of every text item
+in the window and its popups/tooltips, plus tray tooltip changes, with a
+millisecond timestamp and the item's path. Text is printed only if it was on
+screen: a string set while an item was hidden is never logged. Limits: a
+change that starts and ends between two frames is not seen, opacity is rounded
+to tenths, "visible" ignores clipping by a parent, and a flicker that is a pure
+rendering artefact (properties unchanged) leaves no line. So an empty trace
+over the flicker is itself a result (it points to hypothesis 2 or 3 above),
+not proof that nothing flashed. Run:
 
     flatpak run --env=SNITCHWATCH_TEXT_TRACE=1 \
       --env=SNITCHWATCH_LOG=snitchwatch_kirigami=debug \

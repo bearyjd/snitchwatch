@@ -97,6 +97,18 @@ Item {
             verify(joined().indexOf("- ") >= 0 && joined().indexOf("[late]") >= 0, joined());
         }
 
+        function test_text_set_while_hidden_is_never_printed() {
+            heading.text = "public";
+            tracer.sample();
+            host.lines = [];
+            banner.visible = false;
+            heading.text = "private";
+            tracer.sample();
+            const s = joined();
+            verify(s.indexOf("[heading] vis: V -> H text: \"public\"") >= 0, s);
+            compare(s.indexOf("private"), -1, s);
+        }
+
         function test_hidden_before_and_after_is_not_logged() {
             banner.visible = false;
             tracer.sample();
