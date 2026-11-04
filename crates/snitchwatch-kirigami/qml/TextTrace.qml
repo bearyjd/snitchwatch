@@ -116,6 +116,10 @@ Item {
         primed = true;
     }
 
+    // Deliberately NOT visibility-gated: the tray tooltip is app-composed
+    // status text (bridge/daemon state, see tray_health::compose_tooltip),
+    // shown only on hover, and a prime candidate for the "waiting" flash.
+    // Change-driven, not frame-sampled.
     onTrayTooltipChanged: {
         if (primed) {
             emit("tray.tooltip: " + quote(trayTooltipOld) + " -> " + quote(trayTooltip));

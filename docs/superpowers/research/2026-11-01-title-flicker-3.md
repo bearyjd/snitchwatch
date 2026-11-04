@@ -123,8 +123,11 @@ created and never samples; only an inactive `Loader` and one environment
 lookup at startup remain). It samples once per rendered frame and logs the
 changes it sees in on-screen text, visibility and opacity of every text item
 in the window and its popups/tooltips, plus tray tooltip changes, with a
-millisecond timestamp and the item's path. Text is printed only if it was on
-screen: a string set while an item was hidden is never logged. Limits: a
+millisecond timestamp and the item's path. Item text is printed only if it was
+on screen: a string set while an item was hidden is never logged. The one
+exception is the tray tooltip, which is logged whenever its string changes
+(it is app-composed bridge/daemon status text, shown only on hover, and is
+change-driven rather than frame-sampled). Limits: a
 change that starts and ends between two frames is not seen, opacity is rounded
 to tenths, "visible" ignores clipping by a parent, and a flicker that is a pure
 rendering artefact (properties unchanged) leaves no line. So an empty trace
