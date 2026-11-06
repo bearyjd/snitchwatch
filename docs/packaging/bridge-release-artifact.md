@@ -73,7 +73,7 @@ compare against it — compare against the hash pinned in your repo.
   bundled SQLite, no OpenSSL). Its only `NEEDED` libraries are
   `libgcc_s.so.1`, `libm.so.6`, `libc.so.6`, `ld-linux-x86-64.so.2`; it needs
   glibc ≥ 2.34. It is built in
-  `registry.fedoraproject.org/fedora:44@sha256:…` (see `packaging/release/pins.env`).
+  `registry.fedoraproject.org/fedora:45@sha256:…` (see `packaging/release/pins.env`).
 - `--version` prints exactly `snitchwatch-bridge-cli ${VERSION}`; `--help`
   prints usage. Both exit 0 before any I/O (no socket, token, or bind).
   **Without a flag the binary starts a bridge** — never run it bare in an

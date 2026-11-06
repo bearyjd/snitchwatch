@@ -4,7 +4,7 @@
 # access to the Fedora mirrors; deliberately not part of package-check).
 #
 # The packages are installed once into a container from the digest-pinned
-# Fedora 44 image (packaging/release/pins.env), committed to a throwaway local
+# Fedora 45 image (packaging/release/pins.env), committed to a throwaway local
 # image, and removed afterwards. Two phases run on it.
 #
 # Phase 1 (--inside, plain container):
