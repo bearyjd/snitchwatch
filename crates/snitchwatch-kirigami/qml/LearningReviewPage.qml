@@ -16,6 +16,7 @@ import org.kde.kirigami as Kirigami
 Kirigami.Page {
     id: page
     title: "Make rules from what I saw"
+    property bool textTraceTitle: true
 
     // LearningReviewController and SettingsController, or stand-ins.
     property var controller: null

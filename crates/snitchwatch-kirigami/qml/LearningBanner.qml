@@ -61,6 +61,7 @@ ColumnLayout {
     }
 
     Kirigami.InlineMessage {
+        property bool textTraceable: true
         Layout.fillWidth: true
         visible: true
         type: Kirigami.MessageType.Information

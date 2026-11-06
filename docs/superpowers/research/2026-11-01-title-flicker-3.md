@@ -120,27 +120,30 @@ look at the timestamps.
 
 Opt-in debug mode (off by default: without the flag the tracer is never
 created and never samples; only an inactive `Loader` and one environment
-lookup at startup remain). It samples once per rendered frame and logs the
-changes it sees in on-screen text, visibility and opacity of every text item
-in the window and its popups/tooltips, plus tray tooltip changes, with a
-millisecond timestamp and the item's path. Item text is printed only if it was
-on screen: visible, effective opacity above 0, and inside the window and every
-clipping ancestor; a string set while an item was hidden or scrolled out is
-never logged. Editable fields (TextInput, TextEdit, TextField, TextArea,
-password fields) never have their content logged: they show as
-`<editable field redacted>`. Truncated (elided) text shows as `(elided)`, not
-the full raw string. The one exception to on-screen-only is the tray tooltip,
-which is logged whenever its string changes, under the label
-`tray-tooltip (not necessarily visible)` so it can never be mistaken for
-on-screen text (it is app-composed bridge/daemon status text, shown only on
-hover, invisible to item-tree probing, and is change-driven rather than
-frame-sampled). Limits: a
-change that starts and ends between two frames is not seen, opacity is rounded
-to tenths, clipping is checked by bounding box only (no rotation or shader
-clipping), and a flicker that is a pure
-rendering artefact (properties unchanged) leaves no line. So an empty trace
-over the flicker is itself a result (it points to hypothesis 2 or 3 above),
-not proof that nothing flashed. Run:
+lookup at startup remain). It samples once per rendered frame and logs changes
+of the text, visibility and opacity of an ALLOWLIST of text items, with a
+millisecond timestamp and the item's path. Only items under a
+`property bool textTraceable: true` mark are ever read: the window banners, the
+prompt-slot and learning banners' fixed message (not the holder line, which
+holds program and host), the Daemon Health message, the "Waiting for daemon
+statistics" placeholder, the rule button state label ("Waiting for the
+firewall") and the window title (read from the page stack's toolbar while the
+current page has a fixed `textTraceTitle`). Editors, tables, the Rule
+Simulator, inputs, process names and hosts are never read. Marked text is
+logged only while on screen: visible, opacity above 0 and FULLY inside the
+window and every clipping ancestor (`(partly hidden)` otherwise); editable
+fields log `<editable field redacted>`; elided text logs `(elided)`. To add a
+mark, put `property bool textTraceable: true` on an item whose strings are all
+fixed (full list and rule in docs/superpowers/plans/2026-11-03-text-trace.md).
+The one exception to on-screen-only is the tray tooltip, logged on change under
+the label `tray-tooltip (not necessarily visible)`; a `Blocked: ...` tooltip
+(attacker-influenced process and host) is logged only as
+`Blocked: (details withheld)`. Limits: a change that starts and ends between
+two frames is not seen, opacity is rounded to tenths, clipping is checked by
+bounding box only, the holder line of the prompt-slot banner is not traced, and
+a flicker that is a pure rendering artefact (properties unchanged) leaves no
+line. So an empty trace over the flicker is itself a result (it points to
+hypothesis 2 or 3 above), not proof that nothing flashed. Run:
 
     flatpak run --env=SNITCHWATCH_TEXT_TRACE=1 \
       --env=SNITCHWATCH_LOG=snitchwatch_kirigami=debug \

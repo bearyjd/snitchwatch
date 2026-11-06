@@ -110,8 +110,14 @@ fn main_qml_mounts_the_tracer_only_with_the_flag_and_it_logs() {
         );
     }
     assert!(
-        on_out.contains("text-trace t=") && on_out.contains("-> \"traced banner text\""),
-        "flag on: no trace line for the changed banner text:\n{on_out}"
+        on_out.contains("text-trace t=")
+            && on_out.contains("bridgeMessage-connecting")
+            && on_out.contains("Snitchwatch is connecting to its background service"),
+        "flag on: no trace line for the allowlisted bridge banner:\n{on_out}"
+    );
+    assert!(
+        !on_out.contains("STATUS_CANARY"),
+        "flag on: the unmarked bridge status text was logged:\n{on_out}"
     );
     assert!(
         !off_out.contains("text-trace"),
@@ -154,11 +160,15 @@ const PROBE_ON_BODY: &str = r#"
         if (loader.item === null) {
             throw new Error("the TextTrace instance does not exist with the flag on");
         }
+        if (loader.item.titleToolbar() === null) {
+            throw new Error("the window title toolbar is not traced for a fixed-title page");
+        }
         main.bridgeFeedRef.ok = false;
-        main.bridgeFeedRef.linkState = "retrying";
+        main.bridgeFeedRef.linkState = "connecting";
         main.bridgeFeedRef.statusText = "before";
         loader.item.sample();
-        main.bridgeFeedRef.statusText = "traced banner text";
+        main.bridgeFeedRef.linkState = "retrying";
+        main.bridgeFeedRef.statusText = "STATUS_CANARY";
         loader.item.sample();
         console.warn("probe-done on");
     }

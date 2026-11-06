@@ -11,11 +11,20 @@
 // console.warn: console.log is a debug-level message and is dropped in a
 // default Qt build, so a flatpak run would show nothing.
 //
-// Privacy: text is logged only for items that are visible, have effective
-// opacity > 0 and intersect the window and every clip:true ancestor. Editable
-// fields log a placeholder, never their content; truncated text logs
-// "(elided)" instead of the undisplayed full string. The tray tooltip is the
-// one labelled exception (see onTrayTooltipChanged).
+// ALLOWLIST: text is read ONLY under an item that opts in with
+// `property bool textTraceable: true` (an item's own value overrides what it
+// inherits, so `false` opts a part of a marked subtree back out). Unmarked
+// items are never read: not their text, not displayText/selectedText. The
+// window title comes from the page stack's toolbar, and only while the current
+// page declares `textTraceTitle: true` (a fixed, literal title). Marks live in
+// the component files; docs/superpowers/plans/2026-11-03-text-trace.md lists them.
+//
+// Defence in depth for marked items: text is logged only while the item is
+// visible, effective opacity > 0 and FULLY inside the window and every
+// clip:true ancestor ("(partly hidden)" otherwise); editable fields log a
+// placeholder, truncated text logs "(elided)". The tray tooltip is the one
+// labelled exception (see onTrayTooltipChanged) and withholds the
+// RecentBlock "Blocked: <what>" detail.
 import QtQuick
 
 Item {
@@ -26,6 +35,8 @@ Item {
     property Item overlay: null
     // The tray tooltip is not an item, so main.qml hands the string in.
     property string trayTooltip: ""
+    // The page stack whose toolbar carries the window title; tests may replace it.
+    property var pageStack: Window.window ? Window.window.pageStack : null
 
     // One finished log line; also written with console.warn.
     signal traced(string line)
@@ -85,32 +96,50 @@ Item {
                  r: Math.min(r.r, c.r), b: Math.min(r.b, c.b) };
     }
 
-    // `clipRect` is the window rect narrowed by every clip:true ancestor.
-    function walk(item, path, out, opacity, clipRect) {
+    // The toolbar item to read, or null: only while the current page's title
+    // is a fixed literal (`textTraceTitle`).
+    function titleToolbar() {
+        const ps = pageStack;
+        const page = ps ? ps.currentItem : null;
+        return page && page.textTraceTitle === true && ps.globalToolBar ? ps.globalToolBar : null;
+    }
+
+    // `clipRect` is the window rect narrowed by every clip:true ancestor;
+    // `allowed` is the inherited allowlist state.
+    function walk(item, path, out, opacity, clipRect, allowed, toolbar) {
         const op = opacity * item.opacity;
         let clip = clipRect;
         if (item.clip) {
             clip = intersect(clipRect, bounds(item));
         }
-        if (typeof item.text === "string"
+        let ok = allowed;
+        if (item === toolbar) {
+            ok = true;
+        } else if (item.textTraceable !== undefined) {
+            ok = item.textTraceable === true;
+        }
+        if (ok && typeof item.text === "string"
                 && (item.lineCount !== undefined || item.cursorPosition !== undefined)) {
             const r = bounds(item);
-            const inside = r.l < clip.r && r.r > clip.l && r.t < clip.b && r.b > clip.t;
+            const within = r.l >= clip.l - 1 && r.r <= clip.r + 1 && r.t >= clip.t - 1 && r.b <= clip.b + 1;
+            const touches = r.l < clip.r && r.r > clip.l && r.t < clip.b && r.b > clip.t;
             let shown = item.text;
             if (isEditable(item)) {
                 shown = redacted;
             } else if (item.truncated === true) {
                 shown = "(elided)";
+            } else if (!within) {
+                shown = "(partly hidden)";
             }
             out[path] = {
-                vis: item.visible && op > 0 && inside ? "V" : "H",
+                vis: item.visible && op > 0 && touches ? "V" : "H",
                 op: String(Math.round(op * 10)),
                 text: shown
             };
         }
         const kids = item.children;
         for (let i = 0; i < kids.length; ++i) {
-            walk(kids[i], path + "/" + segment(kids[i], i), out, op, clip);
+            walk(kids[i], path + "/" + segment(kids[i], i), out, op, clip, ok, toolbar);
         }
     }
 
@@ -153,9 +182,10 @@ Item {
         const win = tracer.Window.window;
         const view = win ? { l: 0, t: 0, r: win.width, b: win.height }
                          : { l: -Infinity, t: -Infinity, r: Infinity, b: Infinity };
-        walk(target, segment(target, 0), snap, 1, view);
+        const toolbar = titleToolbar();
+        walk(target, segment(target, 0), snap, 1, view, false, toolbar);
         if (overlay) {
-            walk(overlay, "overlay", snap, 1, view);
+            walk(overlay, "overlay", snap, 1, view, false, toolbar);
         }
         if (primed) {
             Object.keys(snap).forEach(function (k) { diff(k, previous[k], snap[k]); });
@@ -176,15 +206,24 @@ Item {
     // "waiting" flash. Its lines carry a distinct label so they can never be
     // mistaken for on-screen text. Change-driven, not frame-sampled.
     onTrayTooltipChanged: {
-        if (primed) {
-            emit("tray-tooltip (not necessarily visible): " + quote(trayTooltipOld) + " -> " + quote(trayTooltip));
+        const cur = safeTooltip(trayTooltip);
+        if (primed && cur !== trayTooltipOld) {
+            emit("tray-tooltip (not necessarily visible): " + quote(trayTooltipOld) + " -> " + quote(cur));
         }
-        trayTooltipOld = trayTooltip;
+        trayTooltipOld = cur;
     }
     property string trayTooltipOld: ""
 
+    // "Blocked: <what>" carries the attacker-influenced process and host of a
+    // RecentBlock (src/tray.rs derive_tooltip), and compose_tooltip appends
+    // more after it, so the source string cannot be split safely: log only
+    // the fixed lead-in and drop the rest.
+    function safeTooltip(t) {
+        return t.indexOf("Blocked:") === 0 ? "Blocked: (details withheld)" : t;
+    }
+
     Component.onCompleted: {
-        trayTooltipOld = trayTooltip;
+        trayTooltipOld = safeTooltip(trayTooltip);
         sample();
     }
 

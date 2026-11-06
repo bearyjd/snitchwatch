@@ -10,6 +10,7 @@ import com.snitchwatch.shell
 Kirigami.Page {
     id: page
     title: "Set up Snitchwatch"
+    property bool textTraceTitle: true
 
     // Injected by main.qml: the SettingsController.
     property var settings: null

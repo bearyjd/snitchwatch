@@ -27,6 +27,7 @@ import com.snitchwatch.shell
 Kirigami.Page {
     id: page
     title: "Traffic"
+    property bool textTraceTitle: true
 
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property TrafficModel model
@@ -80,6 +81,7 @@ Kirigami.Page {
         width: parent.width - (Kirigami.Units.largeSpacing * 4)
         visible: !page.model || !page.model.statsReceived
         icon.name: "office-chart-line"
+        property bool textTraceable: true
         text: "Waiting for daemon statistics"
         explanation: "opensnitchd reports aggregate connection statistics when it has new \
                       connection activity to report, not on a fixed schedule — this page \

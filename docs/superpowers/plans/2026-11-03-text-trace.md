@@ -20,14 +20,37 @@ app itself must say which item flashes.
   instantiated (no walker, no connections, no timers). A few lines in
   main.qml (guarded by the 800-line cap).
 - Change-driven: samples on the window's `frameSwapped` (no timer). Each
-  sample walks the window content and `Controls.Overlay.overlay` (popups,
-  tooltips) and keeps, per text item (anything with string `text` and
-  `lineCount`, or a text-entry item), effective visibility, effective opacity
-  and text. "On screen" = visible, effective opacity > 0, and the item's rect
-  intersects the window and every `clip: true` ancestor.
-- Privacy: editable items (TextInput/TextEdit/TextField/TextArea, any
-  non-Normal `echoMode`, `readOnly: false`) log `<editable field redacted>`,
-  never their content; truncated text logs `(elided)` instead of the raw text.
+  sample walks the window content and `Controls.Overlay.overlay`.
+- **Allowlist (owner decision, codex round 2):** text is read ONLY under an
+  item that declares `property bool textTraceable: true`; the nearest
+  declaration wins, so `textTraceable: false` opts a part of a marked subtree
+  back out. Unmarked items are never read (no `text`, `displayText`,
+  `selectedText`, `preeditText`), so editors, rule/connection tables, the Rule
+  Simulator, inputs, process names and hosts cannot leak, however they are
+  bound. The window title is read from `pageStack.globalToolBar` only while
+  the current page has `property bool textTraceTitle: true` (a literal,
+  fixed title; ConnectionDetailPage's title is a process name and is not
+  marked).
+- Defence in depth on marked items: logged only while visible, effective
+  opacity > 0 and FULLY inside the window and every `clip: true` ancestor
+  (otherwise `(partly hidden)`); editable items (TextInput/TextEdit/TextField/
+  TextArea, non-Normal `echoMode`, `readOnly: false`) log
+  `<editable field redacted>`; truncated text logs `(elided)`.
+- **Marked:** `main.qml` bridgeBanner (its `statusText` label opted out),
+  daemonHealthBanner, pendingExposureBanner; the InlineMessage in
+  `PromptSlotBanner.qml` (its holder line carries program and host, so it is
+  not marked) and `LearningBanner.qml`; the InlineMessage in
+  `DaemonHealthPage.qml`; the "Waiting for daemon statistics"
+  PlaceholderMessage in `TrafficPage.qml`; the `ruleLabel` state label in
+  `RuleButton.qml` ("Waiting for the firewall"); and `textTraceTitle` on the
+  fixed-title pages (Traffic, Scanner, Daemon Health, About, Diagnostics, Geo,
+  Silent Mode, Blocklists, Rules, Profiles, Recommended Rules, Learning
+  Review, Connections, Curated Groups, Onboarding).
+- **To add a mark:** one line `property bool textTraceable: true` on the item
+  (only if every string it can show is fixed, none from the network, a file or
+  the user), or `property bool textTraceTitle: true` on a page whose `title`
+  is a literal. Do not add it in `main.qml` (800-line cap) unless it fits on an
+  existing line.
 - Logs only diffs, one line each, via `console.warn` (stderr, so it reaches the
   terminal/journal without `SNITCHWATCH_LOG`):
   `text-trace t=<ms> <path> <field>: <old> -> <new>`, plus `+`/`-` lines for
@@ -38,7 +61,10 @@ app itself must say which item flashes.
   This is the one deliberate exception to the on-screen-only rule: the text is
   app-composed status ("waiting for the bridge" is a flicker candidate) and a
   tooltip is invisible to item-tree probing. The label keeps it from being
-  mistaken for on-screen text.
+  mistaken for on-screen text. A tooltip starting `Blocked:` carries the
+  attacker-influenced `RecentBlock.what` (src/tray.rs), and `compose_tooltip`
+  appends more after it, so it cannot be split safely: it is logged only as
+  `Blocked: (details withheld)`.
 - Each line is also emitted as the `traced(line)` signal; the qmltestrunner
   test asserts on it.
 

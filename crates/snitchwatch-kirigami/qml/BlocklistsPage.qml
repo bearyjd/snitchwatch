@@ -28,6 +28,7 @@ import com.snitchwatch.shell
 Kirigami.ScrollablePage {
     id: page
     title: "Blocklists"
+    property bool textTraceTitle: true
 
     // Injected by the caller (main.qml) so the models' lifetime is owned there.
     property BlocklistsModel model

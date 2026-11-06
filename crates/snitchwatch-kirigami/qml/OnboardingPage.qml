@@ -19,6 +19,7 @@ import com.snitchwatch.shell
 Kirigami.Page {
     id: page
     title: "Set up Snitchwatch"
+    property bool textTraceTitle: true
 
     // Injected by main.qml; owns detection state + actions.
     property WizardController controller

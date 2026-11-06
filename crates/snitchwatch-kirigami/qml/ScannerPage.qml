@@ -16,6 +16,7 @@ import com.snitchwatch.shell
 Kirigami.ScrollablePage {
     id: page
     title: "Security Scan"
+    property bool textTraceTitle: true
 
     // Injected by main.qml so the controller's lifetime is owned there.
     property ScannerController controller

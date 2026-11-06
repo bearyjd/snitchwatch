@@ -369,7 +369,7 @@ Kirigami.ApplicationWindow {
     // never chosen from it.
     ColumnLayout {
         id: bridgeBanner
-        z: 999
+        z: 999; property bool textTraceable: true
         anchors {
             top: parent.top
             left: parent.left
@@ -417,7 +417,7 @@ Kirigami.ApplicationWindow {
                 anchors.fill: parent
                 anchors.margins: Kirigami.Units.smallSpacing
                 wrapMode: Text.Wrap
-                textFormat: Text.PlainText
+                textFormat: Text.PlainText; property bool textTraceable: false
                 text: bridgeFeed.statusText
             }
         }
@@ -429,7 +429,7 @@ Kirigami.ApplicationWindow {
     // being met. See docs/superpowers/specs/2026-07-14-daemon-kernel-diagnostics-design.md.
     Kirigami.InlineMessage {
         id: daemonHealthBanner
-        z: 999
+        z: 999; property bool textTraceable: true
         anchors {
             top: bridgeBanner.visible ? bridgeBanner.bottom : parent.top
             left: parent.left
@@ -458,7 +458,7 @@ Kirigami.ApplicationWindow {
     // docs/superpowers/plans/2026-08-05-pending-decision-exposure-warning.md.
     Kirigami.InlineMessage {
         id: pendingExposureBanner
-        z: 999
+        z: 999; property bool textTraceable: true
         anchors {
             top: daemonHealthBanner.visible ? daemonHealthBanner.bottom
                 : (bridgeBanner.visible ? bridgeBanner.bottom : parent.top)

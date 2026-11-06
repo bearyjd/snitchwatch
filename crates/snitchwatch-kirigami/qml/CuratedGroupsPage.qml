@@ -8,6 +8,7 @@ import com.snitchwatch.shell
 Kirigami.ScrollablePage {
     id: page
     title: "Set up Snitchwatch"
+    property bool textTraceTitle: true
 
     // Injected by main.qml: the CuratedDefaultsModel.
     property CuratedDefaultsModel model

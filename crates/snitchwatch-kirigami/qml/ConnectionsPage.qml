@@ -13,6 +13,7 @@ import com.snitchwatch.shell
 Kirigami.Page {
     id: page
     title: "Connections"
+    property bool textTraceTitle: true
     padding: 0
     // PageRow would give this page a fixed column in a wide window.
     Kirigami.ColumnView.fillWidth: true
