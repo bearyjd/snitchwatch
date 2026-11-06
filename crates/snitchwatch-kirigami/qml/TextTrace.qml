@@ -26,6 +26,7 @@
 // labelled exception (see onTrayTooltipChanged) and withholds the
 // RecentBlock "Blocked: <what>" detail.
 import QtQuick
+import org.kde.kirigami as Kirigami
 
 Item {
     id: tracer
@@ -98,35 +99,69 @@ Item {
 
     // The ONE item to read as the CURRENT page's default title, or null: only
     // while that page's title is a fixed literal (`textTraceTitle`).
-    // pageStack.globalToolBar is non-visual, so use the page's own
-    // `globalToolBarItem` (Kirigami Page: the header rendered for this page
-    // only; other pages' headers are never authorized). Inside it, authorize
-    // only the title Heading that is a direct child of a *TitleDelegate and
-    // whose text equals the page's literal title: a custom delegate that
-    // borrows the name, a dynamic heading or any sibling is not authorized
-    // and needs its own `textTraceable` mark (the four production custom
-    // delegates mark their heading). Only that item is authorized, not its
-    // subtree.
+    // Authorization is by identity, never by reading text. pageStack.globalToolBar
+    // is non-visual, so use the page's own `globalToolBarItem` (the header
+    // rendered for this page only). The page must use Kirigami's own default
+    // `titleDelegate`: its Component comes from the same file as a pristine
+    // Kirigami.Page's, which no custom delegate can fake by borrowing a type
+    // name. Inside that header only the delegate's own title Heading is
+    // authorized (the item alone, no subtree or siblings), unless
+    // `textTraceable: false` vetoes it on the heading or the delegate. Custom
+    // delegates mark their own headings `textTraceable` instead.
     function titleToolbar() {
         const ps = pageStack;
         const page = ps ? ps.currentItem : null;
-        const header = page && page.textTraceTitle === true ? page.globalToolBarItem : null;
-        return header ? findTitle(header, page.title) : null;
+        if (!page || page.textTraceTitle !== true || !page.globalToolBarItem
+                || !usesDefaultTitleDelegate(page)) {
+            return null;
+        }
+        return findTitle(page.globalToolBarItem);
     }
 
-    function findTitle(item, title) {
+    property string defaultDelegateUrl: ""
+
+    function usesDefaultTitleDelegate(page) {
+        const delegate = page.titleDelegate;
+        if (!delegate) {
+            return false;
+        }
+        if (defaultDelegateUrl === "") {
+            const probe = pageProbe.createObject(null);
+            defaultDelegateUrl = probe.titleDelegate.url.toString();
+            probe.destroy();
+        }
+        return defaultDelegateUrl !== "" && delegate.url.toString() === defaultDelegateUrl;
+    }
+
+    Component { id: pageProbe; Kirigami.Page {} }
+
+    // True if `textTraceable: false` is set on the item or an ancestor up to
+    // and including `stop`.
+    function isVetoed(item, stop) {
+        for (let it = item; it; it = it.parent) {
+            if (it.textTraceable === false) {
+                return true;
+            }
+            if (it === stop) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    function findTitle(item) {
         if (/TitleDelegate$/.test(typeName(item))) {
             const kids = item.children;
             for (let i = 0; i < kids.length; ++i) {
-                if (typeName(kids[i]) === "Heading" && kids[i].text === title) {
-                    return kids[i];
+                if (typeName(kids[i]) === "Heading") {
+                    return isVetoed(kids[i], item) ? null : kids[i];
                 }
             }
             return null;
         }
         const kids = item.children;
         for (let i = 0; kids && i < kids.length; ++i) {
-            const hit = findTitle(kids[i], title);
+            const hit = findTitle(kids[i]);
             if (hit) {
                 return hit;
             }

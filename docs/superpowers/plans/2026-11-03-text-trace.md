@@ -28,13 +28,16 @@ app itself must say which item flashes.
   `selectedText`, `preeditText`), so editors, rule/connection tables, the Rule
   Simulator, inputs, process names and hosts cannot leak, however they are
   bound. The window title is traced two ways. Pages with the
-  default title delegate: only the title `Heading` that is a direct child of a
-  `*TitleDelegate` inside the CURRENT page's own `globalToolBarItem` and whose
-  text equals the page's literal title (the item alone, never its subtree or
-  siblings; a custom delegate that borrows the name gets no authorization) (Kirigami `Page` property: the header
-  rendered for that page only; `pageStack.globalToolBar` is non-visual and is
-  not walked), and only while that page has `property bool textTraceTitle:
-  true` (a literal title). An unmarked page's header, such as one below the
+  default title delegate: authorized by identity, never by reading text. The
+  current page must have `textTraceTitle: true` and use Kirigami's own default
+  `titleDelegate` (its Component's `url` equals that of a pristine
+  `Kirigami.Page`; a custom delegate cannot fake that by borrowing a type
+  name). Then only the title `Heading` that is the direct child of the
+  `*TitleDelegate` in the page's own `globalToolBarItem` is read (the item
+  alone, no subtree or siblings), and `textTraceable: false` on it or the
+  delegate vetoes it. Text equality with the title is not an input.
+  Only the current page's own header is considered (`pageStack.globalToolBar`
+  is non-visual and is not walked), so an unmarked page's header, such as one below the
   current page, is never authorized. Pages with a custom `titleDelegate`
   (Connections via `ConnectionsHeader.qml`, Rules, Profiles, Blocklists) mark
   only their fixed title heading `textTraceable`, never the search field,

@@ -183,9 +183,10 @@ TestCase {
         compare(joined().indexOf("CANARY"), -1, joined());
     }
 
-    // The heading shows the (literal) page title, so it is traced; the
-    // unmarked sibling Text next to it never is.
-    function test_custom_delegate_title_heading_traced_but_not_its_sibling() {
+    // A custom delegate whose heading happens to show a text EQUAL to the
+    // page title is still not the trusted default delegate: authorization is by
+    // identity, never by text equality, so nothing of it is read or logged.
+    function test_custom_heading_equal_to_the_title_is_not_traced() {
         const win = open_window();
         win.showCustom();
         wait(500);
@@ -194,7 +195,22 @@ TestCase {
         win.pageStack.currentItem.title = "Custom Changed";
         wait(100);
         win.tracer.sample();
-        verify(joined().indexOf('"Fixed Custom" -> "Custom Changed"') >= 0, joined());
+        compare(joined().indexOf("Custom Changed"), -1, joined());
+        compare(joined().indexOf("Fixed Custom"), -1, joined());
         compare(joined().indexOf("CANARY"), -1, joined());
+    }
+
+    // The veto: textTraceable false on the heading or an ancestor up to the
+    // delegate. (Kirigami's own heading cannot be given a property from
+    // outside, so the helper is exercised directly on plain items.)
+    function test_veto_helper_honors_false_on_the_heading_and_its_ancestors() {
+        const win = open_window();
+        const root = Qt.createQmlObject('import QtQuick; Item { id: d; Item { id: mid; Item { id: h } } }', win.contentItem);
+        const mid = root.children[0];
+        const h = mid.children[0];
+        compare(win.tracer.isVetoed(h, root), false);
+        const v = Qt.createQmlObject('import QtQuick; Item { property bool textTraceable: false; Item { } }', win.contentItem);
+        compare(win.tracer.isVetoed(v.children[0], v), true);
+        compare(win.tracer.isVetoed(v, v), true);
     }
 }
