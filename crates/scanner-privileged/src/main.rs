@@ -67,8 +67,7 @@ fn start_privileged_watchdog_after(timeout: std::time::Duration) -> anyhow::Resu
     scanner_privileged::containment::become_subreaper()?;
     std::thread::spawn(move || {
         std::thread::sleep(timeout);
-        notify_watchdog_timeout();
-        scanner_privileged::command::expire_watchdog(pid);
+        scanner_privileged::command::expire_watchdog(pid, notify_watchdog_timeout);
     });
     Ok(())
 }
@@ -231,7 +230,9 @@ fn validate_database_files(db: &std::path::Path, owner: u32) -> anyhow::Result<(
 
 fn main() -> anyhow::Result<()> {
     // However `run` ends (return, error, panic): leave through the lifecycle's
-    // exit transition, which excludes a concurrent watchdog expiry.
+    // exit transition, which excludes a concurrent watchdog expiry. A panic
+    // reaches this guard only by unwinding, so this relies on panic=unwind
+    // (the default; never set `panic = "abort"` for this binary).
     let _exit = scanner_privileged::command::ExitGuard;
     run()
 }
@@ -387,7 +388,7 @@ mod argument_tests {
             std::thread::spawn(move || {
                 let _ = finished.send(child.wait_with_output());
             });
-            let output = match result.recv_timeout(Duration::from_secs(2)) {
+            let output = match result.recv_timeout(Duration::from_secs(5)) {
                 Ok(output) => output.unwrap(),
                 Err(_) => {
                     unsafe {

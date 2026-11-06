@@ -28,29 +28,62 @@ pub fn become_subreaper() -> io::Result<()> {
     Ok(())
 }
 
+/// Whether an error only means the process vanished (ENOENT/ESRCH); any other
+/// (EMFILE, ENFILE, EACCES, EIO...) says nothing about the process.
+fn vanished(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(libc::ENOENT) | Some(libc::ESRCH))
+}
+
 /// One `/proc/<pid>/stat` line's parent and whether the process is a zombie.
 /// Read as bytes: a comm need not be valid UTF-8, and such a process must
-/// still be found.
-pub(crate) fn parent_and_zombie(pid: i32) -> Option<(i32, bool)> {
-    let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+/// still be found. `Ok(None)`: the process vanished; `Err`: unknown.
+fn read_stat(pid: i32) -> io::Result<Option<(i32, bool)>> {
+    let stat = match std::fs::read(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(e) if vanished(&e) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let malformed = || io::Error::new(io::ErrorKind::InvalidData, "malformed /proc stat");
     // The command name may contain spaces and parentheses: split at the last ')'.
-    let tail = &stat[stat.iter().rposition(|&b| b == b')')? + 1..];
-    let mut fields = tail
+    let end = stat
+        .iter()
+        .rposition(|&b| b == b')')
+        .ok_or_else(malformed)?;
+    let mut fields = stat[end + 1..]
         .split(|b| b.is_ascii_whitespace())
         .filter(|f| !f.is_empty());
-    let state = fields.next()?;
-    let parent = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
-    Some((parent, state == b"Z"))
+    let state = fields.next().ok_or_else(malformed)?;
+    let parent = std::str::from_utf8(fields.next().ok_or_else(malformed)?)
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .ok_or_else(malformed)?;
+    Ok(Some((parent, state == b"Z")))
+}
+
+/// [`read_stat`] with "vanished or unreadable" as `None`.
+#[cfg(test)]
+pub(crate) fn parent_and_zombie(pid: i32) -> Option<(i32, bool)> {
+    read_stat(pid).ok().flatten()
 }
 
 /// A zombie thread-group leader whose other threads still run is alive: only
-/// a leader with no other task left is dead.
-fn has_other_tasks(pid: i32) -> bool {
-    std::fs::read_dir(format!("/proc/{pid}/task")).is_ok_and(|tasks| {
-        tasks
-            .flatten()
-            .any(|task| task.file_name().to_str() != Some(&pid.to_string()))
-    })
+/// a leader with no other task left is dead. An unreadable task list is
+/// unknown, not dead.
+fn has_other_tasks(pid: i32) -> io::Result<bool> {
+    let tasks = match std::fs::read_dir(format!("/proc/{pid}/task")) {
+        Ok(tasks) => tasks,
+        Err(e) if vanished(&e) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    for task in tasks {
+        match task {
+            Ok(task) if task.file_name().to_str() != Some(&pid.to_string()) => return Ok(true),
+            Ok(_) => {}
+            Err(e) if vanished(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
 }
 
 /// Every live process below `root`, by the current `/proc` (a zombie is dead
@@ -59,7 +92,12 @@ fn has_other_tasks(pid: i32) -> bool {
 fn live_descendants(root: i32, deadline: Instant) -> io::Result<Option<Vec<i32>>> {
     let entries = std::fs::read_dir("/proc")?;
     let mut children: HashMap<i32, Vec<(i32, bool)>> = HashMap::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) if vanished(&e) => continue,
+            Err(e) => return Err(e),
+        };
         // A pass over a huge /proc must not outlast the bound.
         if Instant::now() >= deadline {
             return Ok(None);
@@ -71,8 +109,8 @@ fn live_descendants(root: i32, deadline: Instant) -> io::Result<Option<Vec<i32>>
         else {
             continue;
         };
-        if let Some((parent, zombie)) = parent_and_zombie(pid) {
-            let dead = zombie && !has_other_tasks(pid);
+        if let Some((parent, zombie)) = read_stat(pid)? {
+            let dead = zombie && !has_other_tasks(pid)?;
             children.entry(parent).or_default().push((pid, dead));
         }
     }
@@ -120,7 +158,10 @@ fn kill_if_descendant_with(
     tree: &HashSet<i32>,
     open: impl FnOnce(i32) -> io::Result<i32>,
 ) -> io::Result<()> {
-    let in_tree = || parent_and_zombie(pid).is_some_and(|(parent, _)| tree.contains(&parent));
+    // A vanished process is simply not ours to kill; an unreadable one is an error.
+    let in_tree = || -> io::Result<bool> {
+        Ok(read_stat(pid)?.is_some_and(|(parent, _)| tree.contains(&parent)))
+    };
     let fd = match open(pid) {
         Ok(fd) => fd,
         Err(e) if e.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
@@ -128,29 +169,31 @@ fn kill_if_descendant_with(
             // Fail safe when no pidfd can be had (kernel before 5.3, EMFILE,
             // a seccomp filter...): kill by pid after the same parent check,
             // accepting the reuse window pidfds close.
-            if in_tree() && unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+            if in_tree()? && unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
                 return ignore_gone(io::Error::last_os_error());
             }
             return Ok(());
         }
     };
-    let result = if in_tree() {
-        let sent = unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_send_signal,
-                fd,
-                libc::SIGKILL,
-                std::ptr::null::<libc::siginfo_t>(),
-                0,
-            )
-        };
-        if sent != 0 {
-            ignore_gone(io::Error::last_os_error())
-        } else {
-            Ok(())
+    let result = match in_tree() {
+        Ok(true) => {
+            let sent = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    fd,
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            };
+            if sent != 0 {
+                ignore_gone(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
         }
-    } else {
-        Ok(())
+        Ok(false) => Ok(()),
+        Err(e) => Err(e),
     };
     unsafe {
         libc::close(fd);
@@ -245,6 +288,7 @@ fn kill_descendants_with(
 mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};
+    use std::os::unix::process::CommandExt;
     use std::process::{Child, Command, Stdio};
 
     /// A child that is always killed and reaped, whatever the test did.
@@ -624,5 +668,84 @@ mod tests {
         let (root_fds, child_fds) = (extra_fds(root), extra_fds(child));
         assert!(root_fds.is_empty(), "root holds {root_fds:?}");
         assert!(child_fds.is_empty(), "child holds {child_fds:?}");
+    }
+
+    /// With one fd slot left, `read_dir("/proc")` takes it and every per-pid
+    /// read then fails with EMFILE: that must fail the scan, not read as "no
+    /// descendants". The limit is lowered in a fixture process, not here.
+    #[test]
+    fn an_exhausted_fd_table_fails_the_scan_instead_of_emptying_it() {
+        use std::process::Command;
+        const CHILD: &str = "SNITCHWATCH_TEST_FD_EXHAUSTED";
+        if std::env::var_os(CHILD).is_some() {
+            let own = me();
+            #[allow(clippy::zombie_processes)] // killed with the fixture's group
+            let _descendant = Command::new("/usr/bin/sleep").arg("60").spawn().unwrap();
+            unsafe {
+                // The lowest free fd is the only one the limit may leave.
+                let lowest = libc::dup(0);
+                libc::close(lowest);
+                let mut limit = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit);
+                limit.rlim_cur = lowest as libc::rlim_t + 1;
+                assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &limit), 0);
+            }
+            // An unreadable task list is unknown, not "dead".
+            let held = unsafe { libc::dup(0) }; // the last free slot
+            let tasks = has_other_tasks(own);
+            unsafe {
+                libc::close(held);
+            }
+            let scan = live_descendants(own, Instant::now() + Duration::from_secs(1));
+            let sweep = kill_descendants(own, Duration::from_millis(600));
+            std::process::exit(if tasks.is_ok() {
+                7
+            } else if scan.is_ok() {
+                3
+            } else if sweep.complete {
+                5
+            } else if sweep.failures == 0 {
+                6
+            } else {
+                0
+            });
+        }
+        let mut fixture = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "containment::tests::an_exhausted_fd_table_fails_the_scan_instead_of_emptying_it",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        let status = loop {
+            if let Some(status) = fixture.try_wait().unwrap() {
+                break Some(status);
+            }
+            if start.elapsed() > Duration::from_secs(20) {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // Group kill first (the sleeper is in it), then reap.
+        unsafe {
+            libc::kill(-(fixture.id() as i32), libc::SIGKILL);
+        }
+        let _ = fixture.wait();
+        let status = status.expect("the fixture never finished");
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "3: the scan came back Ok; 5: complete; 6: no failure counted ({status:?})"
+        );
     }
 }
