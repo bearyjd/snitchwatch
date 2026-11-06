@@ -54,16 +54,15 @@ fn has_other_tasks(pid: i32) -> bool {
 }
 
 /// Every live process below `root`, by the current `/proc` (a zombie is dead
-/// unless threads of its group still run).
-fn live_descendants(root: i32, deadline: Instant) -> Vec<i32> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
+/// unless threads of its group still run). `Ok(None)`: the scan hit `deadline`
+/// and is incomplete; `Err`: `/proc` could not be read. Neither says "none".
+fn live_descendants(root: i32, deadline: Instant) -> io::Result<Option<Vec<i32>>> {
+    let entries = std::fs::read_dir("/proc")?;
     let mut children: HashMap<i32, Vec<(i32, bool)>> = HashMap::new();
     for entry in entries.flatten() {
         // A pass over a huge /proc must not outlast the bound.
         if Instant::now() >= deadline {
-            return Vec::new();
+            return Ok(None);
         }
         let Some(pid) = entry
             .file_name()
@@ -92,7 +91,7 @@ fn live_descendants(root: i32, deadline: Instant) -> Vec<i32> {
             }
         }
     }
-    live
+    Ok(Some(live))
 }
 
 /// `pidfd_open(pid)`, as a raw fd or the OS error.
@@ -182,12 +181,13 @@ pub struct Sweep {
 /// Kill every process below `root` (the scanner), pass after pass, until two
 /// consecutive passes find none alive or `bound` has passed. Two, because one
 /// `/proc` snapshot can miss an orphan (a child listed before its parent, the
-/// parent then exiting). The bound is checked per `/proc` entry and per pid.
+/// parent then exiting). A pass that failed or was cut short by the deadline
+/// is no evidence of "none". One deadline covers scans and signalling alike.
 pub fn kill_descendants(root: i32, bound: Duration) -> Sweep {
     let deadline = Instant::now() + bound;
     kill_descendants_with(
         root,
-        bound,
+        deadline,
         || live_descendants(root, deadline),
         kill_if_descendant,
     )
@@ -196,11 +196,10 @@ pub fn kill_descendants(root: i32, bound: Duration) -> Sweep {
 /// [`kill_descendants`] with the `/proc` scan and the kill injected.
 fn kill_descendants_with(
     root: i32,
-    bound: Duration,
-    mut scan: impl FnMut() -> Vec<i32>,
+    deadline: Instant,
+    mut scan: impl FnMut() -> io::Result<Option<Vec<i32>>>,
     mut kill: impl FnMut(i32, &HashSet<i32>) -> io::Result<()>,
 ) -> Sweep {
-    let deadline = Instant::now() + bound;
     let mut sweep = Sweep {
         complete: false,
         failures: 0,
@@ -208,24 +207,32 @@ fn kill_descendants_with(
     };
     let mut empty_passes = 0;
     while Instant::now() < deadline {
-        let live = scan();
-        if live.is_empty() {
-            empty_passes += 1;
-            if empty_passes == 2 {
-                sweep.complete = true;
-                return sweep;
+        match scan() {
+            // Kept in memory: the watchdog must not log before its kill.
+            Err(e) => {
+                empty_passes = 0;
+                sweep.failures += 1;
+                sweep.first_error.get_or_insert(e);
             }
-        } else {
-            empty_passes = 0;
-            let tree: HashSet<i32> = live.iter().copied().chain([root]).collect();
-            for &pid in &live {
-                if Instant::now() >= deadline {
+            Ok(None) => empty_passes = 0,
+            Ok(Some(live)) if live.is_empty() => {
+                empty_passes += 1;
+                if empty_passes == 2 {
+                    sweep.complete = true;
                     return sweep;
                 }
-                if let Err(e) = kill(pid, &tree) {
-                    // Kept in memory: the watchdog must not log before its kill.
-                    sweep.failures += 1;
-                    sweep.first_error.get_or_insert(e);
+            }
+            Ok(Some(live)) => {
+                empty_passes = 0;
+                let tree: HashSet<i32> = live.iter().copied().chain([root]).collect();
+                for &pid in &live {
+                    if Instant::now() >= deadline {
+                        return sweep;
+                    }
+                    if let Err(e) = kill(pid, &tree) {
+                        sweep.failures += 1;
+                        sweep.first_error.get_or_insert(e);
+                    }
                 }
             }
         }
@@ -358,24 +365,47 @@ mod tests {
         assert!(alive(&mut child));
     }
 
-    /// Forks a root process `P` and, below it, a `C` whose comm is not valid
-    /// UTF-8; returns `(P, C)`. Both pause forever until killed.
-    fn fork_root_with_binary_comm() -> (i32, i32) {
+    /// A forked root `P` with a forked `C` below it; both are killed and
+    /// `P` reaped when dropped, so a failed assertion cannot leak them.
+    struct ForkedTree {
+        root: i32,
+        child: i32,
+    }
+    impl Drop for ForkedTree {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.child, libc::SIGKILL);
+                libc::kill(self.root, libc::SIGKILL);
+                libc::waitpid(self.root, std::ptr::null_mut(), 0);
+            }
+        }
+    }
+
+    /// Forks `P`, and `P` forks `C`, which runs `body`. The children never
+    /// exec, so they close every fd but stdio at once (those would be the
+    /// pipes of concurrent tests, kept open past their EOF). Only
+    /// async-signal-safe calls run in the children (forked from a threaded
+    /// test), `body` included.
+    fn fork_tree(body: fn()) -> ForkedTree {
+        let close_inherited = || unsafe {
+            libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
+        };
         let mut pipe = [0; 2];
         unsafe {
             assert_eq!(libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC), 0);
             let root = libc::fork();
             assert!(root >= 0);
             if root == 0 {
-                // Async-signal-safe calls only (forked from a threaded test).
                 let child = libc::fork();
                 if child == 0 {
-                    libc::prctl(libc::PR_SET_NAME, c"\xff\xfex".as_ptr());
+                    close_inherited();
+                    body();
                     loop {
                         libc::pause();
                     }
                 }
                 libc::write(pipe[1], (&child as *const i32).cast(), 4);
+                close_inherited();
                 loop {
                     libc::pause();
                 }
@@ -384,13 +414,20 @@ mod tests {
             let mut child: i32 = 0;
             assert_eq!(libc::read(pipe[0], (&mut child as *mut i32).cast(), 4), 4);
             libc::close(pipe[0]);
-            (root, child)
+            ForkedTree { root, child }
+        }
+    }
+
+    fn set_binary_name() {
+        unsafe {
+            libc::prctl(libc::PR_SET_NAME, c"\xff\xfex".as_ptr());
         }
     }
 
     #[test]
     fn a_process_with_a_non_utf8_name_is_found_and_killed() {
-        let (root, child) = fork_root_with_binary_comm();
+        let tree = fork_tree(set_binary_name);
+        let (root, child) = (tree.root, tree.child);
         // Wait until the child has set its name.
         let start = Instant::now();
         while std::fs::read(format!("/proc/{child}/stat"))
@@ -406,11 +443,6 @@ mod tests {
             let tail = &stat[stat.iter().rposition(|&b| b == b')').unwrap() + 1..];
             tail.trim_ascii_start().first() != Some(&b'Z')
         });
-        unsafe {
-            libc::kill(child, libc::SIGKILL);
-            libc::kill(root, libc::SIGKILL);
-            libc::waitpid(root, std::ptr::null_mut(), 0);
-        }
         assert!(swept.complete);
         assert!(!alive, "the non-UTF-8-named descendant survived");
     }
@@ -424,10 +456,10 @@ mod tests {
         let mut killed = Vec::new();
         let sweep = kill_descendants_with(
             1,
-            Duration::from_secs(5),
+            Instant::now() + Duration::from_secs(5),
             || {
                 scans += 1;
-                snapshots.next().unwrap_or_default()
+                Ok(Some(snapshots.next().unwrap_or_default()))
             },
             |pid, _| {
                 killed.push(pid);
@@ -439,13 +471,66 @@ mod tests {
         assert_eq!(scans, 4);
     }
 
+    /// A failed or truncated scan is no evidence of "none": it neither counts
+    /// as an empty pass nor lets two empty passes straddle it.
+    #[test]
+    fn failed_or_truncated_scans_never_count_as_empty() {
+        let scans: Vec<io::Result<Option<Vec<i32>>>> = vec![
+            Ok(Some(vec![])),
+            Ok(None),
+            Ok(Some(vec![])),
+            Err(io::Error::from_raw_os_error(libc::EMFILE)),
+            Ok(Some(vec![])),
+            Ok(Some(vec![])),
+        ];
+        let mut scans = scans.into_iter();
+        let mut count = 0;
+        let sweep = kill_descendants_with(
+            1,
+            Instant::now() + Duration::from_secs(5),
+            || {
+                count += 1;
+                scans.next().unwrap_or(Ok(None))
+            },
+            |_, _| Ok(()),
+        );
+        assert!(sweep.complete);
+        assert_eq!(count, 6, "completed on a pair that straddled a bad scan");
+        assert_eq!(sweep.failures, 1);
+        assert_eq!(
+            sweep.first_error.unwrap().raw_os_error(),
+            Some(libc::EMFILE)
+        );
+        // Only failures and truncations: never complete.
+        let sweep = kill_descendants_with(
+            1,
+            Instant::now() + Duration::from_millis(60),
+            || Ok(None),
+            |_, _| Ok(()),
+        );
+        assert!(!sweep.complete);
+        let sweep = kill_descendants_with(
+            1,
+            Instant::now() + Duration::from_millis(60),
+            || Err(io::Error::from_raw_os_error(libc::EIO)),
+            |_, _| Ok(()),
+        );
+        assert!(!sweep.complete && sweep.failures > 0);
+    }
+
+    #[test]
+    fn a_scan_past_its_deadline_is_truncated_not_empty() {
+        let past = Instant::now() - Duration::from_secs(1);
+        assert!(live_descendants(me(), past).unwrap().is_none());
+    }
+
     #[test]
     fn the_deadline_is_checked_per_pid() {
         let mut kills = 0;
         let sweep = kill_descendants_with(
             1,
-            Duration::from_millis(50),
-            || vec![2, 3, 4, 5, 6, 7, 8, 9],
+            Instant::now() + Duration::from_millis(50),
+            || Ok(Some(vec![2, 3, 4, 5, 6, 7, 8, 9])),
             |_, _| {
                 kills += 1;
                 std::thread::sleep(Duration::from_millis(40));
@@ -462,37 +547,17 @@ mod tests {
         }
     }
 
-    /// Forks a root `P` and, below it, a `C` whose thread-group leader exits
-    /// (SYS_exit) while a second thread keeps running; returns `(P, C)`.
-    fn fork_root_with_leaderless_thread_group() -> (i32, i32) {
-        let mut pipe = [0; 2];
+    /// The leader exits (SYS_exit) while a second thread keeps running.
+    fn exit_the_leader_keeping_a_thread() {
         unsafe {
-            assert_eq!(libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC), 0);
-            let root = libc::fork();
-            assert!(root >= 0);
-            if root == 0 {
-                let child = libc::fork();
-                if child == 0 {
-                    // The forking thread is the new process's leader.
-                    let mut thread: libc::pthread_t = 0;
-                    libc::pthread_create(
-                        &mut thread,
-                        std::ptr::null(),
-                        pause_forever,
-                        std::ptr::null_mut(),
-                    );
-                    libc::syscall(libc::SYS_exit, 0);
-                }
-                libc::write(pipe[1], (&child as *const i32).cast(), 4);
-                loop {
-                    libc::pause();
-                }
-            }
-            libc::close(pipe[1]);
-            let mut child: i32 = 0;
-            assert_eq!(libc::read(pipe[0], (&mut child as *mut i32).cast(), 4), 4);
-            libc::close(pipe[0]);
-            (root, child)
+            let mut thread: libc::pthread_t = 0;
+            libc::pthread_create(
+                &mut thread,
+                std::ptr::null(),
+                pause_forever,
+                std::ptr::null_mut(),
+            );
+            libc::syscall(libc::SYS_exit, 0);
         }
     }
 
@@ -509,7 +574,8 @@ mod tests {
 
     #[test]
     fn a_zombie_leader_with_running_threads_is_found_and_killed() {
-        let (root, child) = fork_root_with_leaderless_thread_group();
+        let tree = fork_tree(exit_the_leader_keeping_a_thread);
+        let (root, child) = (tree.root, tree.child);
         // Wait for the leader to be a zombie with its other thread running.
         let start = Instant::now();
         while !(parent_and_zombie(child).is_some_and(|(_, zombie)| zombie)
@@ -525,13 +591,38 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         let survived = other_tasks(child) > 0;
-        unsafe {
-            libc::kill(child, libc::SIGKILL);
-            libc::kill(root, libc::SIGKILL);
-            libc::waitpid(root, std::ptr::null_mut(), 0);
-        }
         assert!(setup, "the fixture never reached its leaderless state");
         assert!(swept.complete);
         assert!(!survived, "a thread group with a zombie leader survived");
+    }
+
+    /// Open fds of `pid` other than stdio, straight from /proc.
+    fn extra_fds(pid: i32) -> Vec<String> {
+        std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .map(|dir| {
+                dir.flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .filter(|fd| !["0", "1", "2"].contains(&fd.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The raw-fork fixtures never exec, so any fd they inherit (the pipes of
+    /// concurrent tests' `capture`) would stay open and block those tests'
+    /// EOF waits: they must close everything but stdio.
+    #[test]
+    fn forked_fixtures_do_not_hold_the_test_binarys_fds() {
+        let tree = fork_tree(set_binary_name);
+        let (root, child) = (tree.root, tree.child);
+        let start = Instant::now();
+        while (!extra_fds(root).is_empty() || !extra_fds(child).is_empty())
+            && start.elapsed() < Duration::from_secs(2)
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (root_fds, child_fds) = (extra_fds(root), extra_fds(child));
+        assert!(root_fds.is_empty(), "root holds {root_fds:?}");
+        assert!(child_fds.is_empty(), "child holds {child_fds:?}");
     }
 }

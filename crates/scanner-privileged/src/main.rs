@@ -230,11 +230,10 @@ fn validate_database_files(db: &std::path::Path, owner: u32) -> anyhow::Result<(
 }
 
 fn main() -> anyhow::Result<()> {
-    let result = run();
-    // The watchdog's first step can release a running primitive with an error
-    // that brings us here; its sweep must finish before the process ends.
-    scanner_privileged::command::wait_for_watchdog_cleanup();
-    result
+    // However `run` ends (return, error, panic): leave through the lifecycle's
+    // exit transition, which excludes a concurrent watchdog expiry.
+    let _exit = scanner_privileged::command::ExitGuard;
+    run()
 }
 
 fn run() -> anyhow::Result<()> {
@@ -275,7 +274,7 @@ fn run() -> anyhow::Result<()> {
     if report.reconciled.new.is_empty() {
         Ok(())
     } else {
-        scanner_privileged::command::wait_for_watchdog_cleanup();
+        scanner_privileged::command::finish_process();
         std::process::exit(2);
     }
 }
