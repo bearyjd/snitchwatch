@@ -127,8 +127,9 @@ millisecond timestamp and the item's path. Only items under a
 prompt-slot and learning banners' fixed message (not the holder line, which
 holds program and host), the Daemon Health message, the "Waiting for daemon
 statistics" placeholder, the rule button state label ("Waiting for the
-firewall") and the window title (the default title delegate of the current page's own
-header while that page has a fixed `textTraceTitle`; Connections, Rules,
+firewall") and the window title (the default title Heading of the current page's own
+header, only if its text equals the page's literal title, while that page has
+a fixed `textTraceTitle`; delegates are never authorized as a subtree; Connections, Rules,
 Profiles and Blocklists mark just their title heading; the connection detail
 page, whose title is a process name, is not traced). Editors, tables, the Rule
 Simulator, inputs, process names and hosts are never read. Marked text is

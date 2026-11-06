@@ -96,28 +96,37 @@ Item {
                  r: Math.min(r.r, c.r), b: Math.min(r.b, c.b) };
     }
 
-    // The item that draws the CURRENT page's default title, or null: only
+    // The ONE item to read as the CURRENT page's default title, or null: only
     // while that page's title is a fixed literal (`textTraceTitle`).
-    // pageStack.globalToolBar is a non-visual configuration object, so use the
-    // page's own `globalToolBarItem` (Kirigami Page: the ToolBarPageHeader
-    // rendered for this page only) and look in it for the title delegate
-    // (DefaultPageTitleDelegate, holding the title Heading). Other pages'
-    // headers, such as an unmarked page below, are never authorized.
-    // Pages with a custom titleDelegate mark their own heading instead.
+    // pageStack.globalToolBar is non-visual, so use the page's own
+    // `globalToolBarItem` (Kirigami Page: the header rendered for this page
+    // only; other pages' headers are never authorized). Inside it, authorize
+    // only the title Heading that is a direct child of a *TitleDelegate and
+    // whose text equals the page's literal title: a custom delegate that
+    // borrows the name, a dynamic heading or any sibling is not authorized
+    // and needs its own `textTraceable` mark (the four production custom
+    // delegates mark their heading). Only that item is authorized, not its
+    // subtree.
     function titleToolbar() {
         const ps = pageStack;
         const page = ps ? ps.currentItem : null;
         const header = page && page.textTraceTitle === true ? page.globalToolBarItem : null;
-        return header ? findTitle(header) : null;
+        return header ? findTitle(header, page.title) : null;
     }
 
-    function findTitle(item) {
+    function findTitle(item, title) {
         if (/TitleDelegate$/.test(typeName(item))) {
-            return item;
+            const kids = item.children;
+            for (let i = 0; i < kids.length; ++i) {
+                if (typeName(kids[i]) === "Heading" && kids[i].text === title) {
+                    return kids[i];
+                }
+            }
+            return null;
         }
         const kids = item.children;
         for (let i = 0; kids && i < kids.length; ++i) {
-            const hit = findTitle(kids[i]);
+            const hit = findTitle(kids[i], title);
             if (hit) {
                 return hit;
             }
@@ -134,12 +143,11 @@ Item {
             clip = intersect(clipRect, bounds(item));
         }
         let ok = allowed;
-        if (item === toolbar) {
-            ok = true;
-        } else if (item.textTraceable !== undefined) {
+        if (item.textTraceable !== undefined) {
             ok = item.textTraceable === true;
         }
-        if (ok && typeof item.text === "string"
+        // The default title heading is authorized itself, never its subtree.
+        if ((ok || item === toolbar) && typeof item.text === "string"
                 && (item.lineCount !== undefined || item.cursorPosition !== undefined)) {
             const r = bounds(item);
             const within = r.l >= clip.l - 1 && r.r <= clip.r + 1 && r.t >= clip.t - 1 && r.b <= clip.b + 1;

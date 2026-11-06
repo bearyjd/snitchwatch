@@ -40,6 +40,28 @@ TestCase {
                     Item { implicitHeight: 10 }
                 }
             }
+            Component {
+                id: customPage
+                Kirigami.ScrollablePage {
+                    id: cp
+                    property bool textTraceTitle: true
+                    property alias delegate: holder.item
+                    title: "Fixed Custom"
+                    titleDelegate: DefaultPageTitleDelegate { shown: cp.title; sibling: "SIBLING_CANARY" }
+                    Item { id: holder; property Item item: null; implicitHeight: 10 }
+                }
+            }
+            Component {
+                id: dynamicPage
+                Kirigami.ScrollablePage {
+                    property bool textTraceTitle: true
+                    title: "Fixed Dynamic"
+                    titleDelegate: DefaultPageTitleDelegate { shown: "DYNAMIC_CANARY"; sibling: "SIBLING_CANARY" }
+                    Item { implicitHeight: 10 }
+                }
+            }
+            function showCustom() { pageStack.replace(customPage); }
+            function showDynamic() { pageStack.replace(dynamicPage); }
             function showPlain() { pageStack.replace(plainPage); }
             function pushMarked() { pageStack.push(markedPage); }
             function pushPlain() { pageStack.push(plainPage); }
@@ -137,6 +159,42 @@ TestCase {
         win.pageStack.currentItem.title = "PAGE_TITLE_CANARY_AGAIN";
         wait(100);
         win.tracer.sample();
+        compare(joined().indexOf("CANARY"), -1, joined());
+    }
+
+    // A custom delegate that has the default delegate's type name must not
+    // authorize its whole subtree: a dynamic heading and an unmarked sibling
+    // never log.
+    function test_custom_delegate_with_the_default_name_logs_nothing_dynamic() {
+        const win = open_window();
+        win.showDynamic();
+        wait(500);
+        win.tracer.sample();
+        tc.lines = [];
+        win.tracer.sample();
+        verify(win.pageStack.currentItem.title === "Fixed Dynamic");
+        wait(100);
+        win.tracer.sample();
+        compare(joined().indexOf("CANARY"), -1, joined());
+        // Nothing of the custom delegate is in a logged line, now or after changes.
+        win.pageStack.currentItem.titleDelegate = null;
+        wait(100);
+        win.tracer.sample();
+        compare(joined().indexOf("CANARY"), -1, joined());
+    }
+
+    // The heading shows the (literal) page title, so it is traced; the
+    // unmarked sibling Text next to it never is.
+    function test_custom_delegate_title_heading_traced_but_not_its_sibling() {
+        const win = open_window();
+        win.showCustom();
+        wait(500);
+        win.tracer.sample();
+        tc.lines = [];
+        win.pageStack.currentItem.title = "Custom Changed";
+        wait(100);
+        win.tracer.sample();
+        verify(joined().indexOf('"Fixed Custom" -> "Custom Changed"') >= 0, joined());
         compare(joined().indexOf("CANARY"), -1, joined());
     }
 }
