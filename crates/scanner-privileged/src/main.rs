@@ -229,7 +229,7 @@ fn validate_database_files(db: &std::path::Path, owner: u32) -> anyhow::Result<(
 }
 
 fn main() -> anyhow::Result<()> {
-    // However `run` ends (return, error, panic): leave through the lifecycle's
+    // However `run` ends (return, error, panic): leave through the watchdog_state's
     // exit transition, which excludes a concurrent watchdog expiry. A panic
     // reaches this guard only by unwinding, so this relies on panic=unwind
     // (the default; never set `panic = "abort"` for this binary).

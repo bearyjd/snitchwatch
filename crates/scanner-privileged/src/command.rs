@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 const STDOUT_LIMIT: usize = 1024 * 1024;
 const STDERR_LIMIT: usize = 64 * 1024;
-/// The scanner's lifecycle: one state, one lock, mutually exclusive
+/// The scanner's watchdog_state: one state, one lock, mutually exclusive
 /// transitions. Held only briefly, never across `spawn()` (whose exec
 /// handshake can stall) or a sweep, so the numeric group id in `pid` can never
 /// name a recycled, unrelated group (`Guard` clears it under the same lock).
@@ -31,15 +31,15 @@ enum Phase {
     Expired,
     Exiting,
 }
-struct Lifecycle {
+struct WatchdogState {
     phase: Phase,
     /// A spawn is authorized and not yet registered; no second may start.
     in_flight: bool,
     /// The registered primitive's group (its leader's pid); 0: none.
     pid: i32,
 }
-static LIFECYCLE: (Mutex<Lifecycle>, Condvar) = (
-    Mutex::new(Lifecycle {
+static WATCHDOG_STATE: (Mutex<WatchdogState>, Condvar) = (
+    Mutex::new(WatchdogState {
         phase: Phase::Running,
         in_flight: false,
         pid: 0,
@@ -48,14 +48,14 @@ static LIFECYCLE: (Mutex<Lifecycle>, Condvar) = (
 );
 /// Nothing blocks under this lock, so a poisoned one still holds a coherent
 /// state. Silent: the watchdog must not log before its kill.
-fn lifecycle() -> MutexGuard<'static, Lifecycle> {
-    LIFECYCLE
+fn watchdog_state() -> MutexGuard<'static, WatchdogState> {
+    WATCHDOG_STATE
         .0
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
 }
 /// Lock-free mirror of "the watchdog has begun to expire the scanner", set
-/// under the lifecycle lock on `Running` -> `Expiring` and never cleared. A
+/// under the watchdog_state lock on `Running` -> `Expiring` and never cleared. A
 /// capture re-reads it right before it spawns, and a forked child before it
 /// execs (an atomic load is async-signal-safe), so a capture that resumes
 /// after the watchdog gave up waiting for it cannot start a primitive.
@@ -177,8 +177,8 @@ fn spawn_register_wait() -> Duration {
 }
 
 fn wait_for_spawn_to_register() {
-    let state = lifecycle();
-    let _ = LIFECYCLE
+    let state = watchdog_state();
+    let _ = WATCHDOG_STATE
         .1
         .wait_timeout_while(state, spawn_register_wait(), |s| s.in_flight);
 }
@@ -189,7 +189,7 @@ impl ExpiryScope {
     /// `None` unless the scanner was `Running`: leaving (`Exiting`) or
     /// already expiring/expired scanners are not expired again.
     fn enter() -> Option<Self> {
-        let mut state = lifecycle();
+        let mut state = watchdog_state();
         if state.phase != Phase::Running {
             return None;
         }
@@ -200,8 +200,8 @@ impl ExpiryScope {
 }
 impl Drop for ExpiryScope {
     fn drop(&mut self) {
-        lifecycle().phase = Phase::Expired;
-        LIFECYCLE.1.notify_all();
+        watchdog_state().phase = Phase::Expired;
+        WATCHDOG_STATE.1.notify_all();
     }
 }
 
@@ -225,10 +225,10 @@ pub fn finish_process() {
 }
 
 fn finish_process_with(sweep: impl FnOnce()) {
-    let mut state = match LIFECYCLE.0.lock() {
+    let mut state = match WATCHDOG_STATE.0.lock() {
         Ok(state) => state,
         Err(poison) => {
-            tracing::debug!("lifecycle lock was poisoned; using its last state");
+            tracing::debug!("watchdog_state lock was poisoned; using its last state");
             poison.into_inner()
         }
     };
@@ -239,7 +239,7 @@ fn finish_process_with(sweep: impl FnOnce()) {
             sweep();
         }
         Phase::Expiring => {
-            let _ = LIFECYCLE
+            let _ = WATCHDOG_STATE
                 .1
                 .wait_timeout_while(state, WATCHDOG_CLEANUP_WAIT, |s| s.phase == Phase::Expiring);
         }
@@ -294,7 +294,7 @@ static SPAWNED_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32:
 fn kill_active_group() {
     let deadline = Instant::now() + WATCHDOG_LOCK_WAIT;
     loop {
-        let state = match LIFECYCLE.0.try_lock() {
+        let state = match WATCHDOG_STATE.0.try_lock() {
             Ok(state) => state,
             Err(TryLockError::Poisoned(poison)) => poison.into_inner(),
             Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
@@ -321,7 +321,7 @@ struct Guard(Child);
 impl Drop for Guard {
     fn drop(&mut self) {
         {
-            let mut state = lifecycle();
+            let mut state = watchdog_state();
             // WNOWAIT kept this leader PID reserved, so it cannot name an
             // unrelated recycled group. Clear it before the final reap.
             unsafe {
@@ -513,7 +513,7 @@ fn capture(
     let expired = || io::Error::new(io::ErrorKind::TimedOut, "scanner watchdog already expired");
     {
         // Authorized only while `Running`, atomically with marking it in flight.
-        let mut state = lifecycle();
+        let mut state = watchdog_state();
         if state.phase != Phase::Running {
             return Err(expired());
         }
@@ -528,8 +528,8 @@ fn capture(
     ));
     if EXPIRING.load(Ordering::SeqCst) {
         // Resumed after the watchdog began (and maybe finished): do not spawn.
-        lifecycle().in_flight = false;
-        LIFECYCLE.1.notify_all();
+        watchdog_state().in_flight = false;
+        WATCHDOG_STATE.1.notify_all();
         return Err(expired());
     }
     #[cfg(test)]
@@ -548,9 +548,9 @@ fn capture(
     std::thread::sleep(Duration::from_millis(
         DELAY_REGISTRATION_MS.load(Ordering::SeqCst),
     ));
-    let mut state = lifecycle();
+    let mut state = watchdog_state();
     state.in_flight = false;
-    LIFECYCLE.1.notify_all();
+    WATCHDOG_STATE.1.notify_all();
     let child = spawned?;
     // Unreaped, so this pid (and group) stays reserved until Guard clears it.
     state.pid = child.id() as i32;
@@ -1190,7 +1190,7 @@ mod tests {
 
     /// `spawn_in_flight`: a spawn is authorized but its pid not registered.
     fn spawn_in_flight() -> bool {
-        lifecycle().in_flight
+        watchdog_state().in_flight
     }
     /// `main` leaving, without the real sweep (which would reach other tests'
     /// children in this process).
@@ -1304,7 +1304,7 @@ mod tests {
             |_| events.borrow_mut().push("log"),
         );
         let events = events.into_inner();
-        reset_lifecycle();
+        reset_watchdog_state();
         assert!(events.is_empty(), "{events:?}");
     }
 
@@ -1399,27 +1399,27 @@ mod tests {
                 |_| {},
             );
         }));
-        reset_lifecycle();
+        reset_watchdog_state();
         assert!(result.is_err());
         assert_eq!(killed.get(), 4242);
     }
 
-    /// A poisoned lifecycle lock is explicit, not fatal: its last state is
+    /// A poisoned watchdog_state lock is explicit, not fatal: its last state is
     /// used (nothing blocks under the lock, so it stays coherent).
     #[test]
-    fn a_poisoned_lifecycle_lock_does_not_stop_the_exit_path() {
+    fn a_poisoned_watchdog_state_lock_does_not_stop_the_exit_path() {
         let _lock = serial();
         let _ = std::thread::spawn(|| {
-            let _held = LIFECYCLE.0.lock().unwrap();
-            panic!("poison the lifecycle lock");
+            let _held = WATCHDOG_STATE.0.lock().unwrap();
+            panic!("poison the watchdog_state lock");
         })
         .join();
-        assert!(LIFECYCLE.0.is_poisoned());
+        assert!(WATCHDOG_STATE.0.is_poisoned());
         let swept = std::cell::Cell::new(false);
         finish_process_with(|| swept.set(true));
         assert!(swept.get());
-        assert_eq!(lifecycle().phase, Phase::Exiting);
-        LIFECYCLE.0.clear_poison();
+        assert_eq!(watchdog_state().phase, Phase::Exiting);
+        WATCHDOG_STATE.0.clear_poison();
     }
 
     /// A capture that was authorized but resumes only after the watchdog's
@@ -1522,7 +1522,7 @@ mod tests {
         let emitted = std::cell::Cell::new(0);
         expire_watchdog(1, || emitted.set(emitted.get() + 1));
         assert_eq!(emitted.get(), 1, "a running scanner's expiry emits it");
-        reset_lifecycle();
+        reset_watchdog_state();
         begin_exit();
         expire_watchdog(1, || emitted.set(emitted.get() + 1));
         assert_eq!(emitted.get(), 1, "an exiting scanner's must not");
@@ -1533,7 +1533,7 @@ mod tests {
     fn a_direct_kill_of_the_active_group_does_not_wedge_the_phase() {
         let _lock = serial();
         kill_active_group();
-        assert_eq!(lifecycle().phase, Phase::Running);
+        assert_eq!(watchdog_state().phase, Phase::Running);
     }
 
     #[test]
@@ -1581,10 +1581,10 @@ mod tests {
     }
 
     fn active_pid() -> i32 {
-        lifecycle().pid
+        watchdog_state().pid
     }
     /// Back to a fresh, running scanner (tests simulate expiry in-process).
-    fn reset_lifecycle() {
+    fn reset_watchdog_state() {
         EXPIRING.store(false, Ordering::SeqCst);
         EXPIRE_AFTER_SPAWN.store(false, Ordering::SeqCst);
         DELAY_REGISTRATION.store(false, Ordering::SeqCst);
@@ -1594,25 +1594,25 @@ mod tests {
         DELAY_REGISTRATION_MS.store(0, Ordering::SeqCst);
         SPAWN_REGISTER_WAIT_MS.store(1000, Ordering::SeqCst);
         STALL_FD.store(-1, Ordering::SeqCst);
-        *lifecycle() = Lifecycle {
+        *watchdog_state() = WatchdogState {
             phase: Phase::Running,
             in_flight: false,
             pid: 0,
         };
     }
-    /// Serializes the tests that use the process-global lifecycle, and leaves
+    /// Serializes the tests that use the process-global watchdog_state, and leaves
     /// it fresh before and after (a panicking test must not poison the rest).
     struct Serial {
         _guard: MutexGuard<'static, ()>,
     }
     fn serial() -> Serial {
         let guard = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
-        reset_lifecycle();
+        reset_watchdog_state();
         Serial { _guard: guard }
     }
     impl Drop for Serial {
         fn drop(&mut self) {
-            reset_lifecycle();
+            reset_watchdog_state();
         }
     }
 
@@ -1628,7 +1628,7 @@ mod tests {
     fn invalid_scanner_groups_never_reach_killpg_or_the_sweep() {
         let _lock = serial();
         for group in [i32::MIN, -1, 0, 1] {
-            reset_lifecycle();
+            reset_watchdog_state();
             let events = std::cell::RefCell::new(Vec::new());
             expire_watchdog_with(
                 group,
@@ -1653,7 +1653,7 @@ mod tests {
     fn killpg_comes_before_every_diagnostic() {
         let _lock = serial();
         for failures in [0, 3] {
-            reset_lifecycle();
+            reset_watchdog_state();
             let events = std::cell::RefCell::new(Vec::new());
             expire_watchdog_with(
                 4242,
@@ -1694,7 +1694,7 @@ mod tests {
         }
         let mut victim = Reaped(victim.spawn().unwrap());
         let _scope = ExpiryScope::enter().unwrap();
-        let mut held = lifecycle();
+        let mut held = watchdog_state();
         held.pid = victim.0.id() as i32;
         let start = Instant::now();
         kill_active_group();
