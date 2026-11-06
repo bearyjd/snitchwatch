@@ -10,6 +10,12 @@
 // hidden before and after a change are skipped. Lines go out through
 // console.warn: console.log is a debug-level message and is dropped in a
 // default Qt build, so a flatpak run would show nothing.
+//
+// Privacy: text is logged only for items that are visible, have effective
+// opacity > 0 and intersect the window and every clip:true ancestor. Editable
+// fields log a placeholder, never their content; truncated text logs
+// "(elided)" instead of the undisplayed full string. The tray tooltip is the
+// one labelled exception (see onTrayTooltipChanged).
 import QtQuick
 
 Item {
@@ -49,18 +55,62 @@ Item {
         return typeName(item) + "#" + index + (item.objectName ? "[" + item.objectName + "]" : "");
     }
 
-    function walk(item, path, out, opacity) {
+    readonly property string redacted: "<editable field redacted>"
+
+    // True for anything the user can type into: the content must never be
+    // logged. Covers TextInput/TextEdit/TextField/TextArea (they expose
+    // cursorPosition), any non-Normal echoMode (password) and readOnly: false.
+    function isEditable(item) {
+        if (item.echoMode !== undefined && item.echoMode !== TextInput.Normal) {
+            return true;
+        }
+        if (item.readOnly !== undefined) {
+            return item.readOnly === false;
+        }
+        return item.cursorPosition !== undefined || item.inputMethodHints !== undefined;
+    }
+
+    // Window-coordinate bounds of an item (corners only; ignores rotation).
+    function bounds(item) {
+        const a = item.mapToItem(null, 0, 0);
+        const b = item.mapToItem(null, item.width, item.height);
+        return {
+            l: Math.min(a.x, b.x), t: Math.min(a.y, b.y),
+            r: Math.max(a.x, b.x), b: Math.max(a.y, b.y)
+        };
+    }
+
+    function intersect(r, c) {
+        return { l: Math.max(r.l, c.l), t: Math.max(r.t, c.t),
+                 r: Math.min(r.r, c.r), b: Math.min(r.b, c.b) };
+    }
+
+    // `clipRect` is the window rect narrowed by every clip:true ancestor.
+    function walk(item, path, out, opacity, clipRect) {
         const op = opacity * item.opacity;
-        if (typeof item.text === "string" && item.lineCount !== undefined) {
+        let clip = clipRect;
+        if (item.clip) {
+            clip = intersect(clipRect, bounds(item));
+        }
+        if (typeof item.text === "string"
+                && (item.lineCount !== undefined || item.cursorPosition !== undefined)) {
+            const r = bounds(item);
+            const inside = r.l < clip.r && r.r > clip.l && r.t < clip.b && r.b > clip.t;
+            let shown = item.text;
+            if (isEditable(item)) {
+                shown = redacted;
+            } else if (item.truncated === true) {
+                shown = "(elided)";
+            }
             out[path] = {
-                vis: item.visible && op > 0.01 ? "V" : "H",
+                vis: item.visible && op > 0 && inside ? "V" : "H",
                 op: String(Math.round(op * 10)),
-                text: item.text
+                text: shown
             };
         }
         const kids = item.children;
         for (let i = 0; i < kids.length; ++i) {
-            walk(kids[i], path + "/" + segment(kids[i], i), out, op);
+            walk(kids[i], path + "/" + segment(kids[i], i), out, op, clip);
         }
     }
 
@@ -100,9 +150,12 @@ Item {
             return;
         }
         const snap = {};
-        walk(target, segment(target, 0), snap, 1);
+        const win = tracer.Window.window;
+        const view = win ? { l: 0, t: 0, r: win.width, b: win.height }
+                         : { l: -Infinity, t: -Infinity, r: Infinity, b: Infinity };
+        walk(target, segment(target, 0), snap, 1, view);
         if (overlay) {
-            walk(overlay, "overlay", snap, 1);
+            walk(overlay, "overlay", snap, 1, view);
         }
         if (primed) {
             Object.keys(snap).forEach(function (k) { diff(k, previous[k], snap[k]); });
@@ -116,13 +169,15 @@ Item {
         primed = true;
     }
 
-    // Deliberately NOT visibility-gated: the tray tooltip is app-composed
-    // status text (bridge/daemon state, see tray_health::compose_tooltip),
-    // shown only on hover, and a prime candidate for the "waiting" flash.
-    // Change-driven, not frame-sampled.
+    // The ONE exception to "on-screen text only": deliberately NOT
+    // visibility-gated. The tray tooltip is app-composed status text
+    // (bridge/daemon state, see tray_health::compose_tooltip), shown only on
+    // hover, invisible to item-tree probing, and a prime candidate for the
+    // "waiting" flash. Its lines carry a distinct label so they can never be
+    // mistaken for on-screen text. Change-driven, not frame-sampled.
     onTrayTooltipChanged: {
         if (primed) {
-            emit("tray.tooltip: " + quote(trayTooltipOld) + " -> " + quote(trayTooltip));
+            emit("tray-tooltip (not necessarily visible): " + quote(trayTooltipOld) + " -> " + quote(trayTooltip));
         }
         trayTooltipOld = trayTooltip;
     }

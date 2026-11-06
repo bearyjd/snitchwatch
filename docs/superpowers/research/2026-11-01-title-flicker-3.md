@@ -124,12 +124,20 @@ lookup at startup remain). It samples once per rendered frame and logs the
 changes it sees in on-screen text, visibility and opacity of every text item
 in the window and its popups/tooltips, plus tray tooltip changes, with a
 millisecond timestamp and the item's path. Item text is printed only if it was
-on screen: a string set while an item was hidden is never logged. The one
-exception is the tray tooltip, which is logged whenever its string changes
-(it is app-composed bridge/daemon status text, shown only on hover, and is
-change-driven rather than frame-sampled). Limits: a
+on screen: visible, effective opacity above 0, and inside the window and every
+clipping ancestor; a string set while an item was hidden or scrolled out is
+never logged. Editable fields (TextInput, TextEdit, TextField, TextArea,
+password fields) never have their content logged: they show as
+`<editable field redacted>`. Truncated (elided) text shows as `(elided)`, not
+the full raw string. The one exception to on-screen-only is the tray tooltip,
+which is logged whenever its string changes, under the label
+`tray-tooltip (not necessarily visible)` so it can never be mistaken for
+on-screen text (it is app-composed bridge/daemon status text, shown only on
+hover, invisible to item-tree probing, and is change-driven rather than
+frame-sampled). Limits: a
 change that starts and ends between two frames is not seen, opacity is rounded
-to tenths, "visible" ignores clipping by a parent, and a flicker that is a pure
+to tenths, clipping is checked by bounding box only (no rotation or shader
+clipping), and a flicker that is a pure
 rendering artefact (properties unchanged) leaves no line. So an empty trace
 over the flicker is itself a result (it points to hypothesis 2 or 3 above),
 not proof that nothing flashed. Run:
@@ -144,7 +152,7 @@ then do the same on Security Scan. Send `trace.log` (grep for `text-trace`).
 
 Line format: `text-trace t=<ms>ms <path> <field>: <old> -> <new> text: "..."`,
 where field is `vis` (V visible / H hidden), `op` (opacity x10) or `text`;
-`+`/`-` lines are items that appeared/disappeared; `tray.tooltip:` lines are
-the tray tooltip. A flash shows up as a `vis: H -> V` (or a `text:` change to
+`+`/`-` lines are items that appeared/disappeared; `tray-tooltip (not necessarily visible):` lines
+are the tray tooltip. A flash shows up as a `vis: H -> V` (or a `text:` change to
 "working"/"waiting") followed within a few ms by the reverse; the path names
 the item (`Type#childIndex[objectName]` per level).

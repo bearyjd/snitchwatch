@@ -22,14 +22,23 @@ app itself must say which item flashes.
 - Change-driven: samples on the window's `frameSwapped` (no timer). Each
   sample walks the window content and `Controls.Overlay.overlay` (popups,
   tooltips) and keeps, per text item (anything with string `text` and
-  `lineCount`), effective visibility, effective opacity and text.
+  `lineCount`, or a text-entry item), effective visibility, effective opacity
+  and text. "On screen" = visible, effective opacity > 0, and the item's rect
+  intersects the window and every `clip: true` ancestor.
+- Privacy: editable items (TextInput/TextEdit/TextField/TextArea, any
+  non-Normal `echoMode`, `readOnly: false`) log `<editable field redacted>`,
+  never their content; truncated text logs `(elided)` instead of the raw text.
 - Logs only diffs, one line each, via `console.warn` (stderr, so it reaches the
   terminal/journal without `SNITCHWATCH_LOG`):
   `text-trace t=<ms> <path> <field>: <old> -> <new>`, plus `+`/`-` lines for
   items that appear/disappear. Path = per-level `Type#childIndex[objectName]`.
   Items hidden before and after are skipped (noise).
 - The tray tooltip (`trayController.tooltip`) is passed in as a property and
-  logged on change as `tray.tooltip`.
+  logged on change as `tray-tooltip (not necessarily visible): old -> new`.
+  This is the one deliberate exception to the on-screen-only rule: the text is
+  app-composed status ("waiting for the bridge" is a flicker candidate) and a
+  tooltip is invisible to item-tree probing. The label keeps it from being
+  mistaken for on-screen text.
 - Each line is also emitted as the `traced(line)` signal; the qmltestrunner
   test asserts on it.
 
