@@ -152,7 +152,7 @@ or launch the GUI.
 
 `packaging/release/` builds `snitchwatch-bridge-cli` plus
 `systemd/snitchwatch-bridge.service` into a deterministic, sha256-pinned
-release tarball inside the digest-pinned Fedora 44 image in
+release tarball inside the digest-pinned Fedora 45 image in
 `release/pins.env`. `.github/workflows/release.yml` runs it on `v*` tags and
 creates a draft GitHub release. It lets an image bake the bridge in
 (`/usr/bin` + `/usr/lib/systemd/user`, enabled with

@@ -401,7 +401,7 @@ internet access rather than scoped loopback). See
 
 Tagged releases (`v*`) publish the bridge as a sha256-pinned tarball —
 `snitchwatch-bridge-<version>-x86_64.tar.gz` (binary, systemd user unit,
-MANIFEST) — built in a digest-pinned Fedora 44 container and rebuilt byte-identically from a second path before publishing, for a
+MANIFEST) — built in a digest-pinned Fedora 45 container and rebuilt byte-identically from a second path before publishing, for a
 bootc/bluebuild image to install at build time and enable with
 `systemctl --global enable snitchwatch-bridge.service`. Contract, install
 snippet and smoke-test assertions:

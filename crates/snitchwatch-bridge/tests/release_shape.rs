@@ -199,8 +199,8 @@ fn builder_container_image_matches_pins_env() {
         .get("SW_BUILDER_IMAGE")
         .unwrap_or_else(|| panic!("{PINS} must define SW_BUILDER_IMAGE"));
     assert!(
-        pinned.contains("fedora:44@sha256:"),
-        "SW_BUILDER_IMAGE must be a digest-pinned Fedora 44 image, got `{pinned}`"
+        pinned.contains("fedora:45@sha256:"),
+        "SW_BUILDER_IMAGE must be a digest-pinned Fedora 45 image, got `{pinned}`"
     );
     let digest = pinned.rsplit_once("@sha256:").map_or("", |(_, d)| d);
     assert!(

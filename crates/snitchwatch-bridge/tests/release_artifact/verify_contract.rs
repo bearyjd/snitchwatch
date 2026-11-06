@@ -41,7 +41,7 @@ fn verify_rejects_malformed_manifest_values() {
             "cargo_lock_sha256",
         ),
         (
-            r#"m["build"]["builder_image"] = "fedora:44""#.into(),
+            r#"m["build"]["builder_image"] = "fedora:45""#.into(),
             "not digest-pinned",
         ),
         (
