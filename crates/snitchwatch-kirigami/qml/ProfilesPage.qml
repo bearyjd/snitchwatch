@@ -62,6 +62,7 @@ Kirigami.ScrollablePage {
         spacing: Kirigami.Units.largeSpacing
 
         Kirigami.Heading {
+            property bool textTraceable: true
             text: page.title
             level: 1
             Layout.alignment: Qt.AlignVCenter

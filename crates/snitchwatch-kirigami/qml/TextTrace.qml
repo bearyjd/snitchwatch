@@ -96,27 +96,28 @@ Item {
                  r: Math.min(r.r, c.r), b: Math.min(r.b, c.b) };
     }
 
-    // The item that draws the window title, or null: only while the current
-    // page's title is a fixed literal (`textTraceTitle`). pageStack.globalToolBar
-    // is a non-visual configuration object, so look for Kirigami's title
-    // delegate (DefaultPageTitleDelegate, holding the title Heading) in the page
-    // stack, outside the current page's own content.
+    // The item that draws the CURRENT page's default title, or null: only
+    // while that page's title is a fixed literal (`textTraceTitle`).
+    // pageStack.globalToolBar is a non-visual configuration object, so use the
+    // page's own `globalToolBarItem` (Kirigami Page: the ToolBarPageHeader
+    // rendered for this page only) and look in it for the title delegate
+    // (DefaultPageTitleDelegate, holding the title Heading). Other pages'
+    // headers, such as an unmarked page below, are never authorized.
+    // Pages with a custom titleDelegate mark their own heading instead.
     function titleToolbar() {
         const ps = pageStack;
         const page = ps ? ps.currentItem : null;
-        return page && page.textTraceTitle === true ? findTitle(ps, page) : null;
+        const header = page && page.textTraceTitle === true ? page.globalToolBarItem : null;
+        return header ? findTitle(header) : null;
     }
 
-    function findTitle(item, skip) {
-        if (item === skip) {
-            return null;
-        }
+    function findTitle(item) {
         if (/TitleDelegate$/.test(typeName(item))) {
             return item;
         }
         const kids = item.children;
         for (let i = 0; kids && i < kids.length; ++i) {
-            const hit = findTitle(kids[i], skip);
+            const hit = findTitle(kids[i]);
             if (hit) {
                 return hit;
             }

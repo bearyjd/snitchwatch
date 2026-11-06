@@ -115,6 +115,16 @@ fn main_qml_mounts_the_tracer_only_with_the_flag_and_it_logs() {
             && on_out.contains("Snitchwatch is connecting to its background service"),
         "flag on: no trace line for the allowlisted bridge banner:\n{on_out}"
     );
+    for page in ["connections", "rules", "profiles", "blocklists"] {
+        assert!(
+            on_out.contains(&format!("probe-title-ok {page} ")),
+            "{page}: fixed title heading not traced:\n{on_out}"
+        );
+    }
+    assert!(
+        !on_out.contains("TITLECANARY"),
+        "flag on: text typed into a header input was logged:\n{on_out}"
+    );
     assert!(
         !on_out.contains("STATUS_CANARY"),
         "flag on: the unmarked bridge status text was logged:\n{on_out}"
@@ -178,6 +188,36 @@ const PROBE_ON_BODY: &str = r#"
                     throw new Error("not reachable by the walk: " + part);
                 }
             });
+        // Pages with a custom titleDelegate: the fixed heading is traced, the
+        // adjacent input never (real pages, real header delegates).
+        function findBy(item, prop, part) {
+            if (typeof item[prop] === "string" && item[prop].indexOf(part) >= 0) return item;
+            for (let i = 0; i < item.children.length; i++) {
+                const hit = findBy(item.children[i], prop, part);
+                if (hit) return hit;
+            }
+            return null;
+        }
+        const pg = main.globalDrawer.pages;
+        [["connections", "Connections", "Search, or app"],
+         ["rules", "Rules", ""],
+         ["profiles", "Profiles", "New profile name"],
+         ["blocklists", "Blocklists", "Blocklist URL"]].forEach(function (spec) {
+            main.pageStack.replace(pg[spec[0]].createObject(main));
+            const title = main.pageStack.currentItem.title;
+            if (spec[2] !== "") {
+                const input = findBy(main.contentItem, "placeholderText", spec[2]);
+                if (input === null) throw new Error("no input found on " + spec[0]);
+                input.text = "TITLECANARY";
+            }
+            loader.item.sample();
+            const snap = loader.item.previous;
+            const hit = Object.keys(snap).filter(function (k) {
+                return k.indexOf("ToolBarPageHeader") >= 0 && snap[k].text === title && snap[k].vis === "V";
+            });
+            if (hit.length === 0) throw new Error("title heading not traced on " + spec[0] + " (" + title + ")");
+            console.warn("probe-title-ok " + spec[0] + " " + title);
+        });
         console.warn("probe-done on");
     }
 }

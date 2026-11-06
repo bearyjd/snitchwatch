@@ -127,8 +127,10 @@ millisecond timestamp and the item's path. Only items under a
 prompt-slot and learning banners' fixed message (not the holder line, which
 holds program and host), the Daemon Health message, the "Waiting for daemon
 statistics" placeholder, the rule button state label ("Waiting for the
-firewall") and the window title (read from Kirigami's page-title delegate while the
-current page has a fixed `textTraceTitle`). Editors, tables, the Rule
+firewall") and the window title (the default title delegate of the current page's own
+header while that page has a fixed `textTraceTitle`; Connections, Rules,
+Profiles and Blocklists mark just their title heading; the connection detail
+page, whose title is a process name, is not traced). Editors, tables, the Rule
 Simulator, inputs, process names and hosts are never read. Marked text is
 logged only while on screen: visible, opacity above 0 and FULLY inside the
 window and every clipping ancestor (`(partly hidden)` otherwise); editable

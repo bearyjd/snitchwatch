@@ -27,11 +27,17 @@ app itself must say which item flashes.
   back out. Unmarked items are never read (no `text`, `displayText`,
   `selectedText`, `preeditText`), so editors, rule/connection tables, the Rule
   Simulator, inputs, process names and hosts cannot leak, however they are
-  bound. The window title is read from Kirigami's `DefaultPageTitleDelegate`
-  item (found in the page stack outside the current page; `globalToolBar` is
-  a non-visual object and is not walked) only while the current page has `property bool textTraceTitle: true` (a literal,
-  fixed title; ConnectionDetailPage's title is a process name and is not
-  marked).
+  bound. The window title is traced two ways. Pages with the
+  default title delegate: the `DefaultPageTitleDelegate` inside the CURRENT
+  page's own `globalToolBarItem` (Kirigami `Page` property: the header
+  rendered for that page only; `pageStack.globalToolBar` is non-visual and is
+  not walked), and only while that page has `property bool textTraceTitle:
+  true` (a literal title). An unmarked page's header, such as one below the
+  current page, is never authorized. Pages with a custom `titleDelegate`
+  (Connections via `ConnectionsHeader.qml`, Rules, Profiles, Blocklists) mark
+  only their fixed title heading `textTraceable`, never the search field,
+  subscribe box or buttons next to it. `ConnectionDetailPage` (title is the
+  process name) is deliberately not marked and traces no title.
 - Defence in depth on marked items: logged only while visible, effective
   opacity > 0 and FULLY inside the window and every `clip: true` ancestor
   (otherwise `(partly hidden)`); editable items (TextInput/TextEdit/TextField/

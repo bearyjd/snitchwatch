@@ -41,6 +41,8 @@ TestCase {
                 }
             }
             function showPlain() { pageStack.replace(plainPage); }
+            function pushMarked() { pageStack.push(markedPage); }
+            function pushPlain() { pageStack.push(plainPage); }
             Production.TextTrace {
                 id: tracer
                 target: win.contentItem
@@ -76,5 +78,65 @@ TestCase {
         wait(100);
         win.tracer.sample();
         compare(joined().indexOf("PAGE_TITLE_CANARY"), -1, joined());
+    }
+
+    function open_window() {
+        const win = createTemporaryObject(windowComp, tc);
+        verify(win);
+        waitForRendering(win.contentItem);
+        wait(300);
+        return win;
+    }
+
+    // A marked page pushed OVER an unmarked page whose title is a canary: the
+    // lower page's title delegate must never be read.
+    function test_marked_page_over_unmarked_never_logs_the_lower_title() {
+        const win = open_window();
+        win.showPlain();
+        wait(400);
+        win.pushMarked();
+        wait(400);
+        win.tracer.sample();
+        tc.lines = [];
+        win.pageStack.get(0).title = "PAGE_TITLE_CANARY_LOWER";
+        wait(100);
+        win.tracer.sample();
+        win.pageStack.currentItem.title = "Marked Changed";
+        wait(100);
+        win.tracer.sample();
+        verify(joined().indexOf('"Marked Changed"') >= 0, "the marked page's own title is traced: " + joined());
+        compare(joined().indexOf("CANARY"), -1, joined());
+        win.pageStack.pop();
+        wait(400);
+        win.tracer.sample();
+        win.pageStack.currentItem.title = "PAGE_TITLE_CANARY_AFTER_POP";
+        wait(100);
+        win.tracer.sample();
+        compare(joined().indexOf("CANARY"), -1, joined());
+    }
+
+    // A marked page BELOW an unmarked one: the current page is unmarked, so
+    // no title is read, neither its own nor the lower marked page's.
+    function test_marked_page_under_unmarked_logs_no_canary() {
+        const win = open_window();
+        win.pushPlain();
+        wait(400);
+        win.tracer.sample();
+        tc.lines = [];
+        win.pageStack.currentItem.title = "PAGE_TITLE_CANARY_TOP";
+        wait(100);
+        win.tracer.sample();
+        win.pageStack.get(0).title = "Lower Marked Changed";
+        wait(100);
+        win.tracer.sample();
+        compare(joined().indexOf("CANARY"), -1, joined());
+        win.pageStack.pop();
+        wait(400);
+        win.pushPlain();
+        wait(400);
+        win.pageStack.currentItem.title = "PAGE_TITLE_CANARY_AGAIN";
+        wait(100);
+        win.tracer.sample();
+        compare(joined().indexOf("CANARY"), -1, joined());
     }
 }

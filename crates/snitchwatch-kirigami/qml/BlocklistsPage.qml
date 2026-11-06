@@ -95,6 +95,7 @@ Kirigami.ScrollablePage {
         spacing: Kirigami.Units.largeSpacing
 
         SelectableText {
+            property bool textTraceable: true
             text: page.title
             level: 1
             wrapMode: Text.NoWrap
