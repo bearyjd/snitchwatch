@@ -4,7 +4,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, TryLockError};
+use std::sync::{Condvar, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 const STDOUT_LIMIT: usize = 1024 * 1024;
@@ -64,6 +64,8 @@ fn expire_watchdog_with(
     killpg: impl FnOnce(i32),
     log: impl Fn(&str),
 ) {
+    // Before anything releases `capture`: see `wait_for_watchdog_cleanup`.
+    let _scope = ExpiryScope::enter();
     kill_active();
     if own_group <= 1 {
         log(&format!(
@@ -82,6 +84,48 @@ fn expire_watchdog_with(
             sweep.failures
         ));
     }
+}
+
+/// Whether the watchdog is mid-expiry, so the main thread must not end the
+/// process (and the watchdog thread with it) before the cleanup is done.
+static WATCHDOG_EXPIRING: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+/// How long the main thread waits for the watchdog's cleanup: the sweep bound
+/// plus a margin. In production the final `killpg` ends the process first.
+const WATCHDOG_CLEANUP_WAIT: Duration = Duration::from_secs(5);
+
+/// Marks the watchdog's cleanup as under way until dropped (even on panic).
+struct ExpiryScope;
+impl ExpiryScope {
+    fn enter() -> Self {
+        *WATCHDOG_EXPIRING
+            .0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = true;
+        ExpiryScope
+    }
+}
+impl Drop for ExpiryScope {
+    fn drop(&mut self) {
+        *WATCHDOG_EXPIRING
+            .0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = false;
+        WATCHDOG_EXPIRING.1.notify_all();
+    }
+}
+
+/// Call before the main thread returns or exits: if the watchdog is mid-expiry
+/// (its first step releases `capture` with an error, which can bring `main` to
+/// its end), wait, bounded, until its cleanup is done, so the process is not
+/// ended mid-sweep with descendants alive.
+pub fn wait_for_watchdog_cleanup() {
+    let guard = WATCHDOG_EXPIRING
+        .0
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let _ = WATCHDOG_EXPIRING
+        .1
+        .wait_timeout_while(guard, WATCHDOG_CLEANUP_WAIT, |expiring| *expiring);
 }
 
 /// Test only: a pre-exec hook that reports the forked child's pid on this fd
@@ -836,6 +880,106 @@ mod tests {
         assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
         assert_eq!(reported.len(), 2, "the fixture never reported its pids");
         assert!(survivors.is_empty(), "outlived the watchdog: {survivors:?}");
+    }
+
+    /// The main thread must not return (and so end the process, and the
+    /// watchdog thread with it) while the watchdog is still cleaning up: the
+    /// watchdog's first step releases `capture`, whose error would otherwise
+    /// let `main` exit with a detached descendant still alive. The injected
+    /// delay after the release makes the unsynchronised exit certain.
+    #[test]
+    fn main_waits_for_the_watchdog_to_finish_its_sweep() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD: &str = "SNITCHWATCH_TEST_MAIN_EXITS_EARLY";
+        if let Some(file) = std::env::var_os(CHILD) {
+            let own = unsafe { libc::getpid() };
+            unsafe {
+                assert!(libc::setpgid(0, 0) == 0 || libc::getpgrp() == own);
+            }
+            crate::containment::become_subreaper().unwrap();
+            let mut detached = Command::new("/usr/bin/sleep");
+            detached
+                .arg("60")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null());
+            unsafe {
+                detached.pre_exec(|| {
+                    if libc::setsid() < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            #[allow(clippy::zombie_processes)] // killed by the watchdog under test
+            let detached = detached.spawn().unwrap();
+            std::fs::write(&file, format!("{}\n", detached.id())).unwrap();
+            std::thread::spawn(move || {
+                // Fire once the primitive below is registered.
+                while ACTIVE_GROUP.lock().unwrap().pid == 0 {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                expire_watchdog_with(
+                    own,
+                    || {
+                        kill_active_group();
+                        std::thread::sleep(Duration::from_millis(300));
+                    },
+                    |root| crate::containment::kill_descendants(root, DESCENDANT_SWEEP),
+                    |group| unsafe {
+                        libc::killpg(group, libc::SIGKILL);
+                    },
+                    |_| {},
+                );
+            });
+            // Released by the watchdog's first step, with an error.
+            let _ = capture(
+                Command::new("/usr/bin/sh").args(["-c", "exec sleep 30"]),
+                Duration::from_secs(60),
+                None,
+            );
+            // What `main` does on its way out.
+            wait_for_watchdog_cleanup();
+            std::process::exit(0);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pids = dir.path().join("pids");
+        let mut scanner = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "command::tests::main_waits_for_the_watchdog_to_finish_its_sweep",
+                "--test-threads=1",
+            ])
+            .env(CHILD, &pids)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        let mut reported = Vec::new();
+        while reported.is_empty() && start.elapsed() < Duration::from_secs(10) {
+            reported = reported_pids(&pids);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let exited = exited_within(&scanner, Duration::from_secs(10));
+        let since = Instant::now();
+        while !reported.iter().all(|&pid| gone(pid)) && since.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
+        for &pid in &survivors {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        let status = kill_group_then_reap(&mut scanner);
+        assert!(exited, "the scanner never exited");
+        assert_eq!(reported.len(), 1, "the fixture never reported its pid");
+        assert!(
+            survivors.is_empty(),
+            "main exited before the watchdog's sweep: {survivors:?} survived ({status:?})"
+        );
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
     }
 
     #[test]

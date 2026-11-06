@@ -230,6 +230,14 @@ fn validate_database_files(db: &std::path::Path, owner: u32) -> anyhow::Result<(
 }
 
 fn main() -> anyhow::Result<()> {
+    let result = run();
+    // The watchdog's first step can release a running primitive with an error
+    // that brings us here; its sweep must finish before the process ends.
+    scanner_privileged::command::wait_for_watchdog_cleanup();
+    result
+}
+
+fn run() -> anyhow::Result<()> {
     init_logging();
     let elevated = unsafe { libc::geteuid() } == 0;
     let args = parse_args_from(std::env::args().skip(1), elevated)?;
@@ -267,6 +275,7 @@ fn main() -> anyhow::Result<()> {
     if report.reconciled.new.is_empty() {
         Ok(())
     } else {
+        scanner_privileged::command::wait_for_watchdog_cleanup();
         std::process::exit(2);
     }
 }

@@ -43,7 +43,18 @@ pub(crate) fn parent_and_zombie(pid: i32) -> Option<(i32, bool)> {
     Some((parent, state == b"Z"))
 }
 
-/// Every live (non-zombie) process below `root`, by the current `/proc`.
+/// A zombie thread-group leader whose other threads still run is alive: only
+/// a leader with no other task left is dead.
+fn has_other_tasks(pid: i32) -> bool {
+    std::fs::read_dir(format!("/proc/{pid}/task")).is_ok_and(|tasks| {
+        tasks
+            .flatten()
+            .any(|task| task.file_name().to_str() != Some(&pid.to_string()))
+    })
+}
+
+/// Every live process below `root`, by the current `/proc` (a zombie is dead
+/// unless threads of its group still run).
 fn live_descendants(root: i32, deadline: Instant) -> Vec<i32> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
@@ -62,20 +73,22 @@ fn live_descendants(root: i32, deadline: Instant) -> Vec<i32> {
             continue;
         };
         if let Some((parent, zombie)) = parent_and_zombie(pid) {
-            children.entry(parent).or_default().push((pid, zombie));
+            let dead = zombie && !has_other_tasks(pid);
+            children.entry(parent).or_default().push((pid, dead));
         }
     }
     let mut live = Vec::new();
     let mut seen = HashSet::from([root]);
     let mut stack = vec![root];
     while let Some(parent) = stack.pop() {
-        for &(pid, zombie) in children.get(&parent).into_iter().flatten() {
+        for &(pid, dead) in children.get(&parent).into_iter().flatten() {
             if seen.insert(pid) {
-                // A zombie's children were already reparented; nothing to walk.
-                if !zombie {
+                if !dead {
                     live.push(pid);
-                    stack.push(pid);
                 }
+                // Walk through dead nodes too: a snapshot can list a child
+                // under a parent that is already exiting.
+                stack.push(pid);
             }
         }
     }
@@ -441,5 +454,84 @@ mod tests {
         );
         assert!(!sweep.complete);
         assert!(kills <= 3, "kept signalling past the bound: {kills}");
+    }
+
+    extern "C" fn pause_forever(_: *mut libc::c_void) -> *mut libc::c_void {
+        loop {
+            unsafe { libc::pause() };
+        }
+    }
+
+    /// Forks a root `P` and, below it, a `C` whose thread-group leader exits
+    /// (SYS_exit) while a second thread keeps running; returns `(P, C)`.
+    fn fork_root_with_leaderless_thread_group() -> (i32, i32) {
+        let mut pipe = [0; 2];
+        unsafe {
+            assert_eq!(libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC), 0);
+            let root = libc::fork();
+            assert!(root >= 0);
+            if root == 0 {
+                let child = libc::fork();
+                if child == 0 {
+                    // The forking thread is the new process's leader.
+                    let mut thread: libc::pthread_t = 0;
+                    libc::pthread_create(
+                        &mut thread,
+                        std::ptr::null(),
+                        pause_forever,
+                        std::ptr::null_mut(),
+                    );
+                    libc::syscall(libc::SYS_exit, 0);
+                }
+                libc::write(pipe[1], (&child as *const i32).cast(), 4);
+                loop {
+                    libc::pause();
+                }
+            }
+            libc::close(pipe[1]);
+            let mut child: i32 = 0;
+            assert_eq!(libc::read(pipe[0], (&mut child as *mut i32).cast(), 4), 4);
+            libc::close(pipe[0]);
+            (root, child)
+        }
+    }
+
+    /// Tasks of `pid` besides its leader entry, read straight from /proc.
+    fn other_tasks(pid: i32) -> usize {
+        std::fs::read_dir(format!("/proc/{pid}/task"))
+            .map(|dir| {
+                dir.flatten()
+                    .filter(|e| e.file_name().to_str() != Some(&pid.to_string()))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_zombie_leader_with_running_threads_is_found_and_killed() {
+        let (root, child) = fork_root_with_leaderless_thread_group();
+        // Wait for the leader to be a zombie with its other thread running.
+        let start = Instant::now();
+        while !(parent_and_zombie(child).is_some_and(|(_, zombie)| zombie)
+            && other_tasks(child) > 0)
+            && start.elapsed() < Duration::from_secs(3)
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let setup = other_tasks(child) > 0;
+        let swept = kill_descendants(root, Duration::from_secs(3));
+        let start = Instant::now();
+        while other_tasks(child) > 0 && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let survived = other_tasks(child) > 0;
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+            libc::kill(root, libc::SIGKILL);
+            libc::waitpid(root, std::ptr::null_mut(), 0);
+        }
+        assert!(setup, "the fixture never reached its leaderless state");
+        assert!(swept.complete);
+        assert!(!survived, "a thread group with a zombie leader survived");
     }
 }
