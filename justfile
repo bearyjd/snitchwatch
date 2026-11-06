@@ -162,7 +162,7 @@ endpoint-events-verify:
 
 # --- Bridge release tarball (docs/packaging/bridge-release-artifact.md) ---
 # These run packaging/release/*.sh inside a fresh container from the
-# digest-pinned Fedora 44 builder image in packaging/release/pins.env — the
+# digest-pinned Fedora 45 builder image in packaging/release/pins.env — the
 # same scripts .github/workflows/release.yml runs. The checkout is mounted
 # read-only and output lands in ./dist (release-verify is the exception: it
 # never mounts the checkout, only temp copies; see its comment).
@@ -221,7 +221,7 @@ release-bridge-repro:
 # invoked from; the arguments reach the script as positional parameters, never
 # interpolated into shell text.
 
-# Verify a tarball against a known sha256 in a throwaway Fedora 44 container.
+# Verify a tarball against a known sha256 in a throwaway Fedora 45 container.
 [positional-arguments]
 release-verify tarball sha256:
     #!/usr/bin/env bash

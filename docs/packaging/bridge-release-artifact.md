@@ -2,7 +2,7 @@
 
 The Snitchwatch bridge (`snitchwatch-bridge-cli` plus its systemd **user**
 unit) is published as a pre-built, sha256-pinned tarball for immutable images
-(bazzite-tower, Fedora 44 bootc) to install at image build time: fetch a
+(bazzite-tower, Fedora 45 bootc) to install at image build time: fetch a
 release asset by exact version, check a pinned sha256, extract — no package
 scriptlets. This is the consumer contract. Design and decisions:
 [`../superpowers/plans/2026-10-03-bridge-release-artifact.md`](../superpowers/plans/2026-10-03-bridge-release-artifact.md).
@@ -73,7 +73,7 @@ compare against it — compare against the hash pinned in your repo.
   bundled SQLite, no OpenSSL). Its only `NEEDED` libraries are
   `libgcc_s.so.1`, `libm.so.6`, `libc.so.6`, `ld-linux-x86-64.so.2`; it needs
   glibc ≥ 2.34. It is built in
-  `registry.fedoraproject.org/fedora:44@sha256:…` (see `packaging/release/pins.env`).
+  `registry.fedoraproject.org/fedora:45@sha256:…` (see `packaging/release/pins.env`).
 - `--version` prints exactly `snitchwatch-bridge-cli ${VERSION}`; `--help`
   prints usage. Both exit 0 before any I/O (no socket, token, or bind).
   **Without a flag the binary starts a bridge** — never run it bare in an
@@ -93,7 +93,7 @@ Sorted keys, 2-space indent. Contents independent of the checkout path.
 |---|---|
 | `name`, `version`, `arch` | `snitchwatch-bridge`, the crate version, `x86_64` |
 | `source.git_commit` / `git_tag` / `dirty` / `source_date_epoch` | What was built. Releases have `git_tag` = `v${VERSION}` and `dirty: false`. |
-| `build.builder_image` | Digest-pinned Fedora 44 image |
+| `build.builder_image` | Digest-pinned Fedora 45 image |
 | `build.rustc_vv`, `cargo_version`, `protoc_version`, `rpms{}` | Toolchain as built (exact Fedora NEVRAs for rust, cargo, gcc, glibc, glibc-devel, libgcc, binutils, llvm-libs, zlib-ng-compat, python3, protobuf-compiler) |
 | `build.rpm_qa`, `build.rpm_qa_sha256` | Every installed RPM (sorted NEVRAs) and its digest — the image digest pins only the base layer, `dnf` pulls live updates |
 | `build.command`, `rustflags`, `cargo_lock_sha256` | `cargo build --release --locked -p snitchwatch-bridge-cli --no-default-features`, the path-remap template, the lockfile hash |
@@ -184,7 +184,7 @@ This bridge release does not change the user unit's transport.
    actually compiles), then (in the `release` environment) refuses if the tag
    moved or a release already exists, attests provenance, and creates a
    **draft** release.
-4. Compare the draft's sha256 with step 2's. They match only if Fedora 44
+4. Compare the draft's sha256 with step 2's. They match only if Fedora 45
    shipped no toolchain update in between (`MANIFEST.json` → `build.rpm_qa`
    shows exactly what each build used). Run the strict attestation check
    above, publish the draft, and pin that sha256 in the image.
@@ -196,7 +196,7 @@ A `workflow_dispatch` run of `Release` builds and verifies without publishing.
 ```bash
 just release-bridge            # build into dist/ (ALLOW_DIRTY=1 for an uncommitted tree)
 just release-bridge-repro      # build twice from different paths; require identical bytes
-just release-verify <tarball> <sha256>  # host-side hash check first, then verify + install + unit checks in a throwaway Fedora 44 container
+just release-verify <tarball> <sha256>  # host-side hash check first, then verify + install + unit checks in a throwaway Fedora 45 container
 just package-check             # includes the packer/shape tests and a real unit verify
 ```
 
@@ -215,7 +215,7 @@ or `just release-verify` instead.
 
 `packaging/release/pins.env` is the single source of truth: builder image
 digest, expected rustc and protoc versions, and the vendored OpenSnitch
-commit/tag. Builds fail loudly when Fedora 44 ships a new rust or protoc
+commit/tag. Builds fail loudly when Fedora 45 ships a new rust or protoc
 ("bump pins.env"). Bump the image digest in `pins.env` **and** in
 `release.yml`'s `container.image` together —
 `crates/snitchwatch-bridge/tests/release_shape.rs` fails if they differ.

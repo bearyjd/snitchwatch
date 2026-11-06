@@ -453,7 +453,7 @@ just endpoint-events-verify
 ```
 
 Runs [`verify.sh`](verify.sh) with rootless podman. It installs the packages
-once into a container from the digest-pinned Fedora 44 image
+once into a container from the digest-pinned Fedora 45 image
 (`packaging/release/pins.env`), commits that to a throwaway local image, runs
 two phases on it and removes it. `NET_ADMIN` and `SYS_ADMIN` apply only inside
 the container's own namespaces, so nothing touches the host's firewall or `/etc`.
