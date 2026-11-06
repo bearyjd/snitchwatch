@@ -127,7 +127,7 @@ millisecond timestamp and the item's path. Only items under a
 prompt-slot and learning banners' fixed message (not the holder line, which
 holds program and host), the Daemon Health message, the "Waiting for daemon
 statistics" placeholder, the rule button state label ("Waiting for the
-firewall") and the window title (read from the page stack's toolbar while the
+firewall") and the window title (read from Kirigami's page-title delegate while the
 current page has a fixed `textTraceTitle`). Editors, tables, the Rule
 Simulator, inputs, process names and hosts are never read. Marked text is
 logged only while on screen: visible, opacity above 0 and FULLY inside the

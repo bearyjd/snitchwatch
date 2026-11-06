@@ -96,12 +96,32 @@ Item {
                  r: Math.min(r.r, c.r), b: Math.min(r.b, c.b) };
     }
 
-    // The toolbar item to read, or null: only while the current page's title
-    // is a fixed literal (`textTraceTitle`).
+    // The item that draws the window title, or null: only while the current
+    // page's title is a fixed literal (`textTraceTitle`). pageStack.globalToolBar
+    // is a non-visual configuration object, so look for Kirigami's title
+    // delegate (DefaultPageTitleDelegate, holding the title Heading) in the page
+    // stack, outside the current page's own content.
     function titleToolbar() {
         const ps = pageStack;
         const page = ps ? ps.currentItem : null;
-        return page && page.textTraceTitle === true && ps.globalToolBar ? ps.globalToolBar : null;
+        return page && page.textTraceTitle === true ? findTitle(ps, page) : null;
+    }
+
+    function findTitle(item, skip) {
+        if (item === skip) {
+            return null;
+        }
+        if (/TitleDelegate$/.test(typeName(item))) {
+            return item;
+        }
+        const kids = item.children;
+        for (let i = 0; kids && i < kids.length; ++i) {
+            const hit = findTitle(kids[i], skip);
+            if (hit) {
+                return hit;
+            }
+        }
+        return null;
     }
 
     // `clipRect` is the window rect narrowed by every clip:true ancestor;

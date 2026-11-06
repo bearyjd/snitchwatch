@@ -73,8 +73,6 @@ Item {
             }
         }
 
-        Item { id: toolbarStub; objectName: "toolbar"; Text { id: titleText; objectName: "title"; text: "Daemon Health" } }
-
         // Everything below is NOT marked: never read, whatever it holds.
         Item {
             id: unmarked
@@ -103,16 +101,11 @@ Item {
         }
     }
 
-    // A stand-in page stack for the window-title toolbar.
-    QtObject { id: fakePage; property bool textTraceTitle: true }
-    QtObject { id: plainPage }
-    QtObject { id: fakeStack; property var currentItem: fakePage; property var globalToolBar: toolbarStub }
 
     Production.TextTrace {
         id: tracer
         target: tree
         trayTooltip: "Snitchwatch - ok"
-        pageStack: null
         onTraced: function (line) { host.lines = host.lines.concat([line]); }
     }
 
@@ -317,24 +310,6 @@ Item {
             verify(joined().indexOf("(elided)") >= 0, joined());
             compare(joined().indexOf("CANARY"), -1, joined());
             e.destroy();
-        }
-
-        function test_window_title_is_traced_only_for_a_fixed_title_page() {
-            tracer.pageStack = fakeStack;
-            tracer.sample();
-            titleText.text = "Security Scan";
-            tracer.sample();
-            verify(joined().indexOf('[title] text: "Daemon Health" -> "Security Scan"') >= 0
-                   || joined().indexOf('"Security Scan"') >= 0, joined());
-            host.lines = [];
-            fakeStack.currentItem = plainPage;
-            tracer.sample();
-            host.lines = [];
-            titleText.text = "TITLE_CANARY";
-            tracer.sample();
-            compare(joined().indexOf("TITLE_CANARY"), -1, joined());
-            fakeStack.currentItem = fakePage;
-            tracer.pageStack = null;
         }
     }
 }

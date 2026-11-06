@@ -27,8 +27,9 @@ app itself must say which item flashes.
   back out. Unmarked items are never read (no `text`, `displayText`,
   `selectedText`, `preeditText`), so editors, rule/connection tables, the Rule
   Simulator, inputs, process names and hosts cannot leak, however they are
-  bound. The window title is read from `pageStack.globalToolBar` only while
-  the current page has `property bool textTraceTitle: true` (a literal,
+  bound. The window title is read from Kirigami's `DefaultPageTitleDelegate`
+  item (found in the page stack outside the current page; `globalToolBar` is
+  a non-visual object and is not walked) only while the current page has `property bool textTraceTitle: true` (a literal,
   fixed title; ConnectionDetailPage's title is a process name and is not
   marked).
 - Defence in depth on marked items: logged only while visible, effective

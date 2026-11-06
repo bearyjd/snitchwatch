@@ -170,6 +170,14 @@ const PROBE_ON_BODY: &str = r#"
         main.bridgeFeedRef.linkState = "retrying";
         main.bridgeFeedRef.statusText = "STATUS_CANARY";
         loader.item.sample();
+        // The marked areas must be reachable by the walk in the REAL window.
+        const keys = Object.keys(loader.item.previous).join("\n");
+        ["DefaultPageTitleDelegate", "[bridgeMessage-connecting]", "PromptSlotBanner", "LearningBanner"]
+            .forEach(function (part) {
+                if (keys.indexOf(part) < 0) {
+                    throw new Error("not reachable by the walk: " + part);
+                }
+            });
         console.warn("probe-done on");
     }
 }
