@@ -262,15 +262,15 @@ Two independent limits; whichever trips first evicts.
 | # | Invariant | Enforcement mechanism | Test |
 |---|-----------|-----------------------|------|
 | S1 | Every persisted field has a fixed maximum byte length, so the largest possible row, index entry and snapshot are known from the schema | One field-cap table in the insert API (`rule_name`, `process_path`, `dst_host`, rule snapshot parts and every other column); longer values are truncated with a marker or the row is refused; `page_size` is pinned (4096) at creation and verified on open | Property test: for every column, a value at cap+1 never reaches the file at more than cap |
-| S2 | No write transaction can modify more pages than the journal share can hold | The writer sizes each transaction from S1's worst-case pages **per row including indexes, snapshot rows and orphan-snapshot cleanup**, and commits when the page budget is reached. **The implementation must prove the per-row page constant from the schema and caps; it is not asserted here.** If it cannot be proved, fall back to reserving headroom for a full rollback journal (main-file share ≤ B/2) | Fault test: worst-case rows (all fields at cap) through insert, eviction, snapshot cleanup and incremental vacuum; assert pages modified per transaction never exceeds the budget |
-| S3 | main file + maximum journal + slack ≤ B | `max_page_count` for the main file; journal = S2's page budget × page size; 10% slack never allocated; 2% reserved for the ledger (D6) | Measured simultaneous file sizes under S2's worst-case workload stay ≤ B (measurement validates the invariant; it is not the enforcement) |
-| S4 | Freed space returns to the filesystem without a full rewrite | `auto_vacuum=INCREMENTAL`, `incremental_vacuum(N)` in steps that obey S2. **No full `VACUUM`**: its temporary space cannot fit in B | Delete 90% of rows; file shrinks; no step exceeds S2 |
+| S2 | The rollback journal cannot outgrow its reserve, whatever a transaction writes | **Full-journal reserve (owner decision 2026-10-28; the per-row page proof was declined as unproved).** Room is reserved for a journal of every page of the main file (one 4096-byte header plus one 4104-byte record per page; `cache_spill=OFF`, verified on open, keeps it to one header), and the main file is capped at ≤ B/2. No claim is made about pages per row or rows per transaction; batch sizes only keep transactions short. The writer also checks the journal against that limit before `COMMIT` as a tripwire | Fill-to-limit workload: the main file never exceeds B/2; a transaction that journals every page keeps main + journal + settings ≤ B; mutant check: loosening the cap fails both |
+| S3 | main file + maximum journal + settings ≤ B | `max_page_count` for the main file, the largest count with main ≤ B/2 and main + full journal + settings ≤ B (the leftover, about 0.2% of the main file, is never allocated); 2% of B inside the main file reserved for the ledger (D6) | Measured simultaneous file sizes under S2's worst-case workload stay ≤ B (measurement validates the invariant; it is not the enforcement) |
+| S4 | Freed space returns to the filesystem without a full rewrite | `auto_vacuum=INCREMENTAL`, `incremental_vacuum(N)` in short transactions (S2 bounds the journal whatever N is). **No full `VACUUM`**: its temporary space cannot fit in B | Delete 90% of rows; file shrinks; no journal exceeds the S2 limit |
 | S5 | Deleted content is not left readable in the file | `secure_delete=ON`; clear-all recreates the file (H02) instead of deleting inside it | Canary scan after delete and after clear |
 
   `journal_size_limit` only trims the journal after a commit and is not
   relied on for any of the above.
 - **Eviction order:** per-process byte share first (admission, below), then
-  oldest `ts_ms` first, in chunks obeying S2. If a chunk
+  oldest `ts_ms` first, in short chunks (S2). If a chunk
   does not bring usage under the high-water mark after a fixed number of
   rounds (default 3), recording pauses with a `write-failed (cap)` gap and
   retries with exponential backoff; it never grows past the budget and never
@@ -834,10 +834,10 @@ Resolved by the owner; each is reflected in the sections named.
 - **S1:** the implementation must derive the field-cap table for every stored
   string beyond the three the owner set, and prove from the schema that no
   value can exceed it.
-- **S2:** the implementation must prove the worst-case pages-per-row constant
-  from the schema and caps (including indexes, snapshots and orphan cleanup).
-  If it cannot, the fallback is reserving a full-database rollback journal
-  (main-file share at most half of the budget).
+- **S2:** resolved by the owner (2026-10-28): the per-row page proof was
+  declined as unproved, and the full-journal fallback is used: a full
+  rollback journal is reserved and the main file is at most half of the
+  budget. No per-row page constant is claimed.
 - **Correlation uniqueness:** the implementation must prove that `src_ip`,
   `src_port`, protocol, destination and process path identify one live socket
   within the settlement window; where it cannot, or the match is ambiguous,

@@ -8,6 +8,7 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
+import com.snitchwatch.shell
 
 Rectangle {
     id: row
@@ -28,7 +29,32 @@ Rectangle {
     color: row.selected !== "" ? Qt.alpha(Kirigami.Theme.highlightColor, 0.12) : "transparent"
     border.color: Kirigami.Theme.disabledTextColor
     border.width: 1
-    radius: 3
+    radius: Theme.radiusMedium
+
+    readonly property string countsText: row.info.connections
+        + (row.info.connections === 1 ? " connection to " : " connections to ")
+        + row.info.distinct + (row.info.distinctExact ? "" : " or more")
+        + (row.info.distinct === 1 ? " destination" : " destinations")
+        + ". Last seen " + new Date(row.info.lastSeenMs).toLocaleString() + "."
+
+    // The warnings and per-choice lines, shared by their Labels and the row's
+    // Copy text so the two cannot drift. "" = not shown.
+    readonly property string dualUseText: row.info.dualUse === true
+        ? "This program can run other programs or scripts." : ""
+    readonly property string highFanOutText: row.info.highFanOut === true
+        ? "It connected to " + row.info.distinct + " or more destinations, so no destination list is chosen for it." : ""
+    readonly property string alreadyPresentText: row.info.alreadyPresent !== undefined && row.info.alreadyPresent.length > 0
+        ? "A rule you already have makes: " + row.present(row.info.alreadyPresent) + "." : ""
+
+    function hostLine(h) {
+        return h.host + "  (" + h.count + ")";
+    }
+    function onlyText(c) {
+        return c.hosts.length > 0 ? "Only: " + c.hosts.join(", ") : "";
+    }
+    function noteText(c) {
+        return c.note === null || c.note === undefined ? "" : c.note;
+    }
 
     function present(kinds) {
         const names = {
@@ -38,6 +64,30 @@ Rectangle {
             "directory": "any program file in a folder"
         };
         return kinds.map(k => names[k] || "a choice").join(", ");
+    }
+
+    // Right-click Copy of the whole program (mouse only: no focus, no Tab
+    // stop). The labels stay Labels: a second per-label menu would open
+    // beside this one, and a drag-select would fight the list's flick.
+    RowCopyMenu {
+        copyText: {
+            const i = row.info;
+            const lines = [i.programLabel + (i.programLabelUnverified ? " (name unverified)" : ""),
+                           i.programPathFull === undefined ? "" : i.programPathFull,
+                           row.countsText];
+            lines.push(...(i.flags === undefined ? [] : i.flags));
+            const hosts = row.more.length > 0 ? row.more : (i.top === undefined ? [] : i.top);
+            lines.push(row.dualUseText, row.highFanOutText);
+            lines.push(...hosts.map(h => row.hostLine(h)));
+            if (i.notSelectable !== undefined && i.notSelectable !== null) {
+                lines.push(i.notSelectable);
+            }
+            lines.push(row.alreadyPresentText);
+            for (const c of (i.choices === undefined ? [] : i.choices)) {
+                lines.push(c.title, row.onlyText(c), row.noteText(c));
+            }
+            return lines.filter(l => l !== "").join("\n");
+        }
     }
 
     ColumnLayout {
@@ -67,10 +117,7 @@ Rectangle {
             Layout.fillWidth: true
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: row.info.connections + (row.info.connections === 1 ? " connection to " : " connections to ")
-                + row.info.distinct + (row.info.distinctExact ? "" : " or more")
-                + (row.info.distinct === 1 ? " destination" : " destinations")
-                + ". Last seen " + new Date(row.info.lastSeenMs).toLocaleString() + "."
+            text: row.countsText
         }
 
         Repeater {
@@ -86,17 +133,17 @@ Rectangle {
         }
         Controls.Label {
             Layout.fillWidth: true
-            visible: row.info.dualUse === true
+            visible: row.dualUseText !== ""
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: "This program can run other programs or scripts."
+            text: row.dualUseText
         }
         Controls.Label {
             Layout.fillWidth: true
-            visible: row.info.highFanOut === true
+            visible: row.highFanOutText !== ""
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: "It connected to " + row.info.distinct + " or more destinations, so no destination list is chosen for it."
+            text: row.highFanOutText
         }
 
         Repeater {
@@ -106,10 +153,10 @@ Rectangle {
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
                 wrapMode: Text.WrapAnywhere
-                text: modelData.host + "  (" + modelData.count + ")"
+                text: row.hostLine(modelData)
             }
         }
-        Controls.Button {
+        RoundedButton {
             visible: row.info.destinationsHidden === true && row.more.length === 0
             text: "Show the busiest destinations"
             onClicked: row.more = JSON.parse(row.controller.destinations(row.info.key)).slice(0, 25)
@@ -125,10 +172,10 @@ Rectangle {
         }
         Controls.Label {
             Layout.fillWidth: true
-            visible: row.info.alreadyPresent !== undefined && row.info.alreadyPresent.length > 0
+            visible: row.alreadyPresentText !== ""
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: visible ? "A rule you already have makes: " + row.present(row.info.alreadyPresent) + "." : ""
+            text: row.alreadyPresentText
         }
 
         Repeater {
@@ -140,7 +187,7 @@ Rectangle {
 
                 RowLayout {
                     Layout.fillWidth: true
-                    Controls.CheckBox {
+                    RoundedCheckBox {
                         id: tickBox
                         objectName: "tick-" + modelData.kind
                         enabled: !row.locked
@@ -173,10 +220,10 @@ Rectangle {
                 Controls.Label {
                     Layout.fillWidth: true
                     Layout.leftMargin: Kirigami.Units.gridUnit * 2
-                    visible: modelData.hosts.length > 0
+                    visible: row.onlyText(modelData) !== ""
                     textFormat: Text.PlainText
                     wrapMode: Text.WrapAnywhere
-                    text: "Only: " + modelData.hosts.join(", ")
+                    text: row.onlyText(modelData)
                 }
                 Controls.Label {
                     Layout.fillWidth: true
@@ -185,7 +232,7 @@ Rectangle {
                     textFormat: Text.PlainText
                     wrapMode: Text.WrapAnywhere
                     opacity: 0.8
-                    text: modelData.note === null || modelData.note === undefined ? "" : modelData.note
+                    text: row.noteText(modelData)
                 }
             }
         }

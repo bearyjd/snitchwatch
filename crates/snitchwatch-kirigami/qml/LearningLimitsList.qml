@@ -3,7 +3,6 @@
 // PlainText label so a test can count them.
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 
 ColumnLayout {
@@ -23,7 +22,7 @@ ColumnLayout {
 
     Repeater {
         model: limits.lines
-        delegate: Controls.Label {
+        delegate: SelectableText {
             required property string modelData
             Layout.fillWidth: true
             wrapMode: Text.Wrap

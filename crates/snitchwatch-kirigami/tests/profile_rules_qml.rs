@@ -108,7 +108,7 @@ Window {
                     && reasons[0].text === "Not installed: <i>no</i>", "reason not shown");
                 let markup = 0;
                 for (const node of probeWindow.all(inspector.contentItem, [])) {
-                    if (node instanceof Controls.Label && node.text.indexOf("<") >= 0) {
+                    if ((node instanceof Controls.Label || node instanceof TextEdit) && node.text.indexOf("<") >= 0) {
                         markup += 1;
                         probeWindow.expect(node.textFormat === Text.PlainText,
                             "markup rendered as rich text: " + node.text);

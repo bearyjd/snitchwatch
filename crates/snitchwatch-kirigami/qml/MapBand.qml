@@ -84,7 +84,7 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        Controls.ToolButton {
+        GuardedToolButton {
             id: chevronButton
             // A text glyph, so it shows without an icon theme (QML cannot
             // tell whether a theme icon will actually render).
@@ -100,8 +100,12 @@ ColumnLayout {
                 }
             }
         }
-        Controls.Label {
+        // Selectable (batch 8). The count and the scope below stay Labels:
+        // both elide in a row that cannot grow a line.
+        SelectableText {
             text: "Map"
+            textFormat: Text.PlainText
+            wrapMode: Text.NoWrap
             font.bold: true
         }
         Controls.Label {
@@ -113,7 +117,7 @@ ColumnLayout {
                 : band.countryCount + (band.countryCount === 1 ? " country" : " countries")
                     + (map.hierarchy.available ? " · "+map.hierarchy.ips.length+" observed IPs" : "")
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapZoomOut"
             text: "−"
             visible: !MapBandState.collapsed
@@ -121,7 +125,7 @@ ColumnLayout {
             Accessible.name: "Zoom out"
             onClicked: map.camera.zoomAt(1 / 1.5, map.width / 2, map.height / 2)
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapZoomIn"
             text: "+"
             visible: !MapBandState.collapsed
@@ -129,14 +133,14 @@ ColumnLayout {
             Accessible.name: "Zoom in"
             onClicked: map.camera.zoomAt(1.5, map.width / 2, map.height / 2)
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapFit"
             text: "Fit"
             visible: !MapBandState.collapsed
             Accessible.name: "Fit world map"
             onClicked: map.camera.reset()
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             id: countriesButton
             text: "Places"
             icon.name: "view-list-details"
@@ -151,14 +155,14 @@ ColumnLayout {
         visible: !MapBandState.collapsed
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapWorldScope"
             text: "World"
             enabled: map.activeGeoScope.kind !== ""
             Accessible.name: "Clear geographic scope; preserve search"
             onClicked: map.clearScope()
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapScopeBack"
             text: "‹ Back"
             enabled: map.activeGeoScope.kind !== ""
@@ -168,10 +172,11 @@ ColumnLayout {
         Controls.Label {
             Layout.fillWidth: true
             text: map.activeGeoScope.kind === "" ? "Countries → cities → observed IPs" : map.activeGeoScope.name
+            Accessible.name: "Geographic scope: " + map.activeGeoScope.name
             textFormat: Text.PlainText
             elide: Text.ElideRight
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "mapDestinations"
             text: "Destinations ("+map.scopeNodes.length+")"
             Accessible.name: "List destinations, including local, unknown and unavailable locations"
@@ -198,6 +203,9 @@ ColumnLayout {
         Layout.margins: Kirigami.Units.smallSpacing
         spacing: 0
 
+        // The footer's two wrapping texts stay Labels (batch 8): a wrapping
+        // TextEdit reports a different implicitHeight, which feeds
+        // chromeHeight and so the SplitView sizes (map_split_drag_real_qml).
         Controls.Label {
             Layout.fillWidth: true
             visible: map.hierarchy.available
@@ -212,23 +220,31 @@ ColumnLayout {
         Flow {
             Layout.fillWidth: true
             spacing: Kirigami.Units.largeSpacing
-            Controls.Label {
+            SelectableText {
                 text: "● allowed"
+                textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
                 color: Theme.allow
                 font: Kirigami.Theme.smallFont
             }
-            Controls.Label {
+            SelectableText {
                 text: "■ denied"
+                textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
                 color: Theme.deny
                 font: Kirigami.Theme.smallFont
             }
-            Controls.Label {
+            SelectableText {
                 text: "◆ pending"
+                textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
                 color: Theme.pending
                 font: Kirigami.Theme.smallFont
             }
-            Controls.Label {
+            SelectableText {
                 text: "ring: mixed verdicts"
+                textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
                 font: Kirigami.Theme.smallFont
             }
         }

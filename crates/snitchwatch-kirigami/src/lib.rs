@@ -6,6 +6,8 @@
 //! Phase 3a spike proved cxx-qt issue #770 does not bite this repo — see
 //! `crates/kirigami-spike/tests/link_770.rs`).
 
+pub mod about;
+pub mod about_model;
 pub(crate) mod alert_row;
 pub mod analysis_export;
 pub mod analysis_export_controller;

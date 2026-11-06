@@ -78,10 +78,12 @@ Item {
             model: bar.model
         }
 
-        Controls.Label {
+        // Echoes the typed query: external text, so PlainText (batch 8).
+        SelectableText {
             width: column.width
             visible: bar.model ? bar.model.filterSummary.length > 0 : false
             text: bar.model ? "Filter: " + bar.model.filterSummary : ""
+            textFormat: Text.PlainText
             wrapMode: Text.WordWrap
             color: Kirigami.Theme.disabledTextColor
         }

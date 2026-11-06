@@ -65,13 +65,15 @@ Kirigami.ScrollablePage {
             level: 1
             Layout.alignment: Qt.AlignVCenter
         }
-        Controls.TextField {
+        RoundedField {
             id: newProfileName
             Layout.fillWidth: true
             placeholderText: "New profile name…"
+            Accessible.name: "New profile name"
         }
-        Controls.Button {
+        GuardedButton {
             text: "Create"
+            Accessible.name: "Create profile"
             icon.name: "list-add"
             enabled: newProfileName.text.trim().length > 0
             onClicked: {
@@ -109,7 +111,7 @@ Kirigami.ScrollablePage {
             text: "Profiles are not applied to the firewall here: activating one installs "
                 + "no firewall rules, so it changes nothing that is allowed or blocked."
         }
-        Controls.Label {
+        SelectableText {
             objectName: "notAppliedReason"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -126,7 +128,7 @@ Kirigami.ScrollablePage {
             text: "Profiles are kept in memory only, so they are lost when Snitchwatch's "
                 + "background service restarts (for example on logout or reboot)."
         }
-        Controls.Label {
+        SelectableText {
             objectName: "savedNote"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -136,7 +138,7 @@ Kirigami.ScrollablePage {
             text: "Profiles are saved, so they are kept when Snitchwatch's background service "
                 + "restarts."
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
             visible: page.storageReason.length > 0
@@ -146,7 +148,7 @@ Kirigami.ScrollablePage {
         }
         // Why the last create/rename/matcher change was refused (#116). The
         // reason comes from the bridge, so it sits in a PlainText label.
-        Controls.Label {
+        SelectableText {
             objectName: "profileNote"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -157,7 +159,7 @@ Kirigami.ScrollablePage {
         }
     }
 
-    ListView {
+    FocusOrderListView {
         id: list
         model: page.model
         currentIndex: -1
@@ -173,27 +175,42 @@ Kirigami.ScrollablePage {
             explanation: "Create a profile above, e.g. \"At Home\" or \"Public Wi-Fi\", then set its network matchers to auto-activate it."
         }
 
-        delegate: Controls.ItemDelegate {
+        delegate: NavigableRow {
             id: row
             width: ListView.view ? ListView.view.width : implicitWidth
             highlighted: ListView.isCurrentItem
+            focusPolicy: Qt.StrongFocus
+            Accessible.name: row.isActive ? row.name + " (active)" : row.name
+            Accessible.description: row.networkMatchers.length > 0 ? row.networkMatchers
+                : "No network matchers (manual activation only)"
 
-            required property int index
             required property string profileId
             required property string name
             required property string networkMatchers
             required property bool isActive
+
+            // The texts the row draws, shared by its Labels and its Copy.
+            readonly property string dotText: row.isActive ? "●" : "○"
+            readonly property string matchersText: row.networkMatchers.length > 0
+                ? row.networkMatchers : "No network matchers (manual activation only)"
+            readonly property string activeText: "Active"
 
             onClicked: {
                 list.currentIndex = row.index;
                 page.openInspector(row);
             }
 
+            // Right-click Copy of the row's text (mouse only; selectable-text plan, class C).
+            RowCopyMenu {
+                copyText: [row.dotText, row.name, row.matchersText]
+                    .concat(row.isActive ? [row.activeText] : []).join("\n")
+            }
+
             contentItem: RowLayout {
                 spacing: Kirigami.Units.largeSpacing
 
                 Controls.Label {
-                    text: row.isActive ? "●" : "○"
+                    text: row.dotText
                     color: row.isActive ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.disabledTextColor
                     Layout.alignment: Qt.AlignVCenter
                 }
@@ -210,7 +227,7 @@ Kirigami.ScrollablePage {
                     }
                     Controls.Label {
                         textFormat: Text.PlainText
-                        text: row.networkMatchers.length > 0 ? row.networkMatchers : "No network matchers (manual activation only)"
+                        text: row.matchersText
                         opacity: 0.7
                         font: Kirigami.Theme.smallFont
                         elide: Text.ElideMiddle
@@ -220,7 +237,7 @@ Kirigami.ScrollablePage {
 
                 Controls.Label {
                     visible: row.isActive
-                    text: "Active"
+                    text: row.activeText
                     color: Kirigami.Theme.positiveTextColor
                     Layout.alignment: Qt.AlignVCenter
                 }
@@ -284,6 +301,9 @@ Kirigami.ScrollablePage {
     SizedOverlaySheet {
         id: inspector
         title: page.inspectName
+        // Focus goes into the sheet (Tab then reaches its first control, and
+        // Escape closes it), on nothing that a held key could press.
+        onOpened: inspector.contentItem.forceActiveFocus(Qt.TabFocusReason)
 
         ColumnLayout {
             Layout.preferredWidth: inspector.preferredWidth
@@ -292,12 +312,13 @@ Kirigami.ScrollablePage {
             Kirigami.FormLayout {
                 Layout.fillWidth: true
 
-                Controls.TextField {
+                RoundedField {
                     id: renameField
                     Kirigami.FormData.label: "Name"
+                    Accessible.name: "Profile name"
                     text: page.inspectName
                 }
-                Controls.Button {
+                GuardedButton {
                     Kirigami.FormData.label: " "
                     text: "Save name"
                     enabled: renameField.text.trim().length > 0 && renameField.text.trim() !== page.inspectName
@@ -307,13 +328,14 @@ Kirigami.ScrollablePage {
                     }
                 }
 
-                Controls.TextField {
+                RoundedField {
                     id: matchersField
                     Kirigami.FormData.label: "Network matchers"
                     placeholderText: "Home*, Office-5G"
+                    Accessible.name: "Network matchers"
                     text: page.inspectMatchers
                 }
-                Controls.Button {
+                GuardedButton {
                     Kirigami.FormData.label: " "
                     text: "Save matchers"
                     enabled: matchersField.text !== page.inspectMatchers
@@ -323,8 +345,10 @@ Kirigami.ScrollablePage {
                     }
                 }
 
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Status"
+                    textFormat: Text.PlainText
+                    wrapMode: Text.NoWrap
                     text: page.inspectActive ? "Active" : "Inactive"
                     color: page.inspectActive ? Kirigami.Theme.positiveTextColor : Kirigami.Theme.neutralTextColor
                 }
@@ -335,12 +359,13 @@ Kirigami.ScrollablePage {
             }
 
             // The profile's rules and whether the firewall has them.
-            Controls.Label {
+            SelectableText {
                 textFormat: Text.PlainText
+                wrapMode: Text.NoWrap
                 text: "Rules"
                 font.bold: true
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "profileNoRules"
                 Layout.fillWidth: true
                 visible: page.inspectRules.length === 0
@@ -357,6 +382,11 @@ Kirigami.ScrollablePage {
                     spacing: 0
                     RowLayout {
                         Layout.fillWidth: true
+                        // Right-click Copy of the rule (its conditions are elided, so both
+                        // texts stay Labels; selectable-text plan, class B).
+                        RowCopyMenu {
+                            copyText: ruleRow.modelData.action + " " + ruleRow.modelData.conditions
+                        }
                         Controls.Label {
                             objectName: "profileRuleAction"
                             textFormat: Text.PlainText
@@ -370,22 +400,25 @@ Kirigami.ScrollablePage {
                             text: ruleRow.modelData.conditions
                             elide: Text.ElideMiddle
                         }
-                        Controls.Button {
+                        GuardedButton {
                             objectName: "profileRuleRemove"
                             icon.name: "list-remove"
                             text: "Remove"
+                            Accessible.name: "Remove rule: " + ruleRow.modelData.action + " "
+                                + ruleRow.modelData.conditions
                             display: Controls.AbstractButton.IconOnly
                             onClicked: page.model.removeRule(page.inspectId, ruleRow.modelData.id)
                         }
                     }
-                    Controls.Label {
+                    SelectableText {
                         objectName: "profileRuleStatus"
                         textFormat: Text.PlainText
+                        wrapMode: Text.NoWrap
                         text: ruleRow.modelData.status
                         color: ruleRow.modelData.installed ? Kirigami.Theme.positiveTextColor
                                                            : Kirigami.Theme.neutralTextColor
                     }
-                    Controls.Label {
+                    SelectableText {
                         objectName: "profileRuleReason"
                         Layout.fillWidth: true
                         visible: ruleRow.modelData.reason.length > 0
@@ -395,7 +428,7 @@ Kirigami.ScrollablePage {
                     }
                 }
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "profileEditorStatus"
                 Layout.fillWidth: true
                 visible: ruleEditorController.statusText.length > 0
@@ -403,7 +436,7 @@ Kirigami.ScrollablePage {
                 wrapMode: Text.Wrap
                 text: ruleEditorController.statusText
             }
-            Controls.Button {
+            GuardedButton {
                 objectName: "profileAddRule"
                 Layout.fillWidth: true
                 text: "Add rule…"
@@ -415,7 +448,7 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
             }
 
-            Controls.Button {
+            GuardedButton {
                 Layout.fillWidth: true
                 visible: !page.inspectActive
                 text: "Activate"
@@ -425,7 +458,7 @@ Kirigami.ScrollablePage {
                     page.inspectActive = true;
                 }
             }
-            Controls.Button {
+            GuardedButton {
                 Layout.fillWidth: true
                 visible: page.inspectActive
                 text: "Deactivate"
@@ -442,12 +475,16 @@ Kirigami.ScrollablePage {
 
             // Two-step confirmation kept inline (no separate dialog type
             // introduced) — mirrors RulesPage's existing button-row pattern.
-            Controls.Button {
+            GuardedButton {
                 Layout.fillWidth: true
                 visible: !page.confirmingDelete
                 text: "Delete profile"
+                Accessible.name: "Delete profile " + page.inspectName
                 icon.name: "edit-delete-remove"
-                onClicked: page.confirmingDelete = true
+                onClicked: {
+                    page.confirmingDelete = true;
+                    cancelDelete.forceActiveFocus(Qt.TabFocusReason);
+                }
             }
 
             ColumnLayout {
@@ -455,7 +492,7 @@ Kirigami.ScrollablePage {
                 visible: page.confirmingDelete
                 spacing: Kirigami.Units.smallSpacing
 
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     text: "Delete this profile permanently?"
                     color: Kirigami.Theme.negativeTextColor
@@ -464,14 +501,17 @@ Kirigami.ScrollablePage {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: Kirigami.Units.largeSpacing
-                    Controls.Button {
+                    GuardedButton {
+                        id: cancelDelete
                         Layout.fillWidth: true
                         text: "Cancel"
+                        Accessible.name: "Cancel deleting profile " + page.inspectName
                         onClicked: page.confirmingDelete = false
                     }
-                    Controls.Button {
+                    GuardedButton {
                         Layout.fillWidth: true
                         text: "Confirm delete"
+                        Accessible.name: "Confirm deleting profile " + page.inspectName
                         icon.name: "edit-delete-remove"
                         onClicked: {
                             page.model.deleteProfile(page.inspectId);

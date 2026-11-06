@@ -51,11 +51,17 @@ Controls.Dialog {
     onClosed: {
         if (!controller.saving) controller.cancel();
     }
+    // False while the window is hidden or minimized (main.qml).
+    property bool windowShown: true
+    property alias pollTimer: pollTimer
     Timer {
-        // Always runs while the page owns this dialog, including an open preview
-        // or admitted Save with no subsequent bridge messages.
+        id: pollTimer
+        // Runs while the window is shown, and whenever the dialog is open or a
+        // request, preview or Save is in flight, so expiry, session changes and
+        // Save never wait on the window (perf/gui-idle-wakeups).
         interval: 100
-        running: true
+        running: sheet.windowShown || sheet.opened || sheet.controller.busy
+            || sheet.controller.saving || sheet.controller.previewReady
         repeat: true
         onTriggered: sheet.controller.poll()
     }
@@ -119,7 +125,7 @@ Controls.Dialog {
                     Layout.fillWidth: true
                     enabled: !sheet.controller.saving
                     model: ["All application identities", "Exact process path", "Missing process path category"]
-                    Accessible.name: "Export application selector"
+                    Accessible.name: "Export application: " + displayText
                     onActivated: sheet.changedFilters()
                 }
                 Controls.TextField {
@@ -149,6 +155,7 @@ Controls.Dialog {
                             required property string modelData
                             objectName: "analysisExportVerdict-" + modelData
                             text: modelData
+                            Accessible.name: "Verdict " + modelData
                             checked: true
                             enabled: verdictEnabled.checked && !sheet.controller.saving
                             onToggled: sheet.changedFilters()
@@ -204,7 +211,7 @@ Controls.Dialog {
                     if (filters !== null) sheet.controller.requestExport(filters);
                 }
             }
-            Controls.Button {
+            GuardedButton {
                 objectName: "analysisExportSave"
                 text: sheet.controller.saving ? "Saving…" : "Save privately"
                 enabled: sheet.controller.previewReady && sheet.controller.available && !sheet.controller.saving

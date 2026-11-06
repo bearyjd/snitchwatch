@@ -6,8 +6,10 @@
 // sits under Show all, Expand/Collapse and the filter bar's Full list switch.
 import QtQuick
 import QtQuick.Controls as Controls
+import QtQuick.Controls.impl as Impl
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
+import com.snitchwatch.shell
 
 ColumnLayout {
     id: bar
@@ -28,7 +30,7 @@ ColumnLayout {
         objectName: "showingRow"
         visible: bar.collapsing && bar.background > 0
         Layout.fillWidth: true
-        Controls.Label {
+        SelectableText {
             objectName: "showingText"
             Layout.fillWidth: true
             textFormat: Text.PlainText
@@ -38,7 +40,24 @@ ColumnLayout {
                   : ""
         }
         Controls.Button {
+            id: showAllButton
             objectName: "showAllButton"
+            // Restyled in place (type name stays `Button` for the focus tests).
+            implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+            horizontalPadding: Theme.controlPaddingH
+            background: RoundedSurface { control: showAllButton }
+            // org.kde.desktop draws a Button's label inside the background
+            // replaced above; without its own label it would render blank.
+            contentItem: Impl.IconLabel {
+                objectName: "inPlaceButtonLabel"
+                spacing: showAllButton.spacing
+                mirrored: showAllButton.mirrored
+                display: showAllButton.display
+                icon: showAllButton.icon
+                text: showAllButton.text
+                font: showAllButton.font
+                color: showAllButton.palette.buttonText
+            }
             text: "Show all"
             onClicked: bar.model.setNeedsAttention(false)
         }
@@ -55,7 +74,7 @@ ColumnLayout {
             implicitWidth: Kirigami.Units.iconSizes.small
             implicitHeight: Kirigami.Units.iconSizes.small
         }
-        Controls.Label {
+        SelectableText {
             objectName: "backgroundSummary"
             Layout.fillWidth: true
             textFormat: Text.PlainText
@@ -69,7 +88,24 @@ ColumnLayout {
                     + "in the list, subject to the other filters"
         }
         Controls.Button {
+            id: backgroundToggle
             objectName: "backgroundToggle"
+            // Restyled in place (type name stays `Button` for the focus tests).
+            implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+            horizontalPadding: Theme.controlPaddingH
+            background: RoundedSurface { control: backgroundToggle }
+            // org.kde.desktop draws a Button's label inside the background
+            // replaced above; without its own label it would render blank.
+            contentItem: Impl.IconLabel {
+                objectName: "inPlaceButtonLabel"
+                spacing: backgroundToggle.spacing
+                mirrored: backgroundToggle.mirrored
+                display: backgroundToggle.display
+                icon: backgroundToggle.icon
+                text: backgroundToggle.text
+                font: backgroundToggle.font
+                color: backgroundToggle.palette.buttonText
+            }
             text: bar.collapsing ? "Expand" : "Collapse"
             onClicked: bar.model.setNeedsAttention(!bar.collapsing)
         }
@@ -79,7 +115,7 @@ ColumnLayout {
         objectName: "newProgramsRow"
         visible: bar.newPrograms > 0
         Layout.fillWidth: true
-        Controls.Label {
+        SelectableText {
             objectName: "newProgramsText"
             Layout.fillWidth: true
             textFormat: Text.PlainText
@@ -88,7 +124,24 @@ ColumnLayout {
                   + " first seen this session: always shown until you mark them as seen"
         }
         Controls.Button {
+            id: markSeenButton
             objectName: "markSeenButton"
+            // Restyled in place (type name stays `Button` for the focus tests).
+            implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+            horizontalPadding: Theme.controlPaddingH
+            background: RoundedSurface { control: markSeenButton }
+            // org.kde.desktop draws a Button's label inside the background
+            // replaced above; without its own label it would render blank.
+            contentItem: Impl.IconLabel {
+                objectName: "inPlaceButtonLabel"
+                spacing: markSeenButton.spacing
+                mirrored: markSeenButton.mirrored
+                display: markSeenButton.display
+                icon: markSeenButton.icon
+                text: markSeenButton.text
+                font: markSeenButton.font
+                color: markSeenButton.palette.buttonText
+            }
             text: "Mark as seen"
             onClicked: bar.model.markNewProgramsSeen()
         }
@@ -98,7 +151,7 @@ ColumnLayout {
         objectName: "baselineNotice"
         visible: bar.notice.length > 0
         Layout.fillWidth: true
-        Controls.Label {
+        SelectableText {
             objectName: "baselineText"
             Layout.fillWidth: true
             textFormat: Text.PlainText
@@ -106,7 +159,24 @@ ColumnLayout {
             text: bar.notice
         }
         Controls.Button {
+            id: dismissBaseline
             objectName: "dismissBaseline"
+            // Restyled in place (type name stays `Button` for the focus tests).
+            implicitHeight: Math.max(Theme.hitMin, implicitContentHeight + topPadding + bottomPadding)
+            horizontalPadding: Theme.controlPaddingH
+            background: RoundedSurface { control: dismissBaseline }
+            // org.kde.desktop draws a Button's label inside the background
+            // replaced above; without its own label it would render blank.
+            contentItem: Impl.IconLabel {
+                objectName: "inPlaceButtonLabel"
+                spacing: dismissBaseline.spacing
+                mirrored: dismissBaseline.mirrored
+                display: dismissBaseline.display
+                icon: dismissBaseline.icon
+                text: dismissBaseline.text
+                font: dismissBaseline.font
+                color: dismissBaseline.palette.buttonText
+            }
             text: "Dismiss"
             onClicked: bar.model.dismissBaselineNotice()
         }

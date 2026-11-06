@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
@@ -23,7 +22,7 @@ Kirigami.ScrollablePage {
             text: page.model.statusSummary
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             visible: page.model.hasProblem
@@ -34,7 +33,7 @@ Kirigami.ScrollablePage {
             text: page.model.troubleshootingText
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             visible: !page.model.hasProblem
@@ -42,7 +41,7 @@ Kirigami.ScrollablePage {
             text: page.model.statusSummary
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             objectName: "processMonitorReported"
@@ -50,7 +49,7 @@ Kirigami.ScrollablePage {
             text: page.model.monitorStatus
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             objectName: "processMonitorSupport"
@@ -59,7 +58,7 @@ Kirigami.ScrollablePage {
                    check the daemon log to confirm which method is running."
         }
 
-        Controls.Button {
+        RoundedButton {
             text: "Recheck"
             onClicked: page.model.recheck()
         }

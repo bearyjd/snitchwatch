@@ -80,7 +80,7 @@ Kirigami.ScrollablePage {
             text: "This Snitchwatch service doesn't add or remove recommended rules. Nothing "
                 + "here can be turned on or off; rules already in the firewall stay as they are."
         }
-        Controls.Label {
+        SelectableText {
             objectName: "unavailableReason"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -89,7 +89,7 @@ Kirigami.ScrollablePage {
             wrapMode: Text.Wrap
             text: page.unavailableReason
         }
-        Controls.Label {
+        SelectableText {
             objectName: "dnsUnsupported"
             Layout.fillWidth: true
             textFormat: Text.PlainText
@@ -97,7 +97,7 @@ Kirigami.ScrollablePage {
             visible: page.model && !page.model.broadSupported
             text: "This service cannot accept reviewed DNS consent. Connect to an updated service to turn on or keep the DNS rule. Turning it off is still available."
         }
-        Controls.Label {
+        SelectableText {
             objectName: "dnsChoiceResult"
             Layout.fillWidth: true
             textFormat: Text.PlainText
@@ -105,26 +105,31 @@ Kirigami.ScrollablePage {
             visible: page.model && page.model.consentResult.length > 0
             text: page.model ? page.model.consentResult : ""
         }
-        RowLayout {
-            Layout.margins: Kirigami.Units.smallSpacing
+    }
+
+    FocusOrderListView {
+        id: list
+        model: page.model
+        // Inside the list, so Tab reaches these before the rows (the page's
+        // own header comes after the list in the focus order).
+        header: RowLayout {
+            width: list.width
             spacing: Kirigami.Units.largeSpacing
             visible: page.usable && list.count > 0
-            Controls.Button {
+            height: visible ? implicitHeight : 0
+            GuardedButton {
                 objectName: "allOnButton"
                 text: "Turn all on"
+                Layout.margins: Kirigami.Units.smallSpacing
                 onClicked: page.model.setAll(true)
             }
-            Controls.Button {
+            GuardedButton {
                 objectName: "allOffButton"
                 text: "Turn all off"
+                Layout.margins: Kirigami.Units.smallSpacing
                 onClicked: page.model.setAll(false)
             }
         }
-    }
-
-    ListView {
-        id: list
-        model: page.model
         // Under the bridge's group titles when it sends groups; the flat list otherwise.
         section.property: page.model && page.model.grouped ? "groupTitle" : ""
         section.criteria: ViewSection.FullString
@@ -144,7 +149,7 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
                 label: "No longer recommended"
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "orphansExplanation"
                 Layout.fillWidth: true
                 Layout.margins: Kirigami.Units.smallSpacing
@@ -166,6 +171,17 @@ Kirigami.ScrollablePage {
                     spacing: Kirigami.Units.smallSpacing
                     // Remove asks first; a new list from the bridge ends it.
                     property bool confirmingRemove: false
+
+                    // Right-click Copy of the whole row. The name is elided, so every
+                    // text of the row stays a Label (a second menu would open beside this).
+                    RowCopyMenu {
+                        copyText: {
+                            const lines = [orphanRow.modelData.ruleName, orphanRow.modelData.statusText];
+                            if (orphanRow.modelData.problem.length > 0) lines.push(orphanRow.modelData.problem);
+                            if (orphanRow.modelData.canRemove && orphanRow.confirmingRemove) lines.push(orphanRemoveQuestion.text);
+                            return lines.filter(line => line.length > 0).join("\n");
+                        }
+                    }
 
                     Controls.Label {
                         objectName: "orphanName"
@@ -193,13 +209,18 @@ Kirigami.ScrollablePage {
                         font: Kirigami.Theme.smallFont
                         Layout.fillWidth: true
                     }
-                    Controls.Button {
+                    GuardedButton {
                         objectName: "orphanRemoveButton"
                         visible: orphanRow.modelData.canRemove && !orphanRow.confirmingRemove
                         text: "Remove…"
-                        onClicked: orphanRow.confirmingRemove = true
+                        Accessible.name: "Remove old rule " + orphanRow.modelData.ruleName
+                        onClicked: {
+                            orphanRow.confirmingRemove = true;
+                            orphanCancel.forceActiveFocus(Qt.TabFocusReason);
+                        }
                     }
                     Controls.Label {
+                        id: orphanRemoveQuestion
                         objectName: "orphanRemoveQuestion"
                         visible: orphanRow.modelData.canRemove && orphanRow.confirmingRemove
                         text: "Remove the firewall's rule under this name? Snitchwatch no longer "
@@ -210,17 +231,20 @@ Kirigami.ScrollablePage {
                     }
                     RowLayout {
                         visible: orphanRow.modelData.canRemove && orphanRow.confirmingRemove
-                        Controls.Button {
+                        GuardedButton {
                             objectName: "orphanRemoveConfirm"
                             text: "Remove rule"
+                            Accessible.name: "Confirm removing old rule " + orphanRow.modelData.ruleName
                             onClicked: {
                                 orphanRow.confirmingRemove = false;
                                 page.model.removeOrphan(orphanRow.modelData.orphanId);
                             }
                         }
-                        Controls.Button {
+                        GuardedButton {
+                            id: orphanCancel
                             objectName: "orphanRemoveCancel"
                             text: "Cancel"
+                            Accessible.name: "Cancel removing old rule " + orphanRow.modelData.ruleName
                             onClicked: orphanRow.confirmingRemove = false
                         }
                     }
@@ -228,12 +252,14 @@ Kirigami.ScrollablePage {
             }
         }
 
-        delegate: Controls.ItemDelegate {
+        delegate: NavigableRow {
             id: row
             width: ListView.view ? ListView.view.width : implicitWidth
             hoverEnabled: false
+            focusPolicy: Qt.StrongFocus
+            Accessible.name: row.program
+            Accessible.description: row.statusText
 
-            required property int index
             required property string entryId
             required property string program
             required property string allows
@@ -249,11 +275,23 @@ Kirigami.ScrollablePage {
             // Remove asks first; a model reset (the bridge's answer) ends it.
             property bool confirmingRemove: false
 
+            // Right-click Copy of the whole row (mouse only; selectable-text plan,
+            // class C). The program is elided, so every text of the row stays a Label.
+            RowCopyMenu {
+                copyText: {
+                    const lines = [row.program, row.allows, row.why, row.statusText];
+                    if (row.problem.length > 0) lines.push(row.problem);
+                    if (row.canRemove && row.confirmingRemove) lines.push(removeQuestion.text);
+                    return lines.filter(line => line.length > 0).join("\n");
+                }
+            }
+
             contentItem: RowLayout {
                 spacing: Kirigami.Units.largeSpacing
 
-                Controls.Switch {
+                GuardedSwitch {
                     objectName: "entrySwitch"
+                    Accessible.name: "Recommended rule: " + row.program
                     enabled: page.usable && (!row.isBroad || row.isOn || page.model.broadSupported)
                     checked: row.isOn
                     Layout.alignment: Qt.AlignTop
@@ -307,27 +345,34 @@ Kirigami.ScrollablePage {
                         font: Kirigami.Theme.smallFont
                         Layout.fillWidth: true
                     }
-                    Controls.Button {
+                    GuardedButton {
                         objectName: "keepButton"
+                        Accessible.name: "Keep rule for " + row.program
                         visible: row.canKeep
                         enabled: !row.isBroad || page.model.broadSupported
                         text: "Keep"
                         onClicked: page.model.keepEntry(row.entryId)
                     }
-                    Controls.Button {
+                    GuardedButton {
                         objectName: "reviewDnsButton"
+                        Accessible.name: "Review DNS choice for " + row.program
                         visible: row.isBroad && !row.canKeep && !row.canRemove
                         enabled: page.usable && page.model.broadSupported && !row.heldBack
                         text: "Review DNS choice…"
                         onClicked: page.model.setEntry(row.entryId, true)
                     }
-                    Controls.Button {
+                    GuardedButton {
                         objectName: "removeButton"
+                        Accessible.name: "Remove rule for " + row.program
                         visible: row.canRemove && !row.confirmingRemove
                         text: "Remove…"
-                        onClicked: row.confirmingRemove = true
+                        onClicked: {
+                            row.confirmingRemove = true;
+                            removeCancel.forceActiveFocus(Qt.TabFocusReason);
+                        }
                     }
                     Controls.Label {
+                        id: removeQuestion
                         objectName: "removeQuestion"
                         visible: row.canRemove && row.confirmingRemove
                         text: "Remove the firewall's rule under this name? It differs from this "
@@ -338,16 +383,19 @@ Kirigami.ScrollablePage {
                     }
                     RowLayout {
                         visible: row.canRemove && row.confirmingRemove
-                        Controls.Button {
+                        GuardedButton {
                             objectName: "removeConfirm"
+                            Accessible.name: "Confirm removing rule for " + row.program
                             text: "Remove rule"
                             onClicked: {
                                 row.confirmingRemove = false;
                                 page.model.removeEntry(row.entryId);
                             }
                         }
-                        Controls.Button {
+                        GuardedButton {
+                            id: removeCancel
                             objectName: "removeCancel"
+                            Accessible.name: "Cancel removing rule for " + row.program
                             text: "Cancel"
                             onClicked: row.confirmingRemove = false
                         }

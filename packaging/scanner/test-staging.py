@@ -42,6 +42,12 @@ class ScannerStaging(unittest.TestCase):
         policy = self.dest / "usr/share/polkit-1/actions/org.snitchwatch.scanner.policy"
         annotation = ET.parse(policy).find(".//annotate[@key='org.freedesktop.policykit.exec.path']")
         self.assertEqual(annotation.text, "/usr/libexec/snitchwatch-scanner-privileged")
+        # Every deep scan asks for an administrator: no cached (_keep) grant
+        # another same-session process could reuse; nothing outside the
+        # active session at all.
+        defaults = ET.parse(policy).find(".//action[@id='org.snitchwatch.scanner.run-deep-scan']/defaults")
+        self.assertEqual({child.tag: child.text for child in defaults},
+                         {"allow_any": "no", "allow_inactive": "no", "allow_active": "auth_admin"})
         self.assertEqual(stat.S_IMODE(policy.stat().st_mode), 0o644)
         service = self.dest / "usr/share/dbus-1/services/org.snitchwatch.Scanner.service"
         self.assertIn("Exec=/usr/libexec/snitchwatch-scanner-broker", service.read_text())

@@ -124,7 +124,7 @@ Controls.ApplicationWindow {
                        "explanation calls any address one place: " + explanation);
                 // An older bridge: nothing offered, and the page says so.
                 expect(find(header, "notOfferedBanner").visible, "no not-offered banner");
-                expect(!find(header, "allOnButton").visible, "Turn all on before any list");
+                expect(!find(page.entriesList.headerItem, "allOnButton").visible, "Turn all on before any list");
                 curated.setEntry("flatpak", true);
                 curated.setAll(true);
                 expect(probeWindow.sent.length === 0, "asked before the bridge offered any");
@@ -152,7 +152,7 @@ Controls.ApplicationWindow {
                        "click not sent: " + JSON.stringify(probeWindow.sent));
                 expect(!sw.checked, "the switch claims on before the bridge says so");
 
-                find(header, "allOffButton").clicked();
+                find(page.entriesList.headerItem, "allOffButton").clicked();
                 expect(probeWindow.sent.length === 2
                        && JSON.stringify(probeWindow.sent[1].ids) === '["chronyc","nm"]'
                        && probeWindow.sent[1].on === false,
@@ -181,7 +181,7 @@ Controls.ApplicationWindow {
                 expect(find(row(3), "statusLabel").text
                        === "In the firewall (added earlier), turned off on the Rules page.",
                        "status: " + find(row(3), "statusLabel").text);
-                find(header, "allOffButton").clicked();
+                find(page.entriesList.headerItem, "allOffButton").clicked();
                 expect(JSON.stringify(probeWindow.sent[probeWindow.sent.length - 1].ids)
                        === '["chronyc","nm","held"]',
                        "Turn all off left it undecided: " + JSON.stringify(probeWindow.sent));
@@ -210,12 +210,12 @@ Controls.ApplicationWindow {
                       entry("dns2", true, "inFirewall", true),
                       entry("chronyc", true, "installed")]);
                 const asked = probeWindow.sent.length;
-                find(header, "allOnButton").clicked();
+                find(page.entriesList.headerItem, "allOnButton").clicked();
                 expect(probeWindow.sent.length === asked + 1
                        && JSON.stringify(probeWindow.sent[asked].ids) === '["flatpak"]'
                        && probeWindow.sent[asked].on === true,
                        "Turn all on and a broad entry: " + JSON.stringify(probeWindow.sent));
-                find(header, "allOffButton").clicked();
+                find(page.entriesList.headerItem, "allOffButton").clicked();
                 expect(probeWindow.sent.length === asked + 2
                        && JSON.stringify(probeWindow.sent[asked + 1].ids) === '["dns2","chronyc"]'
                        && probeWindow.sent[asked + 1].on === false,
@@ -308,7 +308,7 @@ Controls.ApplicationWindow {
                 expect(find(header, "unavailableBanner").visible, "no unavailable banner");
                 expect(find(header, "unavailableReason").text === "Needs the system service.",
                        "reason not shown");
-                expect(!find(header, "allOnButton").visible, "Turn all on while unavailable");
+                expect(!find(page.entriesList.headerItem, "allOnButton").visible, "Turn all on while unavailable");
                 expect(!find(row(0), "entrySwitch").enabled, "switch enabled while unavailable");
                 curated.setEntry("flatpak", true);
                 curated.removeEntry("flatpak");

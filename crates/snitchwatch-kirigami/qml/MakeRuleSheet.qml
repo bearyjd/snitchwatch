@@ -10,7 +10,6 @@
 // fixed off-screen notice.
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
@@ -52,7 +51,7 @@ ColumnLayout {
         return sheet.visible && sheet.rowId === rowId;
     }
 
-    Controls.Label {
+    SelectableText {
         id: alsoListedNote
         Layout.fillWidth: true
         visible: sheet.alsoListedByDefault
@@ -63,16 +62,20 @@ ColumnLayout {
             + "as decided by its default action."
     }
 
-    Controls.Button {
+    RoundedButton {
         id: openButton
         Layout.fillWidth: true
         visible: sheet.bindableProcessPath && !form.visible
         text: "Make a rule…"
         icon.name: "list-add"
-        onClicked: form.visible = true
+        // Q01: the button hides as the form opens; focus goes into the form.
+        onClicked: {
+            form.visible = true;
+            scopeBox.forceActiveFocus(Qt.TabFocusReason);
+        }
     }
 
-    Controls.Label {
+    SelectableText {
         Layout.fillWidth: true
         visible: !sheet.bindableProcessPath
         wrapMode: Text.Wrap
@@ -88,13 +91,17 @@ ColumnLayout {
 
         RowLayout {
             Layout.fillWidth: true
-            Controls.Label {
+            SelectableText {
+                wrapMode: Text.NoWrap
+                textFormat: Text.PlainText
                 text: "Scope"
                 Layout.alignment: Qt.AlignVCenter
             }
-            Controls.ComboBox {
+            RoundedComboBox {
                 id: scopeBox
+                objectName: "makeRuleScope"
                 Layout.fillWidth: true
+                Accessible.name: "Scope: " + displayText
                 textRole: "label"
                 valueRole: "token"
                 model: [
@@ -106,13 +113,17 @@ ColumnLayout {
         }
         RowLayout {
             Layout.fillWidth: true
-            Controls.Label {
+            SelectableText {
+                wrapMode: Text.NoWrap
+                textFormat: Text.PlainText
                 text: "Duration"
                 Layout.alignment: Qt.AlignVCenter
             }
-            Controls.ComboBox {
+            RoundedComboBox {
                 id: durationBox
+                objectName: "makeRuleDuration"
                 Layout.fillWidth: true
+                Accessible.name: "Duration: " + displayText
                 textRole: "label"
                 valueRole: "token"
                 // `Durations.remembered`: a once-only answer can't be added
@@ -123,14 +134,14 @@ ColumnLayout {
         }
         RowLayout {
             Layout.fillWidth: true
-            Controls.Button {
+            RoundedButton {
                 Layout.fillWidth: true
                 enabled: !!sheet.controller && !sheet.controller.busy
                 text: "Allow"
                 icon.name: "dialog-ok-apply"
                 onClicked: sheet.make("allow")
             }
-            Controls.Button {
+            RoundedButton {
                 Layout.fillWidth: true
                 enabled: !!sheet.controller && !sheet.controller.busy
                 text: "Deny"
@@ -140,7 +151,7 @@ ColumnLayout {
         }
     }
 
-    Controls.Label {
+    SelectableText {
         id: blockNoteLabel
         Layout.fillWidth: true
         visible: form.visible && sheet.blockedForFiveMinutes
@@ -150,7 +161,7 @@ ColumnLayout {
         text: "This program's 5-minute block stays until it ends. Until then it wins over an Allow rule."
     }
 
-    Controls.Label {
+    SelectableText {
         id: busyElsewhereNote
         objectName: "makeRuleBusyElsewhere"
         Layout.fillWidth: true
@@ -161,7 +172,7 @@ ColumnLayout {
         text: "Another rule is still being sent. Try again in a moment."
     }
 
-    Controls.Label {
+    SelectableText {
         objectName: "makeRuleResult"
         Layout.fillWidth: true
         visible: sheet.result.length > 0
@@ -174,6 +185,10 @@ ColumnLayout {
         if (!sheet.controller) {
             return;
         }
+        // Q01: asked before begin(): it makes the controller busy at once,
+        // which disables the focused Allow/Deny button and drops its focus.
+        let focusInForm = false;
+        for (let it = sheet.Window.activeFocusItem; it; it = it.parent) if (it === form) focusInForm = true;
         const requestId = sheet.controller.begin(sheet.rowId);
         if (requestId === "") {
             return;
@@ -189,6 +204,9 @@ ColumnLayout {
             sheet.controller.notSent(problem);
             return;
         }
+        // Hiding the form must not leave its focus nowhere: it goes back to
+        // "Make a rule…".
         form.visible = false;
+        if (focusInForm) openButton.forceActiveFocus(Qt.TabFocusReason);
     }
 }

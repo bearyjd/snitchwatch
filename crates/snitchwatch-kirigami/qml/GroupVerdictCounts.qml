@@ -4,10 +4,16 @@
 // figures cover only the connections Snitchwatch still holds (see `note`).
 // Sits on its own line along the bottom of the ConnectionRow `src`, so it
 // never squeezes the header's label or buttons; zero height on connections.
+//
+// Each icon+count pair is a capsule chip (RoundedSurface, radiusPill). The
+// chips are NOT independently tappable: they sit on the clickable group-header
+// row, which is the hit target (its hit area is at least Theme.hitMin), so
+// they stay small on purpose, take no focus and add no Tab stop.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
+import com.snitchwatch.shell
 
 Item {
     id: root
@@ -98,23 +104,40 @@ Item {
                     font: Kirigami.Theme.smallFont
                     opacity: 0.7
                 }
-                Kirigami.Icon {
-                    id: pieceIcon
-                    visible: piece.modelData.kind !== ""
-                    source: root.iconFor(piece.modelData.kind)
-                    width: Kirigami.Units.iconSizes.small
-                    height: Kirigami.Units.iconSizes.small
-                }
-                Controls.Label {
-                    objectName: "verdictCount"
-                    textFormat: Text.PlainText
-                    text: piece.modelData.text
-                    font: Kirigami.Theme.smallFont
-                    opacity: piece.modelData.kind === "" ? 0.7 : 1
-                    elide: Text.ElideRight
-                    width: Math.min(implicitWidth, Math.max(0, flow.width - piece.leftPadding
-                        - (windowLabel.visible ? windowLabel.width + piece.spacing : 0)
-                        - (pieceIcon.visible ? pieceIcon.width + piece.spacing : 0)))
+                Controls.Control {
+                    id: chip
+                    // Only a verdict pair is a chip; "no connections" is plain text.
+                    readonly property bool framed: piece.modelData.kind !== ""
+                    horizontalPadding: chip.framed ? Kirigami.Units.smallSpacing : 0
+                    focusPolicy: Qt.NoFocus
+                    background: RoundedSurface {
+                        control: chip
+                        visible: chip.framed
+                        implicitWidth: 0
+                        implicitHeight: 0
+                    }
+                    contentItem: Row {
+                        spacing: piece.spacing
+                        Kirigami.Icon {
+                            id: pieceIcon
+                            visible: piece.modelData.kind !== ""
+                            source: root.iconFor(piece.modelData.kind)
+                            width: Kirigami.Units.iconSizes.small
+                            height: Kirigami.Units.iconSizes.small
+                        }
+                        Controls.Label {
+                            objectName: "verdictCount"
+                            textFormat: Text.PlainText
+                            text: piece.modelData.text
+                            font: Kirigami.Theme.smallFont
+                            opacity: piece.modelData.kind === "" ? 0.7 : 1
+                            elide: Text.ElideRight
+                            width: Math.min(implicitWidth, Math.max(0, flow.width - piece.leftPadding
+                                - (windowLabel.visible ? windowLabel.width + piece.spacing : 0)
+                                - chip.leftPadding - chip.rightPadding
+                                - (pieceIcon.visible ? pieceIcon.width + piece.spacing : 0)))
+                        }
+                    }
                 }
             }
         }

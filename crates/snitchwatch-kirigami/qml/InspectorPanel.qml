@@ -41,7 +41,7 @@ ColumnLayout {
                 onlyWhen: titleLabel.truncated
             }
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "inspectorCloseButton"
             icon.name: "window-close"
             display: Controls.AbstractButton.IconOnly
@@ -102,18 +102,21 @@ ColumnLayout {
                 text: page.inspectIp.length > 0 ? page.inspectIp : "unavailable"
                 elide: Text.ElideMiddle
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Port"
+                wrapMode: Text.NoWrap
                 textFormat: Text.PlainText
                 text: page.inspectPort
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Protocol"
+                wrapMode: Text.NoWrap
                 textFormat: Text.PlainText
                 text: page.inspectProtocol
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Verdict"
+                wrapMode: Text.NoWrap
                 textFormat: Text.PlainText
                 text: page.inspectVerdictText
                 color: page.inspectNoLongerPending
@@ -133,7 +136,7 @@ ColumnLayout {
         // name is known — a pending row ("awaiting decision") or a
         // decided row with no rule name on record ("default action")
         // have nothing to jump to.
-        Controls.Button {
+        RoundedButton {
             Layout.fillWidth: true
             visible: page.inspectMatchedRule.length > 0
             text: "Show rule"
@@ -147,7 +150,7 @@ ColumnLayout {
             }
         }
 
-        Controls.Button {
+        RoundedButton {
             objectName: "simulateConnectionButton"
             Layout.fillWidth: true
             text: "Simulate this connection"

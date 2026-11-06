@@ -234,6 +234,49 @@ fn the_set_is_capped_and_the_least_recently_seen_go_first() {
     assert_eq!(back, merged);
 }
 
+/// Issue #240: 5,000 paths of ~1 KiB serialize past the reader's limit.
+/// The writer trims the least recently seen to fit the same budget, so the
+/// file it writes always reads back as valid (no rebaseline next launch).
+#[test]
+fn a_full_set_of_long_paths_fits_the_read_budget_and_reads_back() {
+    let (_tmp, path) = dir();
+    let long = "x".repeat(1_000);
+    let ours: HashMap<String, i64> = (0..MAX_SEEN as i64)
+        .map(|i| (format!("/opt/{long}/p{i:04}"), T0 + i))
+        .collect();
+    let merged = write_merged(&path, &ours, uid()).unwrap();
+    let written = std::fs::metadata(&path).unwrap().len();
+    assert!(written <= MAX_BYTES, "{written} bytes written");
+    assert!(merged.len() < MAX_SEEN, "nothing was trimmed");
+    assert!(
+        merged.len() > MAX_SEEN * 3 / 4,
+        "trimmed far more than needed: {}",
+        merged.len()
+    );
+    // The newest are kept, the oldest go.
+    assert!(merged.contains_key(&format!("/opt/{long}/p{:04}", MAX_SEEN - 1)));
+    assert!(!merged.contains_key(&format!("/opt/{long}/p0000")));
+    let oldest_kept = merged.values().min().copied().unwrap();
+    assert!(ours
+        .iter()
+        .filter(|(_, &t)| t >= oldest_kept)
+        .all(|(p, _)| merged.contains_key(p)));
+    let Loaded::Valid(back) = read(&path, uid()) else {
+        panic!("the GUI's own file was rejected on read")
+    };
+    assert_eq!(back, merged);
+}
+
+#[test]
+fn a_set_within_the_budget_is_written_whole() {
+    let (_tmp, path) = dir();
+    let ours: HashMap<String, i64> = (0..MAX_SEEN as i64)
+        .map(|i| (format!("/usr/bin/p{i}"), T0 + i))
+        .collect();
+    let merged = write_merged(&path, &ours, uid()).unwrap();
+    assert_eq!(merged.len(), MAX_SEEN);
+}
+
 #[test]
 fn a_later_sighting_moves_a_path_to_the_front_of_the_lru() {
     let mut state = SeenPrograms::default();
@@ -491,4 +534,86 @@ fn another_guis_acknowledgement_never_counts_as_this_ones() {
         !facts.is_handled(&row),
         "X's rows collapse in A without A's acknowledgement"
     );
+}
+
+mod replaced {
+    use super::*;
+    use crate::logging::replace_tests::{put, replace};
+
+    fn seen_file() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = tmp.path().join(SEEN_FILE_NAME);
+        put(&path, br#"{"version":1,"programs":[]}"#, 0o600);
+        (tmp, path)
+    }
+
+    const NEW: &[u8] = br#"{"version":1,"programs":[{"path":"/a","last_seen_ms":1}]}"#;
+
+    #[test]
+    fn zero_links_then_a_valid_replacement_is_read() {
+        let (_d, path) = seen_file();
+        let mut calls = 0;
+        let loaded = read_with(&path, uid(), 4, &mut || {
+            calls += 1;
+            if calls == 1 {
+                replace(&path, NEW, 0o600);
+            }
+        });
+        assert_eq!(
+            loaded,
+            Loaded::Valid(HashMap::from([("/a".to_string(), 1)]))
+        );
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn zero_links_then_an_unsafe_or_hard_linked_replacement_is_foreign() {
+        let (_d, path) = seen_file();
+        let mut first = true;
+        let loaded = read_with(&path, uid(), 4, &mut || {
+            if std::mem::take(&mut first) {
+                replace(&path, NEW, 0o666);
+            }
+        });
+        assert_eq!(loaded, Loaded::Foreign);
+        let (d, path) = seen_file();
+        let mut first = true;
+        let loaded = read_with(&path, uid(), 4, &mut || {
+            if std::mem::take(&mut first) {
+                replace(&path, NEW, 0o600);
+                std::fs::hard_link(&path, d.path().join("other")).unwrap();
+            }
+        });
+        assert_eq!(loaded, Loaded::Foreign);
+    }
+
+    #[test]
+    fn zero_links_then_permanent_deletion_is_missing() {
+        let (_d, path) = seen_file();
+        let loaded = read_with(&path, uid(), 4, &mut || {
+            let _ = std::fs::remove_file(&path);
+        });
+        assert_eq!(loaded, Loaded::Missing);
+    }
+
+    #[test]
+    fn endless_replacement_is_unreadable_after_exactly_the_cap() {
+        let (_d, path) = seen_file();
+        let mut calls = 0;
+        let loaded = read_with(&path, uid(), 5, &mut || {
+            calls += 1;
+            replace(&path, NEW, 0o600);
+        });
+        assert_eq!(loaded, Loaded::Unreadable);
+        assert_eq!(calls, 5);
+    }
+
+    #[test]
+    fn a_rename_after_the_accepting_fstat_is_not_foreign() {
+        use crate::logging::replace_tests::OnCheck;
+        let (_d, path) = seen_file();
+        let loaded = read_with(&path, uid(), 4, &mut OnCheck(|| replace(&path, NEW, 0o600)));
+        assert_eq!(loaded, Loaded::Valid(HashMap::new()));
+    }
 }

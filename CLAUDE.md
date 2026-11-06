@@ -59,7 +59,7 @@ because a dev machine's `~/.config/systemd/user/snitchwatch-bridge.service`
 (+ drop-ins) would otherwise shadow the file under test.
 
 The bridge release tarball (`docs/packaging/bridge-release-artifact.md`) is
-built by `packaging/release/*.sh` inside the digest-pinned Fedora 44 image
+built by `packaging/release/*.sh` inside the digest-pinned Fedora 45 image
 from `packaging/release/pins.env`: `just release-bridge-repro` (build +
 byte-identical rebuild) and `just release-verify <tarball> <sha256>` (podman, verified
 2026-10-03). `.github/workflows/release.yml` runs the same scripts on `v*`

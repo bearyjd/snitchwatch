@@ -134,14 +134,25 @@ pub(super) fn mirror_into_grouping(rust: &mut ConnectionsModelRust, msg: &Server
             // A reconnect's clear resets neither the seen set nor the flags,
             // but nothing collapses again until this session's rules arrive:
             // the previous session's may name a rule deleted meanwhile.
+            // The store's attention facts change visibility, so they are
+            // revoked by `revoke_attention`, inside the caller's reset
+            // bracket (issue #240), not here.
             rust.seen.note_clear_applied();
             rust.attention_armed = false;
-            rust.store.set_attention_facts(std::sync::Arc::new(
-                crate::connections::attention::AttentionFacts::default(),
-            ));
             rust.handled_counts.clear();
         }
         _ => {}
+    }
+}
+
+/// A clear's revocation of the store's attention facts: nothing collapses
+/// until this session's rules arrive. It recomputes visibility, so callers
+/// run it after `begin_reset_model`, never before (issue #240).
+pub(super) fn revoke_attention(rust: &mut ConnectionsModelRust, msg: &ServerMessage) {
+    if matches!(msg, ServerMessage::ClearConnectionRows) {
+        rust.store.set_attention_facts(std::sync::Arc::new(
+            crate::connections::attention::AttentionFacts::default(),
+        ));
     }
 }
 

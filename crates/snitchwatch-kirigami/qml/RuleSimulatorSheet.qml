@@ -147,14 +147,14 @@ SizedOverlaySheet {
         Layout.preferredWidth: sheet.preferredWidth
         spacing: Kirigami.Units.largeSpacing
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             opacity: 0.7
             font: Kirigami.Theme.smallFont
             text: "Evaluates a candidate connection against the currently cached rules, using opensnitchd's own precedence rules. This is a simulation over cached data, not a live daemon verdict. A blank field is unknown, so rules with a condition on it are reported as not evaluated instead of being guessed. To say a connection has no host name at all (it goes to a bare IP address), tick “No host name”."
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             opacity: 0.7
@@ -162,7 +162,7 @@ SizedOverlaySheet {
             text: "Regular expressions are matched the way opensnitchd's Go engine (RE2) does, as closely as this simulator can. A pattern it can't read is reported as not simulated. Inside [...], only these are simulated: a leading ^, ASCII letters and digits, ranges between two of them (a-z, 0-9), single punctuation marks other than \\ [ ] ^ and -, \\d \\w \\s and their capitals, and POSIX classes such as [:alpha:]. Anything else in a class, such as a dash outside a range, an escaped punctuation mark like \\., a space or non-ASCII text, is reported as not simulated."
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             visible: sheet.prefilled
             textFormat: Text.PlainText
@@ -174,22 +174,24 @@ SizedOverlaySheet {
         Kirigami.FormLayout {
             Layout.fillWidth: true
 
-            Controls.TextField {
+            RoundedField {
                 id: simProcessPath
                 objectName: "simProcessPath"
                 Kirigami.FormData.label: "Process path"
+                Accessible.name: Kirigami.FormData.label
                 placeholderText: "/usr/bin/curl"
                 Layout.fillWidth: true
             }
-            Controls.TextField {
+            RoundedField {
                 id: simHost
                 objectName: "simHost"
                 Kirigami.FormData.label: "Destination host"
+                Accessible.name: Kirigami.FormData.label
                 placeholderText: "github.com"
                 enabled: !simHostEmpty.checked
                 Layout.fillWidth: true
             }
-            Controls.CheckBox {
+            RoundedCheckBox {
                 id: simHostEmpty
                 objectName: "simHostEmpty"
                 text: "No host name (a connection to a bare IP address)"
@@ -198,14 +200,16 @@ SizedOverlaySheet {
                 id: simPort
                 objectName: "simPort"
                 Kirigami.FormData.label: "Destination port"
+                Accessible.name: Kirigami.FormData.label
                 from: 0
                 to: 65535
                 value: 443
             }
-            Controls.ComboBox {
+            RoundedComboBox {
                 id: simProtocol
                 objectName: "simProtocol"
                 Kirigami.FormData.label: "Protocol"
+                Accessible.name: Kirigami.FormData.label + ": " + displayText
                 textRole: "label"
                 valueRole: "value"
                 // opensnitchd names IPv6 flows tcp6/udp6/...; a rule for `tcp`
@@ -218,7 +222,7 @@ SizedOverlaySheet {
             }
         }
 
-        Controls.Button {
+        RoundedButton {
             Layout.fillWidth: true
             text: advancedInputs.visible ? "Hide advanced inputs" : "Advanced inputs"
             icon.name: advancedInputs.visible ? "arrow-up" : "arrow-down"
@@ -233,7 +237,7 @@ SizedOverlaySheet {
             visible: false
             spacing: Kirigami.Units.largeSpacing
 
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 opacity: 0.7
@@ -244,91 +248,125 @@ SizedOverlaySheet {
             Kirigami.FormLayout {
                 Layout.fillWidth: true
 
-                Controls.TextArea {
+                RoundedTextArea {
                     id: simParentPaths
                     Kirigami.FormData.label: "Parent programs"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "One path per line, nearest first"
+                    // Q01: Tab leaves the box (it would otherwise type a tab
+                    // character and trap the keyboard); one path per line
+                    // needs only Return.
+                    Keys.onTabPressed: function (event) {
+                        nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocusReason);
+                        event.accepted = true;
+                    }
+                    Keys.onBacktabPressed: function (event) {
+                        nextItemInFocusChain(false).forceActiveFocus(Qt.BacktabFocusReason);
+                        event.accepted = true;
+                    }
                     Layout.fillWidth: true
                     Layout.preferredHeight: Kirigami.Units.gridUnit * 4
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simCommand
                     Kirigami.FormData.label: "Command line"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "/usr/bin/curl -s https://github.com"
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simPid
                     Kirigami.FormData.label: "Process ID"
+                    Accessible.name: Kirigami.FormData.label
                     validator: IntValidator { bottom: 0; top: 2147483647 }
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simUid
                     objectName: "simUid"
                     Kirigami.FormData.label: "User ID"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "1000"
                     validator: IntValidator { bottom: 0; top: 2147483647 }
                     Layout.fillWidth: true
                 }
-                Controls.TextArea {
+                RoundedTextArea {
                     id: simEnv
                     objectName: "simEnv"
                     Kirigami.FormData.label: "Environment"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "NAME=value, one per line"
+                    // Q01: Tab leaves the box (it would otherwise type a tab
+                    // character and trap the keyboard); one path per line
+                    // needs only Return.
+                    Keys.onTabPressed: function (event) {
+                        nextItemInFocusChain(true).forceActiveFocus(Qt.TabFocusReason);
+                        event.accepted = true;
+                    }
+                    Keys.onBacktabPressed: function (event) {
+                        nextItemInFocusChain(false).forceActiveFocus(Qt.BacktabFocusReason);
+                        event.accepted = true;
+                    }
                     Layout.fillWidth: true
                     Layout.preferredHeight: Kirigami.Units.gridUnit * 4
                 }
-                Controls.Label {
+                SelectableText {
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
                     opacity: 0.7
                     font: Kirigami.Theme.smallFont
                     text: "Once you type a variable here, every variable you don't list counts as unset."
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simSrcIp
                     Kirigami.FormData.label: "Source IP"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "192.168.1.10"
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simSrcPort
                     Kirigami.FormData.label: "Source port"
+                    Accessible.name: Kirigami.FormData.label
                     validator: IntValidator { bottom: 0; top: 65535 }
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simDestIp
                     objectName: "simDestIp"
                     Kirigami.FormData.label: "Destination IP"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "93.184.216.34"
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simIfaceIn
                     Kirigami.FormData.label: "Inbound interface"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "eth0"
                     Layout.fillWidth: true
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simIfaceOut
                     Kirigami.FormData.label: "Outbound interface"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "eth0"
                     Layout.fillWidth: true
                 }
-                Controls.ComboBox {
+                RoundedComboBox {
                     id: simChecksums
                     objectName: "simChecksums"
                     Kirigami.FormData.label: "Checksums"
+                    Accessible.name: Kirigami.FormData.label + ": " + displayText
                     // Parallel to `modes`, which is what the simulator reads.
                     readonly property var modes: ["unknown", "off", "on", "on-none"]
                     model: ["Unknown", "Off", "On, program's MD5 below",
                             "On, program has none recorded"]
                 }
-                Controls.TextField {
+                RoundedField {
                     id: simMd5
                     Kirigami.FormData.label: "Program MD5"
+                    Accessible.name: Kirigami.FormData.label
                     placeholderText: "Leave blank if unknown"
                     enabled: simChecksums.currentIndex === 2
                     Layout.fillWidth: true
@@ -336,7 +374,7 @@ SizedOverlaySheet {
             }
         }
 
-        Controls.Button {
+        RoundedButton {
             Layout.fillWidth: true
             text: "Run simulation"
             icon.name: "system-run"
@@ -353,14 +391,14 @@ SizedOverlaySheet {
             visible: sheet.simulateRan
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 opacity: 0.7
                 font: Kirigami.Theme.smallFont
                 text: "Simulated result: not a live daemon verdict."
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 font.bold: true
@@ -375,15 +413,16 @@ SizedOverlaySheet {
                        ? sheet.actionColor(sheet.simulateAction)
                        : Kirigami.Theme.neutralTextColor
             }
-            Controls.Label {
+            SelectableText {
                 visible: sheet.simulateMatchedRule.length > 0
                 textFormat: Text.PlainText
                 text: "Action: " + sheet.simulateAction + "  ·  Position " + (sheet.simulatePrecedence + 1)
                 color: sheet.simulateUndecided
                        ? Kirigami.Theme.neutralTextColor
                        : sheet.actionColor(sheet.simulateAction)
+                wrapMode: Text.NoWrap
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 visible: sheet.simulateMatchedRule.length === 0
                 wrapMode: Text.Wrap
@@ -391,7 +430,7 @@ SizedOverlaySheet {
                 font: Kirigami.Theme.smallFont
                 text: "What happens next depends on the daemon, which this simulation can't see. It usually asks you (if the Snitchwatch window is connected and no other prompt is open); otherwise the daemon's configured default action applies. That default is a setting the simulator doesn't know: Snitchwatch ships allow, as opensnitchd does, unless you opted in to deny."
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 visible: sheet.simulateWarnings.length > 0
                 wrapMode: Text.Wrap
@@ -401,7 +440,7 @@ SizedOverlaySheet {
                 textFormat: Text.PlainText
                 text: sheet.simulateWarnings
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 visible: sheet.simulateUnevaluated.length > 0
                 wrapMode: Text.Wrap
@@ -412,7 +451,7 @@ SizedOverlaySheet {
                 text: "Not evaluated, because an input was left blank. The result assumes these rules did not match:\n"
                       + sheet.simulateUnevaluated
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 visible: sheet.simulateInvalid.length > 0
                 wrapMode: Text.Wrap
@@ -423,7 +462,7 @@ SizedOverlaySheet {
                 text: "Not evaluated, because an input isn't valid. The result assumes these rules did not match:\n"
                       + sheet.simulateInvalid
             }
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 visible: sheet.simulateUnsupported.length > 0
                 wrapMode: Text.Wrap

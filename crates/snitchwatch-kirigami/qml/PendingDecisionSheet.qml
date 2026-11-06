@@ -23,7 +23,6 @@
 // exists.
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
@@ -120,7 +119,7 @@ ColumnLayout {
     // HTML-escaping wouldn't help — AutoText shows `&lt;` literally unless it
     // already judges the string to be markup). So they live in a PlainText
     // Label rather than in the message above (issue #51).
-    Controls.Label {
+    SelectableText {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         font.bold: true
@@ -130,11 +129,13 @@ ColumnLayout {
 
     RowLayout {
         Layout.fillWidth: true
-        Controls.Label {
+        SelectableText {
+            wrapMode: Text.NoWrap
+            textFormat: Text.PlainText
             text: "Scope"
             Layout.alignment: Qt.AlignVCenter
         }
-        Controls.ComboBox {
+        RoundedComboBox {
             id: scopeBox
             objectName: "scopeSelector"
             Layout.fillWidth: true
@@ -162,11 +163,13 @@ ColumnLayout {
     // quitting). It opens on the Settings default where that is offered.
     RowLayout {
         Layout.fillWidth: true
-        Controls.Label {
+        SelectableText {
+            wrapMode: Text.NoWrap
+            textFormat: Text.PlainText
             text: "Duration"
             Layout.alignment: Qt.AlignVCenter
         }
-        Controls.ComboBox {
+        RoundedComboBox {
             id: durationBox
             objectName: "durationSelector"
             Layout.fillWidth: true
@@ -184,7 +187,7 @@ ColumnLayout {
     // A one-time Deny isn't stored by the daemon: it drops only the packet
     // that asked, and most apps retry within a second or two (see
     // `showDenyOnceHint`).
-    Controls.Label {
+    SelectableText {
         id: denyOnceHintLabel
         Layout.fillWidth: true
         visible: sheet.showDenyOnceHint
@@ -197,7 +200,7 @@ ColumnLayout {
 
     // Issue #44: why only "This time" is offered. The bridge's
     // `RuleRefusal::describe` sentence, verbatim (a test keeps them equal).
-    Controls.Label {
+    SelectableText {
         Layout.fillWidth: true
         visible: !sheet.bindableProcessPath
         wrapMode: Text.Wrap
@@ -208,7 +211,7 @@ ColumnLayout {
     }
 
     // Issue #72: why a host-scoped answer can't be remembered on this bridge.
-    Controls.Label {
+    SelectableText {
         id: oldBridgeNoteLabel
         Layout.fillWidth: true
         visible: sheet.showOldBridgeNote
@@ -228,18 +231,19 @@ ColumnLayout {
     }
 
     // The time left; the bridge, not this sheet, answers at the deadline.
-    Controls.Label {
+    SelectableText {
         Layout.fillWidth: true
         horizontalAlignment: Text.AlignHCenter
         opacity: 0.7
         visible: sheet.remainingSeconds >= 0
+        wrapMode: Text.NoWrap
         textFormat: Text.PlainText
         text: "If nobody answers within " + sheet.remainingSeconds
             + " s, the firewall's default action applies."
     }
 
     // Part C on a bridge without "Decide later": nothing can put this off.
-    Controls.Label {
+    SelectableText {
         Layout.fillWidth: true
         visible: !sheet.decideLater
         wrapMode: Text.Wrap
@@ -256,7 +260,7 @@ ColumnLayout {
         Layout.fillWidth: true
         visible: sheet.remoteIp.length > 0
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             Kirigami.FormData.label: "Reverse DNS"
@@ -267,7 +271,7 @@ ColumnLayout {
                      ? insight.hostname
                      : "No PTR result for " + sheet.remoteIp)
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             Kirigami.FormData.label: "Organization"
@@ -275,7 +279,7 @@ ColumnLayout {
             textFormat: Text.PlainText
             text: insight.org
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             Kirigami.FormData.label: "Registrar"
@@ -283,7 +287,7 @@ ColumnLayout {
             textFormat: Text.PlainText
             text: insight.registrar
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             Kirigami.FormData.label: "Country"
@@ -291,20 +295,22 @@ ColumnLayout {
             textFormat: Text.PlainText
             text: insight.country
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             Kirigami.FormData.label: "Registration info"
             visible: !insight.loading && !insight.available && insight.rdapEnabled
             opacity: 0.7
+            textFormat: Text.PlainText
             text: "unavailable (offline?)"
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.Wrap
             Kirigami.FormData.label: "Registration info"
             visible: !insight.rdapEnabled
             opacity: 0.7
+            textFormat: Text.PlainText
             text: "Online research disabled — enable in Settings"
         }
     }
@@ -313,13 +319,13 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        Controls.Button {
+        RoundedButton {
             Layout.fillWidth: true
             text: "Allow"
             icon.name: "dialog-ok-apply"
             onClicked: sheet.submit("allow")
         }
-        Controls.Button {
+        RoundedButton {
             Layout.fillWidth: true
             text: "Deny"
             icon.name: "edit-delete-remove"

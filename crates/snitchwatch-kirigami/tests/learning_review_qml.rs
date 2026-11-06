@@ -53,6 +53,7 @@ const FILES: [(&str, &str); 6] = [
     ),
 ];
 const MAIN: &str = include_str!("../qml/main.qml");
+const DRAWER: &str = include_str!("../qml/GlobalDrawer.qml");
 const BUILD: &str = include_str!("../build.rs");
 const PROBE_URL: &str = "qrc:/learning_review_probe.qml";
 const DONE_MARKER: &str = "LEARNING_REVIEW_PROBE_DONE";
@@ -86,6 +87,15 @@ const VERDICT_WORDS: [&str; 24] = [
     "hostile",
     "threat",
 ];
+
+/// Every button block: plain ones, the rounded ones (restyle batch E) and the
+/// held-key-guarded ones.
+fn buttons(code: &str) -> Vec<String> {
+    let mut found = blocks(code, "Controls.Button {");
+    found.extend(blocks(code, "RoundedButton {"));
+    found.extend(blocks(code, "GuardedButton {"));
+    found
+}
 
 fn source(name: &str) -> &'static str {
     FILES.iter().find(|(n, _)| *n == name).expect("file").1
@@ -160,12 +170,14 @@ fn every_label_in_the_review_files_is_plain_text() {
 fn buttons_carry_fixed_text_and_tick_boxes_none() {
     for (name, src) in FILES {
         let code = code_lines(src);
-        for block in blocks(&code, "Controls.Button {") {
+        for block in buttons(&code) {
             if let Some(text) = text_binding(&block) {
                 assert!(is_fixed_text(&text), "{name}: a button shows data: {text}");
             }
         }
-        for block in blocks(&code, "Controls.CheckBox {") {
+        let mut boxes = blocks(&code, "Controls.CheckBox {");
+        boxes.extend(blocks(&code, "RoundedCheckBox {"));
+        for block in boxes {
             assert!(
                 text_binding(&block).is_none(),
                 "{name}: a tick box text would render as markup:\n{block}"
@@ -209,7 +221,7 @@ fn nothing_is_ticked_by_default_and_only_the_owner_ticks() {
     assert_eq!(row.matches("setTick(").count(), 1);
     let page = code_lines(source("LearningReviewPage.qml"));
     assert_eq!(page.matches("selectSuggested()").count(), 1);
-    let suggest = blocks(&page, "Controls.Button {")
+    let suggest = buttons(&page)
         .into_iter()
         .find(|b| b.contains("selectSuggested()"))
         .expect("the button");
@@ -243,7 +255,7 @@ fn learning_starts_from_one_place_and_rules_are_applied_from_one_place() {
         "apply is called from more than one place"
     );
     let dialog = code_lines(source("LearningSummaryDialog.qml"));
-    let apply = blocks(&dialog, "Controls.Button {")
+    let apply = buttons(&dialog)
         .into_iter()
         .find(|b| b.contains("learningApplyButton"))
         .expect("the Apply button");
@@ -290,11 +302,16 @@ fn the_page_is_reachable_registered_and_main_qml_stays_small() {
     assert_eq!(page.len(), 1);
     assert!(page[0].contains("controller: learningReviewController"));
     assert!(page[0].contains("settings: settingsController"));
-    let entry = blocks(&code, "Kirigami.Action {")
+    // The drawer lives in GlobalDrawer.qml; main.qml registers the page.
+    let entry = blocks(&code_lines(DRAWER), "Kirigami.Action {")
         .into_iter()
         .find(|b| b.contains("Make rules from what I saw"))
         .expect("no navigation entry");
-    assert!(entry.contains("nav.replaceMain(learningReviewPageComponent)"));
+    assert!(entry.contains("drawer.openPage(\"learningReview\")"));
+    assert!(
+        code.contains("learningReview: learningReviewPageComponent"),
+        "main.qml does not register the review page for the drawer"
+    );
     assert!(
         MAIN.lines().count() <= 800,
         "main.qml is {} lines",
@@ -392,7 +409,7 @@ fn the_limits_are_eight_lines_each_scanned_and_the_button_rows_wrap() {
         let code = code_lines(source(name));
         for row in blocks(&code, "RowLayout {") {
             assert!(
-                !row.contains("Controls.Button {"),
+                !row.contains("Controls.Button {") && !row.contains("RoundedButton {"),
                 "{name}: a RowLayout of buttons clips"
             );
         }
@@ -416,12 +433,12 @@ fn many_rules_are_listed_in_list_views_not_repeaters() {
 fn deleting_the_record_asks_first() {
     let page = code_lines(source("LearningReviewPage.qml"));
     assert_eq!(page.matches("clearData()").count(), 1);
-    let yes = blocks(&page, "Controls.Button {")
+    let yes = buttons(&page)
         .into_iter()
         .find(|b| b.contains("learningDeleteYes"))
         .expect("the confirming button");
     assert!(yes.contains("page.controller.clearData()"));
-    let first = blocks(&page, "Controls.Button {")
+    let first = buttons(&page)
         .into_iter()
         .find(|b| b.contains("learningClearButton"))
         .unwrap();

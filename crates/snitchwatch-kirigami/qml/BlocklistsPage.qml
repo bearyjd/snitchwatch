@@ -35,6 +35,8 @@ Kirigami.ScrollablePage {
 
     // Snapshot of the subscription currently shown in the detail sheet.
     property string inspectId: ""
+    // Exposed for the headless probes.
+    property alias inspectorSheet: inspector
     property string inspectDisplayName: ""
     property string inspectUrl: ""
     property int inspectEntryCount: 0
@@ -91,18 +93,22 @@ Kirigami.ScrollablePage {
         Layout.fillWidth: true
         spacing: Kirigami.Units.largeSpacing
 
-        Kirigami.Heading {
+        SelectableText {
             text: page.title
             level: 1
+            wrapMode: Text.NoWrap
+            textFormat: Text.PlainText
             Layout.alignment: Qt.AlignVCenter
         }
-        Controls.TextField {
+        RoundedField {
             id: subscribeUrl
             Layout.fillWidth: true
             placeholderText: "Blocklist URL to subscribe…"
+            Accessible.name: "Blocklist URL to subscribe"
         }
-        Controls.Button {
+        GuardedButton {
             text: "Subscribe"
+            Accessible.name: "Subscribe to blocklist"
             icon.name: "list-add"
             enabled: subscribeUrl.text.trim().length > 0
             onClicked: {
@@ -140,7 +146,7 @@ Kirigami.ScrollablePage {
             visible: page.leftoverRules > 0
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Label {
+            SelectableText {
                 objectName: "leftoverText"
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
@@ -164,15 +170,19 @@ Kirigami.ScrollablePage {
                       + ", so " + (page.leftoverRules === 1 ? "it keeps" : "they keep")
                       + " blocking the hosts of lists you may no longer have."
             }
-            Controls.Button {
+            GuardedButton {
                 objectName: "removeLeftovers"
                 visible: !page.confirmingLeftover
                 text: "Remove these rules"
+                Accessible.name: "Remove leftover blocklist rules"
                 icon.name: "edit-delete-remove"
-                onClicked: page.confirmingLeftover = true
+                onClicked: {
+                    page.confirmingLeftover = true;
+                    cancelLeftovers.forceActiveFocus(Qt.TabFocusReason);
+                }
             }
             // A removal that failed, or left some behind.
-            Controls.Label {
+            SelectableText {
                 objectName: "leftoverReasonText"
                 Layout.fillWidth: true
                 visible: page.leftoverReason.length > 0
@@ -184,7 +194,7 @@ Kirigami.ScrollablePage {
             RowLayout {
                 visible: page.confirmingLeftover
                 spacing: Kirigami.Units.largeSpacing
-                Controls.Label {
+                SelectableText {
                     objectName: "leftoverConfirmText"
                     Layout.fillWidth: true
                     wrapMode: Text.Wrap
@@ -195,14 +205,17 @@ Kirigami.ScrollablePage {
                         : "Remove them from the firewall? The hosts they blocked will no longer "
                           + "be blocked."
                 }
-                Controls.Button {
+                GuardedButton {
+                    id: cancelLeftovers
                     objectName: "cancelRemoveLeftovers"
                     text: "Cancel"
+                    Accessible.name: "Cancel removing leftover blocklist rules"
                     onClicked: page.confirmingLeftover = false
                 }
-                Controls.Button {
+                GuardedButton {
                     objectName: "confirmRemoveLeftovers"
                     text: "Confirm remove"
+                    Accessible.name: "Confirm removing leftover blocklist rules"
                     icon.name: "edit-delete-remove"
                     onClicked: {
                         page.model.removeLeftoverRules();
@@ -211,7 +224,7 @@ Kirigami.ScrollablePage {
                 }
             }
         }
-        Controls.Label {
+        SelectableText {
             objectName: "leftoverFilesLeftText"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -256,7 +269,7 @@ Kirigami.ScrollablePage {
                 + "the firewall and are lost when Snitchwatch's background service restarts (for "
                 + "example on logout or reboot)."
         }
-        Controls.Label {
+        SelectableText {
             objectName: "exactMatchNote"
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
@@ -265,7 +278,7 @@ Kirigami.ScrollablePage {
             opacity: 0.7
             text: "Hosts are matched by exact name, not subdomains."
         }
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
             visible: page.storageReason.length > 0
@@ -275,7 +288,24 @@ Kirigami.ScrollablePage {
         }
     }
 
-    ListView {
+    // The page's header is made after the list's scroll view, which puts the
+    // leftover-rules buttons after the rows in the Tab chain (children are
+    // visited in order). Re-adding the other children after the header (via
+    // a scratch parent, so none is ever parentless) puts them back in
+    // visual order; the header itself stays pinned above the list.
+    Item { id: reparentScratch; visible: false }
+    Component.onCompleted: Qt.callLater(function () {
+        const head = page.header;
+        const holder = head ? head.parent : null;
+        if (!holder || holder.children[0] === head) return;
+        for (const it of Array.from(holder.children)) {
+            if (it === head || it === reparentScratch) continue;
+            it.parent = reparentScratch;
+            it.parent = holder;
+        }
+    })
+
+    FocusOrderListView {
         id: list
         model: page.model
         currentIndex: -1
@@ -292,12 +322,20 @@ Kirigami.ScrollablePage {
                 + "Hosts are matched by exact name, not subdomains."
         }
 
-        delegate: Controls.ItemDelegate {
+        delegate: NavigableRow {
             id: row
             width: ListView.view ? ListView.view.width : implicitWidth
             highlighted: ListView.isCurrentItem
+            focusPolicy: Qt.StrongFocus
+            Accessible.name: row.displayName
+            Accessible.description: row.url + ". " + row.entryCount + " hosts. " + row.statusLabel
+                + ". " + row.enforcementLabel
 
-            required property int index
+            // Right-click Copy of the row's text (mouse only; selectable-text plan, class C).
+            RowCopyMenu {
+                copyText: row.Accessible.name + "\n" + row.Accessible.description
+            }
+
             required property string listId
             required property string displayName
             required property string url
@@ -401,6 +439,9 @@ Kirigami.ScrollablePage {
     SizedOverlaySheet {
         id: inspector
         title: page.inspectDisplayName
+        // Focus goes into the sheet (Tab then reaches its first control, and
+        // Escape closes it), on nothing that a held key could press.
+        onOpened: inspector.contentItem.forceActiveFocus(Qt.TabFocusReason)
 
         ColumnLayout {
             Layout.preferredWidth: inspector.preferredWidth
@@ -408,41 +449,47 @@ Kirigami.ScrollablePage {
 
             Kirigami.FormLayout {
                 Layout.fillWidth: true
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "URL"
                     textFormat: Text.PlainText
                     text: page.inspectUrl
-                    elide: Text.ElideMiddle
+                    // A TextEdit cannot elide: wrap the whole URL instead.
+                    wrapMode: Text.WrapAnywhere
+                    Layout.fillWidth: true
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Entries"
                     text: page.inspectEntryCount
+                    wrapMode: Text.NoWrap
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Download"
                     textFormat: Text.PlainText
                     text: page.inspectStatusLabel
                     color: page.statusColor(page.inspectStatus)
+                    wrapMode: Text.NoWrap
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Blocking"
                     textFormat: Text.PlainText
                     text: page.inspectEnforcementLabel
+                    wrapMode: Text.NoWrap
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Why"
                     visible: page.inspectEnforcementReason.length > 0
                     textFormat: Text.PlainText
                     text: page.inspectEnforcementReason
                     wrapMode: Text.Wrap
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Last updated"
                     visible: page.inspectLastUpdated.length > 0
                     textFormat: Text.PlainText
                     text: page.inspectLastUpdated
+                    wrapMode: Text.NoWrap
                 }
-                Controls.Label {
+                SelectableText {
                     Kirigami.FormData.label: "Last failure"
                     visible: (page.inspectStatus === "failed" || page.inspectStatus === "refused")
                         && page.inspectLastFailureReason.length > 0
@@ -457,8 +504,10 @@ Kirigami.ScrollablePage {
                 Layout.fillWidth: true
             }
 
-            Kirigami.Heading {
+            SelectableText {
                 level: 3
+                wrapMode: Text.NoWrap
+                textFormat: Text.PlainText
                 text: "Entries"
             }
 
@@ -488,26 +537,29 @@ Kirigami.ScrollablePage {
                 }
             }
 
-            Controls.Label {
+            SelectableText {
                 visible: page.entriesModel && page.entriesModel.subscriptionId === page.inspectId
                 text: page.entriesModel
                     ? "Showing " + page.entriesModel.count + " of " + page.entriesModel.total + " hosts"
                     : ""
                 opacity: 0.7
+                wrapMode: Text.NoWrap
             }
 
-            Controls.Button {
+            GuardedButton {
                 Layout.fillWidth: true
                 visible: page.entriesModel && page.entriesModel.subscriptionId === page.inspectId
                     && page.entriesModel.hasMore
                 text: "Show more"
+                Accessible.name: "Show more hosts"
                 icon.name: "go-down"
                 onClicked: page.model.requestEntries(page.inspectId, page.entriesModel.count)
             }
 
-            Controls.Button {
+            GuardedButton {
                 Layout.fillWidth: true
                 text: "Unsubscribe"
+                Accessible.name: "Unsubscribe from " + page.inspectDisplayName
                 icon.name: "edit-delete-remove"
                 onClicked: {
                     page.model.unsubscribe(page.inspectId);

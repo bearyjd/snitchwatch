@@ -24,12 +24,14 @@ Kirigami.ScrollablePage {
 
     ListView {
         id: list
+        // One Tab stop, then arrows between the rows; named, since it is a stop even when empty.
+        Accessible.name: "Countries by connections"
         model: page.model && page.model.dbAvailable ? page.model : null
         reuseItems: true
         header: ColumnLayout {
             width: list.width
             spacing: Kirigami.Units.largeSpacing
-            Controls.Label {
+            SelectableText {
                 objectName: "geoPageDatabaseSource"
                 Layout.fillWidth: true
                 visible: page.model && page.model.dbAvailable
@@ -38,7 +40,7 @@ Kirigami.ScrollablePage {
                 padding: Kirigami.Units.smallSpacing
                 text: page.model ? page.model.dbSource : ""
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "geoCapacityWarning"
                 Layout.fillWidth: true
                 visible: page.model && page.model.capacityReached
@@ -79,6 +81,13 @@ Kirigami.ScrollablePage {
             id: row
             width: ListView.view ? ListView.view.width : implicitWidth
             hoverEnabled: false
+            Accessible.name: row.countryName + ": " + row.total + " connections, allowed "
+                + row.allowed + ", denied " + row.denied + ", pending " + row.pending
+
+            // Right-click Copy of the row's text (mouse only; selectable-text plan, class C).
+            RowCopyMenu {
+                copyText: row.Accessible.name
+            }
 
             required property string countryCode
             required property string countryName

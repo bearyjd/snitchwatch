@@ -4699,7 +4699,7 @@ dependencies = [
 
 [[package]]
 name = "snitchwatch-kirigami"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "addr",
  "anyhow",
@@ -4722,6 +4722,7 @@ dependencies = [
  "serde_json",
  "snitchwatch-bridge",
  "snitchwatch-bridge-cli",
+ "snitchwatch-kirigami",
  "snitchwatch-proto",
  "tempfile",
  "tokio",

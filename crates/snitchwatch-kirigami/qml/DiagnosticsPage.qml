@@ -45,14 +45,15 @@ Kirigami.ScrollablePage {
         Kirigami.FormLayout {
             Layout.fillWidth: true
 
-            Controls.Switch {
+            GuardedSwitch {
                 Kirigami.FormData.label: "Launch at login"
+                Accessible.name: "Launch at login"
                 checked: page.controller ? page.controller.autostartEnabled : false
                 enabled: page.controller && !page.controller.busy
                 onToggled: page.controller.setAutostart(checked)
             }
 
-            Controls.Label {
+            SelectableText {
                 objectName: "autostartError"
                 Kirigami.FormData.label: "Status"
                 visible: page.controller && page.controller.autostartError.length > 0
@@ -62,14 +63,15 @@ Kirigami.ScrollablePage {
                 wrapMode: Text.Wrap
             }
 
-            Controls.Switch {
+            GuardedSwitch {
                 Kirigami.FormData.label: "Online research (RDAP) in decision dialog"
+                Accessible.name: "Online research (RDAP) in decision dialog"
                 checked: page.controller ? page.controller.rdapEnabled : false
                 enabled: page.controller && !page.controller.busy
                 onToggled: page.controller.toggleRdapEnabled(checked)
             }
 
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: ""
                 opacity: 0.7
                 wrapMode: Text.Wrap
@@ -87,9 +89,10 @@ Kirigami.ScrollablePage {
         Kirigami.FormLayout {
             Layout.fillWidth: true
 
-            Controls.ComboBox {
+            RoundedComboBox {
                 objectName: "defaultDurationBox"
                 Kirigami.FormData.label: "Allow remembers for"
+                Accessible.name: "Allow remembers for: " + displayText
                 textRole: "label"
                 valueRole: "token"
                 model: Durations.all
@@ -98,15 +101,16 @@ Kirigami.ScrollablePage {
                 enabled: page.controller && !page.controller.busy
                 onActivated: page.controller.chooseDefaultDuration(currentValue)
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: ""
                 opacity: 0.7
                 wrapMode: Text.Wrap
                 text: "Used by the alert, the Allow buttons and notifications. The firewall stores only \"Forever\" rules; a program Snitchwatch cannot identify is always answered once."
             }
-            Controls.ComboBox {
+            RoundedComboBox {
                 objectName: "silentModeBox"
                 Kirigami.FormData.label: "New connections"
+                Accessible.name: "New connections: " + displayText
                 textRole: "label"
                 valueRole: "token"
                 model: SilentModes.all
@@ -115,7 +119,7 @@ Kirigami.ScrollablePage {
                 enabled: page.controller && !page.controller.busy
                 onActivated: page.controller.chooseSilentMode(currentValue)
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: ""
                 objectName: "silentModeNote"
                 opacity: 0.7
@@ -131,13 +135,14 @@ Kirigami.ScrollablePage {
         RowLayout {
             Layout.fillWidth: true
 
-            Kirigami.Heading {
+            SelectableText {
+                wrapMode: Text.NoWrap
                 Layout.fillWidth: true
                 level: 3
                 text: "Upstream opensnitch-ui coexistence"
             }
 
-            Controls.Button {
+            RoundedButton {
                 text: "Check again"
                 icon.name: "view-refresh"
                 enabled: page.controller && !page.controller.busy
@@ -154,7 +159,7 @@ Kirigami.ScrollablePage {
             text: "The upstream OpenSnitch UI is also set up on this system."
         }
 
-        Controls.Label {
+        SelectableText {
             objectName: "coexistenceDetail"
             Layout.fillWidth: true
             wrapMode: Text.Wrap
@@ -172,7 +177,8 @@ Kirigami.ScrollablePage {
         RowLayout {
             Layout.fillWidth: true
 
-            Kirigami.Heading {
+            SelectableText {
+                wrapMode: Text.NoWrap
                 Layout.fillWidth: true
                 level: 3
                 text: "Crash log"
@@ -185,7 +191,7 @@ Kirigami.ScrollablePage {
                 implicitHeight: Kirigami.Units.iconSizes.small
             }
 
-            Controls.Button {
+            RoundedButton {
                 text: "Refresh"
                 icon.name: "view-refresh"
                 enabled: page.controller && !page.controller.busy
@@ -197,6 +203,7 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             Layout.preferredHeight: Kirigami.Units.gridUnit * 20
             readOnly: true
+            Accessible.name: "Crash log"
             wrapMode: Controls.TextArea.NoWrap
             font.family: "monospace"
             selectByMouse: true

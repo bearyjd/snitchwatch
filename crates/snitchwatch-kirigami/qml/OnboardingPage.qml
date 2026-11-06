@@ -83,11 +83,12 @@ Kirigami.Page {
             }
         }
 
-        Kirigami.Heading {
+        SelectableText {
             Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
             level: 2
             wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
             text: {
                 switch (page.controller ? page.controller.state : "") {
                 case "unitMissing": return "Daemon not installed";
@@ -98,7 +99,7 @@ Kirigami.Page {
             }
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             horizontalAlignment: Text.AlignHCenter
@@ -108,7 +109,7 @@ Kirigami.Page {
             text: page.controller ? page.controller.detail : ""
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             horizontalAlignment: Text.AlignHCenter
@@ -119,7 +120,7 @@ Kirigami.Page {
                   "opensnitch), or use the bluebuild batteries-included image instead."
         }
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             wrapMode: Text.WordWrap
             horizontalAlignment: Text.AlignHCenter
@@ -138,7 +139,7 @@ Kirigami.Page {
             Layout.alignment: Qt.AlignHCenter
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Button {
+            GuardedButton {
                 text: "Start daemon"
                 icon.name: "media-playback-start"
                 visible: page.controller && (page.controller.state === "unitInactive"
@@ -146,13 +147,13 @@ Kirigami.Page {
                 enabled: page.controller && !page.controller.busy
                 onClicked: page.controller.startUnit()
             }
-            Controls.Button {
+            RoundedButton {
                 text: "Retry"
                 icon.name: "view-refresh"
                 enabled: page.controller && !page.controller.busy
                 onClicked: page.controller.probe()
             }
-            Controls.Button {
+            RoundedButton {
                 text: "Continue anyway"
                 flat: true
                 onClicked: page.dismissed()

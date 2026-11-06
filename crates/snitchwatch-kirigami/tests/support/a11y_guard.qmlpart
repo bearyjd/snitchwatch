@@ -1,0 +1,89 @@
+    // Shared Accessible.name guard (Q01): inserted into a probe's root
+    // object, whose id must be `probe`, in place of a `// @a11y-guard` line
+    // (`tests/support/a11y_guard.qmlpart`). Needs Qt's accessibility layer
+    // on (`src/accessibility_test.rs`): Controls report a role and a name
+    // only then. `sweep(where)` walks the window and its popup overlay;
+    // `probe.missing` collects every shown interactive control without a
+    // meaningful name, `probe.names` every name seen. `stable(key, item)` is
+    // the #237 readiness check; `find(root, pred)` a tree search.
+    property var missing: ({})
+    property int checked: 0
+    property var geo: ({})
+    // Roles a user operates; each needs a name a screen reader can say.
+    readonly property var interactive: [Accessible.Button, Accessible.CheckBox,
+        Accessible.RadioButton, Accessible.ComboBox, Accessible.EditableText,
+        Accessible.Slider, Accessible.SpinBox, Accessible.MenuItem,
+        Accessible.ButtonMenu, Accessible.ButtonDropDown, Accessible.Link]
+    // (Not PageTab: a Kirigami page reports it, and it is a container.)
+    function stable(key, item) {
+        if (!item || !item.visible || !(item.width > 0) || !(item.height > 0)) {
+            probe.geo[key] = "";
+            return false;
+        }
+        const g = item.mapToItem(null, 0, 0);
+        const geometry = [g.x, g.y, item.width, item.height].join(",");
+        const same = geometry === probe.geo[key];
+        probe.geo[key] = geometry;
+        return same;
+    }
+    function find(root, pred) {
+        if (!root) return null;
+        if (pred(root)) return root;
+        const kids = root.children || [];
+        for (let i = 0; i < kids.length; ++i) {
+            const f = probe.find(kids[i], pred);
+            if (f) return f;
+        }
+        return null;
+    }
+    function describe(item) {
+        const text = item.text !== undefined ? String(item.text) : "";
+        return String(item).split("(")[0] + " role " + item.Accessible.role
+            + (item.objectName ? " '" + item.objectName + "'" : "")
+            + (text ? " text '" + text.slice(0, 40) + "'" : "");
+    }
+    // Every shown interactive item under `item` must have a name.
+    function walk(item, where) {
+        if (!item || !item.visible) return;
+        const role = item.Accessible ? item.Accessible.role : 0;
+        // Read-only text (a message, a non-editable combo box's display) is
+        // read out as content, not operated: it is not a control.
+        const staticText = role === Accessible.EditableText && item.readOnly === true;
+        if (probe.interactive.indexOf(role) >= 0 && !staticText && item.width > 0
+                && item.height > 0 && !item.Accessible.ignored) {
+            probe.checked++;
+            probe.seen["role " + role] = (probe.seen["role " + role] || 0) + 1;
+            const name = String(item.Accessible.name || "").trim();
+            probe.names[name] = true;
+            const why = probe.unnamed(name, item, role);
+            // Keyed per item, so two alike controls are both reported.
+            if (why) probe.missing[probe.describe(item) + " #" + probe.checked + ": " + why] = where;
+            // Its parts (a combo box's display field) are named by it.
+            return;
+        }
+        const kids = item.children || [];
+        for (let i = 0; i < kids.length; ++i) probe.walk(kids[i], where);
+    }
+    // Controls checked per sweep, by role.
+    property var seen: ({})
+    property var names: ({})
+    // Words that name a kind of control, not this one.
+    readonly property var generic: ["button", "push button", "combobox", "combo box", "switch",
+        "checkbox", "check box", "menuitem", "menu item", "item", "textfield", "text field",
+        "text", "edit", "toolbutton", "tool button", "control"]
+    // Why `name` does not name the control, or "" when it does.
+    function unnamed(name, item, role) {
+        if (name.length < 2) return "no name";
+        if (probe.generic.indexOf(name.toLowerCase()) >= 0) return "a generic name";
+        if (role === Accessible.ComboBox) {
+            const value = String(item.displayText || "").trim();
+            if (name === value) return "only its value, no label";
+            if (/:\s*$/.test(name)) return "a label with an empty value";
+        }
+        return "";
+    }
+    function sweep(where) {
+        const before = probe.checked;
+        probe.walk(probe.contentItem, where);
+        probe.seen[where] = probe.checked - before;
+    }

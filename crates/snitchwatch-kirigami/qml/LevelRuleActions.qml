@@ -217,7 +217,7 @@ ColumnLayout {
             id: confirmColumn
             objectName: "confirmColumn"
             spacing: Kirigami.Units.largeSpacing
-            Controls.Label {
+            SelectableText {
                 id: confirmBody
                 objectName: "confirmBody"
                 Layout.fillWidth: true
@@ -225,7 +225,7 @@ ColumnLayout {
                 wrapMode: Text.Wrap
                 text: actions.confirmText
             }
-            Controls.Label {
+            SelectableText {
                 id: confirmProgram
                 objectName: "confirmProgram"
                 Layout.fillWidth: true
@@ -239,7 +239,7 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         Layout.margins: Kirigami.Units.smallSpacing
-        Controls.Label {
+        SelectableText {
             objectName: "ruleMessage"
             Layout.fillWidth: true
             textFormat: Text.PlainText

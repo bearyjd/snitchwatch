@@ -36,23 +36,15 @@ Kirigami.ApplicationWindow {
     PromptSlotStatus {
         id: promptSlotStatus
     }
-    // The service can restart independently of this GUI. Polling is cheap
-    // (one mutex-backed string read) and makes the existing banner accurately
-    // report both disconnects and reconnects without adding a Qt event bridge.
-    Timer {
-        interval: 1000
-        running: true
-        repeat: true
-        onTriggered: {
-            bridgeFeed.refresh();
-            // Also ticks the prompt-slot banner's wait time.
-            promptSlotStatus.refresh();
-        }
-    }
+    // Banner tick, only while the window is shown (ShownTicker.qml).
+    ShownTicker { id: shownTicker; window: root; feed: bridgeFeed; slot: promptSlotStatus }
+    readonly property alias shownTickerRef: shownTicker
+    readonly property alias alertHostRef: alertHost
     // QML ids are lexical names, not properties on `root`. Components below
     // need explicitly named root properties to inject these objects without
     // accidentally self-binding a same-named page property.
     property var bridgeFeedRef: bridgeFeed
+    property var daemonRefs: ({ stats: trafficModel, health: daemonHealthModel })
     // Exposed for the headless probe (tests/honest_ui_main_banner_qml.rs).
     property alias bridgeStatusLabel: bridgeStatusLabel
 
@@ -81,7 +73,7 @@ Kirigami.ApplicationWindow {
     property var makeRuleControllerRef: makeRuleController
     // Page replacement must not destroy an admitted local Save or its outcome.
     AnalysisExportController { id: analysisExportController; objectName: "analysisExportController"; Component.onCompleted: startBridgeFeed() }
-    AnalysisExportSheet { id: analysisExportSheet; controller: analysisExportController }
+    AnalysisExportSheet { id: analysisExportSheet; controller: analysisExportController; windowShown: shownTicker.shown }
     readonly property alias analysisExport: analysisExportSheet
     MakeRuleOutcomes {
         controller: makeRuleController
@@ -137,8 +129,9 @@ Kirigami.ApplicationWindow {
 
     Connections {
         target: bridgeFeed
-        function onOkChanged() { if (!bridgeFeed.ok) curatedDefaultsModel.resetBridgeSession(); }
+        function onOkChanged() { if (!bridgeFeed.ok) { curatedDefaultsModel.resetBridgeSession(); trafficModel.resetDaemonStats(); } }
     }
+    Connections { target: daemonHealthModel; function onDaemonDownChanged() { trafficModel.setDaemonDown(daemonHealthModel.daemonDown); } }
 
     // First-run onboarding wizard (Task 12). Owns daemon-detection state; the
     // onboarding page itself is pushed/popped below based on `state`.
@@ -276,7 +269,9 @@ Kirigami.ApplicationWindow {
             rules: rulesPageComponent,
             blocklists: blocklistsPageComponent,
             curatedGroups: curatedGroupsPageComponent,
-            recommendedRules: recommendedRulesPageComponent
+            recommendedRules: recommendedRulesPageComponent,
+            about: aboutPageComponent,
+            silentMode: silentModePageComponent
         })
     }
 
@@ -644,6 +639,10 @@ Kirigami.ApplicationWindow {
             denyStatus: denyStatusModel
         }
     }
+    Component {
+        id: aboutPageComponent
+        AboutPage { daemonConnected: bridgeFeed.ok && !daemonHealthModel.daemonDown && trafficModel.statsReceived; daemonVersion: trafficModel.daemonVersion }
+    }
     // A new prompt does NOT raise this window. The alert (AlertHost.qml ->
     // AlertWindow.qml) is its own window, independent of this one: in "Ask me"
     // it asks whether this window is shown or hidden to the tray (if the alert
@@ -721,68 +720,25 @@ Kirigami.ApplicationWindow {
         if (!analysisExportController.saving) root.hide();
     }
 
-    globalDrawer: Kirigami.GlobalDrawer {
+    // One entry per page, in GlobalDrawer.qml; it routes through `nav`.
+    globalDrawer: GlobalDrawer {
         title: appInfo.appName
-        titleIcon: "security-high"
-        isMenu: false
-        actions: [
-            Kirigami.Action {
-                text: "Connections"
-                icon.name: "network-connect"
-                checked: true
-                onTriggered: nav.replaceMain(connectionsPageComponent)
-            },
-            Kirigami.Action {
-                text: "Geography"
-                icon.name: "map-globe"
-                onTriggered: nav.replaceMain(geoPageComponent)
-            },
-            Kirigami.Action {
-                text: "Rules"
-                icon.name: "view-list-details"
-                onTriggered: nav.replaceMain(rulesPageComponent)
-            },
-            Kirigami.Action {
-                text: "Blocklists"
-                icon.name: "edit-delete"
-                onTriggered: nav.replaceMain(blocklistsPageComponent)
-            },
-            Kirigami.Action {
-                text: "Traffic"
-                icon.name: "office-chart-line"
-                onTriggered: nav.replaceMain(trafficPageComponent)
-            },
-            Kirigami.Action {
-                text: "Profiles"
-                icon.name: "preferences-system-network"
-                onTriggered: nav.replaceMain(profilesPageComponent)
-            },
-            Kirigami.Action {
-                text: "Recommended background-service rules"
-                icon.name: "checkmark"
-                onTriggered: nav.replaceMain(recommendedRulesPageComponent)
-            },
-            Kirigami.Action {
-                text: "Make rules from what I saw"
-                icon.name: "view-list-details"
-                onTriggered: nav.replaceMain(learningReviewPageComponent)
-            },
-            Kirigami.Action {
-                text: "Security Scan"
-                icon.name: "security-low"
-                onTriggered: nav.replaceMain(scannerPageComponent)
-            },
-            Kirigami.Action {
-                text: "Settings & Diagnostics"
-                icon.name: "settings-configure"
-                onTriggered: nav.replaceMain(diagnosticsPageComponent)
-            },
-            Kirigami.Action {
-                text: "Daemon Health"
-                icon.name: "dialog-warning"
-                onTriggered: nav.replaceMain(daemonHealthPageComponent)
-            }
-        ]
+        nav: nav
+        window: root
+        pages: ({
+            connections: connectionsPageComponent,
+            geo: geoPageComponent,
+            rules: rulesPageComponent,
+            blocklists: blocklistsPageComponent,
+            traffic: trafficPageComponent,
+            profiles: profilesPageComponent,
+            recommendedRules: recommendedRulesPageComponent,
+            learningReview: learningReviewPageComponent,
+            scanner: scannerPageComponent,
+            diagnostics: diagnosticsPageComponent,
+            daemonHealth: daemonHealthPageComponent,
+            about: aboutPageComponent
+        })
     }
 
     pageStack.initialPage: nav.createPage(connectionsPageComponent)

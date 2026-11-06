@@ -1,12 +1,12 @@
-# r15.1 system GUI candidate CI
+# r16 system GUI candidate CI
 
-The fixed destinations are `r15.1-candidate` (branch, tag, draft prerelease).
-Earlier `r13-candidate`, `r14-candidate`, and `r15-candidate` records and the
-stable `r15` release are never replaced. New builds name the bundle
-`snitchwatch-system-r15.flatpak`, as requested for the r15 GUI line. This outer
+The fixed destinations are `r16-candidate` (branch, tag, draft prerelease).
+Earlier `r13-candidate`, `r14-candidate`, `r15-candidate`, and `r15.1-candidate`
+records and the stable `r15` release are never replaced. New builds name the bundle
+`snitchwatch-system-r16.flatpak`, following the r15 GUI line's scheme. This outer
 filename does not identify the source: the packet binds the exact commit and bytes.
-The Flatpak ostree branch is `r15.1-candidate` and the Actions artifact name is
-`r15.1-system-gui-candidate`. Published releases and their identity packets
+The Flatpak ostree branch is `r16-candidate` and the Actions artifact name is
+`r16-system-gui-candidate`. Published releases and their identity packets
 retain their original filenames and bytes.
 
 `.github/workflows/candidate-gui.yml` produces a clean system-profile GUI
@@ -17,12 +17,12 @@ not establish runtime acceptance or authorize stable publication.
 
 The primary must independently obtain resolved source/workflow reviews and
 successful native/QML CI at the immutable head. Only then may the primary set
-the repository variable `R15_1_CANDIDATE_REVIEWED_SHA` to that full lowercase SHA
-and push that same commit to `r15.1-candidate`. An absent or different variable
+the repository variable `R16_CANDIDATE_REVIEWED_SHA` to that full lowercase SHA
+and push that same commit to `r16-candidate`. An absent or different variable
 holds both build and publisher. Branch movement invalidates that authorization;
 a changed head needs fresh review and green CI. The variable is owner-managed
 authorization, not a candidate-authored PASS receipt. Review the workflow and
-credential scope before setting it. The r15.1 publication round requires its own exact-head review, green CI,
+credential scope before setting it. The r16 publication round requires its own exact-head review, green CI,
 and runtime acceptance; earlier release acceptance does not authorize it.
 
 The new workflow uses a branch push so it can run before any main merge. GitHub
@@ -56,14 +56,21 @@ A separate fresh publisher job runs only pinned trusted actions and inline
 reviewed validation. It downloads the same-run artifact, accepts nine fixed,
 bounded regular filenames, hashes every byte, and validates source/tree/
 gitlink/manifest/lock/generator identities against immutable GitHub source
-responses. It requires the latest returned exact-head native CI run and every
-required job in its latest attempt to succeed. Missing, skipped, failed or
-still-running jobs hold publication. The publisher never checks out source,
+responses. It judges the newest exact-head push/pull_request native CI run,
+skipping only unfinished *first-attempt* runs, and requires that run and every
+required job in its latest attempt to succeed. The candidate push itself starts
+a newer first-attempt `ci.yml` run on the same SHA, still running when the
+publisher looks; skipping it keeps it from masking the completed evidence. An
+unfinished rerun (`run_attempt` above 1, or absent) is never skipped: rerunning
+a failed or cancelled newer run must not expose an older green run, so it holds
+publication. No judged run, a newer completed failed or cancelled run, or
+missing, skipped, failed or stale-attempt jobs hold publication. Push the
+candidate branch only after main or PR CI on that exact SHA is green. The publisher never checks out source,
 restores caches, unpacks a Flatpak or executes candidate code. The write token
 is repository-wide; fixed reviewed publisher code enforces the target boundary.
 
 The publisher attests the validated bundle and packet as data. It explicitly
-creates the lightweight `refs/tags/r15.1-candidate` at the reviewed commit before
+creates the lightweight `refs/tags/r16-candidate` at the reviewed commit before
 creating a draft prerelease: GitHub draft releases do not create their tag.
 An existing tag must already point directly to that exact commit. Only a 404
 from the tag lookup permits creation; lookup errors and creation conflicts

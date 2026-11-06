@@ -35,9 +35,39 @@ Controls.AbstractButton {
     // Name carries the counts in words, so nothing depends on the colour.
     Accessible.name: cluster.summary
     Accessible.role: Accessible.Button
+    Accessible.description: isCluster ? "Lists these " + cluster.members.length + " places" : "Scopes connections to this place"
+    // Space clicks a button on its release, auto-repeats included, so a key
+    // still held while the focus arrives would apply the scope. Return and
+    // Enter act once on a fresh press, on the marker that has the focus.
+    Keys.priority: Keys.BeforeItem
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+            if (!event.isAutoRepeat && marker.enabled) {
+                marker.clicked();
+            }
+            event.accepted = true;
+        } else if (event.key === Qt.Key_Space && event.isAutoRepeat) {
+            event.accepted = true;
+        }
+    }
+    Keys.onReleased: event => {
+        if (event.key === Qt.Key_Space && event.isAutoRepeat) {
+            event.accepted = true;
+        }
+    }
     hoverEnabled: true
     activeFocusOnTab: true
     padding: 0
+    // The VISIBLE marker stays small (it scales with the count); only the
+    // region that takes clicks and hover grows to Theme.hitMin, centred on the
+    // marker. A containment mask adds no item, no input handler and no Tab
+    // stop, and does not touch the map's drag/pan.
+    containmentMask: QtObject {
+        function contains(point: point): bool {
+            return Math.abs(point.x - marker.width / 2) <= Math.max(marker.width, Theme.hitMin) / 2
+                && Math.abs(point.y - marker.height / 2) <= Math.max(marker.height, Theme.hitMin) / 2;
+        }
+    }
     width: diameter + Kirigami.Units.smallSpacing * 2
     height: width
 
@@ -54,8 +84,10 @@ Controls.AbstractButton {
     }
 
     background: Item {
-        // Focus / hover halo.
+        // Focus / hover halo. Drawn outside the verdict shape, in the
+        // selection colour, which no verdict colour uses.
         Rectangle {
+            objectName: "focusHalo"
             anchors.centerIn: parent
             width: marker.diameter + Kirigami.Units.smallSpacing * 2
             height: width

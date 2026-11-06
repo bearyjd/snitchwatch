@@ -21,9 +21,12 @@ RowLayout {
     Layout.fillWidth: true
     spacing: Kirigami.Units.largeSpacing
 
-    Kirigami.Heading {
+    // Selectable (batch 8): a level-1 heading on one line, as before.
+    SelectableText {
         text: header.title
         level: 1
+        textFormat: Text.PlainText
+        wrapMode: Text.NoWrap
         Layout.alignment: Qt.AlignVCenter
     }
     Kirigami.SearchField {

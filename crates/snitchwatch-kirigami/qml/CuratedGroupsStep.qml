@@ -39,14 +39,15 @@ ColumnLayout {
     DnsConsentDialog { id: dnsConsent; consentModel: step.model }
     Component.onDestruction: if (step.model) step.model.cancelBroadConsent()
 
-    Kirigami.Heading {
+    SelectableText {
         Layout.fillWidth: true
         level: 2
         wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
         text: "Recommended rules"
     }
 
-    Controls.Label {
+    SelectableText {
         objectName: "groupsIntro"
         Layout.fillWidth: true
         wrapMode: Text.Wrap
@@ -66,7 +67,7 @@ ColumnLayout {
         text: "This Snitchwatch service doesn't add recommended rules, so nothing here can be "
             + "turned on."
     }
-    Controls.Label {
+    SelectableText {
         objectName: "dnsUnsupported"
         Layout.fillWidth: true
         textFormat: Text.PlainText
@@ -75,7 +76,7 @@ ColumnLayout {
         text: "This service cannot accept reviewed DNS consent, so the name-resolution rule "
             + "cannot be turned on from here."
     }
-    Controls.Label {
+    SelectableText {
         objectName: "dnsChoiceResult"
         Layout.fillWidth: true
         textFormat: Text.PlainText
@@ -94,12 +95,27 @@ ColumnLayout {
             Layout.fillWidth: true
             spacing: Kirigami.Units.smallSpacing
 
+            // Right-click Copy of the whole group (title, description and,
+            // when shown, its entries). Mouse only: no focus, no Tab stop.
+            RowCopyMenu {
+                copyText: {
+                    const lines = [groupRow.modelData.title, groupRow.modelData.description];
+                    if (groupRow.expanded) {
+                        for (const e of groupRow.modelData.entries) {
+                            lines.push(e.program + ": " + e.allows, e.why, e.statusText);
+                        }
+                    }
+                    return lines.join("\n");
+                }
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.largeSpacing
 
-                Controls.Switch {
+                GuardedSwitch {
                     objectName: "groupSwitch-" + groupRow.modelData.id
+                    Accessible.name: groupRow.modelData.title
                     Layout.alignment: Qt.AlignTop
                     enabled: step.usable
                         && (!groupRow.modelData.isBroad || groupRow.modelData.isOn
@@ -130,10 +146,11 @@ ColumnLayout {
                         opacity: 0.7
                         Layout.fillWidth: true
                     }
-                    Controls.Button {
+                    RoundedButton {
                         objectName: "groupDetails-" + groupRow.modelData.id
                         flat: true
                         text: groupRow.expanded ? "Hide details" : "Details"
+                        Accessible.name: text + " for " + groupRow.modelData.title
                         onClicked: groupRow.expanded = !groupRow.expanded
                     }
                     Repeater {
@@ -179,7 +196,7 @@ ColumnLayout {
         }
     }
 
-    Controls.Button {
+    RoundedButton {
         objectName: "groupsFinish"
         Layout.alignment: Qt.AlignRight
         text: step.anyOn ? "Continue" : "Skip"

@@ -7,9 +7,13 @@
 // the saved list's state. "Review" asks the host to open the review page
 // (`reviewRequested`); "Stop learning" ends the window through
 // SettingsController.stopLearning(), which restores the mode it replaced.
+//
+// Restyle (rounded style, batch F): nothing here needs a change. The
+// Kirigami.InlineMessage is Kirigami-drawn; its two buttons are GuardedButton
+// (already 44 px capsules); the details strip below is text only and takes no
+// input.
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 
 ColumnLayout {
@@ -65,11 +69,25 @@ ColumnLayout {
             Kirigami.Action {
                 text: "Stop learning"
                 icon.name: "media-playback-stop"
+                // A button that ignores a held key (GuardedButton); a narrow
+                // bar's overflow menu uses the action itself.
+                displayComponent: GuardedButton {
+                    returnActivates: true
+                    text: "Stop learning"
+                    icon.name: "media-playback-stop"
+                    onClicked: banner.settings.stopLearning()
+                }
                 onTriggered: banner.settings.stopLearning()
             },
             Kirigami.Action {
                 text: "Review"
                 icon.name: "view-list-details"
+                displayComponent: GuardedButton {
+                    returnActivates: true
+                    text: "Review"
+                    icon.name: "view-list-details"
+                    onClicked: banner.reviewRequested()
+                }
                 onTriggered: banner.reviewRequested()
             }
         ]
@@ -86,7 +104,7 @@ ColumnLayout {
             anchors.margins: Kirigami.Units.smallSpacing
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Label {
+            SelectableText {
                 id: summaryLabel
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
@@ -94,7 +112,7 @@ ColumnLayout {
                 text: "Ends in " + banner.timeLeft + ". " + banner.programs
                     + (banner.programs === 1 ? " program" : " programs") + " seen."
             }
-            Controls.Label {
+            SelectableText {
                 id: incompleteLabel
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
@@ -102,7 +120,7 @@ ColumnLayout {
                 visible: banner.settings !== null && banner.settings.learningIncomplete === true
                 text: "Some connections were missed under heavy load, so this record is not complete."
             }
-            Controls.Label {
+            SelectableText {
                 id: droppedLabel
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
@@ -113,7 +131,7 @@ ColumnLayout {
                         ? " program was not recorded or was dropped to stay within the limits."
                         : " programs were not recorded or were dropped to stay within the limits.")
             }
-            Controls.Label {
+            SelectableText {
                 id: noticeLabel
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
@@ -121,7 +139,7 @@ ColumnLayout {
                 visible: banner.settings !== null && banner.settings.learnedNotice !== ""
                 text: banner.settings !== null ? banner.settings.learnedNotice : ""
             }
-            Controls.Label {
+            SelectableText {
                 id: whereLabel
                 Layout.fillWidth: true
                 wrapMode: Text.WrapAnywhere

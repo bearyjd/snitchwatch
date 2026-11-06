@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::logging::open_no_follow;
+use crate::logging::{open_no_follow, open_settled, Hooks, NoHooks, REPLACED_RETRIES};
 
 /// The file under `paths::config_dir()`.
 pub const SEEN_FILE_NAME: &str = "seen-programs.json";
@@ -37,9 +37,11 @@ pub const MAX_SEEN: usize = 5_000;
 const VERSION: u32 = 1;
 /// A program seen again has its last-seen time saved at most this often.
 pub const TOUCH_PERSIST_MS: i64 = 60_000;
-/// 5,000 paths of up to 4 KiB each would be ~20 MiB; real paths are short,
-/// so anything larger than this is not a file this GUI wrote.
-const MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// The file's size budget, shared by the writer and the reader: the writer
+/// drops the least recently seen paths until the file fits, so the reader
+/// can refuse anything larger as not a file this GUI wrote (issue #240:
+/// 5,000 paths of ~1 KiB came to ~5.4 MB).
+pub(crate) const MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 const BASELINE_TEXT: &str = "Baseline recorded: programs seen so far will not be flagged as new; \
                              a program already running at that moment was baselined.";
@@ -86,14 +88,21 @@ impl Loaded {
 /// Read `path`, trusting it only if it is a regular file owned by `uid`
 /// with one link.
 pub fn read(path: &Path, uid: u32) -> Loaded {
-    let mut file = match open_no_follow(path, std::fs::OpenOptions::new().read(true)) {
-        Ok(file) => file,
+    read_with(path, uid, REPLACED_RETRIES, &mut NoHooks)
+}
+
+/// [`read`] with the retry cap and the [`open_settled`] hooks. A save
+/// replaces the file by rename, so a file that comes up with zero links is
+/// reopened; one that keeps being replaced is `Unreadable`, not `Foreign`.
+fn read_with(path: &Path, uid: u32, tries: u32, hooks: &mut dyn Hooks) -> Loaded {
+    let opened = open_settled(tries, hooks, || {
+        open_no_follow(path, std::fs::OpenOptions::new().read(true))
+    });
+    let (mut file, meta) = match opened {
+        Ok(opened) => opened,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Loaded::Missing,
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Loaded::Foreign,
         Err(_) => return Loaded::Unreadable,
-    };
-    let Ok(meta) = file.metadata() else {
-        return Loaded::Unreadable;
     };
     if !meta.is_file()
         || meta.uid() != uid
@@ -174,17 +183,47 @@ pub fn write_merged(
     let programs: Vec<Entry> = capped(merged)
         .map(|(path, last_seen_ms)| Entry { path, last_seen_ms })
         .collect();
-    let body = serde_json::to_vec_pretty(&FileBody {
-        version: VERSION,
-        programs,
-    })
-    .map_err(io::Error::other)?;
+    let body = within_budget(programs)?;
     crate::private_files::write_private(path, &body)?;
     let FileBody { programs, .. } = serde_json::from_slice(&body).map_err(io::Error::other)?;
     Ok(programs
         .into_iter()
         .map(|e| (e.path, e.last_seen_ms))
         .collect())
+}
+
+/// The file body for `programs` (newest first), keeping the longest newest
+/// prefix whose serialization fits [`MAX_BYTES`].
+fn within_budget(mut programs: Vec<Entry>) -> io::Result<Vec<u8>> {
+    let serialize = |programs: &[Entry]| {
+        serde_json::to_vec_pretty(&FileBodyRef {
+            version: VERSION,
+            programs,
+        })
+        .map_err(io::Error::other)
+    };
+    let whole = serialize(&programs)?;
+    if whole.len() as u64 <= MAX_BYTES {
+        return Ok(whole);
+    }
+    // Size grows with the prefix length: find the longest prefix that fits.
+    let (mut fits, mut too_big) = (0, programs.len());
+    while too_big - fits > 1 {
+        let middle = fits + (too_big - fits) / 2;
+        if serialize(&programs[..middle])?.len() as u64 <= MAX_BYTES {
+            fits = middle;
+        } else {
+            too_big = middle;
+        }
+    }
+    programs.truncate(fits);
+    serialize(&programs)
+}
+
+#[derive(Serialize)]
+struct FileBodyRef<'a> {
+    version: u32,
+    programs: &'a [Entry],
 }
 
 /// Where the seen set lives.

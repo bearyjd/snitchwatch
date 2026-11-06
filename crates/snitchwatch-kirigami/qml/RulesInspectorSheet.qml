@@ -6,7 +6,6 @@
 // BlocklistsPage's inspector, so it behaves identically at every width.
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
@@ -27,36 +26,39 @@ SizedOverlaySheet {
 
         Kirigami.FormLayout {
             Layout.fillWidth: true
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Name"
                 textFormat: Text.PlainText
                 text: host.inspectDisplayName
-                elide: Text.ElideMiddle
+                wrapMode: Text.WrapAnywhere
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Source"
                 textFormat: Text.PlainText
                 text: host.inspectSourceLabel
+                wrapMode: Text.NoWrap
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Action"
                 textFormat: Text.PlainText
                 text: host.inspectAction
                 color: host.actionColor(host.inspectAction)
+                wrapMode: Text.NoWrap
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Duration"
                 textFormat: Text.PlainText
                 text: host.inspectDuration
+                wrapMode: Text.NoWrap
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Target"
                 visible: host.inspectOperatorSummary.length > 0
                 textFormat: Text.PlainText
                 text: host.inspectOperatorSummary
                 wrapMode: Text.Wrap
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "inspectHowItDecides"
                 Kirigami.FormData.label: "Order"
                 Layout.fillWidth: true
@@ -67,15 +69,16 @@ SizedOverlaySheet {
                       + "checks rules (turned-off rules are counted, but skipped). "
                       + host.inspectHowItDecides
             }
-            Controls.Switch {
+            GuardedSwitch {
                 id: inspectEnabledSwitch
                 Kirigami.FormData.label: "Enabled"
+                Accessible.name: Kirigami.FormData.label
                 enabled: host.inspectToggleable && (!host.inspectManagedDns || host.inspectEnabled)
                 checked: host.inspectEnabled
                 onToggled: host.setInspectEnabled(checked)
             }
             // The bridge's note on this rule's last toggle (#152).
-            Controls.Label {
+            SelectableText {
                 id: inspectCommandNote
                 objectName: "inspectCommandNote"
                 visible: text.length > 0
@@ -84,21 +87,21 @@ SizedOverlaySheet {
                 wrapMode: Text.Wrap
                 text: host.inspectCommandNote
             }
-            Controls.Button {
+            RoundedButton {
                 objectName: "reenableDnsButton"
                 visible: host.inspectManagedDns && !host.inspectEnabled && host.inspectToggleable
                 enabled: host.curatedModel && host.curatedModel.broadSupported
                 text: "Re-enable DNS…"
                 onClicked: host.curatedModel.reenableDns()
             }
-            Controls.Label {
+            SelectableText {
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
                 visible: host.inspectManagedDns && host.curatedModel && host.curatedModel.consentResult.length > 0
                 text: host.curatedModel ? host.curatedModel.consentResult : ""
             }
-            Controls.Label {
+            SelectableText {
                 Kirigami.FormData.label: "Read-only"
                 visible: host.inspectReadOnlyReason.length > 0
                 textFormat: Text.PlainText
@@ -112,7 +115,7 @@ SizedOverlaySheet {
             Layout.fillWidth: true
         }
 
-        Controls.Button {
+        RoundedButton {
             id: inspectEditButton
             objectName: "inspectEditButton"
             Layout.fillWidth: true
@@ -123,7 +126,7 @@ SizedOverlaySheet {
             onClicked: host.editInspected()
         }
         // A read-only rule already says why above.
-        Controls.Label {
+        SelectableText {
             objectName: "inspectNotEditable"
             visible: host.inspectReadOnlyReason.length === 0 && host.inspectNotEditable.length > 0
             Layout.fillWidth: true
@@ -134,7 +137,7 @@ SizedOverlaySheet {
 
         // Two-step confirmation kept inline (no separate dialog type
         // introduced) — mirrors the sheet's existing button-row pattern.
-        Controls.Button {
+        RoundedButton {
             id: inspectDeleteButton
             Layout.fillWidth: true
             visible: !host.confirmingDelete
@@ -149,7 +152,7 @@ SizedOverlaySheet {
             visible: host.confirmingDelete
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 text: "Delete this rule permanently?"
                 color: Kirigami.Theme.negativeTextColor
@@ -158,12 +161,12 @@ SizedOverlaySheet {
             RowLayout {
                 Layout.fillWidth: true
                 spacing: Kirigami.Units.largeSpacing
-                Controls.Button {
+                RoundedButton {
                     Layout.fillWidth: true
                     text: "Cancel"
                     onClicked: host.confirmingDelete = false
                 }
-                Controls.Button {
+                RoundedButton {
                     Layout.fillWidth: true
                     text: "Confirm delete"
                     icon.name: "edit-delete-remove"

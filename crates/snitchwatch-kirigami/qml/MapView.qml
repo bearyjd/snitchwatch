@@ -3,7 +3,6 @@
 // Country-only models retain the original cluster interface for isolated probes.
 import QtQuick
 import QtQuick.Shapes
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
@@ -47,6 +46,7 @@ Item {
     readonly property var scopeNodes: hierarchy.available ? hierarchy.children(activeGeoScope.kind,activeGeoScope.key) : []
     MapHierarchy { id: hierarchy }
     MapDrilldown { id: drilldown; mapView: view }
+    MapFocus { id: focusKeeper; mapView: view; menu: countryMenu }
 
     function loadHierarchy() {
         if (!hierarchyDirty || !geoModel || typeof geoModel.hierarchyJson !== "function") return;
@@ -111,7 +111,7 @@ Item {
     Accessible.role: Accessible.Graphic
     clip: true
     activeFocusOnTab: true
-    Accessible.description: "Use plus and minus to zoom, arrow keys to pan, and Home to fit the world."
+    Accessible.description: "Geographic scope: " + activeGeoScope.name + ". Use plus and minus to zoom, arrow keys to pan, and Home to fit the world."
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Plus || event.key === Qt.Key_Equal) camera.zoomAt(1.5, width / 2, height / 2);
         else if (event.key === Qt.Key_Minus) camera.zoomAt(1 / 1.5, width / 2, height / 2);
@@ -168,6 +168,7 @@ Item {
     // Update `markers`, and sync `markerModel` in place: keep delegates whose
     // key survives, add or remove only the difference.
     function applyClusters(clusters) {
+        const hadFocus = focusKeeper.focusInside();
         // Bound labels separately from geography. Nearby button centers never
         // acquire invented positions; long names elide and remain in the tip.
         for (const cluster of clusters) {
@@ -213,6 +214,7 @@ Item {
                 markerModel.insert(i, { key: keys[i] });
             }
         }
+        if (hadFocus) Qt.callLater(focusKeeper.keep);
     }
     onMapScaleChanged: requestRefresh()
     onGeoModelChanged: { hierarchy.clear();semanticCache={};hierarchyDirty=true;requestRefresh(); }
@@ -350,7 +352,7 @@ Item {
             enabled: x + width > 0 && y + height > 0 && x < view.width && y < view.height
             activeFocusOnTab: enabled
             Accessible.ignored: !enabled
-            onClicked: view.activate(cluster, mk)
+            onClicked: focusKeeper.activate(cluster, mk)
         }
     }
 
@@ -361,7 +363,7 @@ Item {
         anchors.centerIn: parent
         width: Math.min(parent.width - Kirigami.Units.largeSpacing * 2, Kirigami.Units.gridUnit * 30)
         spacing: Kirigami.Units.smallSpacing
-        Controls.Label {
+        SelectableText {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
             font.bold: true
@@ -372,7 +374,7 @@ Item {
                 : hierarchy.available && hierarchy.snapshot.observedConnections>0 ? "No coordinates for these destinations"
                 : (view.geoModel ? "No destinations to place yet" : "No map data")
         }
-        Controls.Label {
+        SelectableText {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
             textFormat: Text.PlainText

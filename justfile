@@ -139,6 +139,7 @@ package-check:
     python3 packaging/geo/test-country-data.py
     bash -n packaging/scanner/stage.sh
     python3 packaging/scanner/test-staging.py
+    python3 -I scripts/ebpf/test_measure.py
     python3 -c "import yaml,sys; yaml.safe_load(open('packaging/bluebuild/recipe.yml')); yaml.safe_load(open('packaging/flatpak/org.snitchwatch.Snitchwatch.yml')); yaml.safe_load(open('.github/workflows/release.yml')); print('YAML ok')"
     python3 -c "import json; json.load(open('packaging/bluebuild/files/system/etc/opensnitchd/default-config.json')); json.load(open('packaging/bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json')); json.load(open('packaging/system/opensnitchd-default-config.json')); json.load(open('packaging/endpoint-events/opensnitchd-logger.json')); print('JSON ok')"
     bash -n packaging/endpoint-events/verify.sh
@@ -161,7 +162,7 @@ endpoint-events-verify:
 
 # --- Bridge release tarball (docs/packaging/bridge-release-artifact.md) ---
 # These run packaging/release/*.sh inside a fresh container from the
-# digest-pinned Fedora 44 builder image in packaging/release/pins.env — the
+# digest-pinned Fedora 45 builder image in packaging/release/pins.env — the
 # same scripts .github/workflows/release.yml runs. The checkout is mounted
 # read-only and output lands in ./dist (release-verify is the exception: it
 # never mounts the checkout, only temp copies; see its comment).
@@ -220,7 +221,7 @@ release-bridge-repro:
 # invoked from; the arguments reach the script as positional parameters, never
 # interpolated into shell text.
 
-# Verify a tarball against a known sha256 in a throwaway Fedora 44 container.
+# Verify a tarball against a known sha256 in a throwaway Fedora 45 container.
 [positional-arguments]
 release-verify tarball sha256:
     #!/usr/bin/env bash

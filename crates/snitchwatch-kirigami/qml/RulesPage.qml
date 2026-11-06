@@ -116,6 +116,7 @@ Kirigami.ScrollablePage {
     property alias rulesIo: rulesIo
     property alias importSheet: importSheet
     property alias ruleEditor: ruleEditor
+    property alias simulatorSheet: simulateSheet
     property alias inspectorEditButton: inspector.editButton
     property alias inspectorCommandNote: inspector.commandNote
     property alias rulesCommandNote: rulesCommandNote
@@ -281,15 +282,16 @@ Kirigami.ScrollablePage {
         Layout.fillWidth: true
         spacing: Kirigami.Units.largeSpacing
 
-        Kirigami.Heading {
+        SelectableText {
             text: page.title
             level: 1
             Layout.alignment: Qt.AlignVCenter
+            wrapMode: Text.NoWrap
         }
         Item {
             Layout.fillWidth: true
         }
-        Controls.Button {
+        RoundedButton {
             objectName: "analyzeButton"
             text: "Analyze rules"
             icon.name: "dialog-scripts"
@@ -297,27 +299,27 @@ Kirigami.ScrollablePage {
                                                           : !!page.model
             onClicked: page.model.analyze()
         }
-        Controls.Button {
+        RoundedButton {
             objectName: "exportRules"
             text: "Export…"
             icon.name: "document-export"
             enabled: !rulesIo.busy
             onClicked: rulesIo.requestExport()
         }
-        Controls.Button {
+        RoundedButton {
             objectName: "importRules"
             text: "Import…"
             icon.name: "document-import"
             enabled: !rulesIo.busy && !rulesIo.applying
             onClicked: importDialog.open()
         }
-        Controls.Button {
+        RoundedButton {
             objectName: "newRule"
             text: "New rule…"
             icon.name: "list-add"
             onClicked: page.openEditor("")
         }
-        Controls.Button {
+        RoundedButton {
             text: "Simulate"
             icon.name: "system-run"
             onClicked: simulateSheet.open()
@@ -346,7 +348,7 @@ Kirigami.ScrollablePage {
         }
         // Counts only Snitchwatch's own earlier rules: blocklist or
         // hand-written rules may apply to all apps too, so no "of N".
-        Controls.Label {
+        SelectableText {
             objectName: "allAppsCount"
             visible: page.showsAllAppsNotice
             Layout.fillWidth: true
@@ -359,8 +361,9 @@ Kirigami.ScrollablePage {
                     : page.model.legacyHostOnlyCount
                       + " rules saved by earlier Snitchwatch versions apply to all apps or to "
                       + "unidentified programs"
+            wrapMode: Text.NoWrap
         }
-        Controls.Label {
+        SelectableText {
             id: hitsSummaryLabel
             objectName: "hitsSummary"
             visible: text.length > 0
@@ -371,7 +374,7 @@ Kirigami.ScrollablePage {
             font: Kirigami.Theme.smallFont
             text: insightsText.hitsSummaryText(page.hitsInfo)
         }
-        Controls.Label {
+        SelectableText {
             id: hitsStorageLabel
             objectName: "hitsStorage"
             visible: text.length > 0
@@ -383,7 +386,7 @@ Kirigami.ScrollablePage {
             color: Kirigami.Theme.neutralTextColor
             text: insightsText.hitsStorageText(page.hitsInfo)
         }
-        Controls.Label {
+        SelectableText {
             id: analysisLabel
             objectName: "analysisSummary"
             visible: text.length > 0
@@ -395,7 +398,7 @@ Kirigami.ScrollablePage {
             text: insightsText.analysisText(page.analysisInfo)
         }
         // The last export or import outcome (P2.7), plain text.
-        Controls.Label {
+        SelectableText {
             id: ioStatus
             objectName: "rulesIoStatus"
             visible: page.showsIoStatus
@@ -405,7 +408,7 @@ Kirigami.ScrollablePage {
             text: rulesIo.statusText
             wrapMode: Text.Wrap
         }
-        Controls.Label {
+        SelectableText {
             objectName: "rulesNotShown"
             visible: page.showsNotShown
             Layout.fillWidth: true
@@ -415,7 +418,7 @@ Kirigami.ScrollablePage {
             text: page.model ? page.model.notShownText : ""
         }
         // Issue #65: fixed text, advice only (the list is not re-sent).
-        Controls.Label {
+        SelectableText {
             objectName: "rulesCountHint"
             visible: page.showsCountHint
             Layout.fillWidth: true
@@ -427,7 +430,7 @@ Kirigami.ScrollablePage {
             text: page.model ? page.model.countHintText : ""
         }
         // Each rule's last toggle or delete note (#152), plain text.
-        Controls.Label {
+        SelectableText {
             id: rulesCommandNote
             objectName: "rulesCommandNote"
             visible: page.showsCommandNote
@@ -438,7 +441,7 @@ Kirigami.ScrollablePage {
             wrapMode: Text.Wrap
         }
         // The rule editor's last result (P2.1), plain text.
-        Controls.Label {
+        SelectableText {
             objectName: "ruleEditorStatus"
             visible: page.showsEditorStatus
             Layout.fillWidth: true
@@ -454,6 +457,31 @@ Kirigami.ScrollablePage {
         model: page.model
         currentIndex: -1
         reuseItems: true
+        // Q01: Tab lands on a rule (its row takes focus); select it then, so
+        // arrows move from it. Space opens a rule (ItemDelegate), and so do
+        // Enter and Return.
+        onActiveFocusChanged: if (activeFocus && currentIndex < 0 && count > 0) currentIndex = 0
+        // The rule that has keyboard focus (a row's own focus, however Tab
+        // got there), read at key time; the selected row only when focus is
+        // on the list itself. `openInspector` copies the rule's fields at
+        // once, so a later reorder cannot change which rule opens.
+        function openCurrent() {
+            let target = null;
+            for (let it = Window.activeFocusItem; it && !target; it = it.parent) {
+                if (it.name !== undefined && it.displayName !== undefined && it.ruleAction !== undefined) {
+                    target = it;
+                }
+            }
+            target = target || list.currentItem;
+            if (target) {
+                page.openInspector(target);
+            }
+        }
+        Keys.onReturnPressed: list.openCurrent()
+        Keys.onEnterPressed: list.openCurrent()
+        // The Menu key opens the rule's actions (its inspector: turn on or
+        // off, edit, delete), as it opens a connection's menu.
+        Keys.onMenuPressed: list.openCurrent()
 
         RulesEmptyPlaceholder {
             parent: list
@@ -472,6 +500,8 @@ Kirigami.ScrollablePage {
             id: row
             width: ListView.view ? ListView.view.width : implicitWidth
             highlighted: ListView.isCurrentItem
+            // Focus, highlight and the arrows' start point always agree.
+            onActiveFocusChanged: if (activeFocus) list.currentIndex = row.index
             opacity: row.source === "blocklist" ? 0.7 : 1.0
 
             required property int index
@@ -513,6 +543,38 @@ Kirigami.ScrollablePage {
             onClicked: {
                 list.currentIndex = row.index;
                 page.openInspector(row);
+            }
+
+            // Every text the row shows, in the order shown (one per line);
+            // the row's Labels stay Labels so a click still opens the rule.
+            function copyLines() {
+                const lines = [row.ruleEnabled ? "●" : "○"];
+                lines.push(row.source === "blocklist" ? ("blocklist: " + row.blocklistId) : row.displayName);
+                if (row.source !== "blocklist" && row.operatorSummary.length > 0) {
+                    lines.push(row.operatorSummary);
+                }
+                const hits = insightsText.hitsRowText(row.hitsCounted, row.hitCount, row.lastHitMs,
+                                                      row.hitsNote, row.hitBadgeKind, row.hitBadgeMs);
+                if (hits.length > 0) {
+                    lines.push(hits);
+                }
+                if (row.shadowText.length > 0) {
+                    lines.push(row.shadowText);
+                }
+                if (row.appliesToAllApps) {
+                    lines.push(row.allAppsHint, row.flagBadge);
+                }
+                if (row.readOnlyReason.length > 0) {
+                    lines.push("read-only");
+                }
+                lines.push("#" + row.precedence, row.ruleAction);
+                return lines.filter(line => line.length > 0);
+            }
+
+            // Right-click Copy of the row's text (mouse only; the Menu key still
+            // opens the inspector, whose Copy buttons are the keyboard route).
+            RowCopyMenu {
+                copyText: row.copyLines().join("\n")
             }
 
             contentItem: RowLayout {
@@ -577,7 +639,7 @@ Kirigami.ScrollablePage {
                             color: Kirigami.Theme.neutralTextColor
                             Layout.fillWidth: true
                         }
-                        Controls.Button {
+                        RoundedButton {
                             objectName: "shadowShow"
                             flat: true
                             text: "Show rule"
@@ -611,7 +673,7 @@ Kirigami.ScrollablePage {
 
                 // One click deletes this one rule; the hint above says what
                 // that changes. No confirmation step, no bulk variant.
-                Controls.Button {
+                RoundedButton {
                     objectName: "allAppsDelete"
                     visible: row.appliesToAllApps && row.deletable
                     text: "Delete"

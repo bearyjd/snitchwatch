@@ -21,7 +21,6 @@
 // a live/fixed-cadence feed.
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
@@ -114,14 +113,16 @@ Kirigami.Page {
                         anchors.centerIn: parent
                         spacing: Kirigami.Units.smallSpacing
 
-                        Controls.Label {
+                        SelectableText {
+                            wrapMode: Text.NoWrap
                             Layout.alignment: Qt.AlignHCenter
                             textFormat: Text.PlainText
                             text: page.formatStatValue(modelData.key)
                             font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.8
                             font.bold: true
                         }
-                        Controls.Label {
+                        SelectableText {
+                            wrapMode: Text.NoWrap
                             Layout.alignment: Qt.AlignHCenter
                             textFormat: Text.PlainText
                             text: modelData.label
@@ -136,7 +137,8 @@ Kirigami.Page {
             Layout.fillHeight: true
         }
 
-        Controls.Label {
+        SelectableText {
+            wrapMode: Text.NoWrap
             Layout.fillWidth: true
             Layout.alignment: Qt.AlignHCenter
             horizontalAlignment: Text.AlignHCenter

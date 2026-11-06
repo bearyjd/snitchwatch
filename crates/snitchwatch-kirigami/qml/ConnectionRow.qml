@@ -13,7 +13,7 @@ Item {
     property var page
     readonly property var verdictHelper: row.page.inlineVerdicts
     width: ListView.view ? ListView.view.width : implicitWidth
-    implicitHeight: content.implicitHeight + verdictCounts.height + Kirigami.Units.smallSpacing * 2
+    implicitHeight: Math.max(Theme.hitMin, content.implicitHeight + verdictCounts.height + Kirigami.Units.smallSpacing * 2)
 
     required property int index
     required property string rowId
@@ -105,7 +105,9 @@ Item {
             row.submitted = false;
         }
     }
-    // Exposed for the headless probes.
+    // Exposed for the headless probes (and the "N pending" / verdict-count
+    // texts of "Copy row text", see ConnectionActions.rowText).
+    property alias verdictCountsItem: verdictCounts
     property alias ruleButton: headerRuleButton
     property alias denyButton: rowDenyButton
     property alias denyAllButton: batchDenyButton
@@ -218,26 +220,21 @@ Item {
             Controls.Label {
                 textFormat: Text.PlainText
                 objectName: "hostLabel"
-                text: (row.repeatCount > 1 ? "×" + row.repeatCount + " · last seen " + Qt.formatTime(
-                    new Date(row.lastSeenMs), "hh:mm:ss") + " · " : "") + row.host + ":" + row.port + "  " + row.protocol
+                text: row.actions.hostLine(row)
                 opacity: 0.7
                 font: Kirigami.Theme.smallFont
                 elide: Text.ElideMiddle
                 Layout.fillWidth: true
             }
             Controls.Label { objectName: "heldBackLabel"; visible: row.pending && row.retriedCount > 0; textFormat: Text.PlainText; opacity: 0.7; font: Kirigami.Theme.smallFont
-                text: "notice held back " + row.retriedCount + (row.retriedCount === 1 ? " time" : " times") + " in the last hour" }
+                text: row.actions.heldBackText(row) }
         }
 
         Controls.Label {
             objectName: "verdictLabel"
             visible: !row.isGroupHeader
             textFormat: Text.PlainText
-            text: row.pending ? "pending"
-                : row.outcomeText !== "" ? row.outcomeText
-                : row.answeredWhilePaused ? "Allowed once (prompting was paused)"
-                : row.needsRule ? row.verdict + " once, needs a rule"
-                : row.verdict
+            text: row.actions.verdictText(row)
             color: row.needsRule ? Theme.needsRule : Theme.verdictColor(row.verdict)
             Layout.alignment: Qt.AlignVCenter
         }
@@ -252,7 +249,7 @@ Item {
 
         Controls.Label {
             visible: row.isGroupHeader
-            text: row.groupTotal + " connection" + (row.groupTotal === 1 ? "" : "s")
+            text: row.actions.totalText(row)
             color: Kirigami.Theme.disabledTextColor
             Layout.alignment: Qt.AlignVCenter
         }
@@ -268,7 +265,7 @@ Item {
             visible: row.isGroupHeader && row.groupPending > 0
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Button {
+            RoundedButton {
                 id: batchAllowButton
                 Keys.onBacktabPressed: row.ListView.view.focusCurrent()
                 flat: true
@@ -277,7 +274,7 @@ Item {
                 icon.name: "dialog-ok-apply"
                 onClicked: row.decideOnce("allow", true)
             }
-            Controls.Button {
+            RoundedButton {
                 id: batchDenyButton
                 flat: true
                 enabled: !row.submitted
@@ -311,7 +308,7 @@ Item {
             visible: !row.isGroupHeader && row.pending
             spacing: Kirigami.Units.smallSpacing
 
-            Controls.Button {
+            RoundedButton {
                 id: rowAllowButton
                 Keys.onBacktabPressed: row.ListView.view.focusCurrent()
                 flat: true
@@ -320,7 +317,7 @@ Item {
                 icon.name: "dialog-ok-apply"
                 onClicked: row.decideOnce("allow", false)
             }
-            Controls.Button {
+            RoundedButton {
                 id: rowDenyButton
                 flat: true
                 enabled: !row.submitted
@@ -377,7 +374,7 @@ Item {
             onRemoveRequested: (level, program, key, label) => row.page.levelRules.remove(
                 level, program, key, label)
         }
-        Controls.ToolButton {
+        GuardedToolButton {
             objectName: "groupActionsButton"
             visible: row.isGroupHeader
             text: "Actions"

@@ -80,7 +80,8 @@ fn assert_enforcement_keyed_banners(page_name: &str, source: &str) {
         &["couldn't read its saved blocklists"],
     );
     keyed("!page.storagePersistent", &["restart"]);
-    let labels = blocks(&header[0], "Controls.Label {");
+    let mut labels = blocks(&header[0], "Controls.Label {");
+    labels.extend(blocks(&header[0], "SelectableText {"));
     let reasons: Vec<_> = labels
         .iter()
         .filter(|l| l.contains("page.storageReason"))
@@ -207,7 +208,8 @@ fn rules_page_labels_showing_rule_data_are_plain_text() {
 #[test]
 fn import_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
     let code = code_lines(IMPORT_SHEET);
-    let labels = blocks(&code, "Controls.Label {");
+    let mut labels = blocks(&code, "Controls.Label {");
+    labels.extend(blocks(&code, "SelectableText {"));
     assert!(labels.len() >= 12, "found {} labels", labels.len());
     for block in &labels {
         assert!(
@@ -215,7 +217,7 @@ fn import_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
             "RulesImportSheet.qml has a label without PlainText:\n{block}"
         );
     }
-    let checkboxes = blocks(&code, "Controls.CheckBox {");
+    let checkboxes = blocks(&code, "RoundedCheckBox {");
     assert!(!checkboxes.is_empty());
     for block in checkboxes {
         assert!(
@@ -231,7 +233,8 @@ fn import_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
 #[test]
 fn editor_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
     let code = code_lines(EDITOR_SHEET);
-    let labels = blocks(&code, "Controls.Label {");
+    let mut labels = blocks(&code, "Controls.Label {");
+    labels.extend(blocks(&code, "SelectableText {"));
     assert!(labels.len() >= 8, "found {} labels", labels.len());
     for block in &labels {
         assert!(
@@ -239,7 +242,7 @@ fn editor_sheet_labels_are_all_plain_text_and_checkboxes_carry_no_text() {
             "RuleEditorSheet.qml has a label without PlainText:\n{block}"
         );
     }
-    let checkboxes = blocks(&code, "Controls.CheckBox {");
+    let checkboxes = blocks(&code, "RoundedCheckBox {");
     assert!(!checkboxes.is_empty());
     for block in checkboxes {
         assert!(

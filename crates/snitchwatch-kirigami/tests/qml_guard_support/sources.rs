@@ -71,6 +71,8 @@ pub const CONNECTIONS_PAGE: &str = concat!(
     "\n",
     include_str!("../../qml/MapDrilldown.qml"),
     "\n",
+    include_str!("../../qml/MapFocus.qml"),
+    "\n",
     include_str!("../../qml/MapDestinationsPopup.qml"),
     "\n",
     include_str!("../../qml/MapCamera.qml"),
@@ -102,6 +104,24 @@ pub const ALL_QML: &[(&str, &str)] = &[
     (
         "RuleScopePreview.qml",
         include_str!("../../qml/RuleScopePreview.qml"),
+    ),
+    ("AboutPage.qml", include_str!("../../qml/AboutPage.qml")),
+    (
+        "GlobalDrawer.qml",
+        include_str!("../../qml/GlobalDrawer.qml"),
+    ),
+    (
+        "SelectableText.qml",
+        include_str!("../../qml/SelectableText.qml"),
+    ),
+    ("RowCopyMenu.qml", include_str!("../../qml/RowCopyMenu.qml")),
+    (
+        "SelectionRegistry.qml",
+        include_str!("../../qml/SelectionRegistry.qml"),
+    ),
+    (
+        "GuardedMenuItem.qml",
+        include_str!("../../qml/GuardedMenuItem.qml"),
     ),
     ("AlertHost.qml", include_str!("../../qml/AlertHost.qml")),
     ("AlertWindow.qml", include_str!("../../qml/AlertWindow.qml")),
@@ -189,6 +209,7 @@ pub const ALL_QML: &[(&str, &str)] = &[
         "PendingAgeTicker.qml",
         include_str!("../../qml/PendingAgeTicker.qml"),
     ),
+    ("ShownTicker.qml", include_str!("../../qml/ShownTicker.qml")),
     (
         "ProgramLabel.qml",
         include_str!("../../qml/ProgramLabel.qml"),
@@ -234,6 +255,7 @@ pub const ALL_QML: &[(&str, &str)] = &[
         "MapDrilldown.qml",
         include_str!("../../qml/MapDrilldown.qml"),
     ),
+    ("MapFocus.qml", include_str!("../../qml/MapFocus.qml")),
     (
         "MapHierarchy.qml",
         include_str!("../../qml/MapHierarchy.qml"),
@@ -277,6 +299,58 @@ pub const ALL_QML: &[(&str, &str)] = &[
         include_str!("../../qml/DnsConsentDialog.qml"),
     ),
     ("GeoPage.qml", include_str!("../../qml/GeoPage.qml")),
+    (
+        "RoundedSurface.qml",
+        include_str!("../../qml/RoundedSurface.qml"),
+    ),
+    (
+        "RoundedButton.qml",
+        include_str!("../../qml/RoundedButton.qml"),
+    ),
+    (
+        "RoundedFieldFrame.qml",
+        include_str!("../../qml/RoundedFieldFrame.qml"),
+    ),
+    (
+        "RoundedField.qml",
+        include_str!("../../qml/RoundedField.qml"),
+    ),
+    (
+        "RoundedTextArea.qml",
+        include_str!("../../qml/RoundedTextArea.qml"),
+    ),
+    (
+        "GuardedButton.qml",
+        include_str!("../../qml/GuardedButton.qml"),
+    ),
+    (
+        "GuardedToolButton.qml",
+        include_str!("../../qml/GuardedToolButton.qml"),
+    ),
+    (
+        "GuardedSwitch.qml",
+        include_str!("../../qml/GuardedSwitch.qml"),
+    ),
+    (
+        "NavigableRow.qml",
+        include_str!("../../qml/NavigableRow.qml"),
+    ),
+    (
+        "FocusOrderListView.qml",
+        include_str!("../../qml/FocusOrderListView.qml"),
+    ),
+    (
+        "GuardedRadioButton.qml",
+        include_str!("../../qml/GuardedRadioButton.qml"),
+    ),
+    (
+        "RoundedCheckBox.qml",
+        include_str!("../../qml/RoundedCheckBox.qml"),
+    ),
+    (
+        "RoundedComboBox.qml",
+        include_str!("../../qml/RoundedComboBox.qml"),
+    ),
     (
         "GeoDatabaseSettings.qml",
         include_str!("../../qml/GeoDatabaseSettings.qml"),

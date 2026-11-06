@@ -19,7 +19,6 @@
 // PlainText label beside each.
 import QtQuick
 import QtQuick.Layouts
-import QtQuick.Controls as Controls
 import org.kde.kirigami as Kirigami
 import com.snitchwatch.shell
 
@@ -99,23 +98,24 @@ SizedOverlaySheet {
 
             RowLayout {
                 Layout.fillWidth: true
-                Controls.CheckBox {
+                RoundedCheckBox {
                     objectName: "importTick"
+                    Accessible.name: "Import rule: " + change.row.displayName
                     checked: !!sheet.ticks[change.row.name]
                     enabled: !!sheet.controller && !sheet.controller.applying
                              && !sheet.controller.applied
                     onToggled: sheet.setTicked(change.row.name, checked)
                 }
-                Controls.Label {
+                SelectableText {
                     objectName: "importRowName"
                     Layout.fillWidth: true
                     textFormat: Text.PlainText
                     text: change.row.displayName
                     font.bold: true
-                    elide: Text.ElideMiddle
+                    wrapMode: Text.WrapAnywhere
                 }
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "importCaution"
                 visible: change.row.caution.length > 0
                 Layout.fillWidth: true
@@ -126,19 +126,21 @@ SizedOverlaySheet {
             }
             Repeater {
                 model: change.row.badges
-                delegate: Controls.Label {
+                delegate: SelectableText {
                     required property string modelData
                     objectName: "importBadge"
                     textFormat: Text.PlainText
                     text: modelData
                     color: Kirigami.Theme.neutralTextColor
                     font.bold: true
+                    wrapMode: Text.NoWrap
                 }
             }
             Repeater {
                 model: change.row.details
-                delegate: Controls.Label {
+                delegate: SelectableText {
                     required property string modelData
+                    objectName: "importDetail"
                     Layout.fillWidth: true
                     textFormat: Text.PlainText
                     text: modelData
@@ -146,17 +148,18 @@ SizedOverlaySheet {
                     wrapMode: Text.Wrap
                 }
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "importPreviousHeading"
                 visible: change.row.previous.length > 0
                 textFormat: Text.PlainText
                 text: "It replaces this rule:"
                 font: Kirigami.Theme.smallFont
                 opacity: 0.8
+                wrapMode: Text.NoWrap
             }
             Repeater {
                 model: change.row.previous
-                delegate: Controls.Label {
+                delegate: SelectableText {
                     required property string modelData
                     objectName: "importPrevious"
                     Layout.fillWidth: true
@@ -168,7 +171,7 @@ SizedOverlaySheet {
                     wrapMode: Text.Wrap
                 }
             }
-            Controls.Label {
+            SelectableText {
                 objectName: "importResult"
                 visible: sheet.results[change.row.name] !== undefined
                 Layout.fillWidth: true
@@ -190,15 +193,15 @@ SizedOverlaySheet {
             Layout.fillWidth: true
             spacing: 0
 
-            Controls.Label {
+            SelectableText {
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
                 text: plain.row.displayName
-                elide: Text.ElideMiddle
+                wrapMode: Text.WrapAnywhere
             }
             Repeater {
                 model: plain.row.problems
-                delegate: Controls.Label {
+                delegate: SelectableText {
                     required property string modelData
                     objectName: "importProblem"
                     Layout.fillWidth: true
@@ -216,62 +219,66 @@ SizedOverlaySheet {
         Layout.preferredWidth: sheet.preferredWidth
         spacing: Kirigami.Units.largeSpacing
 
-        Controls.Label {
+        SelectableText {
             Layout.fillWidth: true
             textFormat: Text.PlainText
             text: "Nothing is sent until you apply. Rules missing from the file stay as they are."
             wrapMode: Text.Wrap
         }
 
-        Controls.Label {
+        SelectableText {
             objectName: "importSectionAdd"
             visible: sheet.preview.add.length > 0
             textFormat: Text.PlainText
             text: "New rules (" + sheet.preview.add.length + ")"
             font.bold: true
+            wrapMode: Text.NoWrap
         }
         Repeater {
             model: sheet.preview.add
             delegate: changeRow
         }
 
-        Controls.Label {
+        SelectableText {
             objectName: "importSectionReplace"
             visible: sheet.preview.replace.length > 0
             textFormat: Text.PlainText
             text: "Replace a rule with the same name (" + sheet.preview.replace.length + ")"
             font.bold: true
+            wrapMode: Text.NoWrap
         }
         Repeater {
             model: sheet.preview.replace
             delegate: changeRow
         }
 
-        Controls.Label {
+        SelectableText {
             objectName: "importSectionRefused"
             visible: sheet.preview.refused.length > 0
             textFormat: Text.PlainText
             text: "Not imported (" + sheet.preview.refused.length + ")"
             font.bold: true
+            wrapMode: Text.NoWrap
         }
         Repeater {
             model: sheet.preview.refused
             delegate: plainRow
         }
 
-        Controls.Button {
+        RoundedButton {
             objectName: "importShowUnchanged"
             visible: sheet.preview.unchanged.length > 0
             flat: true
             text: sheet.showUnchanged ? "Hide unchanged rules" : "Show unchanged rules"
             onClicked: sheet.showUnchanged = !sheet.showUnchanged
         }
-        Controls.Label {
+        SelectableText {
             objectName: "importSectionUnchanged"
             visible: sheet.showUnchanged && sheet.preview.unchanged.length > 0
             textFormat: Text.PlainText
             text: "Already the same (" + sheet.preview.unchanged.length + ")"
             font.bold: true
+            wrapMode: Text.NoWrap
         }
         Repeater {
             model: sheet.showUnchanged ? sheet.preview.unchanged : []
@@ -282,7 +289,7 @@ SizedOverlaySheet {
             Layout.fillWidth: true
         }
 
-        Controls.Label {
+        SelectableText {
             objectName: "importStatus"
             visible: text.length > 0
             Layout.fillWidth: true
@@ -291,7 +298,7 @@ SizedOverlaySheet {
             wrapMode: Text.Wrap
         }
 
-        Controls.Label {
+        SelectableText {
             objectName: "importTooMany"
             visible: sheet.tickedCount > sheet.maxApply
             Layout.fillWidth: true
@@ -302,7 +309,7 @@ SizedOverlaySheet {
             wrapMode: Text.Wrap
         }
 
-        Controls.Button {
+        RoundedButton {
             objectName: "importApply"
             Layout.fillWidth: true
             visible: !sheet.controller || !sheet.controller.applied

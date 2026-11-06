@@ -48,7 +48,10 @@ Item {
     // Learning-window expiry (phase L1): about once a minute, while the GUI
     // runs, Rust saves the window's running time and ends an expired one
     // (restoring the mode it replaced). A no-op when no window is running.
+    // Exposed for the idle-wakeups probe (tests/idle_wakeups_qml.rs).
+    property alias learningTimer: learningTimer
     Timer {
+        id: learningTimer
         interval: 60000
         repeat: true
         running: host.settings !== null

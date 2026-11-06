@@ -28,7 +28,7 @@ ColumnLayout {
     property alias understood: understoodBox
     property alias warning: warningLabel
 
-    Controls.Label {
+    SelectableText {
         Layout.fillWidth: true
         wrapMode: Text.Wrap
         textFormat: Text.PlainText
@@ -40,7 +40,8 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        Controls.Label {
+        SelectableText {
+            wrapMode: Text.NoWrap
             height: lengthBox.height
             verticalAlignment: Text.AlignVCenter
             textFormat: Text.PlainText
@@ -48,13 +49,14 @@ ColumnLayout {
         }
         Controls.ComboBox {
             id: lengthBox
+            Accessible.name: "For how long: " + lengthBox.displayText
             enabled: !panel.running
             model: ["1 hour", "6 hours", "24 hours (default)", "3 days", "7 days (the longest)"]
             currentIndex: 2
         }
     }
 
-    Controls.Label {
+    SelectableText {
         id: warningLabel
         Layout.fillWidth: true
         wrapMode: Text.Wrap
@@ -86,7 +88,7 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Kirigami.Units.smallSpacing
 
-        Controls.Button {
+        GuardedButton {
             id: startButton
             text: "Start learning"
             icon.name: "media-playback-start"
@@ -96,7 +98,7 @@ ColumnLayout {
                 understoodBox.checked = false;
             }
         }
-        Controls.Button {
+        GuardedButton {
             id: stopButton
             text: "Stop learning"
             icon.name: "media-playback-stop"
@@ -105,7 +107,7 @@ ColumnLayout {
         }
     }
 
-    Controls.Label {
+    SelectableText {
         id: errorLabel
         Layout.fillWidth: true
         wrapMode: Text.Wrap

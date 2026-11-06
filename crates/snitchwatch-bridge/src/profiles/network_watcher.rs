@@ -70,20 +70,21 @@ impl NetworkManagerWatcher {
         let conn = zbus::Connection::system().await?;
         // Best-effort initial read; a transient failure here just starts us
         // at `None` — the poll loop will pick up the real state shortly.
-        let initial = read_current_connection_id(&conn).await.unwrap_or(None);
+        let mut reader = NmReader::new(ZbusBus(conn));
+        let initial = reader.read().await.unwrap_or(None);
         let (tx, _rx) = watch::channel(initial);
         let watcher = Arc::new(Self { tx });
-        watcher.clone().spawn_poll_loop(conn);
+        watcher.clone().spawn_poll_loop(reader);
         Ok(watcher)
     }
 
-    fn spawn_poll_loop(self: Arc<Self>, conn: zbus::Connection) {
+    fn spawn_poll_loop(self: Arc<Self>, mut reader: NmReader<ZbusBus>) {
         tokio::spawn(async move {
             let started = tokio::time::Instant::now();
             let mut interval = tokio::time::interval(NM_POLL_INTERVAL);
             loop {
                 interval.tick().await;
-                match read_current_connection_id(&conn).await {
+                match reader.read().await {
                     Ok(id) => {
                         if *self.tx.borrow() != id {
                             // `send_replace`, not `send`: `connect()` drops its
@@ -123,23 +124,100 @@ impl NetworkWatcher for NetworkManagerWatcher {
     }
 }
 
-async fn read_current_connection_id(conn: &zbus::Connection) -> zbus::Result<Option<String>> {
-    let nm_proxy = zbus::Proxy::new(conn, NM_BUS_NAME, NM_OBJECT_PATH, NM_INTERFACE).await?;
-    let primary: zbus::zvariant::OwnedObjectPath =
-        nm_proxy.get_property("PrimaryConnection").await?;
-    // NetworkManager reports "/" (the root path) as its "no object" sentinel.
-    if primary.as_str() == "/" {
-        return Ok(None);
+/// D-Bus operations the poller needs, abstracted so tests can count proxy
+/// builds without a bus.
+#[allow(clippy::double_must_use)]
+#[async_trait]
+trait NmBus: Send + Sync {
+    type Proxy: Send + Sync;
+    async fn build_proxy(&self, path: &str, interface: &'static str) -> zbus::Result<Self::Proxy>;
+    async fn primary_path(&self, nm: &Self::Proxy) -> zbus::Result<String>;
+    async fn active_id(&self, active: &Self::Proxy) -> zbus::Result<String>;
+}
+
+struct ZbusBus(zbus::Connection);
+
+#[allow(clippy::double_must_use)]
+#[async_trait]
+impl NmBus for ZbusBus {
+    type Proxy = zbus::Proxy<'static>;
+
+    async fn build_proxy(&self, path: &str, interface: &'static str) -> zbus::Result<Self::Proxy> {
+        // `CacheProperties::No`: every poll must do a real `Get`, exactly as
+        // the previous per-poll proxy did, so a reused proxy can never serve a
+        // value that went stale across a NetworkManager restart.
+        zbus::proxy::Builder::new(&self.0)
+            .destination(NM_BUS_NAME)?
+            .path(path.to_owned())?
+            .interface(interface)?
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await
     }
-    let active_proxy = zbus::Proxy::new(
-        conn,
-        NM_BUS_NAME,
-        primary.as_str().to_owned(),
-        NM_ACTIVE_CONNECTION_INTERFACE,
-    )
-    .await?;
-    let id: String = active_proxy.get_property("Id").await?;
-    Ok(Some(id))
+
+    async fn primary_path(&self, nm: &Self::Proxy) -> zbus::Result<String> {
+        let p: zbus::zvariant::OwnedObjectPath = nm.get_property("PrimaryConnection").await?;
+        Ok(p.as_str().to_owned())
+    }
+
+    async fn active_id(&self, active: &Self::Proxy) -> zbus::Result<String> {
+        active.get_property("Id").await
+    }
+}
+
+/// Reads the current connection id, reusing the NetworkManager proxy (and the
+/// active-connection proxy while the primary path is unchanged) across polls.
+/// Any error drops the cached proxies so the next poll rebuilds them (covers
+/// NetworkManager restarting); the 3 s poll interval bounds the retry rate.
+struct NmReader<B: NmBus> {
+    bus: B,
+    nm: Option<B::Proxy>,
+    active: Option<(String, B::Proxy)>,
+}
+
+impl<B: NmBus> NmReader<B> {
+    fn new(bus: B) -> Self {
+        Self {
+            bus,
+            nm: None,
+            active: None,
+        }
+    }
+
+    async fn read(&mut self) -> zbus::Result<Option<String>> {
+        let result = self.read_inner().await;
+        if result.is_err() {
+            self.nm = None;
+            self.active = None;
+        }
+        result
+    }
+
+    async fn read_inner(&mut self) -> zbus::Result<Option<String>> {
+        if self.nm.is_none() {
+            self.nm = Some(self.bus.build_proxy(NM_OBJECT_PATH, NM_INTERFACE).await?);
+        }
+        let primary = match self.nm.as_ref() {
+            Some(nm) => self.bus.primary_path(nm).await?,
+            None => return Ok(None),
+        };
+        // NetworkManager reports "/" (the root path) as its "no object" sentinel.
+        if primary == "/" {
+            self.active = None;
+            return Ok(None);
+        }
+        if self.active.as_ref().map(|(p, _)| p.as_str()) != Some(primary.as_str()) {
+            let proxy = self
+                .bus
+                .build_proxy(&primary, NM_ACTIVE_CONNECTION_INTERFACE)
+                .await?;
+            self.active = Some((primary, proxy));
+        }
+        match self.active.as_ref() {
+            Some((_, active)) => Ok(Some(self.bus.active_id(active).await?)),
+            None => Ok(None),
+        }
+    }
 }
 
 /// Fallback watcher used when NetworkManager/D-Bus isn't reachable at all.
@@ -193,6 +271,48 @@ pub async fn connect_watcher() -> Arc<dyn NetworkWatcher> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Default)]
+    struct FakeBus {
+        builds: AtomicUsize,
+        fail_next: AtomicBool,
+    }
+
+    #[allow(clippy::double_must_use)]
+    #[async_trait]
+    impl NmBus for Arc<FakeBus> {
+        type Proxy = ();
+        async fn build_proxy(&self, _: &str, _: &'static str) -> zbus::Result<()> {
+            self.builds.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn primary_path(&self, _: &()) -> zbus::Result<String> {
+            if self.fail_next.swap(false, Ordering::SeqCst) {
+                return Err(zbus::Error::Failure("nm restarted".into()));
+            }
+            Ok("/org/freedesktop/NetworkManager/ActiveConnection/1".into())
+        }
+        async fn active_id(&self, _: &()) -> zbus::Result<String> {
+            Ok("home".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn proxies_are_built_once_across_polls_and_rebuilt_after_error() {
+        let bus = Arc::new(FakeBus::default());
+        let mut reader = NmReader::new(bus.clone());
+        for _ in 0..10 {
+            assert_eq!(reader.read().await.unwrap(), Some("home".into()));
+        }
+        // One NM proxy + one active-connection proxy, not 2 per poll.
+        assert_eq!(bus.builds.load(Ordering::SeqCst), 2);
+
+        bus.fail_next.store(true, Ordering::SeqCst);
+        assert!(reader.read().await.is_err());
+        assert_eq!(reader.read().await.unwrap(), Some("home".into()));
+        assert_eq!(bus.builds.load(Ordering::SeqCst), 4);
+    }
 
     #[tokio::test]
     async fn noop_watcher_always_reports_none() {

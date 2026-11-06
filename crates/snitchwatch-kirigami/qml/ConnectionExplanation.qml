@@ -1,8 +1,7 @@
 // Offline explanation of the captured record; no lookup or policy replay.
 import QtQuick
-import QtQuick.Controls as Controls
 
-Controls.Label {
+SelectableText {
     id: explanation
     property var snapshot: ({})
     property string recordedVerdict: ""

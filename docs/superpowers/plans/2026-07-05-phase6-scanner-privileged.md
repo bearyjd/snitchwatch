@@ -53,7 +53,8 @@ All findings feed one `scans.db` schema (`scan_runs` + `findings` with the
 new/still-outstanding/resolved reconciliation diff implemented in the store.
 
 `packaging/polkit/org.snitchwatch.scanner.policy` — single action
-`org.snitchwatch.scanner.run-deep-scan`, `auth_admin_keep`.
+`org.snitchwatch.scanner.run-deep-scan`, `auth_admin_keep` (superseded
+2026-10-28: now `auth_admin`, so every scan prompts; see PR #247).
 
 ## Testability seam
 

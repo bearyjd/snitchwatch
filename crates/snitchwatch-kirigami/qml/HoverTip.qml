@@ -5,6 +5,7 @@
 // to show it only for elided text.
 import QtQuick
 import QtQuick.Controls as Controls
+import com.snitchwatch.shell
 
 Item {
     id: root
@@ -18,7 +19,16 @@ Item {
     }
 
     Controls.ToolTip {
+        id: tip
         visible: root.onlyWhen && root.text !== "" && hover.hovered
+        // Rounded like the rest of the app; the native ToolTip elsewhere
+        // (the style's own) is left to the platform.
+        background: Rectangle {
+            radius: Theme.radiusSmall
+            color: tip.palette.toolTipBase
+            border.width: Theme.borderWidth
+            border.color: Qt.alpha(tip.palette.toolTipText, Theme.borderOpacity)
+        }
         contentItem: Controls.Label {
             textFormat: Text.PlainText
             wrapMode: Text.Wrap

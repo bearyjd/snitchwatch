@@ -36,15 +36,16 @@ From a host terminal a manual scan remains available with
 The host session service exposes `org.snitchwatch.Scanner1.RunDeepScan()` at
 `/org/snitchwatch/Scanner`. It takes no arguments and invokes only the fixed
 scanner path with `--json` through `/usr/bin/pkexec`; it accepts no caller paths,
-environment, shell fragments or database locations. Polkit retains active-session
-administrator authentication with cached authorization (`auth_admin_keep`);
-inactive and other sessions are denied. The broker returns typed status plus
+environment, shell fragments or database locations. Polkit asks for administrator
+authentication for every deep scan in the active session (`auth_admin`, not
+`auth_admin_keep`, so no cached authorization another same-session process
+could reuse); inactive and other sessions are denied. The broker returns typed status plus
 JSON/error text, limits reports to 4 MiB and stderr to 64 KiB, rejects overlapping requests,
 waits at most 10 minutes (including authentication), and exits after 30 idle
 seconds. The root scanner has a separate 9-minute process-group watchdog because
 an unprivileged broker cannot kill an already elevated process. There is no
-persistent root service. Elevated `--db` overrides are rejected, including during
-cached authorization; unprivileged development scans retain the override.
+persistent root service. Elevated `--db` overrides are rejected; unprivileged
+development scans retain the override.
 
 The scanner reserves stdout for the JSON report and sends diagnostics to stderr.
 Before its watchdog kills the scan group, it attempts one nonblocking, atomic
