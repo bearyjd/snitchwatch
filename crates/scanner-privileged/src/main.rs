@@ -62,13 +62,12 @@ fn start_privileged_watchdog_after(timeout: std::time::Duration) -> anyhow::Resu
     if unsafe { libc::setpgid(0, 0) } != 0 && unsafe { libc::getpgrp() } != pid {
         return Err(std::io::Error::last_os_error().into());
     }
+    // Before any primitive runs: orphans of primitives stay below the scanner,
+    // where the watchdog's sweep finds them.
+    scanner_privileged::containment::become_subreaper()?;
     std::thread::spawn(move || {
         std::thread::sleep(timeout);
-        notify_watchdog_timeout();
-        scanner_privileged::command::kill_active_group();
-        unsafe {
-            libc::killpg(pid, libc::SIGKILL);
-        }
+        scanner_privileged::command::expire_watchdog(pid, notify_watchdog_timeout);
     });
     Ok(())
 }
@@ -230,6 +229,15 @@ fn validate_database_files(db: &std::path::Path, owner: u32) -> anyhow::Result<(
 }
 
 fn main() -> anyhow::Result<()> {
+    // However `run` ends (return, error, panic): leave through the watchdog_state's
+    // exit transition, which excludes a concurrent watchdog expiry. A panic
+    // reaches this guard only by unwinding, so this relies on panic=unwind
+    // (the default; never set `panic = "abort"` for this binary).
+    let _exit = scanner_privileged::command::ExitGuard;
+    run()
+}
+
+fn run() -> anyhow::Result<()> {
     init_logging();
     let elevated = unsafe { libc::geteuid() } == 0;
     let args = parse_args_from(std::env::args().skip(1), elevated)?;
@@ -267,6 +275,7 @@ fn main() -> anyhow::Result<()> {
     if report.reconciled.new.is_empty() {
         Ok(())
     } else {
+        scanner_privileged::command::finish_process();
         std::process::exit(2);
     }
 }
@@ -361,6 +370,9 @@ mod argument_tests {
             // This check child inherits the scanner's group and both pipes. A
             // surviving check would prevent wait_with_output from completing.
             let _ = scanner_privileged::command::run("sleep", &["20"]);
+            // The watchdog kills the check first, so run can return just
+            // before the scanner's own group is killed: wait for that kill.
+            std::thread::sleep(std::time::Duration::from_secs(10));
             panic!("watchdog did not terminate the fixture");
         }
         for mode in ["normal", "full", "closed"] {
@@ -376,7 +388,7 @@ mod argument_tests {
             std::thread::spawn(move || {
                 let _ = finished.send(child.wait_with_output());
             });
-            let output = match result.recv_timeout(Duration::from_secs(2)) {
+            let output = match result.recv_timeout(Duration::from_secs(5)) {
                 Ok(output) => output.unwrap(),
                 Err(_) => {
                     unsafe {
