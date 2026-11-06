@@ -146,22 +146,41 @@ fn ignore_gone(e: io::Error) -> io::Result<()> {
     }
 }
 
+/// What a [`kill_descendants`] sweep did. Errors are only counted (plus the
+/// first kept), never logged: the caller reports them after its final kill.
+#[derive(Debug)]
+pub struct Sweep {
+    /// A pass found no live descendant before the bound.
+    pub complete: bool,
+    /// Signals that failed for a reason other than the process being gone.
+    pub failures: u32,
+    pub first_error: Option<io::Error>,
+}
+
 /// Kill every process below `root` (the scanner), pass after pass, until a
-/// pass finds none alive or `bound` has passed. Returns whether it got there.
-pub fn kill_descendants(root: i32, bound: Duration) -> bool {
+/// pass finds none alive or `bound` has passed.
+pub fn kill_descendants(root: i32, bound: Duration) -> Sweep {
     let deadline = Instant::now() + bound;
+    let mut sweep = Sweep {
+        complete: false,
+        failures: 0,
+        first_error: None,
+    };
     loop {
         let live = live_descendants(root);
         if live.is_empty() {
-            return true;
+            sweep.complete = true;
+            return sweep;
         }
         if Instant::now() >= deadline {
-            return false;
+            return sweep;
         }
         let tree: HashSet<i32> = live.iter().copied().chain([root]).collect();
         for &pid in &live {
             if let Err(e) = kill_if_descendant(pid, &tree) {
-                tracing::warn!(pid, error = %e, "watchdog could not kill a descendant");
+                // Kept in memory: the watchdog must not log before its kill.
+                sweep.failures += 1;
+                sweep.first_error.get_or_insert(e);
             }
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -220,7 +239,7 @@ mod tests {
             .unwrap();
         let descendant: i32 = line.trim().parse().unwrap();
         let mut bystander = sleeper();
-        assert!(kill_descendants(root.0.id() as i32, Duration::from_secs(3)));
+        assert!(kill_descendants(root.0.id() as i32, Duration::from_secs(3)).complete);
         let start = Instant::now();
         while std::path::Path::new(&format!("/proc/{descendant}")).exists()
             && !parent_and_zombie(descendant).is_some_and(|(_, z)| z)

@@ -44,25 +44,39 @@ pub fn expire_watchdog(own_group: i32) {
         |group| unsafe {
             libc::killpg(group, libc::SIGKILL);
         },
+        |message| tracing::warn!("{message}"),
     );
 }
 
-/// [`expire_watchdog`] with the sweep and the group kill injected. Refuses a
-/// group of 0 (the caller's own) or 1 (init's): `killpg` on them, or a sweep
-/// rooted at them, would take down far more than the scanner.
-fn expire_watchdog_with(own_group: i32, sweep: impl FnOnce(i32) -> bool, killpg: impl FnOnce(i32)) {
+/// [`expire_watchdog`] with the sweep, the group kill and the log injected.
+/// Refuses a group of 0 (the caller's own) or 1 (init's): `killpg` on them, or
+/// a sweep rooted at them, would take down far more than the scanner. Nothing
+/// that can block (logging) runs before the final `killpg`: a stuck stderr
+/// must not hold off the kill, so the sweep's diagnostics come after it.
+fn expire_watchdog_with(
+    own_group: i32,
+    sweep: impl FnOnce(i32) -> crate::containment::Sweep,
+    killpg: impl FnOnce(i32),
+    log: impl Fn(&str),
+) {
     kill_active_group();
     if own_group <= 1 {
-        tracing::error!(
-            own_group,
-            "watchdog refuses to kill an invalid scanner group"
-        );
+        log(&format!(
+            "watchdog refuses to kill invalid scanner group {own_group}"
+        ));
         return;
     }
-    if !sweep(own_group) {
-        tracing::warn!("watchdog descendant sweep did not finish; killing own group anyway");
-    }
+    let sweep = sweep(own_group);
     killpg(own_group);
+    if !sweep.complete {
+        log("watchdog descendant sweep did not finish before the own-group kill");
+    }
+    if let Some(first) = &sweep.first_error {
+        log(&format!(
+            "watchdog could not signal {} descendant(s); first error: {first}",
+            sweep.failures
+        ));
+    }
 }
 
 /// Test only: a pre-exec hook that reports the forked child's pid on this fd
@@ -460,10 +474,57 @@ mod tests {
             io::ErrorKind::NotFound
         );
     }
+    /// Gone, or a zombie waiting for whoever inherited it.
+    fn gone(pid: i32) -> bool {
+        (unsafe { libc::kill(pid, 0) }) != 0
+            || std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| {
+                    stat.rsplit(')')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start()
+                        .starts_with('Z')
+                })
+                .unwrap_or(true)
+    }
+
+    /// Whether `scanner` has exited, observed without reaping it, so its pid
+    /// (and process group) stays reserved and a later `kill(-pid)` can never
+    /// name a recycled, unrelated group. Polls until `bound` has passed.
+    fn exited_within(scanner: &Child, bound: Duration) -> bool {
+        let start = Instant::now();
+        loop {
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let done = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    scanner.id(),
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            } == 0
+                && unsafe { info.si_pid() } != 0;
+            if done || start.elapsed() > bound {
+                return done;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Kill the fixture's whole group while its pid is still reserved
+    /// (unreaped), then reap it and return its status.
+    fn kill_group_then_reap(scanner: &mut Child) -> std::process::ExitStatus {
+        unsafe {
+            libc::kill(-(scanner.id() as i32), libc::SIGKILL);
+        }
+        scanner.wait().unwrap()
+    }
+
     /// A primitive whose spawn stalls after it left the scanner's group (a
     /// hung exec) must not hold off the root watchdog: the scanner dies within
     /// the bound, and so does the stalled child it never got a pid for. Runs in
-    /// a child process, since the watchdog kills its own group.
+    /// a child process, since the watchdog kills its own group. The watchdog
+    /// fires only once the stalled child has reported its pid.
     #[test]
     fn a_spawn_stall_cannot_hold_off_the_watchdog() {
         use std::os::unix::process::ExitStatusExt;
@@ -474,9 +535,28 @@ mod tests {
             unsafe {
                 assert!(libc::setpgid(0, 0) == 0 || libc::getpgrp() == own);
             }
-            STALL_FD.store(fd, std::sync::atomic::Ordering::SeqCst);
+            // The stalled child reports into this pipe; the watchdog thread
+            // forwards the pid to the test, then expires.
+            let mut hook = [0; 2];
+            unsafe {
+                assert_eq!(libc::pipe2(hook.as_mut_ptr(), libc::O_CLOEXEC), 0);
+            }
+            STALL_FD.store(hook[1], std::sync::atomic::Ordering::SeqCst);
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(300));
+                let mut pid: i32 = 0;
+                loop {
+                    let n = unsafe { libc::read(hook[0], (&mut pid as *mut i32).cast(), 4) };
+                    if n == 4 {
+                        break;
+                    }
+                    if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return;
+                }
+                unsafe {
+                    libc::write(fd, (&pid as *const i32).cast(), 4);
+                }
                 expire_watchdog(own);
             });
             let _ = capture(
@@ -495,7 +575,6 @@ mod tests {
             assert_eq!(libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC), 0);
             // The write end goes to the scanner fixture; the read end stays here.
             assert_eq!(libc::fcntl(pipe[1], libc::F_SETFD, 0), 0);
-            assert_eq!(libc::fcntl(pipe[0], libc::F_SETFL, libc::O_NONBLOCK), 0);
         }
         let mut scanner = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -512,38 +591,21 @@ mod tests {
         unsafe {
             libc::close(pipe[1]);
         }
-        let scanner_pid = scanner.id() as i32;
-        let start = Instant::now();
         let bound = Duration::from_secs(5);
+        unsafe {
+            assert_eq!(libc::fcntl(pipe[0], libc::F_SETFL, libc::O_NONBLOCK), 0);
+        }
         let mut stalled: i32 = 0;
-        let status = loop {
-            if stalled == 0 {
-                let mut pid: i32 = 0;
-                if unsafe { libc::read(pipe[0], (&mut pid as *mut i32).cast(), 4) } == 4 {
-                    stalled = pid;
-                }
+        let start = Instant::now();
+        while stalled == 0 && start.elapsed() < Duration::from_secs(10) {
+            let mut pid: i32 = 0;
+            if unsafe { libc::read(pipe[0], (&mut pid as *mut i32).cast(), 4) } == 4 {
+                stalled = pid;
+            } else {
+                std::thread::sleep(Duration::from_millis(10));
             }
-            if let Some(status) = scanner.try_wait().unwrap() {
-                break Some(status);
-            }
-            if start.elapsed() > bound {
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        let gone = |pid: i32| {
-            // Gone, or a zombie waiting for whoever inherited it.
-            (unsafe { libc::kill(pid, 0) }) != 0
-                || std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                    .map(|stat| {
-                        stat.rsplit(')')
-                            .next()
-                            .unwrap_or("")
-                            .trim_start()
-                            .starts_with('Z')
-                    })
-                    .unwrap_or(true)
-        };
+        }
+        let exited = exited_within(&scanner, bound);
         let reaped = stalled > 0 && {
             let since = Instant::now();
             while !gone(stalled) && since.elapsed() < bound {
@@ -552,32 +614,31 @@ mod tests {
             gone(stalled)
         };
         // Never leak a stuck fixture, whatever failed.
-        unsafe {
-            if stalled > 0 && !gone(stalled) {
+        if stalled > 0 && !gone(stalled) {
+            unsafe {
                 libc::kill(stalled, libc::SIGKILL);
             }
-            libc::kill(-scanner_pid, libc::SIGKILL);
+        }
+        let status = kill_group_then_reap(&mut scanner);
+        unsafe {
             libc::close(pipe[0]);
         }
-        let _ = scanner.wait();
-        let status = status.expect("the stalled spawn held off the watchdog");
+        assert!(exited, "the stalled spawn held off the watchdog");
         assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
         assert!(stalled > 0, "the stalled child never reported its pid");
         assert!(reaped, "the stalled child {stalled} outlived the scanner");
     }
 
-    /// Gone, or a zombie waiting for whoever inherited it.
-    fn gone(pid: i32) -> bool {
-        (unsafe { libc::kill(pid, 0) }) != 0
-            || std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                .map(|stat| {
-                    stat.rsplit(')')
-                        .next()
-                        .unwrap_or("")
-                        .trim_start()
-                        .starts_with('Z')
-                })
-                .unwrap_or(true)
+    /// The pids a fixture script wrote (`primitive helper`, newline-terminated
+    /// so a half-written file is never taken for a complete one).
+    fn reported_pids(file: &std::path::Path) -> Vec<i32> {
+        match std::fs::read_to_string(file) {
+            Ok(text) if text.ends_with('\n') => text
+                .split_whitespace()
+                .filter_map(|p| p.parse().ok())
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// A primitive that execs and forks a long-lived helper before the scanner
@@ -585,7 +646,8 @@ mod tests {
     /// primitive, its helper (which PDEATHSIG doesn't reach) and the scanner
     /// are all dead. Twice: the primitive still waiting for its helper, and
     /// the primitive already gone, the helper orphaned (kept below the scanner
-    /// only by the subreaper). Runs in a child scanner process.
+    /// only by the subreaper). Runs in a child scanner process; the watchdog
+    /// fires only once the fixture has reached the state under test.
     #[test]
     fn a_forked_helper_cannot_outlive_the_watchdog() {
         use std::os::unix::process::ExitStatusExt;
@@ -598,17 +660,22 @@ mod tests {
             }
             crate::containment::become_subreaper().unwrap();
             DELAY_REGISTRATION.store(true, Ordering::SeqCst);
+            let orphan = std::env::var(MODE).unwrap() == "orphan";
+            let file = std::path::PathBuf::from(&pids);
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(500));
+                loop {
+                    let reported = reported_pids(&file);
+                    // The orphan state: the primitive has exited too.
+                    if reported.len() == 2 && (!orphan || gone(reported[0])) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 expire_watchdog(own);
             });
-            let then = if std::env::var(MODE).unwrap() == "orphan" {
-                "exit 0"
-            } else {
-                "wait"
-            };
+            let then = if orphan { "exit 0" } else { "wait" };
             let script = format!(
-                "sleep 60 & printf '%s %s' $$ $! > {}; {then}",
+                "sleep 60 & printf '%s %s\\n' $$ $! > {}; {then}",
                 pids.to_str().unwrap()
             );
             let _ = capture(
@@ -636,44 +703,28 @@ mod tests {
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap();
-            let scanner_pid = scanner.id() as i32;
-            let bound = Duration::from_secs(5);
+            let bound = Duration::from_secs(10);
             let start = Instant::now();
-            let mut reported: Vec<i32> = Vec::new();
-            let status = loop {
-                if reported.is_empty() {
-                    if let Ok(text) = std::fs::read_to_string(&pids) {
-                        reported = text
-                            .split_whitespace()
-                            .filter_map(|p| p.parse().ok())
-                            .collect();
-                        if reported.len() != 2 {
-                            reported.clear();
-                        }
-                    }
-                }
-                if let Some(status) = scanner.try_wait().unwrap() {
-                    break Some(status);
-                }
-                if start.elapsed() > bound {
-                    break None;
-                }
+            let mut reported = Vec::new();
+            while reported.len() != 2 && start.elapsed() < bound {
+                reported = reported_pids(&pids);
                 std::thread::sleep(Duration::from_millis(10));
-            };
+            }
+            let exited = exited_within(&scanner, Duration::from_secs(5));
             let since = Instant::now();
-            while !reported.iter().all(|&pid| gone(pid)) && since.elapsed() < bound {
+            while !reported.iter().all(|&pid| gone(pid)) && since.elapsed() < Duration::from_secs(5)
+            {
                 std::thread::sleep(Duration::from_millis(10));
             }
             let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
             // Never leak a fixture, whatever failed.
-            unsafe {
-                for &pid in &survivors {
+            for &pid in &survivors {
+                unsafe {
                     libc::kill(pid, libc::SIGKILL);
                 }
-                libc::kill(-scanner_pid, libc::SIGKILL);
             }
-            let _ = scanner.wait();
-            let status = status.expect("the watchdog did not terminate the scanner");
+            let status = kill_group_then_reap(&mut scanner);
+            assert!(exited, "{mode}: the watchdog did not terminate the scanner");
             assert_eq!(status.signal(), Some(libc::SIGKILL), "{mode}: {status:?}");
             assert_eq!(
                 reported.len(),
@@ -722,35 +773,75 @@ mod tests {
         assert_eq!(ACTIVE_GROUP.lock().unwrap().pid, 0);
     }
 
+    /// A child that is always killed and reaped, even if an assertion panics.
+    struct Reaped(Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn sweep_with(failures: u32) -> crate::containment::Sweep {
+        crate::containment::Sweep {
+            complete: failures == 0,
+            failures,
+            first_error: (failures > 0).then(|| io::Error::from_raw_os_error(libc::EPERM)),
+        }
+    }
+
     #[test]
     fn invalid_scanner_groups_never_reach_killpg_or_the_sweep() {
         let _lock = SERIAL.lock().unwrap();
         for group in [i32::MIN, -1, 0, 1] {
-            let calls = std::cell::Cell::new(0);
+            let events = std::cell::RefCell::new(Vec::new());
             expire_watchdog_with(
                 group,
                 |_| {
-                    calls.set(calls.get() + 1);
-                    true
+                    events.borrow_mut().push("sweep".to_string());
+                    sweep_with(0)
                 },
-                |_| calls.set(calls.get() + 100),
+                |_| events.borrow_mut().push("killpg".to_string()),
+                |m| events.borrow_mut().push(format!("log:{m}")),
             );
-            assert_eq!(calls.get(), 0, "group {group}");
+            let events = events.into_inner();
+            assert_eq!(events.len(), 1, "group {group}: {events:?}");
+            assert!(events[0].starts_with("log:"), "{events:?}");
         }
-        let killed = std::cell::Cell::new(0);
-        expire_watchdog_with(4242, |root| root == 4242, |g| killed.set(g));
-        assert_eq!(killed.get(), 4242);
-        // A failed sweep is logged, and the own group is killed regardless.
-        killed.set(0);
-        expire_watchdog_with(4242, |_| false, |g| killed.set(g));
-        assert_eq!(killed.get(), 4242);
+        EXPIRED.store(false, Ordering::SeqCst);
+    }
+
+    /// Nothing that can block (logging) may run before the final killpg; the
+    /// sweep's failures are only reported afterwards.
+    #[test]
+    fn killpg_comes_before_every_diagnostic() {
+        let _lock = SERIAL.lock().unwrap();
+        for failures in [0, 3] {
+            let events = std::cell::RefCell::new(Vec::new());
+            expire_watchdog_with(
+                4242,
+                |root| {
+                    assert_eq!(root, 4242);
+                    events.borrow_mut().push("sweep".to_string());
+                    sweep_with(failures)
+                },
+                |g| events.borrow_mut().push(format!("killpg:{g}")),
+                |m| events.borrow_mut().push(format!("log:{m}")),
+            );
+            let events = events.into_inner();
+            assert_eq!(events[0], "sweep", "{events:?}");
+            assert_eq!(events[1], "killpg:4242", "{events:?}");
+            // Unfinished sweep (failures > 0 here) is reported, but only after.
+            assert_eq!(events.len() > 2, failures > 0, "{events:?}");
+            assert!(events[2..].iter().all(|e| e.starts_with("log:")));
+        }
         EXPIRED.store(false, Ordering::SeqCst);
     }
 
     #[test]
     fn lock_timeout_lets_the_watchdog_move_on_without_killing() {
         let _lock = SERIAL.lock().unwrap();
-        let mut victim = Command::new("/usr/bin/sleep").arg("30").spawn().unwrap();
+        let mut victim = Reaped(Command::new("/usr/bin/sleep").arg("30").spawn().unwrap());
         let held = ACTIVE_GROUP.lock().unwrap();
         let start = Instant::now();
         kill_active_group();
@@ -760,9 +851,7 @@ mod tests {
         EXPIRED.store(false, Ordering::SeqCst);
         assert!(waited >= WATCHDOG_LOCK_WAIT, "{waited:?}");
         assert!(waited < Duration::from_secs(2), "{waited:?}");
-        assert!(victim.try_wait().unwrap().is_none());
-        victim.kill().unwrap();
-        victim.wait().unwrap();
+        assert!(victim.0.try_wait().unwrap().is_none());
     }
 
     #[test]
