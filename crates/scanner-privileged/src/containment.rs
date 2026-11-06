@@ -29,22 +29,31 @@ pub fn become_subreaper() -> io::Result<()> {
 }
 
 /// One `/proc/<pid>/stat` line's parent and whether the process is a zombie.
-fn parent_and_zombie(pid: i32) -> Option<(i32, bool)> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+/// Read as bytes: a comm need not be valid UTF-8, and such a process must
+/// still be found.
+pub(crate) fn parent_and_zombie(pid: i32) -> Option<(i32, bool)> {
+    let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
     // The command name may contain spaces and parentheses: split at the last ')'.
-    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    let tail = &stat[stat.iter().rposition(|&b| b == b')')? + 1..];
+    let mut fields = tail
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|f| !f.is_empty());
     let state = fields.next()?;
-    let parent = fields.next()?.parse().ok()?;
-    Some((parent, state == "Z"))
+    let parent = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+    Some((parent, state == b"Z"))
 }
 
 /// Every live (non-zombie) process below `root`, by the current `/proc`.
-fn live_descendants(root: i32) -> Vec<i32> {
+fn live_descendants(root: i32, deadline: Instant) -> Vec<i32> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
     let mut children: HashMap<i32, Vec<(i32, bool)>> = HashMap::new();
     for entry in entries.flatten() {
+        // A pass over a huge /proc must not outlast the bound.
+        if Instant::now() >= deadline {
+            return Vec::new();
+        }
         let Some(pid) = entry
             .file_name()
             .to_str()
@@ -157,34 +166,59 @@ pub struct Sweep {
     pub first_error: Option<io::Error>,
 }
 
-/// Kill every process below `root` (the scanner), pass after pass, until a
-/// pass finds none alive or `bound` has passed.
+/// Kill every process below `root` (the scanner), pass after pass, until two
+/// consecutive passes find none alive or `bound` has passed. Two, because one
+/// `/proc` snapshot can miss an orphan (a child listed before its parent, the
+/// parent then exiting). The bound is checked per `/proc` entry and per pid.
 pub fn kill_descendants(root: i32, bound: Duration) -> Sweep {
+    let deadline = Instant::now() + bound;
+    kill_descendants_with(
+        root,
+        bound,
+        || live_descendants(root, deadline),
+        kill_if_descendant,
+    )
+}
+
+/// [`kill_descendants`] with the `/proc` scan and the kill injected.
+fn kill_descendants_with(
+    root: i32,
+    bound: Duration,
+    mut scan: impl FnMut() -> Vec<i32>,
+    mut kill: impl FnMut(i32, &HashSet<i32>) -> io::Result<()>,
+) -> Sweep {
     let deadline = Instant::now() + bound;
     let mut sweep = Sweep {
         complete: false,
         failures: 0,
         first_error: None,
     };
-    loop {
-        let live = live_descendants(root);
+    let mut empty_passes = 0;
+    while Instant::now() < deadline {
+        let live = scan();
         if live.is_empty() {
-            sweep.complete = true;
-            return sweep;
-        }
-        if Instant::now() >= deadline {
-            return sweep;
-        }
-        let tree: HashSet<i32> = live.iter().copied().chain([root]).collect();
-        for &pid in &live {
-            if let Err(e) = kill_if_descendant(pid, &tree) {
-                // Kept in memory: the watchdog must not log before its kill.
-                sweep.failures += 1;
-                sweep.first_error.get_or_insert(e);
+            empty_passes += 1;
+            if empty_passes == 2 {
+                sweep.complete = true;
+                return sweep;
+            }
+        } else {
+            empty_passes = 0;
+            let tree: HashSet<i32> = live.iter().copied().chain([root]).collect();
+            for &pid in &live {
+                if Instant::now() >= deadline {
+                    return sweep;
+                }
+                if let Err(e) = kill(pid, &tree) {
+                    // Kept in memory: the watchdog must not log before its kill.
+                    sweep.failures += 1;
+                    sweep.first_error.get_or_insert(e);
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    sweep
 }
 
 #[cfg(test)]
@@ -309,5 +343,103 @@ mod tests {
         let err = kill_if_descendant_with(pid, &HashSet::from([me()]), |_| Ok(bogus)).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EBADF));
         assert!(alive(&mut child));
+    }
+
+    /// Forks a root process `P` and, below it, a `C` whose comm is not valid
+    /// UTF-8; returns `(P, C)`. Both pause forever until killed.
+    fn fork_root_with_binary_comm() -> (i32, i32) {
+        let mut pipe = [0; 2];
+        unsafe {
+            assert_eq!(libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC), 0);
+            let root = libc::fork();
+            assert!(root >= 0);
+            if root == 0 {
+                // Async-signal-safe calls only (forked from a threaded test).
+                let child = libc::fork();
+                if child == 0 {
+                    libc::prctl(libc::PR_SET_NAME, c"\xff\xfex".as_ptr());
+                    loop {
+                        libc::pause();
+                    }
+                }
+                libc::write(pipe[1], (&child as *const i32).cast(), 4);
+                loop {
+                    libc::pause();
+                }
+            }
+            libc::close(pipe[1]);
+            let mut child: i32 = 0;
+            assert_eq!(libc::read(pipe[0], (&mut child as *mut i32).cast(), 4), 4);
+            libc::close(pipe[0]);
+            (root, child)
+        }
+    }
+
+    #[test]
+    fn a_process_with_a_non_utf8_name_is_found_and_killed() {
+        let (root, child) = fork_root_with_binary_comm();
+        // Wait until the child has set its name.
+        let start = Instant::now();
+        while std::fs::read(format!("/proc/{child}/stat"))
+            .map(|stat| !stat.windows(3).any(|w| w == b"\xff\xfex"))
+            .unwrap_or(true)
+            && start.elapsed() < Duration::from_secs(3)
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let swept = kill_descendants(root, Duration::from_secs(3));
+        // Read as bytes here: the code under test must not be its own oracle.
+        let alive = std::fs::read(format!("/proc/{child}/stat")).is_ok_and(|stat| {
+            let tail = &stat[stat.iter().rposition(|&b| b == b')').unwrap() + 1..];
+            tail.trim_ascii_start().first() != Some(&b'Z')
+        });
+        unsafe {
+            libc::kill(child, libc::SIGKILL);
+            libc::kill(root, libc::SIGKILL);
+            libc::waitpid(root, std::ptr::null_mut(), 0);
+        }
+        assert!(swept.complete);
+        assert!(!alive, "the non-UTF-8-named descendant survived");
+    }
+
+    #[test]
+    fn completion_needs_two_consecutive_empty_passes() {
+        // An empty snapshot followed by a non-empty one (an orphan the first
+        // snapshot missed) must not complete the sweep.
+        let mut snapshots = vec![vec![], vec![7], vec![], vec![]].into_iter();
+        let mut scans = 0;
+        let mut killed = Vec::new();
+        let sweep = kill_descendants_with(
+            1,
+            Duration::from_secs(5),
+            || {
+                scans += 1;
+                snapshots.next().unwrap_or_default()
+            },
+            |pid, _| {
+                killed.push(pid);
+                Ok(())
+            },
+        );
+        assert!(sweep.complete);
+        assert_eq!(killed, [7]);
+        assert_eq!(scans, 4);
+    }
+
+    #[test]
+    fn the_deadline_is_checked_per_pid() {
+        let mut kills = 0;
+        let sweep = kill_descendants_with(
+            1,
+            Duration::from_millis(50),
+            || vec![2, 3, 4, 5, 6, 7, 8, 9],
+            |_, _| {
+                kills += 1;
+                std::thread::sleep(Duration::from_millis(40));
+                Ok(())
+            },
+        );
+        assert!(!sweep.complete);
+        assert!(kills <= 3, "kept signalling past the bound: {kills}");
     }
 }

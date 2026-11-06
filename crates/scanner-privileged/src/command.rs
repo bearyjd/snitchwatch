@@ -40,6 +40,7 @@ const DESCENDANT_SWEEP: Duration = Duration::from_secs(2);
 pub fn expire_watchdog(own_group: i32) {
     expire_watchdog_with(
         own_group,
+        kill_active_group,
         |root| crate::containment::kill_descendants(root, DESCENDANT_SWEEP),
         |group| unsafe {
             libc::killpg(group, libc::SIGKILL);
@@ -53,13 +54,17 @@ pub fn expire_watchdog(own_group: i32) {
 /// a sweep rooted at them, would take down far more than the scanner. Nothing
 /// that can block (logging) runs before the final `killpg`: a stuck stderr
 /// must not hold off the kill, so the sweep's diagnostics come after it.
+/// The sweep (bounded per `/proc` entry and per pid) deliberately precedes the
+/// own-group kill: that kill takes this process down with it, and anything in
+/// another group or session (setsid, an orphan) would survive it.
 fn expire_watchdog_with(
     own_group: i32,
+    kill_active: impl FnOnce(),
     sweep: impl FnOnce(i32) -> crate::containment::Sweep,
     killpg: impl FnOnce(i32),
     log: impl Fn(&str),
 ) {
-    kill_active_group();
+    kill_active();
     if own_group <= 1 {
         log(&format!(
             "watchdog refuses to kill invalid scanner group {own_group}"
@@ -738,6 +743,101 @@ mod tests {
         }
     }
 
+    /// Processes that left the scanner's group (setsid), and one orphaned by
+    /// its parent's death (kept below the scanner only by the subreaper), are
+    /// all dead after the real watchdog fires. Runs in a child scanner.
+    #[test]
+    fn setsid_and_reparented_processes_die_with_the_watchdog() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD: &str = "SNITCHWATCH_TEST_ESCAPEES";
+        if let Some(file) = std::env::var_os(CHILD) {
+            let own = unsafe { libc::getpid() };
+            unsafe {
+                assert!(libc::setpgid(0, 0) == 0 || libc::getpgrp() == own);
+            }
+            crate::containment::become_subreaper().unwrap();
+            let detached = |program: &str, args: &[&str]| {
+                let mut command = Command::new(program);
+                command
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null());
+                unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() < 0 {
+                            return Err(io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+                command
+            };
+            // A: out of the group and session, still our child.
+            #[allow(clippy::zombie_processes)] // killed by the watchdog under test
+            let a = detached("/usr/bin/sleep", &["60"])
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            // B: its parent exits, so it is reparented to this subreaper.
+            let mut parent = detached("/usr/bin/sh", &["-c", "sleep 60 & echo $!"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufRead::read_line(
+                &mut io::BufReader::new(parent.stdout.take().unwrap()),
+                &mut line,
+            )
+            .unwrap();
+            parent.wait().unwrap();
+            let b: i32 = line.trim().parse().unwrap();
+            while crate::containment::parent_and_zombie(b).map(|(p, _)| p) != Some(own) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::fs::write(&file, format!("{} {b}\n", a.id())).unwrap();
+            expire_watchdog(own);
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let pids = dir.path().join("pids");
+        let mut scanner = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "command::tests::setsid_and_reparented_processes_die_with_the_watchdog",
+                "--test-threads=1",
+            ])
+            .env(CHILD, &pids)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        let mut reported = Vec::new();
+        while reported.len() != 2 && start.elapsed() < Duration::from_secs(10) {
+            reported = reported_pids(&pids);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let exited = exited_within(&scanner, Duration::from_secs(5));
+        let since = Instant::now();
+        while !reported.iter().all(|&pid| gone(pid)) && since.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
+        for &pid in &survivors {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        let status = kill_group_then_reap(&mut scanner);
+        assert!(exited, "the watchdog did not terminate the scanner");
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+        assert_eq!(reported.len(), 2, "the fixture never reported its pids");
+        assert!(survivors.is_empty(), "outlived the watchdog: {survivors:?}");
+    }
+
     #[test]
     fn program_paths_cannot_escape_the_trusted_directories() {
         assert!(trusted_program("sh").is_some());
@@ -797,6 +897,7 @@ mod tests {
             let events = std::cell::RefCell::new(Vec::new());
             expire_watchdog_with(
                 group,
+                || events.borrow_mut().push("active".to_string()),
                 |_| {
                     events.borrow_mut().push("sweep".to_string());
                     sweep_with(0)
@@ -805,8 +906,9 @@ mod tests {
                 |m| events.borrow_mut().push(format!("log:{m}")),
             );
             let events = events.into_inner();
-            assert_eq!(events.len(), 1, "group {group}: {events:?}");
-            assert!(events[0].starts_with("log:"), "{events:?}");
+            assert_eq!(events.len(), 2, "group {group}: {events:?}");
+            assert_eq!(events[0], "active");
+            assert!(events[1].starts_with("log:"), "{events:?}");
         }
         EXPIRED.store(false, Ordering::SeqCst);
     }
@@ -820,6 +922,7 @@ mod tests {
             let events = std::cell::RefCell::new(Vec::new());
             expire_watchdog_with(
                 4242,
+                || events.borrow_mut().push("active".to_string()),
                 |root| {
                     assert_eq!(root, 4242);
                     events.borrow_mut().push("sweep".to_string());
@@ -829,11 +932,14 @@ mod tests {
                 |m| events.borrow_mut().push(format!("log:{m}")),
             );
             let events = events.into_inner();
-            assert_eq!(events[0], "sweep", "{events:?}");
-            assert_eq!(events[1], "killpg:4242", "{events:?}");
+            assert_eq!(
+                events[..3],
+                ["active", "sweep", "killpg:4242"],
+                "{events:?}"
+            );
             // Unfinished sweep (failures > 0 here) is reported, but only after.
-            assert_eq!(events.len() > 2, failures > 0, "{events:?}");
-            assert!(events[2..].iter().all(|e| e.starts_with("log:")));
+            assert_eq!(events.len() > 3, failures > 0, "{events:?}");
+            assert!(events[3..].iter().all(|e| e.starts_with("log:")));
         }
         EXPIRED.store(false, Ordering::SeqCst);
     }
