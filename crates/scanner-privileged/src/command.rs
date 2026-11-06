@@ -38,11 +38,31 @@ const DESCENDANT_SWEEP: Duration = Duration::from_secs(2);
 /// the registry's lock being held), then the scanner's own group `own_group`
 /// (its process group leader and pid, from `main`).
 pub fn expire_watchdog(own_group: i32) {
+    expire_watchdog_with(
+        own_group,
+        |root| crate::containment::kill_descendants(root, DESCENDANT_SWEEP),
+        |group| unsafe {
+            libc::killpg(group, libc::SIGKILL);
+        },
+    );
+}
+
+/// [`expire_watchdog`] with the sweep and the group kill injected. Refuses a
+/// group of 0 (the caller's own) or 1 (init's): `killpg` on them, or a sweep
+/// rooted at them, would take down far more than the scanner.
+fn expire_watchdog_with(own_group: i32, sweep: impl FnOnce(i32) -> bool, killpg: impl FnOnce(i32)) {
     kill_active_group();
-    crate::containment::kill_descendants(own_group, DESCENDANT_SWEEP);
-    unsafe {
-        libc::killpg(own_group, libc::SIGKILL);
+    if own_group <= 1 {
+        tracing::error!(
+            own_group,
+            "watchdog refuses to kill an invalid scanner group"
+        );
+        return;
     }
+    if !sweep(own_group) {
+        tracing::warn!("watchdog descendant sweep did not finish; killing own group anyway");
+    }
+    killpg(own_group);
 }
 
 /// Test only: a pre-exec hook that reports the forked child's pid on this fd
@@ -54,6 +74,12 @@ static STALL_FD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::ne
 /// descheduled capture thread would.
 #[cfg(test)]
 static DELAY_REGISTRATION: AtomicBool = AtomicBool::new(false);
+/// Test only: the watchdog "fires" right after the next spawn returns, and the
+/// spawned pid is recorded here.
+#[cfg(test)]
+static EXPIRE_AFTER_SPAWN: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static SPAWNED_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// The invocation watchdog also terminates the active primitive's descendants.
 /// Bounded: it never waits more than [`WATCHDOG_LOCK_WAIT`] for the lock.
@@ -103,6 +129,43 @@ const TRUSTED_DIRS: [&str; 2] = ["/usr/bin", "/usr/sbin"];
 /// A single path component: joining it to a trusted directory cannot leave it.
 fn bare_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains('/')
+}
+
+/// PDEATHSIG is cleared by exec of a setuid/setgid or file-capability binary,
+/// so refuse to spawn one (fail closed). None of the primitives in use
+/// (uname, modinfo, rpm, rpm-ostree, mokutil) is either on Fedora/Bazzite.
+fn refuse_privileged_binary(path: &std::path::Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let denied = |why: &str| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("refusing to run {}: {why}", path.display()),
+        )
+    };
+    if path.metadata()?.mode() & (libc::S_ISUID | libc::S_ISGID) != 0 {
+        return Err(denied("setuid/setgid binary"));
+    }
+    if has_xattr(path, "security.capability")? {
+        return Err(denied("file capabilities set"));
+    }
+    Ok(())
+}
+
+fn has_xattr(path: &std::path::Path, name: &str) -> io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let to_c = |bytes: &[u8]| {
+        std::ffi::CString::new(bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))
+    };
+    let (path, name) = (to_c(path.as_os_str().as_bytes())?, to_c(name.as_bytes())?);
+    if unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) } >= 0 {
+        return Ok(true);
+    }
+    let e = io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::ENODATA) | Some(libc::ENOTSUP) => Ok(false),
+        _ => Err(e),
+    }
 }
 
 pub fn trusted_program(program: &str) -> Option<std::path::PathBuf> {
@@ -189,6 +252,7 @@ fn capture(
     timeout: Duration,
     not_owned: Option<&str>,
 ) -> io::Result<String> {
+    refuse_privileged_binary(std::path::Path::new(command.get_program()))?;
     command
         .env_clear()
         .env("PATH", "/usr/bin:/usr/sbin")
@@ -202,9 +266,8 @@ fn capture(
     // thread ends, and primitives run only on the scanner's main thread, which
     // lives as long as the process (capture is synchronous and Guard reaps
     // before it returns). PDEATHSIG is defence in depth, not the containment:
-    // exec of a setuid/setgid or file-capability binary clears it (check that
-    // rpm-ostree, mokutil and chkrootkit are neither on the host), and forked
-    // descendants never inherit it. Either way the watchdog's descendant sweep
+    // exec of a setuid/setgid or file-capability binary clears it (such a
+    // binary is refused above), and forked descendants never inherit it. Either way the watchdog's descendant sweep
     // (`containment`, the scanner being a subreaper) still kills them, so
     // losing it fails safe.
     let parent = unsafe { libc::getpid() };
@@ -260,6 +323,11 @@ fn capture(
     let child = spawned?;
     // Unreaped, so this pid (and group) stays reserved until Guard clears it.
     state.pid = child.id() as i32;
+    #[cfg(test)]
+    if EXPIRE_AFTER_SPAWN.swap(false, Ordering::SeqCst) {
+        SPAWNED_PID.store(state.pid, Ordering::SeqCst);
+        EXPIRED.store(true, Ordering::SeqCst);
+    }
     drop(state);
     let mut child = Guard(child);
     if EXPIRED.load(Ordering::SeqCst) {
@@ -652,5 +720,110 @@ mod tests {
         );
         assert!(start.elapsed() < Duration::from_secs(2));
         assert_eq!(ACTIVE_GROUP.lock().unwrap().pid, 0);
+    }
+
+    #[test]
+    fn invalid_scanner_groups_never_reach_killpg_or_the_sweep() {
+        let _lock = SERIAL.lock().unwrap();
+        for group in [i32::MIN, -1, 0, 1] {
+            let calls = std::cell::Cell::new(0);
+            expire_watchdog_with(
+                group,
+                |_| {
+                    calls.set(calls.get() + 1);
+                    true
+                },
+                |_| calls.set(calls.get() + 100),
+            );
+            assert_eq!(calls.get(), 0, "group {group}");
+        }
+        let killed = std::cell::Cell::new(0);
+        expire_watchdog_with(4242, |root| root == 4242, |g| killed.set(g));
+        assert_eq!(killed.get(), 4242);
+        // A failed sweep is logged, and the own group is killed regardless.
+        killed.set(0);
+        expire_watchdog_with(4242, |_| false, |g| killed.set(g));
+        assert_eq!(killed.get(), 4242);
+        EXPIRED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn lock_timeout_lets_the_watchdog_move_on_without_killing() {
+        let _lock = SERIAL.lock().unwrap();
+        let mut victim = Command::new("/usr/bin/sleep").arg("30").spawn().unwrap();
+        let held = ACTIVE_GROUP.lock().unwrap();
+        let start = Instant::now();
+        kill_active_group();
+        let waited = start.elapsed();
+        drop(held);
+        assert!(EXPIRED.load(Ordering::SeqCst));
+        EXPIRED.store(false, Ordering::SeqCst);
+        assert!(waited >= WATCHDOG_LOCK_WAIT, "{waited:?}");
+        assert!(waited < Duration::from_secs(2), "{waited:?}");
+        assert!(victim.try_wait().unwrap().is_none());
+        victim.kill().unwrap();
+        victim.wait().unwrap();
+    }
+
+    #[test]
+    fn expiry_during_spawn_kills_the_registered_group() {
+        let _lock = SERIAL.lock().unwrap();
+        EXPIRE_AFTER_SPAWN.store(true, Ordering::SeqCst);
+        let result = fixture("exec sleep 30");
+        EXPIRED.store(false, Ordering::SeqCst);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        let pid = SPAWNED_PID.load(Ordering::SeqCst);
+        assert!(pid > 1);
+        // Guard killed and reaped it: no such process (not even a zombie).
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0);
+        assert_eq!(ACTIVE_GROUP.lock().unwrap().pid, 0);
+    }
+
+    #[test]
+    fn setuid_setgid_and_capability_binaries_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("prog");
+        std::fs::write(&file, "#!/bin/sh\n").unwrap();
+        let mode = |m| std::fs::set_permissions(&file, std::fs::Permissions::from_mode(m)).unwrap();
+        mode(0o755);
+        refuse_privileged_binary(&file).unwrap();
+        for bits in [0o4755, 0o2755] {
+            mode(bits);
+            let _lock = SERIAL.lock().unwrap();
+            let err =
+                capture(&mut Command::new(&file), Duration::from_millis(250), None).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{bits:o}");
+            assert_eq!(
+                refuse_privileged_binary(&file).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+        // The real primitives are not privileged.
+        for name in ["sh", "sleep"] {
+            refuse_privileged_binary(&trusted_program(name).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn xattr_detection_reports_presence() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, "x").unwrap();
+        assert!(!has_xattr(&file, "user.snitchwatch-test").unwrap());
+        let c = std::ffi::CString::new(file.to_str().unwrap()).unwrap();
+        let set = unsafe {
+            libc::setxattr(
+                c.as_ptr(),
+                c"user.snitchwatch-test".as_ptr(),
+                b"1".as_ptr().cast(),
+                1,
+                0,
+            )
+        };
+        if set != 0 {
+            return; // this filesystem has no user xattrs
+        }
+        assert!(has_xattr(&file, "user.snitchwatch-test").unwrap());
     }
 }
