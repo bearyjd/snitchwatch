@@ -76,6 +76,14 @@ const DESCENDANT_SWEEP: Duration = Duration::from_secs(2);
 /// `notify` is a best-effort, non-blocking diagnostic run only once the expiry
 /// has actually begun (not when the scanner is already leaving), before any kill.
 pub fn expire_watchdog(own_group: i32, notify: impl FnOnce()) {
+    // `main` passes its own getpid, always > 1. The refusal in
+    // `expire_watchdog_with` is the only way to end Expired with the scanner
+    // still alive, so production must never reach it. The unit tests of that
+    // refusal pass 1 on purpose, hence the `cfg!(test)` exemption.
+    debug_assert!(
+        own_group > 1 || cfg!(test),
+        "invalid scanner group {own_group}"
+    );
     expire_watchdog_with(
         own_group,
         || {
