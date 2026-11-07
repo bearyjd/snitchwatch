@@ -357,7 +357,7 @@ pub(crate) mod fixture_signal {
         }
     }
 
-    fn open_pidfd(pid: i32) -> io::Result<OwnedFd> {
+    pub(crate) fn open_pidfd(pid: i32) -> io::Result<OwnedFd> {
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
         if fd < 0 {
             Err(io::Error::last_os_error())
@@ -1514,19 +1514,41 @@ mod tests {
     /// Whether a chain of live parents leads from `pid` up to `root`.
     /// A true result requires a live process whose parent is `root`, and
     /// `root` is always an unreaped own child (`own_root()`/`Reaped`, asserted
-    /// to be above 1 and not `me()`), so nothing outside the fixture can become its child;
-    /// unpinned intermediate ancestors can only break a chain (spare), never
-    /// forge one.
+    /// to be above 1 and not `me()`), so nothing outside the fixture can
+    /// become its child. Every other hop is pinned: `pid` is held by the
+    /// caller's pidfd; its parent is read, pinned with a pidfd, and `pid`'s
+    /// parent is read again, which must be unchanged (else the number was
+    /// recycled between the read and the pin); the same for each ancestor,
+    /// all pidfds kept until the walk ends. Any error or surprise spares.
     fn descends_from(pid: i32, root: i32) -> bool {
+        descends_from_with(pid, root, fixture_signal::open_pidfd, read_stat)
+    }
+
+    fn descends_from_with(
+        pid: i32,
+        root: i32,
+        open: impl Fn(i32) -> io::Result<std::os::fd::OwnedFd>,
+        stat: impl Fn(i32) -> io::Result<Option<(i32, bool)>>,
+    ) -> bool {
+        let mut held = Vec::new();
         let mut current = pid;
         for _ in 0..64 {
-            let Some((parent, _)) = parent_and_zombie(current) else {
+            let Ok(Some((parent, _))) = stat(current) else {
                 return false;
             };
             if parent == root {
                 return true;
             }
             if parent <= 1 {
+                return false;
+            }
+            match open(parent) {
+                Ok(fd) => held.push(fd),
+                Err(_) => return false,
+            }
+            // Pinned: `current`'s parent must still be it, else the number
+            // was recycled between the read and the pin.
+            if !matches!(stat(current), Ok(Some((again, _))) if again == parent) {
                 return false;
             }
             current = parent;
@@ -1634,9 +1656,81 @@ mod tests {
         }
     }
 
-    /// Whether `pid` is gone or only a zombie.
+    /// Whether `pid` is gone or only a zombie; an unreadable `/proc` entry
+    /// (after a few tries) is an error, never "dead".
+    fn dead_with(
+        pid: i32,
+        stat: impl Fn(i32) -> io::Result<Option<(i32, bool)>>,
+    ) -> io::Result<bool> {
+        let mut last = None;
+        for _ in 0..5 {
+            match stat(pid) {
+                Ok(seen) => return Ok(seen.is_none_or(|(_, zombie)| zombie)),
+                Err(e) => last = Some(e),
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Err(last.expect("at least one try"))
+    }
+
+    /// [`dead_with`] on the real `/proc`; panics loudly on an unreadable entry
+    /// so a test cannot pass on a failed observation.
     fn dead(pid: i32) -> bool {
-        parent_and_zombie(pid).is_none_or(|(_, zombie)| zombie)
+        dead_with(pid, read_stat)
+            .unwrap_or_else(|e| panic!("cannot tell whether pid {pid} is dead: {e}"))
+    }
+
+    #[test]
+    fn an_unreadable_proc_entry_is_an_error_not_dead() {
+        let emfile = |_| Err(io::Error::from_raw_os_error(libc::EMFILE));
+        assert!(dead_with(4242, emfile).is_err());
+        assert!(dead_with(4242, |_| Ok(None)).unwrap());
+        assert!(dead_with(4242, |_| Ok(Some((1, true)))).unwrap());
+        assert!(!dead_with(4242, |_| Ok(Some((1, false)))).unwrap());
+    }
+
+    /// Pids here are numbers in fake tables only; nothing is signalled.
+    #[test]
+    fn a_parent_recycled_between_the_read_and_the_pin_forges_no_ancestry() {
+        use std::cell::Cell;
+        let root = 7;
+        let reads_of_target = Cell::new(0);
+        let open = |_: i32| std::fs::File::open("/dev/null").map(Into::into);
+        // Target 100 had parent 50 (first read); 50 then exited and its number
+        // was reused by a child of the root, so by the re-read 100 is
+        // orphaned (parent 1) while 50 now reaches the root.
+        let stat = |p: i32| -> io::Result<Option<(i32, bool)>> {
+            Ok(match p {
+                100 => {
+                    reads_of_target.set(reads_of_target.get() + 1);
+                    Some((if reads_of_target.get() == 1 { 50 } else { 1 }, false))
+                }
+                50 => Some((root, false)),
+                _ => None,
+            })
+        };
+        assert!(!descends_from_with(100, root, open, stat));
+    }
+
+    #[test]
+    fn a_pinned_stable_chain_reaches_the_root_and_a_failed_pin_spares() {
+        let root = 7;
+        let table = |p: i32| -> io::Result<Option<(i32, bool)>> {
+            Ok(match p {
+                100 => Some((50, false)),
+                50 => Some((root, false)),
+                _ => None,
+            })
+        };
+        let opened = std::cell::RefCell::new(Vec::new());
+        let open = |p: i32| {
+            opened.borrow_mut().push(p);
+            std::fs::File::open("/dev/null").map(Into::into)
+        };
+        assert!(descends_from_with(100, root, open, table));
+        assert_eq!(*opened.borrow(), [50]);
+        let refuse = |_| Err(io::Error::from_raw_os_error(libc::EMFILE));
+        assert!(!descends_from_with(100, root, refuse, table));
     }
 
     /// Whether `child` is still running after a signal sent to it would have
