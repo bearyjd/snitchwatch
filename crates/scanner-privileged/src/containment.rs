@@ -158,6 +158,16 @@ fn kill_if_descendant_with(
     tree: &HashSet<i32>,
     open: impl FnOnce(i32) -> io::Result<i32>,
 ) -> io::Result<()> {
+    signal_if_descendant_with(libc::SIGKILL, pid, tree, open)
+}
+
+/// [`kill_if_descendant_with`] for any signal `sig`.
+fn signal_if_descendant_with(
+    sig: i32,
+    pid: i32,
+    tree: &HashSet<i32>,
+    open: impl FnOnce(i32) -> io::Result<i32>,
+) -> io::Result<()> {
     // A vanished process is simply not ours to kill; an unreadable one is an error.
     let in_tree = || -> io::Result<bool> {
         Ok(read_stat(pid)?.is_some_and(|(parent, _)| tree.contains(&parent)))
@@ -169,7 +179,7 @@ fn kill_if_descendant_with(
             // Fail safe when no pidfd can be had (kernel before 5.3, EMFILE,
             // a seccomp filter...): kill by pid after the same parent check,
             // accepting the reuse window pidfds close.
-            if in_tree()? && unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+            if in_tree()? && unsafe { libc::kill(pid, sig) } != 0 {
                 return ignore_gone(io::Error::last_os_error());
             }
             return Ok(());
@@ -181,7 +191,7 @@ fn kill_if_descendant_with(
                 libc::syscall(
                     libc::SYS_pidfd_send_signal,
                     fd,
-                    libc::SIGKILL,
+                    sig,
                     std::ptr::null::<libc::siginfo_t>(),
                     0,
                 )
@@ -199,6 +209,12 @@ fn kill_if_descendant_with(
         libc::close(fd);
     }
     result
+}
+
+/// SIGSTOP `pid` under the same pidfd and parent checks as the kill: a
+/// stopped process cannot fork, and SIGKILL still reaches it.
+fn stop_if_descendant(pid: i32, tree: &HashSet<i32>) -> io::Result<()> {
+    signal_if_descendant_with(libc::SIGSTOP, pid, tree, open_pidfd)
 }
 
 /// `ESRCH` (already dead) is success; any other error is surfaced.
@@ -226,12 +242,16 @@ pub struct Sweep {
 /// `/proc` snapshot can miss an orphan (a child listed before its parent, the
 /// parent then exiting). A pass that failed or was cut short by the deadline
 /// is no evidence of "none". One deadline covers scans and signalling alike.
+/// Each pass SIGSTOPs what it found, re-scans once for children forked in the
+/// meantime (stopping them too), then SIGKILLs all of it; a failed stop is
+/// counted but never skips the kill.
 pub fn kill_descendants(root: i32, bound: Duration) -> Sweep {
     let deadline = Instant::now() + bound;
     kill_descendants_with(
         root,
         deadline,
         || live_descendants(root, deadline),
+        stop_if_descendant,
         kill_if_descendant,
     )
 }
@@ -241,6 +261,7 @@ fn kill_descendants_with(
     root: i32,
     deadline: Instant,
     mut scan: impl FnMut() -> io::Result<Option<Vec<i32>>>,
+    mut stop: impl FnMut(i32, &HashSet<i32>) -> io::Result<()>,
     mut kill: impl FnMut(i32, &HashSet<i32>) -> io::Result<()>,
 ) -> Sweep {
     let mut sweep = Sweep {
@@ -265,23 +286,61 @@ fn kill_descendants_with(
                     return sweep;
                 }
             }
-            Ok(Some(live)) => {
+            Ok(Some(mut live)) => {
                 empty_passes = 0;
-                let tree: HashSet<i32> = live.iter().copied().chain([root]).collect();
-                for &pid in &live {
-                    if Instant::now() >= deadline {
-                        return sweep;
+                let mut tree: HashSet<i32> = live.iter().copied().chain([root]).collect();
+                // Freeze what the scan found: a stopped process cannot fork.
+                if !signal_all(&live, &tree, deadline, &mut stop, &mut sweep) {
+                    return sweep;
+                }
+                // Children forked between the scan and the stop: stop them
+                // too. A failed or cut-short re-scan only loses that catch;
+                // the next pass still looks.
+                match scan() {
+                    Ok(Some(again)) => {
+                        let late: Vec<i32> =
+                            again.into_iter().filter(|p| !tree.contains(p)).collect();
+                        tree.extend(late.iter().copied());
+                        if !signal_all(&late, &tree, deadline, &mut stop, &mut sweep) {
+                            return sweep;
+                        }
+                        live.extend(late);
                     }
-                    if let Err(e) = kill(pid, &tree) {
+                    Ok(None) => {}
+                    Err(e) => {
                         sweep.failures += 1;
                         sweep.first_error.get_or_insert(e);
                     }
+                }
+                if !signal_all(&live, &tree, deadline, &mut kill, &mut sweep) {
+                    return sweep;
                 }
             }
         }
         std::thread::sleep(Duration::from_millis(5));
     }
     sweep
+}
+
+/// Run `signal` on each of `pids`, counting failures into `sweep` (a failure
+/// never stops the rest). `false`: the deadline passed first.
+fn signal_all(
+    pids: &[i32],
+    tree: &HashSet<i32>,
+    deadline: Instant,
+    signal: &mut impl FnMut(i32, &HashSet<i32>) -> io::Result<()>,
+    sweep: &mut Sweep,
+) -> bool {
+    for &pid in pids {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        if let Err(e) = signal(pid, tree) {
+            sweep.failures += 1;
+            sweep.first_error.get_or_insert(e);
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -505,6 +564,7 @@ mod tests {
                 scans += 1;
                 Ok(Some(snapshots.next().unwrap_or_default()))
             },
+            |_, _| Ok(()),
             |pid, _| {
                 killed.push(pid);
                 Ok(())
@@ -512,7 +572,8 @@ mod tests {
         );
         assert!(sweep.complete);
         assert_eq!(killed, [7]);
-        assert_eq!(scans, 4);
+        // Four passes, plus the re-scan after the stop on the non-empty one.
+        assert_eq!(scans, 5);
     }
 
     /// A failed or truncated scan is no evidence of "none": it neither counts
@@ -537,6 +598,7 @@ mod tests {
                 scans.next().unwrap_or(Ok(None))
             },
             |_, _| Ok(()),
+            |_, _| Ok(()),
         );
         assert!(sweep.complete);
         assert_eq!(count, 6, "completed on a pair that straddled a bad scan");
@@ -551,12 +613,14 @@ mod tests {
             Instant::now() + Duration::from_millis(60),
             || Ok(None),
             |_, _| Ok(()),
+            |_, _| Ok(()),
         );
         assert!(!sweep.complete);
         let sweep = kill_descendants_with(
             1,
             Instant::now() + Duration::from_millis(60),
             || Err(io::Error::from_raw_os_error(libc::EIO)),
+            |_, _| Ok(()),
             |_, _| Ok(()),
         );
         assert!(!sweep.complete && sweep.failures > 0);
@@ -575,6 +639,7 @@ mod tests {
             1,
             Instant::now() + Duration::from_millis(50),
             || Ok(Some(vec![2, 3, 4, 5, 6, 7, 8, 9])),
+            |_, _| Ok(()),
             |_, _| {
                 kills += 1;
                 std::thread::sleep(Duration::from_millis(40));
@@ -747,5 +812,193 @@ mod tests {
             Some(0),
             "3: the scan came back Ok; 5: complete; 6: no failure counted ({status:?})"
         );
+    }
+
+    /// The one-letter state of `pid` from `/proc` (bytes, no UTF-8 assumed).
+    fn state_of(pid: i32) -> Option<u8> {
+        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+        let tail = &stat[stat.iter().rposition(|&b| b == b')')? + 1..];
+        tail.trim_ascii_start().first().copied()
+    }
+
+    fn wait_state(pid: i32, want: u8) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            if state_of(pid) == Some(want) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    #[test]
+    fn a_pass_stops_everything_then_rescans_then_kills() {
+        use std::cell::RefCell;
+        let events = RefCell::new(Vec::new());
+        // 11 forked between the first scan and the stop of 10.
+        let mut scans = vec![vec![10], vec![10, 11], vec![], vec![]].into_iter();
+        let sweep = kill_descendants_with(
+            1,
+            Instant::now() + Duration::from_secs(5),
+            || Ok(Some(scans.next().unwrap_or_default())),
+            |pid, _| {
+                events.borrow_mut().push(format!("stop {pid}"));
+                Ok(())
+            },
+            |pid, _| {
+                events.borrow_mut().push(format!("kill {pid}"));
+                Ok(())
+            },
+        );
+        assert!(sweep.complete);
+        assert_eq!(
+            *events.borrow(),
+            ["stop 10", "stop 11", "kill 10", "kill 11"]
+        );
+    }
+
+    #[test]
+    fn a_failed_stop_still_kills_and_is_counted() {
+        let mut killed = Vec::new();
+        let mut scans = vec![vec![10], vec![10], vec![], vec![]].into_iter();
+        let sweep = kill_descendants_with(
+            1,
+            Instant::now() + Duration::from_secs(5),
+            || Ok(Some(scans.next().unwrap_or_default())),
+            |_, _| Err(io::Error::from_raw_os_error(libc::EPERM)),
+            |pid, _| {
+                killed.push(pid);
+                Ok(())
+            },
+        );
+        assert_eq!(killed, [10]);
+        assert_eq!(sweep.failures, 1);
+        assert_eq!(sweep.first_error.unwrap().raw_os_error(), Some(libc::EPERM));
+    }
+
+    #[test]
+    fn the_deadline_bounds_stops_and_kills_together() {
+        let signals = std::cell::Cell::new(0);
+        let slow = |_: i32, _: &HashSet<i32>| {
+            signals.set(signals.get() + 1);
+            std::thread::sleep(Duration::from_millis(40));
+            Ok(())
+        };
+        let sweep = kill_descendants_with(
+            1,
+            Instant::now() + Duration::from_millis(50),
+            || Ok(Some(vec![2, 3, 4, 5, 6, 7, 8, 9])),
+            slow,
+            slow,
+        );
+        assert!(!sweep.complete);
+        assert!(
+            signals.get() <= 3,
+            "signalled past the bound: {}",
+            signals.get()
+        );
+    }
+
+    #[test]
+    fn the_stop_path_never_signals_a_pid_outside_the_tree() {
+        let outsider = sleeper();
+        let pid = outsider.0.id() as i32;
+        stop_if_descendant(pid, &HashSet::from([1])).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_ne!(state_of(pid), Some(b'T'), "stopped outside the tree");
+        // Control: with the parent in the tree the same call stops it.
+        stop_if_descendant(pid, &HashSet::from([me()])).unwrap();
+        assert!(wait_state(pid, b'T'), "the in-tree stop never happened");
+    }
+
+    #[test]
+    fn a_stopped_process_is_still_killed() {
+        let mut child = sleeper();
+        let pid = child.0.id() as i32;
+        unsafe {
+            libc::kill(pid, libc::SIGSTOP);
+        }
+        assert!(wait_state(pid, b'T'));
+        let tree = HashSet::from([me()]);
+        stop_if_descendant(pid, &tree).unwrap();
+        kill_if_descendant(pid, &tree).unwrap();
+        assert!(wait_dead(&mut child));
+    }
+
+    /// Kills (and does not reap: they are init's) every live process whose
+    /// argv is `sleep <marker>`, whatever the test did.
+    struct MarkedSleeps(&'static str);
+    impl MarkedSleeps {
+        fn alive(&self) -> Vec<i32> {
+            let want = format!("sleep\0{}\0", self.0).into_bytes();
+            let mut found = Vec::new();
+            for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|n| n.parse::<i32>().ok())
+                else {
+                    continue;
+                };
+                let hit = std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want);
+                if hit && state_of(pid).is_some_and(|s| s != b'Z') {
+                    found.push(pid);
+                }
+            }
+            found
+        }
+    }
+    impl Drop for MarkedSleeps {
+        fn drop(&mut self) {
+            for pid in self.alive() {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    /// A shell in its own session forks `sleep`s as fast as it can (bounded
+    /// to 300 so a broken sweep cannot exhaust the host); `root` is a
+    /// subreaper like the scanner. End-to-end regression guard: it also
+    /// passes without the stop phase (orphans are re-found on the next
+    /// pass), so the ordering tests above are what pin the phase itself.
+    #[test]
+    fn a_session_forking_flat_out_is_fully_dead_after_the_sweep() {
+        let marker = MarkedSleeps("29.7316");
+        let mut command = Command::new("/usr/bin/sh");
+        // Like the scanner, `root` adopts orphans: they stay in its subtree.
+        unsafe {
+            command.pre_exec(become_subreaper);
+        }
+        let mut root = Reaped(
+            command
+                .args([
+                    "-c",
+                    "setsid sh -c 'n=0; while [ $n -lt 300 ]; do sleep 29.7316 & n=$((n+1)); done; wait' & read _",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let start = Instant::now();
+        while marker.alive().len() < 20 && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            marker.alive().len() >= 20,
+            "the fixture never started forking"
+        );
+        let sweep = kill_descendants(root.0.id() as i32, Duration::from_secs(10));
+        let start = Instant::now();
+        while !marker.alive().is_empty() && start.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let left = marker.alive();
+        assert!(left.is_empty(), "{} forked children survived", left.len());
+        assert!(sweep.complete);
+        assert!(alive(&mut root));
     }
 }
