@@ -47,3 +47,63 @@ fn tracer_is_registered_and_never_logs_without_being_asked() {
         "tracer must not poll"
     );
 }
+
+/// `textTraceTitle` makes the tracer log the page's own `title`: it is only
+/// allowed on a page whose title is a string literal in that page's QML.
+#[test]
+fn only_literal_title_pages_declare_text_trace_title() {
+    let pages: [(&str, &str); 15] = [
+        ("AboutPage", include_str!("../qml/AboutPage.qml")),
+        ("OnboardingPage", include_str!("../qml/OnboardingPage.qml")),
+        ("BlocklistsPage", include_str!("../qml/BlocklistsPage.qml")),
+        (
+            "CuratedGroupsPage",
+            include_str!("../qml/CuratedGroupsPage.qml"),
+        ),
+        (
+            "DaemonHealthPage",
+            include_str!("../qml/DaemonHealthPage.qml"),
+        ),
+        ("RulesPage", include_str!("../qml/RulesPage.qml")),
+        ("ScannerPage", include_str!("../qml/ScannerPage.qml")),
+        (
+            "LearningReviewPage",
+            include_str!("../qml/LearningReviewPage.qml"),
+        ),
+        ("ProfilesPage", include_str!("../qml/ProfilesPage.qml")),
+        (
+            "DiagnosticsPage",
+            include_str!("../qml/DiagnosticsPage.qml"),
+        ),
+        (
+            "RecommendedRulesPage",
+            include_str!("../qml/RecommendedRulesPage.qml"),
+        ),
+        (
+            "ConnectionsPage",
+            include_str!("../qml/ConnectionsPage.qml"),
+        ),
+        ("GeoPage", include_str!("../qml/GeoPage.qml")),
+        ("TrafficPage", include_str!("../qml/TrafficPage.qml")),
+        ("SilentModePage", include_str!("../qml/SilentModePage.qml")),
+    ];
+    for (name, src) in pages {
+        let title = code_lines(src)
+            .lines()
+            .find(|l| l.trim_start().starts_with("title:"))
+            .unwrap_or_else(|| panic!("{name}: no title line"))
+            .trim()
+            .to_string();
+        assert!(
+            title.starts_with("title: \""),
+            "{name}: not literal: {title}"
+        );
+        assert!(src.contains("property bool textTraceTitle: true"), "{name}");
+    }
+    // Its title is the inspected process name: dynamic, so never marked.
+    let detail = include_str!("../qml/ConnectionDetailPage.qml");
+    assert!(
+        !detail.contains("textTraceTitle"),
+        "ConnectionDetailPage must stay unmarked"
+    );
+}

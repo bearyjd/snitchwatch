@@ -127,10 +127,11 @@ millisecond timestamp and the item's path. Only items under a
 prompt-slot and learning banners' fixed message (not the holder line, which
 holds program and host), the Daemon Health message, the "Waiting for daemon
 statistics" placeholder, the rule button state label ("Waiting for the
-firewall") and the window title (the default title Heading of the current page's own
-header, authorized by the page using Kirigami's own default title delegate and
-having a fixed `textTraceTitle`, never by text; delegates are never authorized
-as a subtree; Connections, Rules,
+firewall") and the window title (the current page's own `title` property, traced only
+while that page declares a fixed, literal `textTraceTitle`; no header item or
+delegate is read, and the earlier Component-url identity check, which QML code
+could spoof, is gone;
+Connections, Rules,
 Profiles and Blocklists mark just their title heading; the connection detail
 page, whose title is a process name, is not traced). Editors, tables, the Rule
 Simulator, inputs, process names and hosts are never read. Marked text is
