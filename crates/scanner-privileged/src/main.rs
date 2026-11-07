@@ -436,6 +436,8 @@ mod argument_tests {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn().unwrap();
+            // The child's stdout/stderr pipes are not drained while polling; that
+            // is safe only because the watchdog's group kill is unconditional.
             // Polled without reaping: on a timeout the child is still ours, so
             // the group kill cannot name a recycled pid.
             if !exited_without_reaping(&child, Duration::from_secs(5)) {
