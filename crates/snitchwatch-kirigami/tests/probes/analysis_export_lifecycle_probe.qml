@@ -27,6 +27,19 @@ Window {
         }
         return null;
     }
+    // The production window's SettingsController (a non-visual child) has
+    // applied the first preferences push: the last step of its startup thread.
+    function preferencesLoaded() {
+        const lists = [productionWindow.data, productionWindow.resources,
+                       productionWindow.contentItem && productionWindow.contentItem.data];
+        for (const children of lists) {
+            if (!children) continue;
+            for (let i = 0; i < children.length; ++i) {
+                if (children[i] && children[i].preferencesLoaded === true) return "ok";
+            }
+        }
+        return "waiting";
+    }
     function check(condition, message) { if (!condition) throw new Error(message); }
     function openPreview() {
         sheet.open();

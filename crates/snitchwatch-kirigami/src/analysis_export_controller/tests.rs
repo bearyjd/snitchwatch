@@ -40,6 +40,19 @@ impl Harness {
     fn pump_until_idle(&mut self) {
         self.pump_until(|h| !h.with(|c| *c.busy()));
     }
+    /// Wait until the production window's startup thread has applied its first
+    /// preferences push: it ran every step that could touch the recorder.
+    fn wait_preferences_loaded(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while native::ffi::probe(self.engine.pin_mut(), &QString::from("preferencesLoaded"))
+            .to_string()
+            != "ok"
+        {
+            assert!(Instant::now() < deadline, "preferences were never applied");
+            native::ffi::process_events();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
     fn request(&mut self) -> String {
         self.with(|mut c| {
             c.as_mut().request_export(&QString::from("{}"));
@@ -68,6 +81,11 @@ fn reply(link: &crate::bridge_runtime::test_link::TestLink, session: u64, id: St
 
 #[test]
 fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
+    // Loading the production main.qml writes process-wide silent-mode and
+    // learning state; hold the lock every other writer of it holds.
+    let _lock = crate::learned::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     common::init_headless_qt_env();
     let _app = QGuiApplication::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -85,6 +103,14 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
             &QUrl::from("qrc:/analysis_export_lifecycle_probe.qml"),
         );
         native::ffi::process_events();
+        // The startup thread used to attach the real learned file to the
+        // process-wide recorder, which every later learning window in this
+        // binary then inherited (#259): no lib test may leave it attached.
+        harness.wait_preferences_loaded();
+        assert!(
+            !crate::learned::has_backend(),
+            "a lib test attached a file to the process-wide learned recorder"
+        );
         harness.with(|mut c| {
             c.as_mut().rust_mut().test_handles = Some(link.handles.clone());
             c.as_mut().rust_mut().test_directory = Some(directory.path().join("exports"));
@@ -298,15 +324,6 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
         drop(runtime);
         native::ffi::process_events();
     });
-    // The production main.qml ran `refreshPreferences` on a worker thread; give
-    // it time to reach the point where it used to attach the real learned file
-    // to the process-wide recorder, which every later learning window in this
-    // binary then inherited (#259).
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(
-        !crate::learned::has_backend(),
-        "a lib test attached a file to the process-wide learned recorder"
-    );
     assert!(
         !captured.contains("Error:") && !captured.contains("failed to load"),
         "{captured}"
@@ -315,4 +332,32 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
         !captured.contains("curl-é") && !captured.contains(directory.path().to_str().unwrap()),
         "diagnostic canary leaked"
     );
+}
+
+/// The production main.qml writes process-wide silent-mode and learning state
+/// (AlertHost's `setSilentState`, the first preferences push). A scenario that
+/// loads it must wait for `learned::TEST_LOCK`, or it flips the mode or the
+/// window under a silent-answer test that is mid-window (#259).
+#[test]
+fn loading_main_qml_waits_for_the_process_wide_state_lock() {
+    use crate::settings::SilentMode;
+    let lock = crate::learned::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    crate::silent_mode::set_state(SilentMode::Allow);
+    crate::learned::set_active(false);
+    crate::learned::set_active(true);
+    let scenario = std::thread::spawn(stale_delivery_and_off_qt_save_keep_independent_lifetimes);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !scenario.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let choice = crate::silent_mode::current_choice();
+    let active = crate::learned::is_active();
+    crate::learned::set_active(false);
+    crate::silent_mode::set_state(SilentMode::Off);
+    drop(lock);
+    scenario.join().expect("the load scenario failed");
+    assert_eq!(choice, Some("allow"), "main.qml changed the silent mode");
+    assert!(active, "main.qml ended the learning window");
 }
