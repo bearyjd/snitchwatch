@@ -24,9 +24,9 @@ a B always also looks like a D.
 | Result | How to recognise it | Meaning / next |
 |---|---|---|
 | A | `opensnitch.o` and `opensnitch-procs.o` load, no attach errors, `Process monitor method ebpf`, attribution matches (section 4); the dns module is noted separately, it does not decide A/B | prebuilt modules work here; ship the `.o` files in the tower image and flip the tower checks together with our config (section 6) |
-| B | `module specs error` / `module collection error` (the latter carries the verifier text) / `opening kprobe` / `opening kretprobe` / `Error loading opensnitch.o (collection)` (`procmon/ebpf/ebpf.go:141`) / `eBPF module opensnitch.o malformed, bpfmap[..] nil` (about `ebpf.go:204`); load errors then fall back to `/proc`, but attach errors (`opening kprobe/kretprobe`) are only warnings and the daemon stays on ebpf. The same rule applies to `opensnitch-procs.o`: a specs/collection error for it is B (main module fine, procs rejected by the kernel) | modules do not fit this kernel; try the in-image build (section 5) |
+| B | `module specs error` / `module collection error` (the latter carries the verifier text) / `opening kprobe` / `opening kretprobe` / `[eBPF events] <tracepoint>: ...` (exec/exit tracepoint attach, `events.go:113-146`; the daemon still prints `Process monitor method ebpf`, so a run with these is NOT an A) / `Error loading opensnitch.o (collection)` (`procmon/ebpf/ebpf.go:141`) / `eBPF module opensnitch.o malformed, bpfmap[..] nil` (about `ebpf.go:204`); load errors then fall back to `/proc`, but attach errors (`opening kprobe/kretprobe`) are only warnings and the daemon stays on ebpf. The same rule applies to `opensnitch-procs.o`: a specs/collection error for it, or an `Assign` error (`opensnitch-procs.o not available: <assign err>`, `events.go:102-103`, a map mismatch like the main module's), is B (main module fine, procs rejected or mismatched) | modules do not fit this kernel; try the in-image build (section 5) |
 | C | loads and attaches, but attribution is wrong | silent wrong-process attribution, worse than failing: do NOT ship; keep `proc`; this is the case that could justify a CO-RE port upstream |
-| D | `might not be compatible` that names `opensnitch.o` or `opensnitch-procs.o` with **no** preceding `module specs error` / `module collection error` line (a missing `.o` is skipped at debug level and ends in that same message, `core/ebpf.go:41-43,59-62`), or a `[eBPF] unable to remove memlock` warning, or `opensnitch-procs.o not available` caused by a tracefs/perf-map problem and not by a specs/collection error. Precedence: a memlock warning plus any load failure is D first; a memlock warning followed by a clean load is recorded, not D | environment problem (missing files, privileges, rlimit), not a kernel verdict: check the `ls` of all three directories, fix the install and rerun |
+| D | `might not be compatible` that names `opensnitch.o` or `opensnitch-procs.o` with **no** preceding `module specs error` / `module collection error` line (a missing `.o` is skipped at debug level and ends in that same message, `core/ebpf.go:41-43,59-62`), or a `[eBPF] unable to remove memlock` warning, or `opensnitch-procs.o not available` caused by a missing file, a tracefs mount failure or a perf-map failure (`initPerfMap`, `events.go:108`; **UNVERIFIED** that a perf-map failure is never a kernel matter) and not by a specs/collection/`Assign` error. Precedence: a memlock warning plus any load failure is D first; a memlock warning followed by a clean load is recorded, not D | environment problem (missing files, privileges, rlimit), not a kernel verdict: check the `ls` of all three directories, fix the install and rerun |
 
 ## 1. Safety rules (read before running anything)
 
@@ -113,13 +113,18 @@ a B always also looks like a D.
      compatible`, the string has a version in the middle), then `Process monitor method
      /proc` (`init.go:132`);
    - **loaded but did not attach (B):** `opening kprobe: ...` / `opening kretprobe: ...`
-     (`procmon/ebpf/ebpf.go:147-187`); count these as failures even if `module loaded` printed;
+     (`procmon/ebpf/ebpf.go:147-187`) and, for the procs module, `[eBPF events] sys_enter_execve:`
+     (also `sys_exit_execve`, `sys_enter_execveat`, `sys_exit_execveat`, `sched_process_exit`) and
+     `[eBPF events] Some tracepoints not loaded` (`events.go:113-146`). These are warnings, the
+     daemon stays on ebpf; count them as failures even if `module loaded` printed, because exec
+     tracking (section 4 step 3) depends on those tracepoints;
    - **`[eBPF] unable to remove memlock`** (`procmon/ebpf/ebpf.go:126-128`, runs before any
-     load): an environment problem (privileges / rlimit), outcome D, not a kernel verdict;
+     load): an environment problem (privileges / rlimit), outcome D when any load failure follows it;
+     a memlock warning followed by a clean load is recorded in the report, not D;
    - **`opensnitch-procs.o` problem:** `Process monitor method ebpf` *and*
      `opensnitch-procs.o not available: ...` (`init.go:105-106`): still on ebpf with the proc
-     monitors alongside, so read both lines. Classify by the error before it (specs/collection
-     error: B; none: D, covering a missing file, a tracefs mount failure or a perf map failure);
+     monitors alongside, so read both lines. Classify by the error text: specs/collection or `Assign`
+     error: B; a missing file, a tracefs mount failure or a perf-map failure: D;
    - **dns module:** `opensnitch-dns.o` failing only warns (`EBPF-DNS: Unable to attach
      ebpf listener`); note it, it does not decide A/B.
    The verifier output is part of the `module collection error` text (cilium/ebpf returns it
@@ -156,9 +161,9 @@ Non-CO-RE modules built against other headers can load yet read wrong offsets.
    Record per case: expected path, `proc` result, `ebpf` result. Only a mismatch that appears
    under `ebpf` and not under `proc` is outcome C; a mismatch in both is daemon-wide behaviour
    to report separately. Also record connections attributed to an empty/unknown process under
-   `ebpf` that `proc` mode resolves. An unattributed connection logs as `srcport:srcip (uid:N)
-   ->(proto)-> host:port` with no path (`conman/connection.go:315`); a nil connection logs no
-   attribution at all (`main.go:411`).
+   `ebpf` that `proc` mode resolves. Unattributed shapes (`conman/connection.go:312-315`): process missing, `srcport:srcip (uid:N)
+   ->(proto)-> host:port`; entry missing, `srcport:srcip ->(proto)-> host:port` (no uid); a nil
+   connection prints `Applying DefaultAction (...) on <nil>` (`main.go:431-432`), grep for that.
 
 ## 5. Procedure C: in-image build (only if section 3 failed as B)
 
@@ -176,7 +181,9 @@ The upstream build is not CO-RE and needs kernel sources (`ebpf_prog/README`):
    scratch copy (the Makefile's `KERNEL_HEADERS` default is a Debian path, `ebpf_prog/Makefile:8`;
    the README passes both, line 18) (clang -> LLVM IR ->
    `llc -march=bpf`; `llvm-strip -g` is a separate step, README line 20).
-4. Install the three `.o` under `/usr/local/lib/opensnitchd/ebpf/` and repeat sections 3
+4. Caveat: a `bpfmap nil` / `(collection)` / `Assign` mismatch on the tower's patched daemon is not
+   necessarily a kernel problem, and rebuilding v1.8.0's `ebpf_prog` may not fix it; report it as is.
+5. Install the three `.o` under `/usr/local/lib/opensnitchd/ebpf/` and repeat sections 3
    (steps 4-6) and 4.
 
 ## 6. If it passes: what flips together (do not do it from this runbook)
@@ -204,8 +211,9 @@ stale .o in /usr/local/lib, /usr/lib, /etc/opensnitchd: <none / paths>
 opensnitchd -version: <..>   patch set: <none/..>
 config: ProcMonitorMethod=<..> LogLevel=<..> DefaultAction=<..> ModulesPath=<unset/..>
 kernel opts: <BPF.. FTRACE_SYSCALLS y/n>   debugfs/tracefs: y/n   BTF present: y/n
-log: "module loaded" lines <n>/3   "Process monitor method": ebpf | /proc
-attach errors (opening kprobe/kretprobe): <none / verbatim>   memlock warning: y/n
+log: "module loaded" main y/n, procs y/n (decide A/B)   dns y/n (noted only)   "Process monitor method": ebpf | /proc
+"opensnitch-procs.o not available" line: <none / verbatim>   "EBPF-DNS" warning: <none / verbatim>
+attach errors (opening kprobe/kretprobe, [eBPF events] tracepoints): <none / verbatim>   memlock warning: y/n
 load errors (specs/collection error: file path + first/last lines only): <...>   dmesg (<=10 lines): <...>
 attribution: <table of cases, section 4>
 outcome: A | B | C | D        kernel-devel for this kernel available: y/n/not tried
