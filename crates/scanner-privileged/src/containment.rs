@@ -284,6 +284,70 @@ fn kill_descendants_with(
     sweep
 }
 
+/// Signalling for test fixtures: every kill refuses a pid or group <= 1
+/// (`kill(-1)` would signal everything the user may signal, `kill(0)` the
+/// caller's own group, 1 is init) so a failed fork's -1 can never reach one.
+#[cfg(test)]
+pub(crate) mod fixture_signal {
+    use std::io;
+
+    pub(crate) fn target(pid: i32) -> Option<i32> {
+        (pid > 1).then_some(pid)
+    }
+
+    /// Calls `kill` only for a safe `pid`; whether it did.
+    pub(crate) fn kill_with(pid: i32, kill: impl FnOnce(i32)) -> bool {
+        target(pid).map(kill).is_some()
+    }
+
+    pub(crate) fn kill(pid: i32) -> bool {
+        kill_with(pid, |p| unsafe {
+            libc::kill(p, libc::SIGKILL);
+        })
+    }
+
+    /// SIGKILL the process group `group` (not a negative pid by hand).
+    pub(crate) fn killpg(group: i32) -> bool {
+        kill_with(group, |g| unsafe {
+            libc::killpg(g, libc::SIGKILL);
+        })
+    }
+
+    /// A raw `fork()` result as a pid, or the OS error.
+    pub(crate) fn fork_result(result: i32) -> io::Result<i32> {
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(result)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn unsafe_targets_are_refused_and_never_signalled() {
+            for bad in [-1, 0, 1, i32::MIN] {
+                let mut called = false;
+                assert!(!kill_with(bad, |_| called = true), "{bad}");
+                assert!(!called, "signalled {bad}");
+                assert!(!kill(bad) && !killpg(bad));
+            }
+            let mut got = 0;
+            assert!(kill_with(2, |p| got = p));
+            assert_eq!(got, 2);
+        }
+
+        #[test]
+        fn a_failed_fork_is_an_error_not_a_pid() {
+            assert!(fork_result(-1).is_err());
+            assert_eq!(fork_result(0).unwrap(), 0);
+            assert_eq!(fork_result(1234).unwrap(), 1234);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,10 +481,11 @@ mod tests {
     }
     impl Drop for ForkedTree {
         fn drop(&mut self) {
-            unsafe {
-                libc::kill(self.child, libc::SIGKILL);
-                libc::kill(self.root, libc::SIGKILL);
-                libc::waitpid(self.root, std::ptr::null_mut(), 0);
+            fixture_signal::kill(self.child);
+            if fixture_signal::kill(self.root) {
+                unsafe {
+                    libc::waitpid(self.root, std::ptr::null_mut(), 0);
+                }
             }
         }
     }
@@ -431,16 +496,29 @@ mod tests {
     /// async-signal-safe calls run in the children (forked from a threaded
     /// test), `body` included.
     fn fork_tree(body: fn()) -> ForkedTree {
+        fork_tree_with(body, || unsafe { libc::fork() }).expect("fork_tree")
+    }
+
+    /// [`fork_tree`] with `fork` injected. A failed fork (-1) is an error,
+    /// never a pid: neither one is ever stored or signalled.
+    fn fork_tree_with(body: fn(), fork: impl Fn() -> i32) -> io::Result<ForkedTree> {
         let close_inherited = || unsafe {
             libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
         };
         let mut pipe = [0; 2];
         unsafe {
             assert_eq!(libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC), 0);
-            let root = libc::fork();
-            assert!(root >= 0);
+            let root = match fixture_signal::fork_result(fork()) {
+                Ok(root) => root,
+                Err(e) => {
+                    libc::close(pipe[0]);
+                    libc::close(pipe[1]);
+                    return Err(e);
+                }
+            };
             if root == 0 {
-                let child = libc::fork();
+                // A failed fork is written as -1 and rejected by the reader.
+                let child = fork();
                 if child == 0 {
                     close_inherited();
                     body();
@@ -456,10 +534,45 @@ mod tests {
             }
             libc::close(pipe[1]);
             let mut child: i32 = 0;
-            assert_eq!(libc::read(pipe[0], (&mut child as *mut i32).cast(), 4), 4);
+            let read = libc::read(pipe[0], (&mut child as *mut i32).cast(), 4);
             libc::close(pipe[0]);
-            ForkedTree { root, child }
+            let child = if read == 4 {
+                fixture_signal::fork_result(child)
+            } else {
+                Err(io::Error::other("the forked root never reported its child"))
+            };
+            match child {
+                Ok(child) => Ok(ForkedTree { root, child }),
+                Err(e) => {
+                    // Reap the root through the same guarded path.
+                    drop(ForkedTree { root, child: 0 });
+                    Err(e)
+                }
+            }
         }
+    }
+
+    fn nothing() {}
+
+    #[test]
+    fn a_failed_first_fork_is_an_error() {
+        assert!(fork_tree_with(nothing, || -1).is_err());
+    }
+
+    #[test]
+    fn a_failed_second_fork_is_an_error_and_signals_nothing_unsafe() {
+        // The first call (here) really forks; the root's copy of the counter
+        // says 1, so its own fork "fails".
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let tree = fork_tree_with(nothing, || {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+                -1
+            } else {
+                unsafe { libc::fork() }
+            }
+        });
+        // Reaching here at all means -1 was never used as a kill target.
+        assert!(tree.is_err());
     }
 
     fn set_binary_name() {
@@ -737,9 +850,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
         // Group kill first (the sleeper is in it), then reap.
-        unsafe {
-            libc::kill(-(fixture.id() as i32), libc::SIGKILL);
-        }
+        fixture_signal::killpg(fixture.id() as i32);
         let _ = fixture.wait();
         let status = status.expect("the fixture never finished");
         assert_eq!(
@@ -761,19 +872,52 @@ mod tests {
     }
 
     /// The live `sleep <marker>` processes below `root` only: a process
-    /// elsewhere with the same argv is never counted. On drop the whole
-    /// subtree of `root` (the fixture's own) is swept, nothing else.
+    /// elsewhere with the same argv is never counted. On drop the sleepers it
+    /// ever saw are killed by pid first (no /proc scan needed), then
+    /// whatever a best-effort scan still finds below `root`; killing `root`
+    /// itself is left to its owner, which must be declared before this.
     struct MarkedSleeps {
         marker: String,
         root: i32,
+        /// Marked sleepers seen so far.
+        known: std::sync::Mutex<Vec<i32>>,
+        scan: fn(i32, Instant) -> io::Result<Option<Vec<i32>>>,
     }
     impl MarkedSleeps {
+        fn new(marker: String, root: i32) -> Self {
+            Self::with_scan(marker, root, live_descendants)
+        }
+
+        fn with_scan(
+            marker: String,
+            root: i32,
+            scan: fn(i32, Instant) -> io::Result<Option<Vec<i32>>>,
+        ) -> Self {
+            assert!(fixture_signal::target(root).is_some(), "unsafe root {root}");
+            Self {
+                marker,
+                root,
+                known: std::sync::Mutex::new(Vec::new()),
+                scan,
+            }
+        }
+
+        fn want(&self) -> Vec<u8> {
+            format!("sleep\0{}\0", self.marker).into_bytes()
+        }
+
+        fn record(&self, pids: &[i32]) {
+            if let Ok(mut known) = self.known.lock() {
+                known.extend_from_slice(pids);
+            }
+        }
+
         /// One observation. A truncated or failed scan, or a cmdline that
         /// cannot be read for any reason but the process having vanished, is
         /// an error: it says nothing about survivors.
         fn try_alive(&self, deadline: Instant) -> io::Result<Vec<i32>> {
-            let want = format!("sleep\0{}\0", self.marker).into_bytes();
-            let below = live_descendants(self.root, deadline)?
+            let want = self.want();
+            let below = (self.scan)(self.root, deadline)?
                 .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "scan hit its deadline"))?;
             let mut found = Vec::new();
             for pid in below {
@@ -784,6 +928,7 @@ mod tests {
                     Err(e) => return Err(e),
                 }
             }
+            self.record(&found);
             Ok(found)
         }
 
@@ -802,9 +947,59 @@ mod tests {
         }
     }
     impl Drop for MarkedSleeps {
+        /// Never panics, whatever /proc says.
         fn drop(&mut self) {
-            kill_descendants(self.root, Duration::from_secs(5));
+            let want = self.want();
+            let known = self.known.lock().map(|k| k.clone()).unwrap_or_default();
+            for pid in known {
+                let still = std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want);
+                if still {
+                    fixture_signal::kill(pid);
+                }
+            }
+            // Then what a best-effort scan (errors ignored) still finds below
+            // `root`: its own subtree only, a few passes for late forks.
+            for _ in 0..3 {
+                let below = (self.scan)(self.root, Instant::now() + Duration::from_secs(5))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                if below.is_empty() {
+                    break;
+                }
+                for pid in below.into_iter().rev() {
+                    fixture_signal::kill(pid);
+                }
+            }
         }
+    }
+
+    #[test]
+    fn cleanup_kills_recorded_sleepers_even_when_every_scan_fails() {
+        let root = own_root();
+        let marker = unique_marker();
+        let spawn = || {
+            Reaped(
+                Command::new("/usr/bin/sleep")
+                    .arg0("sleep")
+                    .arg(&marker)
+                    .spawn()
+                    .unwrap(),
+            )
+        };
+        let (mut a, mut b) = (spawn(), spawn());
+        let fixture = MarkedSleeps::with_scan(marker.clone(), root.0.id() as i32, |_, _| {
+            Err(io::Error::from_raw_os_error(libc::EMFILE))
+        });
+        assert!(fixture
+            .try_alive(Instant::now() + Duration::from_secs(1))
+            .is_err());
+        fixture.record(&[a.0.id() as i32, b.0.id() as i32]);
+        drop(fixture);
+        assert!(
+            wait_dead(&mut a) && wait_dead(&mut b),
+            "recorded sleepers survived"
+        );
     }
 
     /// A fixture root of its own: a child that only waits. Cleanup of a
@@ -822,10 +1017,7 @@ mod tests {
     #[test]
     fn a_failed_observation_is_an_error_not_an_empty_list() {
         let root = own_root();
-        let fixture = MarkedSleeps {
-            marker: unique_marker(),
-            root: root.0.id() as i32,
-        };
+        let fixture = MarkedSleeps::new(unique_marker(), root.0.id() as i32);
         let past = Instant::now() - Duration::from_secs(1);
         assert!(fixture.try_alive(past).is_err());
     }
@@ -838,10 +1030,7 @@ mod tests {
         let mut sibling = sleeper();
         let root = own_root();
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let fixture = MarkedSleeps {
-                marker: unique_marker(),
-                root: root.0.id() as i32,
-            };
+            let fixture = MarkedSleeps::new(unique_marker(), root.0.id() as i32);
             fixture
                 .try_alive(Instant::now() - Duration::from_secs(1))
                 .unwrap();
@@ -870,10 +1059,7 @@ mod tests {
                 .spawn()
                 .unwrap(),
         );
-        let marker = MarkedSleeps {
-            marker: "29.7316".into(),
-            root: fixture_root.0.id() as i32,
-        };
+        let marker = MarkedSleeps::new("29.7316".into(), fixture_root.0.id() as i32);
         // Same argv, but not below the fixture's root.
         let mut decoy = Reaped(
             Command::new("/usr/bin/sleep")
@@ -912,10 +1098,7 @@ mod tests {
                 .spawn()
                 .unwrap(),
         );
-        let marker = MarkedSleeps {
-            marker: name,
-            root: root.0.id() as i32,
-        };
+        let marker = MarkedSleeps::new(name, root.0.id() as i32);
         let start = Instant::now();
         while marker.alive().len() < 20 && start.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(2));
