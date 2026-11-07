@@ -290,6 +290,7 @@ fn kill_descendants_with(
 #[cfg(test)]
 pub(crate) mod fixture_signal {
     use std::io;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     pub(crate) fn target(pid: i32) -> Option<i32> {
         (pid > 1).then_some(pid)
@@ -311,6 +312,196 @@ pub(crate) mod fixture_signal {
         kill_with(group, |g| unsafe {
             libc::killpg(g, libc::SIGKILL);
         })
+    }
+
+    /// What [`kill_verified_with`] did.
+    #[derive(Debug, PartialEq)]
+    pub(crate) enum Verified {
+        /// SIGKILL was sent through the pidfd.
+        Sent,
+        /// The process was already gone.
+        Gone,
+        /// The pid is not the process the caller meant; nothing was sent.
+        Mismatch,
+        /// The pid is <= 1; nothing was opened or sent.
+        Unsafe,
+        /// No pidfd could be had, or the send failed (errno); nothing was
+        /// signalled by pid instead.
+        Refused(i32),
+    }
+
+    /// SIGKILL `pid` through a pidfd, after `identity` confirmed it *while the
+    /// pidfd was held*. Never signals by bare pid: when no pidfd can be had
+    /// the result is `Refused`. `open` and `send` are injected for tests.
+    pub(crate) fn kill_verified_with(
+        pid: i32,
+        open: impl FnOnce(i32) -> io::Result<OwnedFd>,
+        send: impl FnOnce(i32) -> io::Result<()>,
+        identity: impl FnOnce(i32) -> bool,
+    ) -> Verified {
+        if target(pid).is_none() {
+            return Verified::Unsafe;
+        }
+        let fd = match open(pid) {
+            Ok(fd) => fd,
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => return Verified::Gone,
+            Err(e) => return Verified::Refused(e.raw_os_error().unwrap_or(libc::EIO)),
+        };
+        if !identity(pid) {
+            return Verified::Mismatch;
+        }
+        match send(fd.as_raw_fd()) {
+            Ok(()) => Verified::Sent,
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => Verified::Gone,
+            Err(e) => Verified::Refused(e.raw_os_error().unwrap_or(libc::EIO)),
+        }
+    }
+
+    pub(crate) fn open_pidfd(pid: i32) -> io::Result<OwnedFd> {
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+        }
+    }
+
+    fn send_kill(fd: i32) -> io::Result<()> {
+        let sent = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd,
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if sent == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    /// [`kill_verified_with`] on the real syscalls.
+    pub(crate) fn kill_verified(pid: i32, identity: impl FnOnce(i32) -> bool) -> Verified {
+        kill_verified_with(pid, open_pidfd, send_kill, identity)
+    }
+
+    /// SIGKILL `pid` only if its cmdline contains `marker` (a
+    /// [`unique_marker`]), checked while its pidfd is held.
+    pub(crate) fn kill_marked(pid: i32, marker: &str) -> Verified {
+        kill_verified(pid, |p| has_marker(p, marker))
+    }
+
+    /// Whether `pid`'s cmdline contains `marker`.
+    pub(crate) fn has_marker(pid: i32, marker: &str) -> bool {
+        assert!(!marker.is_empty(), "an empty marker matches everything");
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|c| c.windows(marker.len()).any(|w| w == marker.as_bytes()))
+    }
+
+    /// `attempt` until it is not `Mismatch`, at most `tries` times with
+    /// `pause` between. A process just spawned has an empty cmdline (new mm,
+    /// args not yet copied) or its parent's until its exec lands, so a first
+    /// `Mismatch` is not final; each
+    /// attempt re-verifies under a fresh pidfd, so a recycled pid still never
+    /// matches.
+    pub(crate) fn retry_mismatch(
+        tries: u32,
+        pause: std::time::Duration,
+        mut attempt: impl FnMut() -> Verified,
+    ) -> Verified {
+        let mut got = attempt();
+        for _ in 1..tries {
+            if got != Verified::Mismatch {
+                break;
+            }
+            std::thread::sleep(pause);
+            got = attempt();
+        }
+        got
+    }
+
+    /// [`kill_marked`], patient about a process that has not exec'd yet. A
+    /// zombie or vanished pid is `Gone` at once: it has nothing left to exec.
+    pub(crate) fn kill_marked_patiently(pid: i32, marker: &str) -> Verified {
+        patiently_with(pid, super::read_stat, super::has_other_tasks, || {
+            kill_marked(pid, marker)
+        })
+    }
+
+    /// The retry policy of [`kill_marked_patiently`] with `/proc` readers and
+    /// the kill attempt injected. `Gone` only for a pid that is vanished or a
+    /// zombie with no other task left (a zombie leader with running threads
+    /// still dies of SIGKILL). An unreadable `/proc` entry is `Refused`
+    /// (EMFILE, EACCES, hidepid...), never `Gone`, and is not retried.
+    pub(crate) fn patiently_with(
+        pid: i32,
+        stat: impl Fn(i32) -> io::Result<Option<(i32, bool)>>,
+        tasks: impl Fn(i32) -> io::Result<bool>,
+        mut attempt: impl FnMut() -> Verified,
+    ) -> Verified {
+        retry_mismatch(50, std::time::Duration::from_millis(10), || {
+            match stat(pid) {
+                Err(e) => Verified::Refused(e.raw_os_error().unwrap_or(libc::EIO)),
+                Ok(None) => Verified::Gone,
+                Ok(Some((_, true))) if !tasks(pid).unwrap_or(true) => Verified::Gone,
+                Ok(_) => attempt(),
+            }
+        })
+    }
+
+    /// The pids of the newline-terminated lines of a fixture pid file; an
+    /// unterminated last line may be a torn write and is ignored.
+    pub(crate) fn complete_pids(text: &str) -> Vec<i32> {
+        let Some((complete, _torn_tail)) = text.rsplit_once('\n') else {
+            return Vec::new();
+        };
+        complete
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect()
+    }
+
+    /// A marker no other test invocation shares: pid, clock and a counter.
+    pub(crate) fn unique_marker() -> String {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        format!("29.{}{:09}{n}", unsafe { libc::getpid() }, nanos)
+    }
+
+    /// Whether `pid` is gone or only a zombie; an unreadable `/proc` entry
+    /// (after a few tries) is an error, never "dead".
+    pub(crate) fn dead_with(
+        pid: i32,
+        stat: impl Fn(i32) -> io::Result<Option<(i32, bool)>>,
+    ) -> io::Result<bool> {
+        let mut last = None;
+        for _ in 0..5 {
+            match stat(pid) {
+                Ok(seen) => return Ok(seen.is_none_or(|(_, zombie)| zombie)),
+                Err(e) => last = Some(e),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Err(last.expect("at least one try"))
+    }
+
+    /// [`dead_with`] on the real `/proc`; panics loudly on an unreadable entry
+    /// so a test cannot pass on a failed observation.
+    pub(crate) fn dead(pid: i32) -> bool {
+        dead_with(pid, super::read_stat)
+            .unwrap_or_else(|e| panic!("cannot tell whether pid {pid} is dead: {e}"))
+    }
+
+    /// `/proc/<pid>/stat` as (parent, zombie), `None` when vanished.
+    pub(crate) fn proc_stat(pid: i32) -> io::Result<Option<(i32, bool)>> {
+        super::read_stat(pid)
     }
 
     /// A raw `fork()` result as a pid, or the OS error.
@@ -337,6 +528,297 @@ pub(crate) mod fixture_signal {
             let mut got = 0;
             assert!(kill_with(2, |p| got = p));
             assert_eq!(got, 2);
+        }
+
+        use std::cell::Cell;
+        fn null_fd() -> OwnedFd {
+            std::fs::File::open("/dev/null").unwrap().into()
+        }
+        fn errno(e: i32) -> io::Result<OwnedFd> {
+            Err(io::Error::from_raw_os_error(e))
+        }
+
+        #[test]
+        fn no_pidfd_means_refused_and_nothing_is_sent() {
+            for e in [libc::EPERM, libc::ENOSYS, libc::EMFILE] {
+                let sent = Cell::new(false);
+                let asked = Cell::new(false);
+                let got = kill_verified_with(
+                    4242,
+                    |_| errno(e),
+                    |_| {
+                        sent.set(true);
+                        Ok(())
+                    },
+                    |_| {
+                        asked.set(true);
+                        true
+                    },
+                );
+                assert_eq!(got, Verified::Refused(e));
+                assert!(!sent.get() && !asked.get(), "errno {e}");
+            }
+        }
+
+        #[test]
+        fn a_vanished_process_is_gone() {
+            let sent = Cell::new(false);
+            let got = kill_verified_with(
+                4242,
+                |_| errno(libc::ESRCH),
+                |_| {
+                    sent.set(true);
+                    Ok(())
+                },
+                |_| true,
+            );
+            assert_eq!(got, Verified::Gone);
+            assert!(!sent.get());
+        }
+
+        #[test]
+        fn identity_is_checked_after_the_pidfd_is_held_and_gates_the_send() {
+            let events = std::cell::RefCell::new(Vec::new());
+            let got = kill_verified_with(
+                4242,
+                |_| {
+                    events.borrow_mut().push("open");
+                    Ok(null_fd())
+                },
+                |_| {
+                    events.borrow_mut().push("send");
+                    Ok(())
+                },
+                |_| {
+                    events.borrow_mut().push("identity");
+                    false
+                },
+            );
+            assert_eq!(got, Verified::Mismatch);
+            assert_eq!(*events.borrow(), ["open", "identity"]);
+        }
+
+        #[test]
+        fn a_verified_process_is_signalled_through_the_opened_fd() {
+            let fd = null_fd();
+            let raw = fd.as_raw_fd();
+            let sent_on = Cell::new(-1);
+            let got = kill_verified_with(
+                4242,
+                |_| Ok(fd),
+                |f| {
+                    sent_on.set(f);
+                    Ok(())
+                },
+                |_| true,
+            );
+            assert_eq!(got, Verified::Sent);
+            assert_eq!(sent_on.get(), raw);
+        }
+
+        #[test]
+        fn send_errors_are_gone_for_esrch_and_refused_otherwise() {
+            let send = |e: i32| {
+                kill_verified_with(
+                    4242,
+                    |_| Ok(null_fd()),
+                    |_| Err(io::Error::from_raw_os_error(e)),
+                    |_| true,
+                )
+            };
+            assert_eq!(send(libc::ESRCH), Verified::Gone);
+            assert_eq!(send(libc::EPERM), Verified::Refused(libc::EPERM));
+        }
+
+        #[test]
+        fn unsafe_pids_never_reach_open() {
+            for bad in [-1, 0, 1, i32::MIN] {
+                let opened = Cell::new(false);
+                let got = kill_verified_with(
+                    bad,
+                    |_| {
+                        opened.set(true);
+                        Ok(null_fd())
+                    },
+                    |_| Ok(()),
+                    |_| true,
+                );
+                assert_eq!(got, Verified::Unsafe, "{bad}");
+                assert!(!opened.get(), "{bad}");
+            }
+        }
+
+        /// Killed and reaped whatever the test did, before any assertion.
+        struct Guard(std::process::Child);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        fn marked_sleep(marker: &str) -> Guard {
+            use std::os::unix::process::CommandExt;
+            Guard(
+                std::process::Command::new("/usr/bin/sleep")
+                    .arg0("sleep")
+                    .arg(marker)
+                    .spawn()
+                    .unwrap(),
+            )
+        }
+
+        #[test]
+        fn kill_marked_kills_the_marked_process_and_spares_others() {
+            use std::os::unix::process::ExitStatusExt;
+            let marker = unique_marker();
+            let mut mine = marked_sleep(&marker);
+            let mut other = marked_sleep(&unique_marker());
+            assert_eq!(
+                kill_marked(other.0.id() as i32, &marker),
+                Verified::Mismatch
+            );
+            assert!(other.0.try_wait().unwrap().is_none(), "killed a mismatch");
+            assert_eq!(kill_marked(mine.0.id() as i32, &marker), Verified::Sent);
+            assert_eq!(mine.0.wait().unwrap().signal(), Some(libc::SIGKILL));
+        }
+
+        #[test]
+        fn a_mismatch_is_retried_until_it_matches_but_only_so_often() {
+            let pause = std::time::Duration::from_millis(1);
+            let calls = Cell::new(0);
+            let got = retry_mismatch(5, pause, || {
+                calls.set(calls.get() + 1);
+                if calls.get() < 3 {
+                    Verified::Mismatch
+                } else {
+                    Verified::Sent
+                }
+            });
+            assert_eq!((got, calls.get()), (Verified::Sent, 3));
+            calls.set(0);
+            let got = retry_mismatch(4, pause, || {
+                calls.set(calls.get() + 1);
+                Verified::Mismatch
+            });
+            assert_eq!((got, calls.get()), (Verified::Mismatch, 4));
+            calls.set(0);
+            let got = retry_mismatch(4, pause, || {
+                calls.set(calls.get() + 1);
+                Verified::Refused(libc::EPERM)
+            });
+            assert_eq!((got, calls.get()), (Verified::Refused(libc::EPERM), 1));
+        }
+
+        /// The race seen on loaded hosts: a fresh process whose exec has not
+        /// landed carries its parent's cmdline; the marker arrives later.
+        #[test]
+        fn a_process_that_execs_late_is_still_killed() {
+            use std::os::unix::process::ExitStatusExt;
+            let marker = unique_marker();
+            let mut child = Guard(
+                std::process::Command::new("/usr/bin/sh")
+                    .args(["-c", "sleep 0.2; exec sleep \"$MARK\""])
+                    .env("MARK", &marker)
+                    .spawn()
+                    .unwrap(),
+            );
+            let got = kill_marked_patiently(child.0.id() as i32, &marker);
+            // Asserted before any wait: the guard kills and reaps on failure.
+            assert_eq!(got, Verified::Sent);
+            let status = child.0.wait().unwrap();
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
+        }
+
+        #[test]
+        fn a_reaped_pid_is_gone_not_signalled() {
+            let marker = unique_marker();
+            let mut child = marked_sleep(&marker);
+            let pid = child.0.id() as i32;
+            child.0.kill().unwrap();
+            child.0.wait().unwrap();
+            // Reaped, so the pid is free (and may be reused): never Sent.
+            assert_ne!(kill_marked(pid, &marker), Verified::Sent);
+        }
+
+        /// A zombie is dead, not a process that has yet to exec: no retries.
+        #[test]
+        fn a_zombie_is_gone_at_once_not_after_the_retries() {
+            let marker = unique_marker();
+            let mut child = marked_sleep(&marker);
+            let pid = child.0.id() as i32;
+            child.0.kill().unwrap(); // not reaped: a zombie
+            let start = std::time::Instant::now();
+            while !super::super::parent_and_zombie(pid).is_some_and(|(_, z)| z)
+                && start.elapsed() < std::time::Duration::from_secs(3)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let start = std::time::Instant::now();
+            let got = kill_marked_patiently(pid, &marker);
+            let took = start.elapsed();
+            assert_eq!(got, Verified::Gone);
+            assert!(took < std::time::Duration::from_millis(100), "{took:?}");
+        }
+
+        fn emfile() -> io::Error {
+            io::Error::from_raw_os_error(libc::EMFILE)
+        }
+
+        #[test]
+        fn an_unreadable_proc_entry_is_refused_not_gone_and_not_retried() {
+            let stats = Cell::new(0);
+            let attempts = Cell::new(0);
+            let got = patiently_with(
+                4242,
+                |_| {
+                    stats.set(stats.get() + 1);
+                    Err(emfile())
+                },
+                |_| Ok(false),
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Verified::Sent
+                },
+            );
+            assert_eq!(got, Verified::Refused(libc::EMFILE));
+            assert_eq!((stats.get(), attempts.get()), (1, 0));
+        }
+
+        #[test]
+        fn only_a_vanished_or_fully_dead_zombie_is_gone() {
+            let attempts = Cell::new(0);
+            let run = |stat: Option<(i32, bool)>, tasks: io::Result<bool>| {
+                attempts.set(0);
+                let got = patiently_with(
+                    4242,
+                    |_| Ok(stat),
+                    |_| match &tasks {
+                        Ok(b) => Ok(*b),
+                        Err(_) => Err(emfile()),
+                    },
+                    || {
+                        attempts.set(attempts.get() + 1);
+                        Verified::Sent
+                    },
+                );
+                (got, attempts.get())
+            };
+            assert_eq!(run(None, Ok(false)), (Verified::Gone, 0));
+            assert_eq!(run(Some((1, true)), Ok(false)), (Verified::Gone, 0));
+            // A zombie leader with running threads, or unknown threads: tried.
+            assert_eq!(run(Some((1, true)), Ok(true)), (Verified::Sent, 1));
+            assert_eq!(run(Some((1, true)), Err(emfile())), (Verified::Sent, 1));
+            assert_eq!(run(Some((1, false)), Ok(false)), (Verified::Sent, 1));
+        }
+
+        #[test]
+        fn only_newline_terminated_pid_lines_count() {
+            assert_eq!(complete_pids("11\n22\n"), [11, 22]);
+            assert_eq!(complete_pids("11\n22\n3"), [11, 22]);
+            assert!(complete_pids("12").is_empty());
+            assert!(complete_pids("").is_empty());
+            assert_eq!(complete_pids("11\nx\n22\n"), [11, 22]);
         }
 
         #[test]
@@ -371,7 +853,7 @@ mod tests {
     }
     fn wait_dead(child: &mut Reaped) -> bool {
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(3) {
+        while start.elapsed() < Duration::from_secs(10) {
             if !alive(child) {
                 return true;
             }
@@ -403,14 +885,11 @@ mod tests {
         let mut bystander = sleeper();
         assert!(kill_descendants(root.0.id() as i32, Duration::from_secs(3)).complete);
         let start = Instant::now();
-        while std::path::Path::new(&format!("/proc/{descendant}")).exists()
-            && !parent_and_zombie(descendant).is_some_and(|(_, z)| z)
-            && start.elapsed() < Duration::from_secs(3)
-        {
+        while !dead(descendant) && start.elapsed() < Duration::from_secs(3) {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(
-            parent_and_zombie(descendant).is_none_or(|(_, zombie)| zombie),
+            dead(descendant),
             "descendant {descendant} survived the sweep"
         );
         assert!(alive(&mut root), "the root itself is not swept");
@@ -481,13 +960,34 @@ mod tests {
     }
     impl Drop for ForkedTree {
         fn drop(&mut self) {
-            fixture_signal::kill(self.child);
+            // `C` is not our child: only a live child of `P` is signalled.
+            fixture_signal::kill_verified(self.child, |c| {
+                parent_and_zombie(c).is_some_and(|(parent, _)| parent == self.root)
+            });
             if fixture_signal::kill(self.root) {
                 unsafe {
                     libc::waitpid(self.root, std::ptr::null_mut(), 0);
                 }
             }
         }
+    }
+
+    /// `C` is P's child; a recorded `child` that is not (here a bystander
+    /// sleeper standing for a recycled pid) is not signalled by the drop.
+    #[test]
+    fn a_fork_tree_drop_spares_a_child_that_is_not_its_roots() {
+        let mut bystander = marked_sleep(&unique_marker());
+        let tree = fork_tree(nothing);
+        let root = tree.root;
+        std::mem::forget(tree); // P is killed and reaped below; C dies with it
+        drop(ForkedTree {
+            root,
+            child: bystander.0.id() as i32,
+        });
+        assert!(
+            survives_a_settle(&mut bystander),
+            "the drop killed a process that is not its root's child"
+        );
     }
 
     /// Forks `P`, and `P` forks `C`, which runs `body`. The children never
@@ -505,9 +1005,19 @@ mod tests {
         let close_inherited = || unsafe {
             libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
         };
+        // A child dies with its parent (also if the harness is SIGKILLed), and
+        // exits at once if the parent was already gone before the prctl took
+        // effect. Async-signal-safe calls only.
+        let die_with = |parent: i32| unsafe {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 || libc::getppid() != parent
+            {
+                libc::_exit(1);
+            }
+        };
         let mut pipe = [0; 2];
         unsafe {
             assert_eq!(libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC), 0);
+            let harness = libc::getpid();
             let root = match fixture_signal::fork_result(fork()) {
                 Ok(root) => root,
                 Err(e) => {
@@ -517,9 +1027,12 @@ mod tests {
                 }
             };
             if root == 0 {
+                die_with(harness);
+                let this = libc::getpid();
                 // A failed fork is written as -1 and rejected by the reader.
                 let child = fork();
                 if child == 0 {
+                    die_with(this);
                     close_inherited();
                     body();
                     loop {
@@ -575,6 +1088,67 @@ mod tests {
         assert!(tree.is_err());
     }
 
+    /// The harness dying (SIGKILL, so no destructor runs) must not leave the
+    /// paused `P` and `C` behind. Re-execs the test binary as a harness that
+    /// builds a tree and is then killed (only that child, by its handle).
+    #[test]
+    fn a_killed_harness_leaves_no_fork_tree_behind() {
+        const CHILD: &str = "SNITCHWATCH_TEST_ORPHANED_TREE";
+        if let Some(file) = std::env::var_os(CHILD) {
+            let tree = fork_tree(nothing);
+            std::fs::write(&file, format!("{} {}\n", tree.root, tree.child)).unwrap();
+            loop {
+                unsafe { libc::pause() };
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pids");
+        let marker = unique_marker();
+        // The extra argument is a filter matching no test; it puts the marker
+        // in the argv that `P` and `C` (forked, never exec'd) carry.
+        let mut harness = Reaped(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "containment::tests::a_killed_harness_leaves_no_fork_tree_behind",
+                    "--test-threads=1",
+                    &marker,
+                ])
+                .env(CHILD, &file)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let reported = || -> Vec<i32> {
+            match std::fs::read_to_string(&file) {
+                Ok(text) if text.ends_with('\n') => text
+                    .split_whitespace()
+                    .filter_map(|p| p.parse().ok())
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+        let start = Instant::now();
+        while reported().len() < 2 && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pids = reported();
+        assert_eq!(pids.len(), 2, "the harness never built its tree");
+        harness.0.kill().unwrap();
+        harness.0.wait().unwrap();
+        let start = Instant::now();
+        while !pids.iter().all(|&p| dead(p)) && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let orphans: Vec<i32> = pids.iter().copied().filter(|&p| !dead(p)).collect();
+        for &pid in &orphans {
+            fixture_signal::kill_marked(pid, &marker);
+        }
+        assert!(orphans.is_empty(), "paused orphans: {orphans:?}");
+    }
+
     fn set_binary_name() {
         unsafe {
             libc::prctl(libc::PR_SET_NAME, c"\xff\xfex".as_ptr());
@@ -596,10 +1170,15 @@ mod tests {
         }
         let swept = kill_descendants(root, Duration::from_secs(3));
         // Read as bytes here: the code under test must not be its own oracle.
-        let alive = std::fs::read(format!("/proc/{child}/stat")).is_ok_and(|stat| {
-            let tail = &stat[stat.iter().rposition(|&b| b == b')').unwrap() + 1..];
-            tail.trim_ascii_start().first() != Some(&b'Z')
-        });
+        // A vanished entry is dead; any other read error is not an answer.
+        let alive = match std::fs::read(format!("/proc/{child}/stat")) {
+            Ok(stat) => {
+                let tail = &stat[stat.iter().rposition(|&b| b == b')').unwrap() + 1..];
+                tail.trim_ascii_start().first() != Some(&b'Z')
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+            Err(e) => panic!("cannot read the descendant's stat: {e}"),
+        };
         assert!(swept.complete);
         assert!(!alive, "the non-UTF-8-named descendant survived");
     }
@@ -839,20 +1418,12 @@ mod tests {
             .process_group(0)
             .spawn()
             .unwrap();
-        let start = Instant::now();
-        let status = loop {
-            if let Some(status) = fixture.try_wait().unwrap() {
-                break Some(status);
-            }
-            if start.elapsed() > Duration::from_secs(20) {
-                break None;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        // Group kill first (the sleeper is in it), then reap.
+        // Polled without reaping, so the group kill below cannot name a
+        // recycled pid; then the group first (the sleeper is in it), then reap.
+        let finished = exited_unreaped(&fixture, Duration::from_secs(20));
         fixture_signal::killpg(fixture.id() as i32);
-        let _ = fixture.wait();
-        let status = status.expect("the fixture never finished");
+        let status = fixture.wait().unwrap();
+        assert!(finished, "the fixture never finished");
         assert_eq!(
             status.code(),
             Some(0),
@@ -860,15 +1431,30 @@ mod tests {
         );
     }
 
-    /// A marker no other test invocation shares: pid, clock and a counter.
     fn unique_marker() -> String {
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos();
-        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        format!("29.{}{:09}{n}", me(), nanos)
+        fixture_signal::unique_marker()
+    }
+
+    /// Whether `child` has exited, polled until `bound` without reaping it:
+    /// its pid and group stay reserved for a later group kill.
+    fn exited_unreaped(child: &Child, bound: Duration) -> bool {
+        let start = Instant::now();
+        loop {
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let done = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    child.id(),
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            } == 0
+                && unsafe { info.si_pid() } != 0;
+            if done || start.elapsed() > bound {
+                return done;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// The live `sleep <marker>` processes below `root` only: a process
@@ -882,6 +1468,9 @@ mod tests {
         /// Marked sleepers seen so far.
         known: std::sync::Mutex<Vec<i32>>,
         scan: fn(i32, Instant) -> io::Result<Option<Vec<i32>>>,
+        /// A file the fixture script appends the pids it starts to (`$$` of
+        /// an escaped shell first, then each `$!`): known without any scan.
+        pid_file: Option<std::path::PathBuf>,
     }
     impl MarkedSleeps {
         fn new(marker: String, root: i32) -> Self {
@@ -894,12 +1483,19 @@ mod tests {
             scan: fn(i32, Instant) -> io::Result<Option<Vec<i32>>>,
         ) -> Self {
             assert!(fixture_signal::target(root).is_some(), "unsafe root {root}");
+            assert_ne!(root, me(), "the test process is never a fixture root");
             Self {
                 marker,
                 root,
                 known: std::sync::Mutex::new(Vec::new()),
                 scan,
+                pid_file: None,
             }
+        }
+
+        fn with_pid_file(mut self, file: std::path::PathBuf) -> Self {
+            self.pid_file = Some(file);
+            self
         }
 
         fn want(&self) -> Vec<u8> {
@@ -946,16 +1542,76 @@ mod tests {
             panic!("could not observe the fixture's survivors: {last:?}");
         }
     }
-    impl Drop for MarkedSleeps {
-        /// Never panics, whatever /proc says.
-        fn drop(&mut self) {
-            let want = self.want();
+    /// Whether a chain of live parents leads from `pid` up to `root`.
+    /// A true result requires a live process whose parent is `root`, and
+    /// `root` is always an unreaped own child (`own_root()`/`Reaped`, asserted
+    /// to be above 1 and not `me()`), so nothing outside the fixture can
+    /// become its child. Every other hop is pinned: `pid` is held by the
+    /// caller's pidfd; its parent is read, pinned with a pidfd, and `pid`'s
+    /// parent is read again, which must be unchanged (else the number was
+    /// recycled between the read and the pin); the same for each ancestor,
+    /// all pidfds kept until the walk ends. Any error or surprise spares.
+    fn descends_from(pid: i32, root: i32) -> bool {
+        descends_from_with(pid, root, fixture_signal::open_pidfd, read_stat)
+    }
+
+    fn descends_from_with(
+        pid: i32,
+        root: i32,
+        open: impl Fn(i32) -> io::Result<std::os::fd::OwnedFd>,
+        stat: impl Fn(i32) -> io::Result<Option<(i32, bool)>>,
+    ) -> bool {
+        let mut held = Vec::new();
+        let mut current = pid;
+        for _ in 0..64 {
+            let Ok(Some((parent, _))) = stat(current) else {
+                return false;
+            };
+            if parent == root {
+                return true;
+            }
+            if parent <= 1 {
+                return false;
+            }
+            match open(parent) {
+                Ok(fd) => held.push(fd),
+                Err(_) => return false,
+            }
+            // Pinned: `current`'s parent must still be it, else the number
+            // was recycled between the read and the pin.
+            if !matches!(stat(current), Ok(Some((again, _))) if again == parent) {
+                return false;
+            }
+            current = parent;
+        }
+        false
+    }
+
+    impl MarkedSleeps {
+        /// The cleanup `drop` runs (idempotent), with what each pid-file or
+        /// recorded kill came to. Never panics, whatever /proc says. Every
+        /// signal goes through a pidfd whose process is verified while held.
+        fn cleanup(&self) -> Vec<(i32, fixture_signal::Verified)> {
+            let mut results = Vec::new();
+            // First what the fixture itself reported (no /proc scan needed),
+            // in order: an escaped shell is listed before its sleepers, so it
+            // stops forking before they are killed. Then what a scan saw.
+            let reported = self
+                .pid_file
+                .as_ref()
+                .and_then(|file| std::fs::read_to_string(file).ok())
+                .map(|text| fixture_signal::complete_pids(&text))
+                .unwrap_or_default();
             let known = self.known.lock().map(|k| k.clone()).unwrap_or_default();
-            for pid in known {
-                let still = std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want);
-                if still {
-                    fixture_signal::kill(pid);
+            let mut seen = HashSet::new();
+            for pid in reported.into_iter().chain(known) {
+                if !seen.insert(pid) {
+                    continue;
                 }
+                results.push((
+                    pid,
+                    fixture_signal::kill_marked_patiently(pid, &self.marker),
+                ));
             }
             // Then what a best-effort scan (errors ignored) still finds below
             // `root`: its own subtree only, a few passes for late forks.
@@ -967,10 +1623,21 @@ mod tests {
                 if below.is_empty() {
                     break;
                 }
+                // The scan is stale by now: a pid is signalled only if, with
+                // its pidfd held, it carries the marker or a live chain of
+                // parents leads from it to the reserved `root`.
                 for pid in below.into_iter().rev() {
-                    fixture_signal::kill(pid);
+                    fixture_signal::kill_verified(pid, |p| {
+                        fixture_signal::has_marker(p, &self.marker) || descends_from(p, self.root)
+                    });
                 }
             }
+            results
+        }
+    }
+    impl Drop for MarkedSleeps {
+        fn drop(&mut self) {
+            self.cleanup();
         }
     }
 
@@ -994,11 +1661,236 @@ mod tests {
         assert!(fixture
             .try_alive(Instant::now() + Duration::from_secs(1))
             .is_err());
-        fixture.record(&[a.0.id() as i32, b.0.id() as i32]);
+        let (pa, pb) = (a.0.id() as i32, b.0.id() as i32);
+        fixture.record(&[pa, pb]);
+        let kills = fixture.cleanup();
+        drop(fixture);
+        // Both are waited for (no short circuit); on failure say what each
+        // looked like and what a second verified kill does, to tell a missed
+        // identity check from a kill that was sent but not yet effective.
+        let dead = [wait_dead(&mut a), wait_dead(&mut b)];
+        if !dead.iter().all(|&d| d) {
+            let report: Vec<String> = [(pa, dead[0]), (pb, dead[1])]
+                .iter()
+                .filter(|(_, d)| !d)
+                .map(|&(pid, _)| {
+                    format!(
+                        "pid {pid}: cmdline {:?}, stat {:?}, retried kill {:?}",
+                        std::fs::read(format!("/proc/{pid}/cmdline"))
+                            .map(|c| String::from_utf8_lossy(&c).into_owned()),
+                        parent_and_zombie(pid),
+                        fixture_signal::kill_marked(pid, &marker),
+                    )
+                })
+                .collect();
+            panic!("recorded sleepers survived: {report:?}; cleanup kills: {kills:?}");
+        }
+    }
+
+    use fixture_signal::{dead, dead_with};
+
+    #[test]
+    fn an_unreadable_proc_entry_is_an_error_not_dead() {
+        let emfile = |_| Err(io::Error::from_raw_os_error(libc::EMFILE));
+        assert!(dead_with(4242, emfile).is_err());
+        assert!(dead_with(4242, |_| Ok(None)).unwrap());
+        assert!(dead_with(4242, |_| Ok(Some((1, true)))).unwrap());
+        assert!(!dead_with(4242, |_| Ok(Some((1, false)))).unwrap());
+    }
+
+    /// Pids here are numbers in fake tables only; nothing is signalled.
+    #[test]
+    fn a_parent_recycled_between_the_read_and_the_pin_forges_no_ancestry() {
+        use std::cell::Cell;
+        let root = 7;
+        let reads_of_target = Cell::new(0);
+        let open = |_: i32| std::fs::File::open("/dev/null").map(Into::into);
+        // Target 100 had parent 50 (first read); 50 then exited and its number
+        // was reused by a child of the root, so by the re-read 100 is
+        // orphaned (parent 1) while 50 now reaches the root.
+        let stat = |p: i32| -> io::Result<Option<(i32, bool)>> {
+            Ok(match p {
+                100 => {
+                    reads_of_target.set(reads_of_target.get() + 1);
+                    Some((if reads_of_target.get() == 1 { 50 } else { 1 }, false))
+                }
+                50 => Some((root, false)),
+                _ => None,
+            })
+        };
+        assert!(!descends_from_with(100, root, open, stat));
+    }
+
+    #[test]
+    fn a_pinned_stable_chain_reaches_the_root_and_a_failed_pin_spares() {
+        let root = 7;
+        let table = |p: i32| -> io::Result<Option<(i32, bool)>> {
+            Ok(match p {
+                100 => Some((50, false)),
+                50 => Some((root, false)),
+                _ => None,
+            })
+        };
+        let opened = std::cell::RefCell::new(Vec::new());
+        let open = |p: i32| {
+            opened.borrow_mut().push(p);
+            std::fs::File::open("/dev/null").map(Into::into)
+        };
+        assert!(descends_from_with(100, root, open, table));
+        assert_eq!(*opened.borrow(), [50]);
+        let refuse = |_| Err(io::Error::from_raw_os_error(libc::EMFILE));
+        assert!(!descends_from_with(100, root, refuse, table));
+    }
+
+    /// Whether `child` is still running after a signal sent to it would have
+    /// had time to land (a SIGKILL is not delivered synchronously).
+    fn survives_a_settle(child: &mut Reaped) -> bool {
+        std::thread::sleep(Duration::from_millis(300));
+        alive(child)
+    }
+
+    fn failing_scan(_: i32, _: Instant) -> io::Result<Option<Vec<i32>>> {
+        Err(io::Error::from_raw_os_error(libc::EMFILE))
+    }
+
+    fn marked_sleep(marker: &str) -> Reaped {
+        Reaped(
+            Command::new("/usr/bin/sleep")
+                .arg0("sleep")
+                .arg(marker)
+                .spawn()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn with_scan_refuses_the_test_process_as_root() {
+        let refused = std::panic::catch_unwind(|| {
+            MarkedSleeps::with_scan(unique_marker(), me(), failing_scan)
+        });
+        assert!(refused.is_err(), "accepted the test process as the root");
+    }
+
+    /// Everything an escaped `setsid` shell started is killed even though no
+    /// scan ever succeeded: the script reported its own pids.
+    #[test]
+    fn drop_kills_the_pid_file_processes_when_every_scan_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pids");
+        let marker = unique_marker();
+        let script = format!(
+            "setsid sh -c 'echo $$ >> {f}; sleep {m} & echo $! >> {f}; sleep {m} & echo $! >> {f}; wait' & read _",
+            f = file.display(),
+            m = marker
+        );
+        let root = Reaped(
+            Command::new("/usr/bin/sh")
+                .args(["-c", &script])
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let fixture = MarkedSleeps::with_scan(marker.clone(), root.0.id() as i32, failing_scan)
+            .with_pid_file(file.clone());
+        let read = || -> Vec<i32> {
+            std::fs::read_to_string(&file)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.parse().ok())
+                .collect()
+        };
+        let start = Instant::now();
+        while read().len() < 3 && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let pids = read();
+        assert_eq!(pids.len(), 3, "the fixture never reported its pids");
+        drop(fixture);
+        let start = Instant::now();
+        while !pids.iter().all(|&p| dead(p)) && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let survivors: Vec<i32> = pids.iter().copied().filter(|&p| !dead(p)).collect();
+        for &pid in &survivors {
+            fixture_signal::kill_marked(pid, &marker);
+        }
+        assert!(survivors.is_empty(), "survived the cleanup: {survivors:?}");
+    }
+
+    static DECOY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+    fn scan_returns_the_decoy(_: i32, _: Instant) -> io::Result<Option<Vec<i32>>> {
+        Ok(Some(vec![DECOY.load(std::sync::atomic::Ordering::SeqCst)]))
+    }
+
+    /// Phase 2 signals only a process whose parent is the root or another
+    /// scanned process; a scan result naming anything else is left alone.
+    #[test]
+    fn drop_does_not_kill_a_scanned_non_descendant() {
+        let root = own_root();
+        let mut decoy = sleeper();
+        DECOY.store(decoy.0.id() as i32, std::sync::atomic::Ordering::SeqCst);
+        drop(MarkedSleeps::with_scan(
+            unique_marker(),
+            root.0.id() as i32,
+            scan_returns_the_decoy,
+        ));
+        let survived = survives_a_settle(&mut decoy);
+        DECOY.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert!(survived, "phase 2 killed a non-descendant");
+    }
+
+    static STALE: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+    fn scan_returns_the_stale_list(_: i32, _: Instant) -> io::Result<Option<Vec<i32>>> {
+        Ok(Some(STALE.lock().unwrap().clone()))
+    }
+
+    /// Phase 2 trusts neither the stale scan's parent pids nor their reuse: a
+    /// process outside the fixture whose parent is a scanned pid (here a
+    /// bystander shell, with its own sleeper as the "recycled child") has
+    /// neither the marker nor a live chain to the root, so it is not killed.
+    #[test]
+    fn drop_does_not_kill_a_child_of_a_scanned_but_unrelated_pid() {
+        use std::io::Read;
+        let root = own_root();
+        let mut holder = Reaped(
+            Command::new("/usr/bin/sh")
+                .args(["-c", &format!("sleep {} & echo $!; wait", unique_marker())])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = [0u8; 32];
+        let n = holder.0.stdout.as_mut().unwrap().read(&mut line).unwrap();
+        let decoy: i32 = String::from_utf8_lossy(&line[..n]).trim().parse().unwrap();
+        let holder_pid = holder.0.id() as i32;
+        *STALE.lock().unwrap() = vec![holder_pid, decoy];
+        drop(MarkedSleeps::with_scan(
+            unique_marker(),
+            root.0.id() as i32,
+            scan_returns_the_stale_list,
+        ));
+        STALE.lock().unwrap().clear();
+        std::thread::sleep(Duration::from_millis(300));
+        let spared = !dead(decoy);
+        // The decoy is not our direct child: end it through the holder.
+        fixture_signal::kill_verified(decoy, |p| {
+            parent_and_zombie(p).is_some_and(|(parent, _)| parent == holder_pid)
+        });
+        assert!(spared, "phase 2 killed a child of an unrelated scanned pid");
+    }
+
+    /// Phase 1: a recorded pid that no longer carries the marker (reused) is
+    /// not signalled.
+    #[test]
+    fn drop_does_not_kill_a_recycled_recorded_pid() {
+        let root = own_root();
+        let mut other = marked_sleep(&unique_marker());
+        let fixture = MarkedSleeps::with_scan(unique_marker(), root.0.id() as i32, failing_scan);
+        fixture.record(&[other.0.id() as i32]);
         drop(fixture);
         assert!(
-            wait_dead(&mut a) && wait_dead(&mut b),
-            "recorded sleepers survived"
+            survives_a_settle(&mut other),
+            "killed a pid without the marker"
         );
     }
 
@@ -1082,6 +1974,8 @@ mod tests {
     #[test]
     fn a_session_forking_flat_out_is_fully_dead_after_the_sweep() {
         let name = unique_marker();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("pids");
         let mut command = Command::new("/usr/bin/sh");
         // Like the scanner, `root` adopts orphans: they stay in its subtree.
         unsafe {
@@ -1091,14 +1985,17 @@ mod tests {
             command
                 .args([
                     "-c",
-                    &format!("setsid sh -c 'n=0; while [ $n -lt 300 ]; do sleep {name} & n=$((n+1)); done; wait' & read _"),
+                    &format!(
+                        "setsid sh -c 'echo $$ >> {f}; n=0; while [ $n -lt 300 ]; do sleep {name} & echo $! >> {f}; n=$((n+1)); done; wait' & read _",
+                        f = file.display()
+                    ),
                 ])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .spawn()
                 .unwrap(),
         );
-        let marker = MarkedSleeps::new(name, root.0.id() as i32);
+        let marker = MarkedSleeps::new(name, root.0.id() as i32).with_pid_file(file);
         let start = Instant::now();
         while marker.alive().len() < 20 && start.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(2));
