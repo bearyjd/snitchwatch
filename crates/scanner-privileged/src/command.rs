@@ -727,20 +727,6 @@ mod tests {
         assert!(!gone_with(4242, |_| Ok(Some((1, false)))).unwrap());
     }
 
-    /// Whether `scanner` has exited, observed without reaping it, so its pid
-    /// (and process group) stays reserved and a later `kill(-pid)` can never
-    /// name a recycled, unrelated group. Polls until `bound` has passed.
-    fn exited_within(scanner: &Child, bound: Duration) -> bool {
-        crate::containment::test_fixtures::scanner_fixture::exited_within(scanner, bound)
-    }
-
-    /// Kill the fixture's whole group while its pid is still reserved
-    /// (unreaped), then reap it and return its status.
-    fn kill_group_then_reap(scanner: &mut Child, marker: &str) -> std::process::ExitStatus {
-        crate::containment::fixture_signal::killpg_marked(scanner.id() as i32, marker);
-        scanner.wait().unwrap()
-    }
-
     /// A primitive whose spawn stalls after it left the scanner's group (a
     /// hung exec) must not hold off the root watchdog: the scanner dies within
     /// the bound, and so does the stalled child it never got a pid for. Runs in
@@ -831,7 +817,7 @@ mod tests {
             }
             gone(stalled)
         };
-        let status = scanner.finish();
+        let (status, problems) = scanner.finish();
         unsafe {
             libc::close(pipe[0]);
         }
@@ -839,21 +825,18 @@ mod tests {
         assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
         assert!(stalled > 0, "the stalled child never reported its pid");
         assert!(reaped, "the stalled child {stalled} outlived the scanner");
+        assert!(problems.is_empty(), "fixture cleanup refused: {problems:?}");
     }
 
-    /// The pids a fixture script wrote (`primitive helper`, newline-terminated
-    /// so a half-written file is never taken for a complete one).
     /// Env var carrying a fixture's unique marker (see `fixture_signal`).
     const MARKER: &str = crate::containment::test_fixtures::scanner_fixture::MARKER_ENV;
 
+    /// The pids a fixture script wrote, one per line; only newline-terminated
+    /// lines count, so a half-written file is never taken for a complete one.
     fn reported_pids(file: &std::path::Path) -> Vec<i32> {
-        match std::fs::read_to_string(file) {
-            Ok(text) if text.ends_with('\n') => text
-                .split_whitespace()
-                .filter_map(|p| p.parse().ok())
-                .collect(),
-            _ => Vec::new(),
-        }
+        std::fs::read_to_string(file)
+            .map(|text| crate::containment::fixture_signal::complete_pids(&text))
+            .unwrap_or_default()
     }
 
     /// A primitive that execs and forks a long-lived helper before the scanner
@@ -924,7 +907,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
-            let status = scanner.finish();
+            let (status, problems) = scanner.finish();
             assert!(exited, "{mode}: the watchdog did not terminate the scanner");
             assert_eq!(status.signal(), Some(libc::SIGKILL), "{mode}: {status:?}");
             assert_eq!(
@@ -935,6 +918,10 @@ mod tests {
             assert!(
                 survivors.is_empty(),
                 "{mode}: outlived the watchdog (primitive, helper): {reported:?}, alive: {survivors:?}"
+            );
+            assert!(
+                problems.is_empty(),
+                "{mode}: fixture cleanup refused: {problems:?}"
             );
         }
     }
@@ -1016,11 +1003,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
-        let status = scanner.finish();
+        let (status, problems) = scanner.finish();
         assert!(exited, "the watchdog did not terminate the scanner");
         assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
         assert_eq!(reported.len(), 2, "the fixture never reported its pids");
         assert!(survivors.is_empty(), "outlived the watchdog: {survivors:?}");
+        assert!(problems.is_empty(), "fixture cleanup refused: {problems:?}");
     }
 
     #[test]
@@ -1108,47 +1096,27 @@ mod tests {
             }
             std::process::exit(0);
         }
-        let dir = tempfile::tempdir().unwrap();
-        let pids = dir.path().join("pids");
-        let marker = crate::containment::fixture_signal::unique_marker();
-        let mut scanner = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                &format!(
-                    "command::tests::{}",
-                    if mode == "panic" {
-                        "the_exit_guard_waits_for_the_watchdog_when_main_panics"
-                    } else {
-                        "main_waits_for_the_watchdog_to_finish_its_sweep"
-                    }
-                ),
-                "--test-threads=1",
-                marker.as_str(),
-            ])
-            .env(CHILD, &pids)
-            .env(MARKER, &marker)
-            .env(MODE, mode)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let test = if mode == "panic" {
+            "command::tests::the_exit_guard_waits_for_the_watchdog_when_main_panics"
+        } else {
+            "command::tests::main_waits_for_the_watchdog_to_finish_its_sweep"
+        };
+        let mut scanner = ScannerFixture::reexec(test, |command, pids| {
+            command.env(CHILD, pids).env(MODE, mode);
+        });
         let start = Instant::now();
         let mut reported = Vec::new();
         while reported.is_empty() && start.elapsed() < Duration::from_secs(10) {
-            reported = reported_pids(&pids);
+            reported = scanner.reported();
             std::thread::sleep(Duration::from_millis(10));
         }
-        let exited = exited_within(&scanner, Duration::from_secs(10));
+        let exited = scanner.exited_within(Duration::from_secs(10));
         let since = Instant::now();
         while !reported.iter().all(|&pid| gone(pid)) && since.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(10));
         }
         let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
-        for &pid in &survivors {
-            crate::containment::fixture_signal::kill_marked(pid, &marker);
-        }
-        let status = kill_group_then_reap(&mut scanner, &marker);
+        let (status, problems) = scanner.finish();
         assert!(exited, "{mode}: the scanner never exited");
         assert_eq!(
             reported.len(),
@@ -1160,6 +1128,10 @@ mod tests {
             "{mode}: main exited before the watchdog's sweep: {survivors:?} survived ({status:?})"
         );
         assert_eq!(status.signal(), Some(libc::SIGKILL), "{mode}: {status:?}");
+        assert!(
+            problems.is_empty(),
+            "{mode}: fixture cleanup refused: {problems:?}"
+        );
     }
 
     /// `spawn_in_flight`: a spawn is authorized but its pid not registered.
@@ -1231,34 +1203,21 @@ mod tests {
             }
             std::process::exit(0);
         }
-        let dir = tempfile::tempdir().unwrap();
-        let pids = dir.path().join("pid");
-        let marker = crate::containment::fixture_signal::unique_marker();
-        let mut scanner = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "command::tests::a_spawn_authorized_before_expiry_cannot_escape_the_sweep",
-                "--test-threads=1",
-                marker.as_str(),
-            ])
-            .env(CHILD, &pids)
-            .env(MARKER, &marker)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let exited = exited_within(&scanner, Duration::from_secs(20));
-        for pid in reported_pids(&pids) {
-            crate::containment::fixture_signal::kill_marked(pid, &marker);
-        }
-        let status = kill_group_then_reap(&mut scanner, &marker);
+        let mut scanner = ScannerFixture::reexec(
+            "command::tests::a_spawn_authorized_before_expiry_cannot_escape_the_sweep",
+            |command, pids| {
+                command.env(CHILD, pids);
+            },
+        );
+        let exited = scanner.exited_within(Duration::from_secs(20));
+        let (status, problems) = scanner.finish();
         assert!(exited, "the fixture never finished");
         assert_eq!(
             status.code(),
             Some(0),
             "3: the descendant escaped the sweep; 4: it never started ({status:?})"
         );
+        assert!(problems.is_empty(), "fixture cleanup refused: {problems:?}");
     }
 
     /// Once the process is leaving, a late watchdog does nothing: exit and
@@ -1331,34 +1290,21 @@ mod tests {
             crate::containment::fixture_signal::kill_marked(escapee, &marker);
             std::process::exit(code);
         }
-        let dir = tempfile::tempdir().unwrap();
-        let pids = dir.path().join("pid");
-        let marker = crate::containment::fixture_signal::unique_marker();
-        let mut scanner = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "command::tests::a_clean_exit_sweeps_a_successful_primitives_escapee",
-                "--test-threads=1",
-                marker.as_str(),
-            ])
-            .env(CHILD, &pids)
-            .env(MARKER, &marker)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let exited = exited_within(&scanner, Duration::from_secs(20));
-        for pid in reported_pids(&pids) {
-            crate::containment::fixture_signal::kill_marked(pid, &marker);
-        }
-        let status = kill_group_then_reap(&mut scanner, &marker);
+        let mut scanner = ScannerFixture::reexec(
+            "command::tests::a_clean_exit_sweeps_a_successful_primitives_escapee",
+            |command, pids| {
+                command.env(CHILD, pids);
+            },
+        );
+        let exited = scanner.exited_within(Duration::from_secs(20));
+        let (status, problems) = scanner.finish();
         assert!(exited, "the fixture never finished");
         assert_eq!(
             status.code(),
             Some(0),
             "3: the escapee outlived the exit; 4: it never started ({status:?})"
         );
+        assert!(problems.is_empty(), "fixture cleanup refused: {problems:?}");
     }
 
     /// A panic inside the sweep must not skip the own-group kill.
@@ -1452,34 +1398,23 @@ mod tests {
             }
             std::process::exit(if result.is_err() { 0 } else { 5 });
         }
-        let dir = tempfile::tempdir().unwrap();
-        let pids = dir.path().join("pid");
-        let marker = crate::containment::fixture_signal::unique_marker();
-        let mut scanner = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                &format!("command::tests::a_late_capture_cannot_leave_a_helper_{mode}"),
-                "--test-threads=1",
-                marker.as_str(),
-            ])
-            .env(CHILD, &pids)
-            .env(MARKER, &marker)
-            .env(MODE, mode)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let exited = exited_within(&scanner, Duration::from_secs(20));
-        for pid in reported_pids(&pids) {
-            crate::containment::fixture_signal::kill_marked(pid, &marker);
-        }
-        let status = kill_group_then_reap(&mut scanner, &marker);
+        let mut scanner = ScannerFixture::reexec(
+            &format!("command::tests::a_late_capture_cannot_leave_a_helper_{mode}"),
+            |command, pids| {
+                command.env(CHILD, pids).env(MODE, mode);
+            },
+        );
+        let exited = scanner.exited_within(Duration::from_secs(20));
+        let (status, problems) = scanner.finish();
         assert!(exited, "{mode}: the fixture never finished");
         assert_eq!(
             status.code(),
             Some(0),
             "{mode}: 3: a detached helper escaped; 5: the late capture ran ({status:?})"
+        );
+        assert!(
+            problems.is_empty(),
+            "{mode}: fixture cleanup refused: {problems:?}"
         );
     }
     #[test]

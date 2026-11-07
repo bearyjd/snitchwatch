@@ -19,6 +19,8 @@ pub(crate) struct MarkedSleeps {
     /// A file the fixture script appends the pids it starts to (`$$` of
     /// an escaped shell first, then each `$!`): known without any scan.
     pid_file: Option<std::path::PathBuf>,
+    /// Set by the first [`Self::cleanup`]; later calls (the drop) do nothing.
+    cleaned: std::sync::atomic::AtomicBool,
 }
 impl MarkedSleeps {
     pub(crate) fn new(marker: String, root: i32) -> Self {
@@ -38,6 +40,7 @@ impl MarkedSleeps {
             known: std::sync::Mutex::new(Vec::new()),
             scan,
             pid_file: None,
+            cleaned: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -136,11 +139,15 @@ pub(crate) fn descends_from_with(
 }
 
 impl MarkedSleeps {
-    /// The cleanup `drop` runs (idempotent), with what each pid-file or
-    /// recorded kill came to. Never panics, whatever /proc says. Every
-    /// signal goes through a pidfd whose process is verified while held.
+    /// The cleanup `drop` runs (once: a second call returns nothing), with
+    /// what each pid-file or recorded kill came to. Never panics, whatever
+    /// /proc says. Every signal goes through a pidfd whose process is
+    /// verified while held.
     pub(crate) fn cleanup(&self) -> Vec<(i32, fixture_signal::Verified)> {
         let mut results = Vec::new();
+        if self.cleaned.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return results;
+        }
         // First what the fixture itself reported (no /proc scan needed),
         // in order: an escaped shell is listed before its sleepers, so it
         // stops forking before they are killed. Then what a scan saw.

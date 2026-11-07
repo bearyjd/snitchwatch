@@ -1059,14 +1059,25 @@ mod tests {
         let a = fixture_signal::killpg_marked(live.id() as i32, "some-other-marker");
         let b = fixture_signal::killpg_marked(zombie.id() as i32, "some-other-marker");
         let live_status = live.wait().unwrap();
-        let member_status = member.wait().unwrap();
+        // Bounded: a regression that spares the member fails here at once
+        // (killing it so the test never leaves a sleeper) instead of hanging.
+        let start = Instant::now();
+        let mut member_status = member.try_wait().unwrap();
+        while member_status.is_none() && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+            member_status = member.try_wait().unwrap();
+        }
+        if member_status.is_none() {
+            let _ = member.kill();
+            let _ = member.wait();
+        }
         zombie.wait().unwrap();
         assert!(exited);
         assert_eq!(a, fixture_signal::Verified::Sent);
         assert_eq!(b, fixture_signal::Verified::Sent);
         assert_eq!(live_status.signal(), Some(libc::SIGKILL));
         assert_eq!(
-            member_status.signal(),
+            member_status.and_then(|status| status.signal()),
             Some(libc::SIGKILL),
             "the group's other member survived"
         );

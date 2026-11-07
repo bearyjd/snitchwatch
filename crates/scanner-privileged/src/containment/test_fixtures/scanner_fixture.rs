@@ -89,16 +89,18 @@ impl ScannerFixture {
         exited_within(self.child.as_ref().expect("already finished"), bound)
     }
 
-    /// The full cleanup now, returning the scanner's status.
-    pub(crate) fn finish(&mut self) -> ExitStatus {
-        self.teardown().expect("the scanner could not be reaped")
+    /// The full cleanup now: the scanner's status and the cleanup problems
+    /// (refused signals). Assert the problems empty AFTER the test's own
+    /// assertions, so a cleanup problem never masks the real failure.
+    pub(crate) fn finish(&mut self) -> (ExitStatus, Vec<String>) {
+        let (status, problems) = self.teardown().expect("already finished");
+        (status.expect("the scanner could not be reaped"), problems)
     }
 
     /// Recorded pids (pidfd-verified), a marker scan below the scanner, the
     /// verified group kill, then kill and reap the owned child. A refused
-    /// signal never skips a step; it is reported at the end (printed instead
-    /// while unwinding, where a panic would abort).
-    fn teardown(&mut self) -> Option<ExitStatus> {
+    /// signal never skips a step; it is returned. `None` if already done.
+    fn teardown(&mut self) -> Option<(Option<ExitStatus>, Vec<String>)> {
         let mut child = self.child.take()?;
         let root = child.id() as i32;
         let mut problems = Vec::new();
@@ -109,7 +111,6 @@ impl ScannerFixture {
                 problems.push(format!("pid {pid}: {verdict:?}"));
             }
         }
-        drop(sleeps);
         let group = fixture_signal::killpg_marked(root, &self.marker);
         if !matches!(group, Verified::Sent | Verified::Gone) {
             problems.push(format!("group {root}: {group:?}"));
@@ -123,21 +124,26 @@ impl ScannerFixture {
                 None
             }
         };
-        if !problems.is_empty() {
-            let report = format!("fixture cleanup refused: {}", problems.join("; "));
-            if std::thread::panicking() {
-                eprintln!("{report}");
-            } else {
-                panic!("{report}");
-            }
-        }
-        status
+        Some((status, problems))
     }
 }
 
 impl Drop for ScannerFixture {
+    /// Cleans up if [`Self::finish`] never ran, and reports its problems
+    /// (printed instead while unwinding, where a panic would abort).
     fn drop(&mut self) {
-        let _ = self.teardown();
+        let Some((_, problems)) = self.teardown() else {
+            return;
+        };
+        if problems.is_empty() {
+            return;
+        }
+        let report = format!("fixture cleanup refused: {}", problems.join("; "));
+        if std::thread::panicking() {
+            eprintln!("{report}");
+        } else {
+            panic!("{report}");
+        }
     }
 }
 
