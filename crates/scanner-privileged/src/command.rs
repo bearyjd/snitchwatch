@@ -750,8 +750,8 @@ mod tests {
 
     /// Kill the fixture's whole group while its pid is still reserved
     /// (unreaped), then reap it and return its status.
-    fn kill_group_then_reap(scanner: &mut Child) -> std::process::ExitStatus {
-        crate::containment::fixture_signal::killpg(scanner.id() as i32);
+    fn kill_group_then_reap(scanner: &mut Child, marker: &str) -> std::process::ExitStatus {
+        crate::containment::fixture_signal::killpg_marked(scanner.id() as i32, marker);
         scanner.wait().unwrap()
     }
 
@@ -856,7 +856,7 @@ mod tests {
         if stalled > 0 && !gone(stalled) {
             crate::containment::fixture_signal::kill_marked(stalled, &marker);
         }
-        let status = kill_group_then_reap(&mut scanner);
+        let status = kill_group_then_reap(&mut scanner, &marker);
         unsafe {
             libc::close(pipe[0]);
         }
@@ -965,7 +965,7 @@ mod tests {
             for &pid in &survivors {
                 crate::containment::fixture_signal::kill_marked(pid, &marker);
             }
-            let status = kill_group_then_reap(&mut scanner);
+            let status = kill_group_then_reap(&mut scanner, &marker);
             assert!(exited, "{mode}: the watchdog did not terminate the scanner");
             assert_eq!(status.signal(), Some(libc::SIGKILL), "{mode}: {status:?}");
             assert_eq!(
@@ -1071,7 +1071,7 @@ mod tests {
         for &pid in &survivors {
             crate::containment::fixture_signal::kill_marked(pid, &marker);
         }
-        let status = kill_group_then_reap(&mut scanner);
+        let status = kill_group_then_reap(&mut scanner, &marker);
         assert!(exited, "the watchdog did not terminate the scanner");
         assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
         assert_eq!(reported.len(), 2, "the fixture never reported its pids");
@@ -1137,8 +1137,8 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(300));
                     },
                     |root| crate::containment::kill_descendants(root, DESCENDANT_SWEEP),
-                    |group| {
-                        crate::containment::fixture_signal::killpg(group);
+                    move |group| {
+                        crate::containment::fixture_signal::killpg_marked(group, &marker);
                     },
                     |_| {},
                 );
@@ -1203,7 +1203,7 @@ mod tests {
         for &pid in &survivors {
             crate::containment::fixture_signal::kill_marked(pid, &marker);
         }
-        let status = kill_group_then_reap(&mut scanner);
+        let status = kill_group_then_reap(&mut scanner, &marker);
         assert!(exited, "{mode}: the scanner never exited");
         assert_eq!(
             reported.len(),
@@ -1307,7 +1307,7 @@ mod tests {
         for pid in reported_pids(&pids) {
             crate::containment::fixture_signal::kill_marked(pid, &marker);
         }
-        let status = kill_group_then_reap(&mut scanner);
+        let status = kill_group_then_reap(&mut scanner, &marker);
         assert!(exited, "the fixture never finished");
         assert_eq!(
             status.code(),
@@ -1407,7 +1407,7 @@ mod tests {
         for pid in reported_pids(&pids) {
             crate::containment::fixture_signal::kill_marked(pid, &marker);
         }
-        let status = kill_group_then_reap(&mut scanner);
+        let status = kill_group_then_reap(&mut scanner, &marker);
         assert!(exited, "the fixture never finished");
         assert_eq!(
             status.code(),
@@ -1529,7 +1529,7 @@ mod tests {
         for pid in reported_pids(&pids) {
             crate::containment::fixture_signal::kill_marked(pid, &marker);
         }
-        let status = kill_group_then_reap(&mut scanner);
+        let status = kill_group_then_reap(&mut scanner, &marker);
         assert!(exited, "{mode}: the fixture never finished");
         assert_eq!(
             status.code(),

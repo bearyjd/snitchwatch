@@ -309,7 +309,9 @@ mod argument_tests {
     }
 
     /// SIGKILL a child and its process group while the child is still
-    /// unreaped (its pid is reserved). Refuses a pid or group <= 1.
+    /// unreaped (its pid is reserved). Refuses a pid or group <= 1. No pidfd
+    /// identity check: the child is polled with `WNOWAIT` and never reaped
+    /// before this runs, so its pid (and group id) cannot have been recycled.
     fn kill_unreaped_group(child: &mut std::process::Child) {
         let pid = child.id() as i32;
         if pid > 1 {
