@@ -630,6 +630,7 @@ fn capture(
 mod tests {
     use super::*;
     use crate::containment::test_fixtures::reaped::Reaped;
+    use crate::containment::test_fixtures::scanner_fixture::ScannerFixture;
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn fixture(script: &str) -> io::Result<String> {
         capture(
@@ -730,23 +731,7 @@ mod tests {
     /// (and process group) stays reserved and a later `kill(-pid)` can never
     /// name a recycled, unrelated group. Polls until `bound` has passed.
     fn exited_within(scanner: &Child, bound: Duration) -> bool {
-        let start = Instant::now();
-        loop {
-            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            let done = unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    scanner.id(),
-                    &mut info,
-                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                )
-            } == 0
-                && unsafe { info.si_pid() } != 0;
-            if done || start.elapsed() > bound {
-                return done;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        crate::containment::test_fixtures::scanner_fixture::exited_within(scanner, bound)
     }
 
     /// Kill the fixture's whole group while its pid is still reserved
@@ -813,21 +798,12 @@ mod tests {
             // The write end goes to the scanner fixture; the read end stays here.
             assert_eq!(libc::fcntl(pipe[1], libc::F_SETFD, 0), 0);
         }
-        let marker = crate::containment::fixture_signal::unique_marker();
-        let mut scanner = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "command::tests::a_spawn_stall_cannot_hold_off_the_watchdog",
-                "--test-threads=1",
-                marker.as_str(),
-            ])
-            .env(CHILD, pipe[1].to_string())
-            .env(MARKER, &marker)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut scanner = ScannerFixture::reexec(
+            "command::tests::a_spawn_stall_cannot_hold_off_the_watchdog",
+            |command, _| {
+                command.env(CHILD, pipe[1].to_string());
+            },
+        );
         unsafe {
             libc::close(pipe[1]);
         }
@@ -841,11 +817,13 @@ mod tests {
             let mut pid: i32 = 0;
             if unsafe { libc::read(pipe[0], (&mut pid as *mut i32).cast(), 4) } == 4 {
                 stalled = pid;
+                // Reported at once: the drop kills it whatever fails next.
+                scanner.record_pid(stalled);
             } else {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        let exited = exited_within(&scanner, bound);
+        let exited = scanner.exited_within(bound);
         let reaped = stalled > 0 && {
             let since = Instant::now();
             while !gone(stalled) && since.elapsed() < bound {
@@ -853,11 +831,7 @@ mod tests {
             }
             gone(stalled)
         };
-        // Never leak a stuck fixture, whatever failed.
-        if stalled > 0 && !gone(stalled) {
-            crate::containment::fixture_signal::kill_marked(stalled, &marker);
-        }
-        let status = kill_group_then_reap(&mut scanner, &marker);
+        let status = scanner.finish();
         unsafe {
             libc::close(pipe[0]);
         }
@@ -870,7 +844,7 @@ mod tests {
     /// The pids a fixture script wrote (`primitive helper`, newline-terminated
     /// so a half-written file is never taken for a complete one).
     /// Env var carrying a fixture's unique marker (see `fixture_signal`).
-    const MARKER: &str = "SNITCHWATCH_TEST_MARKER";
+    const MARKER: &str = crate::containment::test_fixtures::scanner_fixture::MARKER_ENV;
 
     fn reported_pids(file: &std::path::Path) -> Vec<i32> {
         match std::fs::read_to_string(file) {
@@ -917,7 +891,7 @@ mod tests {
             });
             let then = if orphan { "exit 0" } else { "wait" };
             let script = format!(
-                "sleep {marker} & printf '%s %s\\n' $$ $! > {}; {then}",
+                "sleep {marker} & printf '%s\\n%s\\n' $$ $! > {}; {then}",
                 pids.to_str().unwrap()
             );
             let _ = capture(
@@ -930,43 +904,27 @@ mod tests {
             }
         }
         for mode in ["wait", "orphan"] {
-            let dir = tempfile::tempdir().unwrap();
-            let pids = dir.path().join("pids");
-            let marker = crate::containment::fixture_signal::unique_marker();
-            let mut scanner = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "command::tests::a_forked_helper_cannot_outlive_the_watchdog",
-                    "--test-threads=1",
-                    marker.as_str(),
-                ])
-                .env(CHILD, &pids)
-                .env(MARKER, &marker)
-                .env(MODE, mode)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
+            let mut scanner = ScannerFixture::reexec(
+                "command::tests::a_forked_helper_cannot_outlive_the_watchdog",
+                |command, pids| {
+                    command.env(CHILD, pids).env(MODE, mode);
+                },
+            );
             let bound = Duration::from_secs(10);
             let start = Instant::now();
             let mut reported = Vec::new();
             while reported.len() != 2 && start.elapsed() < bound {
-                reported = reported_pids(&pids);
+                reported = scanner.reported();
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let exited = exited_within(&scanner, Duration::from_secs(5));
+            let exited = scanner.exited_within(Duration::from_secs(5));
             let since = Instant::now();
             while !reported.iter().all(|&pid| gone(pid)) && since.elapsed() < Duration::from_secs(5)
             {
                 std::thread::sleep(Duration::from_millis(10));
             }
             let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
-            // Never leak a fixture, whatever failed.
-            for &pid in &survivors {
-                crate::containment::fixture_signal::kill_marked(pid, &marker);
-            }
-            let status = kill_group_then_reap(&mut scanner, &marker);
+            let status = scanner.finish();
             assert!(exited, "{mode}: the watchdog did not terminate the scanner");
             assert_eq!(status.signal(), Some(libc::SIGKILL), "{mode}: {status:?}");
             assert_eq!(
@@ -1034,45 +992,31 @@ mod tests {
             while crate::containment::parent_and_zombie(b).map(|(p, _)| p) != Some(own) {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            std::fs::write(&file, format!("{} {b}\n", a.id())).unwrap();
+            std::fs::write(&file, format!("{}\n{b}\n", a.id())).unwrap();
             expire_watchdog(own, || {});
             loop {
                 unsafe { libc::pause() };
             }
         }
-        let dir = tempfile::tempdir().unwrap();
-        let pids = dir.path().join("pids");
-        let marker = crate::containment::fixture_signal::unique_marker();
-        let mut scanner = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "command::tests::setsid_and_reparented_processes_die_with_the_watchdog",
-                "--test-threads=1",
-                marker.as_str(),
-            ])
-            .env(CHILD, &pids)
-            .env(MARKER, &marker)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut scanner = ScannerFixture::reexec(
+            "command::tests::setsid_and_reparented_processes_die_with_the_watchdog",
+            |command, pids| {
+                command.env(CHILD, pids);
+            },
+        );
         let start = Instant::now();
         let mut reported = Vec::new();
         while reported.len() != 2 && start.elapsed() < Duration::from_secs(10) {
-            reported = reported_pids(&pids);
+            reported = scanner.reported();
             std::thread::sleep(Duration::from_millis(10));
         }
-        let exited = exited_within(&scanner, Duration::from_secs(5));
+        let exited = scanner.exited_within(Duration::from_secs(5));
         let since = Instant::now();
         while !reported.iter().all(|&pid| gone(pid)) && since.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(10));
         }
         let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
-        for &pid in &survivors {
-            crate::containment::fixture_signal::kill_marked(pid, &marker);
-        }
-        let status = kill_group_then_reap(&mut scanner, &marker);
+        let status = scanner.finish();
         assert!(exited, "the watchdog did not terminate the scanner");
         assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
         assert_eq!(reported.len(), 2, "the fixture never reported its pids");

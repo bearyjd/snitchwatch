@@ -949,7 +949,10 @@ mod tests {
         use fixture_signal::{killpg_verified_with, Verified};
         use std::cell::Cell;
         let sent = Cell::new(0);
-        let go = |g: i32| sent.set(g);
+        let go = |g: i32| {
+            sent.set(g);
+            Ok(())
+        };
         let eperm = |_| Err(io::Error::from_raw_os_error(libc::EPERM));
         let esrch = |_| Err(io::Error::from_raw_os_error(libc::ESRCH));
         let unreachable_open = |_| -> io::Result<std::os::fd::OwnedFd> { panic!("opened") };
@@ -977,15 +980,29 @@ mod tests {
             Verified::Sent
         );
         assert_eq!(sent.get(), 4242);
+        let killpg_fails = |errno| move |_: i32| Err(io::Error::from_raw_os_error(errno));
+        assert_eq!(
+            killpg_verified_with(4242, devnull_fd, killpg_fails(libc::ESRCH), |_| true),
+            Verified::Gone
+        );
+        assert_eq!(
+            killpg_verified_with(4242, devnull_fd, killpg_fails(libc::EPERM), |_| true),
+            Verified::Refused(libc::EPERM)
+        );
     }
 
     /// A pid that is not a child of ours (here a sleeper orphaned from its
     /// shell, standing for a recycled pid), with a marker elsewhere.
     fn orphan_sleeper(marker: &str) -> i32 {
+        orphan_sleeper_with(marker, "")
+    }
+
+    /// [`orphan_sleeper`] started by `launcher` (e.g. `setsid `).
+    fn orphan_sleeper_with(marker: &str, launcher: &str) -> i32 {
         let out = Command::new("/usr/bin/sh")
             .args([
                 "-c",
-                &format!("sleep {marker} >/dev/null 2>&1 </dev/null & echo $!"),
+                &format!("{launcher}sleep {marker} >/dev/null 2>&1 </dev/null & echo $!"),
             ])
             .output()
             .unwrap();
@@ -997,11 +1014,19 @@ mod tests {
     #[test]
     fn killpg_marked_spares_a_leader_it_cannot_vouch_for() {
         let marker = unique_marker();
-        let pid = orphan_sleeper(&marker);
+        // A real group leader (its own session), or the group kill would have
+        // nothing to hit and the survival assertion could never fail.
+        let pid = orphan_sleeper_with(&marker, "setsid ");
+        let start = Instant::now();
+        while unsafe { libc::getpgid(pid) } != pid && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let leads = unsafe { libc::getpgid(pid) } == pid;
         let verdict = fixture_signal::killpg_marked(pid, "some-other-marker");
         std::thread::sleep(Duration::from_millis(200));
         let survived = !dead(pid);
         fixture_signal::kill_marked(pid, &marker);
+        assert!(leads, "the orphan never became a group leader");
         assert_eq!(verdict, fixture_signal::Verified::Mismatch);
         assert!(
             survived,
@@ -1020,6 +1045,12 @@ mod tests {
             .process_group(0)
             .spawn()
             .unwrap();
+        // spawn returns after the exec, so `live` already leads its group.
+        let mut member = Command::new("/usr/bin/sleep")
+            .arg(&marker)
+            .process_group(live.id() as i32)
+            .spawn()
+            .unwrap();
         let mut zombie = Command::new("/usr/bin/true")
             .process_group(0)
             .spawn()
@@ -1028,11 +1059,17 @@ mod tests {
         let a = fixture_signal::killpg_marked(live.id() as i32, "some-other-marker");
         let b = fixture_signal::killpg_marked(zombie.id() as i32, "some-other-marker");
         let live_status = live.wait().unwrap();
+        let member_status = member.wait().unwrap();
         zombie.wait().unwrap();
         assert!(exited);
         assert_eq!(a, fixture_signal::Verified::Sent);
         assert_eq!(b, fixture_signal::Verified::Sent);
         assert_eq!(live_status.signal(), Some(libc::SIGKILL));
+        assert_eq!(
+            member_status.signal(),
+            Some(libc::SIGKILL),
+            "the group's other member survived"
+        );
     }
 
     /// The root of a fork tree that is not our child (a recycled pid) is not

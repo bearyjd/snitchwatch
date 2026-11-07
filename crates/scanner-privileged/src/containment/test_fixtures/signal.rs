@@ -30,7 +30,8 @@ pub(crate) fn killpg(group: i32) -> bool {
 /// What [`kill_verified_with`] did.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Verified {
-    /// SIGKILL was sent through the pidfd.
+    /// SIGKILL was sent: through the pidfd, or to the verified leader's
+    /// whole group by `killpg`.
     Sent,
     /// The process was already gone.
     Gone,
@@ -108,7 +109,7 @@ pub(crate) fn kill_verified(pid: i32, identity: impl FnOnce(i32) -> bool) -> Ver
 pub(crate) fn killpg_verified_with(
     group: i32,
     open: impl FnOnce(i32) -> io::Result<OwnedFd>,
-    killpg: impl FnOnce(i32),
+    killpg: impl FnOnce(i32) -> io::Result<()>,
     identity: impl FnOnce(i32) -> bool,
 ) -> Verified {
     if target(group).is_none() {
@@ -122,8 +123,11 @@ pub(crate) fn killpg_verified_with(
     if !identity(group) {
         return Verified::Mismatch;
     }
-    killpg(group);
-    Verified::Sent
+    match killpg(group) {
+        Ok(()) => Verified::Sent,
+        Err(e) if e.raw_os_error() == Some(libc::ESRCH) => Verified::Gone,
+        Err(e) => Verified::Refused(e.raw_os_error().unwrap_or(libc::EIO)),
+    }
 }
 
 /// [`killpg_verified_with`] on the real syscalls; the leader is the
@@ -133,8 +137,9 @@ pub(crate) fn killpg_marked(group: i32, marker: &str) -> Verified {
     killpg_verified_with(
         group,
         open_pidfd,
-        |g| unsafe {
-            libc::killpg(g, libc::SIGKILL);
+        |g| match unsafe { libc::killpg(g, libc::SIGKILL) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
         },
         |p| {
             has_marker(p, marker)
