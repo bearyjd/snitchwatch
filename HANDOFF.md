@@ -1,6 +1,27 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-11-01)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-11-07)
 
-> Start with the 2026-11-01 section below. The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are dated history.
+> Start with the 2026-11-07 section below (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are dated history.
+
+## 2026-11-07 — overnight run 5 done: nothing open, r16 candidate stale, r16.1 waits for the owner
+
+- **Source:** `origin/main` at `6bf46af7` (plus the learning/handoff PR #327 once merged). No other PR is open. Local `main` is fast-forward only: `git fetch && git merge --ff-only origin/main`.
+- **Merged since 2026-11-01** (each with 6/6 CI; the later ones with a clean independent Fable/Opus review on the exact head, merged pinned with `--match-head-commit`):
+  - GUI/bridge: #311 handoff refresh, #312 NM watcher, #313 probe follow-ups, #314 title-flicker probe (cause still not reproduced), #315 GUI idle wakeups, #316 text-trace debug flag (`SNITCHWATCH_TEXT_TRACE=1`, off by default) + #319 page-title tracing (allowlist of `textTraceable` / `textTraceTitle` marks).
+  - Release builder: #317 Fedora 45 pins (`packaging/release/pins.env`: `fedora:45@sha256:ea0998f4...`, rust 1.99.1, protoc 33.5). The tower merged its builder PR #176 and policy repin #177 on top.
+  - Scanner: #252 watchdog hardening (lifecycle state machine for spawn/expiry/exit, hardened `/proc` sweep, refuses setuid/setgid/capability programs, sweep on clean exit); #318 one `debug_assert` + test fixture hygiene (a SIGSTOP sweep phase was considered and REJECTED: `docs/superpowers/plans/2026-11-06-sweep-sigstop.md`).
+  - Test infrastructure: #321 fixes the #259 flake (a lib test loaded the real `main.qml`, attaching the developer's real learned file to the global recorder; `|| cfg!(test)` seam, `TEST_LOCK`, a pre-`main` isolation constructor in `crates/snitchwatch-kirigami/tests/common/mod.rs`, a guard test); #326 fixes a containment cleanup CI flake (a fresh process shows an empty or its parent's `/proc/<pid>/cmdline` until its exec lands) and starts issue #322 (pidfd-verified fixture kills).
+  - Docs: #324 codemaps (`docs/CODEMAPS/`) + `docs/CONTRIBUTING.md`, `docs/ENV.md`, `docs/RUNBOOK.md`; #325 r16.1 prep notes; #320/#323 learnings and the overnight plan (`docs/superpowers/plans/2026-11-06-overnight-run-5.md`).
+- **r16 GUI release:** the published `r16-candidate` (`a75214b3`) is STALE (main moved a lot; the Fedora 45 pins change the reproducible hash). NOTHING is cut, tagged or promoted. A new candidate needs a new name (`r16.1`) and a prep PR like #308; checklist, hard-coded files and the three owner decisions (bundle name, dotted `r16.1-candidate` name, variable name) are in `docs/superpowers/research/2026-11-07-r16-1-prep-checklist.md`. The owner's go is given in the bazzite-tower session, not in this repo. A published candidate cannot be replaced; recover from a publish race with a FULL rerun, never `--failed`.
+- **Tower (bazzite-tower-94):** repinned to snitchwatch `32eca9a7`; it repins to newer main after its own security review of the scanner-privileged changes and fetches main itself. Nothing needed from this repo.
+- **Running tests safely** (see `docs/CONTRIBUTING.md` Test safety): run on a throwaway `HOME`/XDG dirs with `CARGO_HOME` and `RUSTUP_HOME` pointing at the real ones; never run binaries from `target/debug/deps` directly (one is a hard link of the real app); wrap runs in `timeout`; signal only processes you created and never pid <= 1 (fixtures go through `containment::fixture_signal`); the words `lifecycle` and `pins` are banned in `.rs` sources (bridge `history::dormant_tests`, fails only in the CI `test` job).
+- **Open follow-ups:** issue #322 (`ScannerFixture` refactor; three timing tests that fail 25-40% under heavy host load because the production sweep bound is 3 s; poller dedupe; lock-test handshake; `just clean-probe-homes`). `CLAUDE.md` still says `just build`/`just check` cover default members only; they use `--workspace`.
+- **Needs the owner:**
+  - The r16.1 go (tower session), then an install and Plasma check of that candidate.
+  - Install a build with #315/#316/#319 and capture the title flicker with `SNITCHWATCH_TEXT_TRACE=1` (trace goes to `console.warn`); the capture steps are in `docs/superpowers/research/2026-11-01-title-flicker-3.md`.
+  - The real `~/.config/snitchwatch/learned.json` was inflated by earlier whole-binary test runs (about +80 on `/usr/bin/curl`, no backup) and three stray `.learned.json.tmp-*` files sit next to it: inspect or clean.
+  - Branch housekeeping: about 129 merged and about 100 unmerged remote branches; `feat/q01-rules-keyboard` (WIP, no PR) and the local `chore/builder-fedora-45` (duplicate of #317).
+  - Click-ology cleanup details, still owed.
+- **Resume checklist:** `git fetch`; `gh pr list`; read `.omc/STATE.md` (same machine only); read this section; check the tower session for r16.1 before touching any release workflow.
 
 ## 2026-11-01 — selectable text and rounded restyle merged, r16 candidate published
 
