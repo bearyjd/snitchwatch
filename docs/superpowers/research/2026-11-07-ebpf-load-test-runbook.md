@@ -23,10 +23,10 @@ a B always also looks like a D.
 
 | Result | How to recognise it | Meaning / next |
 |---|---|---|
-| A | all three modules load, no attach errors, `Process monitor method ebpf`, attribution matches (section 4) | prebuilt modules work here; ship the `.o` files in the tower image and flip the tower checks together with our config (section 6) |
-| B | `module specs error` / `module collection error` (the latter carries the verifier text) / `opening kprobe` / `opening kretprobe` errors, then fallback to `/proc` | modules do not fit this kernel; try the in-image build (section 5) |
+| A | `opensnitch.o` and `opensnitch-procs.o` load, no attach errors, `Process monitor method ebpf`, attribution matches (section 4); the dns module is noted separately, it does not decide A/B | prebuilt modules work here; ship the `.o` files in the tower image and flip the tower checks together with our config (section 6) |
+| B | `module specs error` / `module collection error` (the latter carries the verifier text) / `opening kprobe` / `opening kretprobe` / `Error loading opensnitch.o (collection)` (`procmon/ebpf/ebpf.go:141`), then fallback to `/proc` | modules do not fit this kernel; try the in-image build (section 5) |
 | C | loads and attaches, but attribution is wrong | silent wrong-process attribution, worse than failing: do NOT ship; keep `proc`; this is the case that could justify a CO-RE port upstream |
-| D | fallback to `/proc` with a *file not found* / *permission* / unreadable-dir error, or no `.o` files at all | environment problem, not a kernel verdict: fix the install and rerun |
+| D | fallback to `/proc` with `might not be compatible` and **no** preceding `module specs error` / `module collection error` line (a missing `.o` is skipped at debug level and ends in that same message, `core/ebpf.go:41-43,59-62`), or a `[eBPF] unable to remove memlock` warning | environment problem (missing files, privileges, rlimit), not a kernel verdict: check the `ls` of all three directories, fix the install and rerun |
 
 ## 1. Safety rules (read before running anything)
 
@@ -61,6 +61,10 @@ a B always also looks like a D.
    whether it exists anyway for the 2026-07-14 diagnostics spec.
 6. Is the VM an rpm-ostree image (read-only `/usr`)? **UNVERIFIED** what the tower's VM gate
    image is; `touch /usr/lib/x` tells you. It decides where section 3 step 3 may write.
+7. The tower image builds a patched daemon from Go source (groundwork note lines 55-56): record
+   `opensnitchd -version` and the patch set. Whether the v1.8.0 `.o` files match that build's
+   map assignments is **UNVERIFIED**; an `Error loading opensnitch.o (collection)` from a
+   mismatch is outcome B.
 
 ## 3. Procedure A: prebuilt modules from the v1.8.0 RPM
 
@@ -85,18 +89,18 @@ a B always also looks like a D.
      stale `.o` files** (`ls -l` each), because a stale copy earlier in the order loads
      instead of the test copy and a later one can mask a failure. Leave `Ebpf.ModulesPath`
      unset (setting it restricts the search to that path).
-4. Config: **set `"ProcMonitorMethod": "ebpf"` explicitly and `"LogLevel": 0`** in the test
-   config. The tower image overwrites `ebpf` to `proc` after `stage.sh`
+4. Config: **set `"ProcMonitorMethod": "ebpf"` explicitly and `"LogLevel": -1`** (TRACE; 0 is
+   DEBUG, 1 INFO, `log/log.go:36-46`) in the test config. The tower image overwrites `ebpf` to `proc` after `stage.sh`
    (`docs/packaging/system-bridge-integration.md:102-105`), so a `proc` result from
    `grep -E 'ProcMonitorMethod|LogLevel|DefaultAction' /etc/opensnitchd/default-config.json`
-   means the test is not valid yet. `LogLevel: 0` is required: both shipped configs set
+   means the test is not valid yet. A level of 0 or lower is required for the load lines and -1 for section 4: both shipped configs set
    `"LogLevel": 2` (IMPORTANT, `log/log.go:38-42`), which drops the info-level lines this
    test relies on, and the level from the config is applied before the CLI log flags, so a
-   `-debug` flag does not substitute for it. Put `LogLevel: 0` in the section 7 report.
+   `-debug` flag does not substitute for it. Put the `LogLevel` used in the section 7 report.
 5. Start the daemon as root and capture the full log. Main file: `/var/log/opensnitchd.log`
    (the `LogFile` setting). The systemd unit is `opensnitch.service` (not `opensnitchd`;
    `recipe.yml:85-93`): `journalctl -u opensnitch` only helps if `LogFile` is unset.
-6. Read the log for these, at `LogLevel: 0` (sources: `core/ebpf.go`,
+6. Read the log for these, at `LogLevel: -1` (sources: `core/ebpf.go`,
    `procmon/monitor/init.go`, `procmon/ebpf/ebpf.go`, `dns/ebpfhook.go`):
    - **pass:** three `[eBPF] module loaded: <path>` lines (`ebpf.go:56`) and
      `Process monitor method ebpf` (`init.go:96`), and **none** of the failure lines below;
@@ -106,16 +110,18 @@ a B always also looks like a D.
      compatible`, the string has a version in the middle), then `Process monitor method
      /proc` (`init.go:132`);
    - **loaded but did not attach (B):** `opening kprobe: ...` / `opening kretprobe: ...`
-     (`procmon/ebpf/ebpf.go:147-187`) and `[eBPF] unable to remove memlock`
-     (`procmon/ebpf/ebpf.go:127`); count these as failures even if `module loaded` printed;
-   - **only `opensnitch-procs.o` missing:** `Process monitor method ebpf` *and*
+     (`procmon/ebpf/ebpf.go:147-187`); count these as failures even if `module loaded` printed;
+   - **`[eBPF] unable to remove memlock`** (`procmon/ebpf/ebpf.go:126-128`, runs before any
+     load): an environment problem (privileges / rlimit), outcome D, not a kernel verdict;
+   - **only `opensnitch-procs.o` missing (outcome D for that module):** `Process monitor method ebpf` *and*
      `opensnitch-procs.o not available: ...` (`init.go:105-106`): still on ebpf with the proc
      monitors alongside, so read both lines;
    - **dns module:** `opensnitch-dns.o` failing only warns (`EBPF-DNS: Unable to attach
      ebpf listener`); note it, it does not decide A/B.
-   At `LogLevel: 0` the verifier output is part of the `module collection error` text
-   (cilium/ebpf returns it there; full verifier logging switches on at debug,
-   `ebpf.go:32-33`). **UNVERIFIED** that `dmesg` shows anything useful; record
+   The verifier output is part of the `module collection error` text (cilium/ebpf returns it
+   there). At `LogLevel` 0 or lower full verifier logging is already on (`ebpf.go:32-33`), so that
+   error can be hundreds of lines: keep the whole log as a file and quote at most the first and
+   last lines in the report. **UNVERIFIED** that `dmesg` shows anything useful; record
    `dmesg | tail -50` anyway, but treat the log line as the primary evidence.
 
 A clean load is **necessary, not sufficient** (section 4).
@@ -124,28 +130,34 @@ A clean load is **necessary, not sufficient** (section 4).
 
 Non-CO-RE modules built against other headers can load yet read wrong offsets.
 
-1. With `LogLevel: 0` the daemon logs each connection with the attributed process path
-   (`main.go:547`; that line carries the **path, not the pid**). Compare paths only; get the
-   real pid/path from `ss -tnp` and `/proc/<pid>/exe` on your side. No bridge or GUI is
-   needed. **UNVERIFIED** that this log line is enough to read cleanly at volume; if it is
-   not, stop and report that instead of improvising a client.
+1. The observable: with `DefaultAction: allow` and no UI connected, an unmatched connection
+   takes `applyDefaultAction`, which logs `con.String()` **only at TRACE** (`main.go:431-432`;
+   `conman/connection.go:315-319` formats `path (pid) -> host:port (proto uid)`). So set
+   `"LogLevel": -1`; at 0 nothing attributed is printed. It gives path **and** pid; compare both
+   with `ss -tnp` and `/proc/<pid>/exe` on your side. No bridge or GUI is needed.
+   **UNVERIFIED** that this is readable at volume; if it is not, stop and report that instead of
+   improvising a client. (A temporary catch-all allow rule would instead log at debug level on
+   match; if you use one, remove it in section 8.)
 2. Generate known traffic from known, distinct binaries, e.g. `curl -s https://example.org`,
    `python3 -c` with a socket connect, and a long-lived `nc` connection, each under its own
    binary path.
-3. Repeat for the cases where exec tracking matters, with the expected answer fixed in
-   advance (the attributed path is the process that **owns the socket at connect time**):
+3. Repeat for the cases where exec tracking matters. The expected answers below are the
+   obvious ones, **UNVERIFIED** as ebpf behaviour (no repo source states them):
    - a process that connects and then execs: expect the binary that made the connection;
    - a short-lived process that connects and exits at once: expect its own path, not empty;
    - a child of a shell (`sh -c 'curl ...'`): expect `curl`, not `sh`.
-4. Record per case: expected path, attributed path, match yes/no. Any mismatch is outcome
-   C. Also record connections attributed to an empty/unknown process under `ebpf` that
-   `proc` mode resolves.
+4. **Run every case twice, once with `ProcMonitorMethod: proc` (baseline) and once with `ebpf`.**
+   Record per case: expected path, `proc` result, `ebpf` result. Only a mismatch that appears
+   under `ebpf` and not under `proc` is outcome C; a mismatch in both is daemon-wide behaviour
+   to report separately. Also record connections attributed to an empty/unknown process under
+   `ebpf` that `proc` mode resolves.
 
 ## 5. Procedure C: in-image build (only if section 3 failed as B)
 
 The upstream build is not CO-RE and needs kernel sources (`ebpf_prog/README`):
 1. Work in a **scratch copy** of `vendor/opensnitch/ebpf_prog`; never build inside the
-   submodule.
+   submodule. On an atomic VM, `kernel-devel`/clang/llvm need layering or a toolbox container;
+   build against the **host** kernel's headers, not the container's.
 2. `kernel-devel` matching the running kernel exactly. **UNVERIFIED** that a package for the
    recorded `uname -r` exists (custom kernel). If it does not, the README's other route is
    building against a kernel source tree (`ebpf_prog/README:3-21`); if neither is available,
@@ -179,11 +191,12 @@ anywhere today (the 40-70% and 20.5% figures were `proc`).
 kernel: <uname -r>  == target image kernel: yes/no   run as root: yes/no   VM image: <ostree y/n>
 RPM sha256: <...>   modules in RPM: opensnitch.o y/n, -procs.o y/n, -dns.o y/n
 stale .o in /usr/local/lib, /usr/lib, /etc/opensnitchd: <none / paths>
+opensnitchd -version: <..>   patch set: <none/..>
 config: ProcMonitorMethod=<..> LogLevel=<..> DefaultAction=<..> ModulesPath=<unset/..>
 kernel opts: <BPF.. FTRACE_SYSCALLS y/n>   debugfs/tracefs: y/n   BTF present: y/n
 log: "module loaded" lines <n>/3   "Process monitor method": ebpf | /proc
-attach errors (opening kprobe/kretprobe, memlock): <none / verbatim>
-load errors (specs/collection error, verbatim, <=10 lines): <...>   dmesg (<=10 lines): <...>
+attach errors (opening kprobe/kretprobe): <none / verbatim>   memlock warning: y/n
+load errors (specs/collection error: file path + first/last lines only): <...>   dmesg (<=10 lines): <...>
 attribution: <table of cases, section 4>
 outcome: A | B | C | D        kernel-devel for this kernel available: y/n/not tried
 ```
