@@ -298,6 +298,15 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
         drop(runtime);
         native::ffi::process_events();
     });
+    // The production main.qml ran `refreshPreferences` on a worker thread; give
+    // it time to reach the point where it used to attach the real learned file
+    // to the process-wide recorder, which every later learning window in this
+    // binary then inherited (#259).
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !crate::learned::has_backend(),
+        "a lib test attached a file to the process-wide learned recorder"
+    );
     assert!(
         !captured.contains("Error:") && !captured.contains("failed to load"),
         "{captured}"
