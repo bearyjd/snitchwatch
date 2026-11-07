@@ -1,6 +1,7 @@
-// The window title is drawn by a Heading inside Kirigami's page header, not by
-// the (non-visual) pageStack.globalToolBar object. This runs the real
-// TextTrace inside a REAL Kirigami.ApplicationWindow + pageStack (no stubs).
+// The window title is traced from the current page's OWN `title` property, and
+// only while that page declares `textTraceTitle: true`: the header and its
+// delegate are never walked or read. This runs the real TextTrace inside a
+// REAL Kirigami.ApplicationWindow + pageStack (no stubs).
 import QtQuick
 import QtQuick.Controls as Controls
 import QtTest
@@ -60,6 +61,15 @@ TestCase {
                     Item { implicitHeight: 10 }
                 }
             }
+            Component {
+                id: spoofPage
+                Kirigami.ScrollablePage {
+                    property bool textTraceTitle: true
+                    title: "Spoof Page"
+                    Item { implicitHeight: 10 }
+                }
+            }
+            function showSpoof() { pageStack.replace(spoofPage); }
             function showCustom() { pageStack.replace(customPage); }
             function showDynamic() { pageStack.replace(dynamicPage); }
             function showPlain() { pageStack.replace(plainPage); }
@@ -183,10 +193,9 @@ TestCase {
         compare(joined().indexOf("CANARY"), -1, joined());
     }
 
-    // A custom delegate whose heading happens to show a text EQUAL to the
-    // page title is still not the trusted default delegate: authorization is by
-    // identity, never by text equality, so nothing of it is read or logged.
-    function test_custom_heading_equal_to_the_title_is_not_traced() {
+    // A custom delegate whose heading shows a text EQUAL to the page title is
+    // irrelevant: only the page's own title is traced, the delegate is not read.
+    function test_custom_delegate_page_logs_its_own_title_not_the_delegate() {
         const win = open_window();
         win.showCustom();
         wait(500);
@@ -195,22 +204,41 @@ TestCase {
         win.pageStack.currentItem.title = "Custom Changed";
         wait(100);
         win.tracer.sample();
-        compare(joined().indexOf("Custom Changed"), -1, joined());
-        compare(joined().indexOf("Fixed Custom"), -1, joined());
+        verify(joined().indexOf('"Fixed Custom" -> "Custom Changed"') >= 0, joined());
         compare(joined().indexOf("CANARY"), -1, joined());
     }
 
-    // The veto: textTraceable false on the heading or an ancestor up to the
-    // delegate. (Kirigami's own heading cannot be given a property from
-    // outside, so the helper is exercised directly on plain items.)
-    function test_veto_helper_honors_false_on_the_heading_and_its_ancestors() {
+    // The codex finding: QML that passes the default delegate's Component url
+    // to Qt.createQmlObject used to forge the identity check, and the unmarked
+    // heading of its delegate was traced. Nothing of a delegate is read now.
+    function test_spoofed_default_delegate_url_never_logs_the_canary() {
         const win = open_window();
-        const root = Qt.createQmlObject('import QtQuick; Item { id: d; Item { id: mid; Item { id: h } } }', win.contentItem);
-        const mid = root.children[0];
-        const h = mid.children[0];
-        compare(win.tracer.isVetoed(h, root), false);
-        const v = Qt.createQmlObject('import QtQuick; Item { property bool textTraceable: false; Item { } }', win.contentItem);
-        compare(win.tracer.isVetoed(v.children[0], v), true);
-        compare(win.tracer.isVetoed(v, v), true);
+        win.showSpoof();
+        wait(500);
+        const page = win.pageStack.currentItem;
+        const pristine = createTemporaryObject(pristineComp, tc);
+        const url = pristine.titleDelegate.url.toString();
+        const dir = Qt.resolvedUrl(".").toString();
+        const spoof = Qt.createQmlObject(
+            'import QtQuick; import "' + dir + '" as T; Component { T.DefaultPageTitleDelegate { shown: "SPOOF_CANARY"; sibling: "SPOOF_SIBLING_CANARY" } }',
+            page, url);
+        verify(spoof);
+        win.tracer.sample();
+        tc.lines = [];
+        page.titleDelegate = spoof;
+        wait(500);
+        win.tracer.sample();
+        compare(joined().indexOf("CANARY"), -1, joined());
+        page.title = "Spoof Changed";
+        wait(100);
+        win.tracer.sample();
+        verify(joined().indexOf('"Spoof Page" -> "Spoof Changed"') >= 0, joined());
+        compare(joined().indexOf("CANARY"), -1, joined());
+        page.titleDelegate = null;
+        wait(200);
+        win.tracer.sample();
+        compare(joined().indexOf("CANARY"), -1, joined());
     }
+
+    Component { id: pristineComp; Kirigami.Page {} }
 }

@@ -170,8 +170,8 @@ const PROBE_ON_BODY: &str = r#"
         if (loader.item === null) {
             throw new Error("the TextTrace instance does not exist with the flag on");
         }
-        if (loader.item.titleToolbar() === null) {
-            throw new Error("the window title toolbar is not traced for a fixed-title page");
+        if (loader.item.titledPage === null) {
+            throw new Error("the current fixed-title page is not traced for its window title");
         }
         main.bridgeFeedRef.ok = false;
         main.bridgeFeedRef.linkState = "connecting";
@@ -182,7 +182,7 @@ const PROBE_ON_BODY: &str = r#"
         loader.item.sample();
         // The marked areas must be reachable by the walk in the REAL window.
         const keys = Object.keys(loader.item.previous).join("\n");
-        ["DefaultPageTitleDelegate", "[bridgeMessage-connecting]", "PromptSlotBanner", "LearningBanner"]
+        ["[bridgeMessage-connecting]", "PromptSlotBanner", "LearningBanner"]
             .forEach(function (part) {
                 if (keys.indexOf(part) < 0) {
                     throw new Error("not reachable by the walk: " + part);
@@ -216,6 +216,7 @@ const PROBE_ON_BODY: &str = r#"
                 return k.indexOf("ToolBarPageHeader") >= 0 && snap[k].text === title && snap[k].vis === "V";
             });
             if (hit.length === 0) throw new Error("title heading not traced on " + spec[0] + " (" + title + ")");
+            if (loader.item.titledPage !== main.pageStack.currentItem) throw new Error("page title not traced on " + spec[0]);
             console.warn("probe-title-ok " + spec[0] + " " + title);
         });
         console.warn("probe-done on");
