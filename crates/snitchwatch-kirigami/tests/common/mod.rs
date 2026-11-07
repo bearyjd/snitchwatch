@@ -73,6 +73,7 @@ pub fn capture_stderr<F: FnOnce()>(f: F) -> String {
 /// keeps the stderr assertions load-bearing, a silent removal in a future Qt
 /// would reintroduce exactly the vacuous-assertion bug it was added to fix.
 pub fn init_headless_qt_env() {
+    home_isolation();
     if std::env::var_os("QT_QPA_PLATFORM").is_none() {
         std::env::set_var("QT_QPA_PLATFORM", "offscreen");
     }
@@ -82,4 +83,42 @@ pub fn init_headless_qt_env() {
     if std::env::var_os("QT_FORCE_STDERR_LOGGING").is_none() {
         std::env::set_var("QT_FORCE_STDERR_LOGGING", "1");
     }
+}
+
+/// The HOME the process started with, and the throwaway home every probe runs
+/// under instead (see [`init_headless_qt_env`]). Probes load the production
+/// main.qml in-process, whose startup reads and writes the config dir, so
+/// HOME and the XDG dirs point at a per-process tempdir (0700, removed at exit)
+/// and never at the developer's own `~/.config/snitchwatch`.
+pub fn home_isolation() -> &'static (Option<std::ffi::OsString>, std::path::PathBuf) {
+    static HOME: std::sync::OnceLock<(Option<std::ffi::OsString>, std::path::PathBuf)> =
+        std::sync::OnceLock::new();
+    static REMOVE_AT_EXIT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    extern "C" fn remove_home() {
+        if let Some(dir) = REMOVE_AT_EXIT.get() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    HOME.get_or_init(|| {
+        let original = std::env::var_os("HOME");
+        let dir = tempfile::Builder::new()
+            .prefix("snitchwatch-probe-home")
+            .tempdir()
+            .expect("throwaway probe home")
+            .keep();
+        for (var, sub) in [
+            ("XDG_CONFIG_HOME", ".config"),
+            ("XDG_STATE_HOME", ".state"),
+            ("XDG_DATA_HOME", ".data"),
+            ("XDG_RUNTIME_DIR", "run"),
+        ] {
+            std::fs::create_dir_all(dir.join(sub)).expect("probe home subdirectory");
+            std::env::set_var(var, dir.join(sub));
+        }
+        std::env::set_var("HOME", &dir);
+        let _ = REMOVE_AT_EXIT.set(dir.clone());
+        // SAFETY: `remove_home` only reads a set-once static.
+        unsafe { libc::atexit(remove_home) };
+        (original, dir)
+    })
 }

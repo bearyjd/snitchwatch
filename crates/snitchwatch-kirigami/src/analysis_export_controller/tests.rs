@@ -87,6 +87,15 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     common::init_headless_qt_env();
+    // Probes load the production main.qml, whose startup reads and writes the
+    // config dir: it must be a throwaway one, never the developer's.
+    let (original, isolated) = common::home_isolation();
+    assert_ne!(original.as_deref(), Some(isolated.as_os_str()));
+    assert_eq!(
+        std::env::var_os("HOME").as_deref(),
+        Some(isolated.as_os_str())
+    );
+    assert!(crate::paths::learned_path().starts_with(isolated));
     let _app = QGuiApplication::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let link = crate::bridge_runtime::test_link::TestLink::new(runtime.handle().clone(), 32, 32);
