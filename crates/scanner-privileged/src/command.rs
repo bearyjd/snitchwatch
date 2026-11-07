@@ -629,6 +629,7 @@ fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::containment::test_fixtures::reaped::Reaped;
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn fixture(script: &str) -> io::Result<String> {
         capture(
@@ -1601,15 +1602,6 @@ mod tests {
         );
         assert!(start.elapsed() < Duration::from_secs(2));
         assert_eq!(active_pid(), 0);
-    }
-
-    /// A child that is always killed and reaped, even if an assertion panics.
-    struct Reaped(Child);
-    impl Drop for Reaped {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
     }
 
     fn active_pid() -> i32 {
