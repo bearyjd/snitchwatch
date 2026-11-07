@@ -25,6 +25,7 @@ Help text source: `crates/snitchwatch-bridge-cli/src/cli.rs:61-83`.
 | `XDG_RUNTIME_DIR` | `crates/snitchwatch-bridge/src/auth.rs:90` | no | Base of the `snitchwatch/` socket and token directory. If unset, falls back to `<OS temp dir>/snitchwatch`. |
 | `LISTEN_PID`, `LISTEN_FDS`, `LISTEN_FDNAMES` | `crates/snitchwatch-bridge-cli/src/activation.rs:32-34` | system mode only | systemd socket-activation protocol; missing values are an error (`.context("... missing")`). Set by systemd, not by hand. |
 | `RUST_LOG` | `crates/snitchwatch-bridge-cli/src/logging.rs:13` | no | `tracing` EnvFilter; default `info` when unset or unparsable. Shipped user unit sets `RUST_LOG=info` (`packaging/systemd/snitchwatch-bridge.service:40`). |
+| `PATH` | `crates/snitchwatch-bridge/src/diagnostics/kernel_probe.rs:19` | no | Searched for `nft` by the kernel probe; unset means "not found". (`scanner-core/src/inspector.rs:127` does the same lookup for `SystemInspector::which`.) |
 <!-- /AUTO-GENERATED -->
 
 Variables fixed by the shipped units (not read from your shell):
@@ -53,6 +54,8 @@ Variables fixed by the shipped units (not read from your shell):
 | `XDG_DATA_HOME` | `.../paths.rs:18`, `.../geo/resolver.rs:425`, `.../geo/install.rs:34`, `.../app_icons.rs:413` | no | Data dir (GeoIP databases, `.desktop` icon lookup). |
 | `XDG_CONFIG_HOME` | `.../paths.rs:27,31,39,44,50` | no | Config dir (settings, autostart file, learned data). |
 | `XDG_DATA_DIRS` | `.../app_icons.rs:418` | no | `.desktop` search dirs; default `/usr/local/share:/usr/share`. |
+| `XDG_RUNTIME_DIR` | `crates/snitchwatch-bridge/src/auth.rs:90` via `.../bridge_runtime.rs:270` | no | Base of the GUI's default socket path (`<dir>/snitchwatch/bridge.sock`). |
+| `QT_QPA_PLATFORM` | `.../main.rs:46` | no | Only compared with `offscreen` to decide whether to default `QT_QUICK_CONTROLS_STYLE`. |
 | `QT_QUICK_CONTROLS_STYLE` | `.../main.rs:45` | no | Defaulted to `Basic` only when `QT_QPA_PLATFORM=offscreen` and it is unset (`main.rs:45-48`). |
 <!-- /AUTO-GENERATED -->
 
@@ -115,7 +118,6 @@ lines, sourced by the justfile and scripts).
 | `SNITCHWATCH_DBIP_PROOF`, `SNITCHWATCH_DBIP_CITY_PROOF` | `crates/snitchwatch-kirigami/src/geo/install/tests.rs:158,540`; `crates/snitchwatch-kirigami/tests/geo_validation_worker.rs:177` | Path to a real DB-IP file for proof tests; the tests `expect` it, so leave them unset in normal runs. |
 | `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `SNITCHWATCH_WS_SOCKET`, `SNITCHWATCH_WS_TOKEN_PATH` | set to tempdirs by many `crates/snitchwatch-kirigami/tests/*_qml.rs` (e.g. `tray_lifecycle_qml.rs:33-35`, `learning_end_qml.rs:37`) | Test isolation; see `docs/CONTRIBUTING.md` "Test safety". |
 | `SNITCHWATCH_TEST_*`, `*_CHILD` | `scanner-privileged/src/{command,containment,main}.rs`, `snitchwatch-bridge/src/history/tests.rs:502`, others | Internal re-exec markers for child-process tests; not user-facing. |
-| `PATH` | `crates/scanner-core/src/inspector.rs:127`, `crates/snitchwatch-bridge/src/diagnostics/kernel_probe.rs:19` | Searched when looking up programs by name (`nft` probe in the bridge; `SystemInspector::which` in scanner-core); unset means "not found". |
 | `SW_STEPS` | `crates/snitchwatch-kirigami/tests/support/probe_runner.rs:64` | QML probe step limit; default `1000000`. |
 | `SNITCHWATCH_TRAY_TEST_SDK` | `crates/snitchwatch-kirigami/tests/native-tray/run.sh:58` | Flatpak SDK for the native tray fixture; default `org.kde.Sdk//6.11`. |
 | `SNITCHWATCH_WEB_BASE`, `SNITCHWATCH_TAURI_BASE` | `tests/web_smoke/playwright.config.ts:11`, `tests/tauri_smoke/playwright.config.ts:10` | Playwright base URL; default `http://127.0.0.1:3031`. |

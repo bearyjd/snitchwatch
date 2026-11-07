@@ -14,7 +14,7 @@ is silent the text says "Not defined in the repo".
 | `just` | All commands below | `justfile` |
 | Tauri build deps | `snitchwatch-tauri` is a default member; its build links webkit2gtk even for `cargo check` | `ci.yml` (`libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`, ...) |
 | Qt6 + KDE Frameworks 6 (Kirigami) dev packages | Needed for `kirigami-spike` and `snitchwatch-kirigami`, which are excluded from `default-members`; plain `cargo build`/`cargo check`/`cargo test` (what CI runs) skip them, but `just build`, `just check` and `just test` use `--workspace` (`justfile:24-25,27-28,33-35`) and DO compile them, so they need Qt6/KF6. Without Qt, run the plain cargo commands. Build Kirigami explicitly with `cargo build -p snitchwatch-kirigami` | `CLAUDE.md`; `Cargo.toml:24-36`; `justfile` `kirigami-dev` |
-| Fedora package set known to build and test Kirigami | `gcc gcc-c++ make protobuf-compiler dbus-daemon xdg-dbus-proxy qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel qt6-qttools-devel plasma-integration kf6-kirigami-devel` | `ci.yml` job `kirigami` |
+| Fedora package set known to build and test Kirigami | `git gcc gcc-c++ make protobuf-compiler dbus-daemon xdg-dbus-proxy qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel qt6-qttools-devel plasma-integration kf6-kirigami-devel` | `ci.yml` job `kirigami` |
 | `qmltestrunner-qt6` | Ships in `qt6-qtdeclarative-devel` | `justfile` `qml-test`; `ci.yml` |
 | Playwright (one time) | `just web-smoke-install`, `just tauri-smoke-install`; a "missing browser" failure is a setup gap, not a regression. `just doctor` reports what is missing | `README.md` "Playwright smoke suites"; `justfile` `doctor` |
 | podman | Used by the `release-*` and `endpoint-events-verify` recipes | `justfile` |
@@ -35,7 +35,7 @@ is silent the text says "Not defined in the repo".
 | `regen-proto` | `cargo build -p snitchwatch-proto` |
 | `run-bridge` | `RUST_LOG=info cargo run -p snitchwatch-bridge-cli` (starts a real bridge: see Test safety) |
 | `run-spike endpoint="http://127.0.0.1:50051"` | `cargo run -p snitchwatch-spike -- <endpoint>` with `RUST_LOG=info`. |
-| `web-rebrand` | Re-run the idempotent rebrand pass over the vendored `web/` tree. |
+| `web-rebrand` | Run `./web/rebrand.sh`, then `git diff --stat web/`, over the vendored `web/` tree. |
 | `web-smoke` | Run the Playwright smoke tests against a freshly built bridge. |
 | `web-smoke-install` | Install the Playwright Firefox channel into `tests/web_smoke/node_modules`. |
 | `tauri-dev` | Run the Tauri shell in dev mode (kept until Tauri/`web/` are retired; Kirigami is the shell that ships). |
@@ -47,7 +47,7 @@ is silent the text says "Not defined in the repo".
 | `kirigami-screenshots dir="target/screenshots"` | Demo-mode (`SNITCHWATCH_DEMO=1`) offscreen render of the pages to PNGs in `dir`; Basic style, so colours differ slightly from the Flatpak. |
 | `qml-test` | `qmltestrunner-qt6` input-routing tests in `crates/snitchwatch-kirigami/tests/qml` (real mouse events via QtTest). |
 | `test-blocklists` | Blocklist unit + e2e suites, offline (fixture fetchers and local TLS servers). |
-| `package-check` | Validates packaging artifacts without a Bazzite host: YAML/JSON parse, `verify-unit.sh`, shellcheck (skipped if absent), packaging/release shape tests, `--no-default-features` clippy/test of the tarball feature set. |
+| `package-check` | Validates packaging artifacts without a Bazzite host: `packaging/geo/test-country-data.py`, `packaging/scanner/test-staging.py`, `scripts/ebpf/test_measure.py`, `bash -n` on `packaging/scanner/stage.sh` and `packaging/endpoint-events/verify.sh`, YAML/JSON parse, `verify-unit.sh`, shellcheck (skipped if absent), packaging/release shape tests, `--no-default-features` clippy/test of the tarball feature set. |
 | `endpoint-events-verify` | Real-rsyslog proof of the opt-in endpoint-events recipe; needs rootless podman and Fedora mirrors; not part of `package-check`. |
 | `release-bridge` | Build `dist/snitchwatch-bridge-<version>-x86_64.tar.gz{,.sha256}` in the pinned Fedora 45 container. |
 | `release-bridge-repro` | Build, rebuild from another path, require byte-identical tarballs. |
@@ -85,7 +85,7 @@ configured in the repo (no match in `justfile` or `ci.yml`).
 | Never edit anything under `vendor/opensnitch`. A dirty submodule showing only an untracked `.omc/` path is tooling noise; do not commit a pointer bump for it | `CLAUDE.md` |
 | `DefaultAction: allow` is the shipped default (owner decision 2026-10-25); deny is an explicit operator opt-in, never packaged | `CLAUDE.md` "Settled" #5; `packaging/README.md` |
 | Components A and B stay separate apps (no shared daemon/unit/privilege model) | `CLAUDE.md` "Settled" #1 |
-| Releases (tags, `r*-candidate`, promotion) are the owner's decision | `docs/RUNBOOK.md` |
+| Releases (tags, `r*-candidate`, promotion) are the owner's decision | `HANDOFF.md:12`; `docs/RUNBOOK.md` |
 
 ## Code style, as enforced
 

@@ -8,7 +8,7 @@ workflow: `docs/CONTRIBUTING.md`.
 Do not push a `v*` tag, push or move `r16-candidate`, set
 `R16_CANDIDATE_REVIEWED_SHA`, publish a draft release, or pin a new release in
 an image on your own initiative. (The repo-side mechanics of that gate are
-under "Release flow".)
+under "Release flow". Source: `HANDOFF.md:12`, "final r16 needs a separate owner go given to the bazzite-tower session".)
 
 ## Deployment shapes
 
@@ -36,7 +36,7 @@ dial-in, closed-window fail-open, tray states, Daemon Health) are in
 | Unit | `snitchwatch-bridge.service` (`systemctl --user`) | `snitchwatch-system-bridge.service` + `-grpc.socket` + `-gui.socket` | `packaging/systemd/`, `packaging/system/` |
 | State | `$STATE_DIRECTORY` or `SNITCHWATCH_STATE_DIR`; `blocklists.sqlite3`, `profiles.sqlite3` (0600); none set means in-memory only | `/var/lib/snitchwatch` only | `README.md` "M4"; `cli.rs:71-75` |
 | GUI access (system) | `usermod -aG snitchwatch-ui <user>`, then a new login session | same | `system-bridge-integration.md:18-22` |
-| Crash log (Tauri shell) | `$XDG_STATE_HOME/snitchwatch/crash.log` (default `~/.local/state/snitchwatch/crash.log`) | n/a | `README.md` "Crash log" |
+| Crash log (Tauri and Kirigami shells) | `$XDG_STATE_HOME/snitchwatch/crash.log` (default `~/.local/state/snitchwatch/crash.log`) | n/a | `README.md` "Crash log"; Kirigami: `src/main.rs:34`, `src/paths.rs:57-59` |
 | GUI log (Kirigami) | `gui.log` in the state dir, only when `SNITCHWATCH_LOG` is set; previous run kept as `gui.log.1` | n/a | `crates/snitchwatch-kirigami/src/logging.rs:21-28` |
 
 `DefaultAction` is `allow` as shipped (owner decision 2026-10-25), in both the
@@ -60,7 +60,7 @@ decision (hard rule above).
 | `workflow_dispatch` of `Release` builds and verifies without publishing | `release.yml:6-9`; `bridge-release-artifact.md` |
 | Maintainer compares the draft's sha256 with the local build, runs the attestation check, publishes the draft, pins the sha256 in the image | `bridge-release-artifact.md` "Cutting a release" 4 |
 | Candidate GUI: `candidate-gui.yml` triggers only on a push to `r16-candidate`. Build runs only if repo variable `R16_CANDIDATE_REVIEWED_SHA` equals the pushed SHA, else a `register` job holds. Publisher needs green exact-head `ci.yml`, validates the packet, creates the lightweight tag `r16-candidate` if missing and a draft, uploads assets, and then **automatically makes the prerelease public** (`draft: false, prerelease: true, make_latest: 'false'`), so after the owner sets the variable, the push itself publishes with no further workflow step; it never overwrites assets and never becomes "latest" | `.github/workflows/candidate-gui.yml:4-30,245,259-260`; `docs/packaging/r13-candidate-gui-ci.md` |
-| The workflow refuses an existing release or mismatched tag and does not overwrite assets; failure leaves a draft and HOLD; a full rerun builds a new candidate needing fresh acceptance | `r13-candidate-gui-ci.md` |
+| The workflow refuses an existing release or mismatched tag and does not overwrite assets; a failure after draft creation (`candidate-gui.yml:247`) leaves a draft and HOLD, earlier failures leave nothing; a full rerun builds a new candidate needing fresh acceptance | `r13-candidate-gui-ci.md` |
 
 The file `docs/packaging/r13-candidate-gui-ci.md` is titled "r16 system GUI
 candidate CI"; the filename is historical.
@@ -79,7 +79,7 @@ other argument (`crates/snitchwatch-bridge-cli/src/cli.rs:49-60`).
 | System sockets | `systemctl status snitchwatch-system-bridge-grpc.socket snitchwatch-system-bridge.service`; `ls -l /run/snitchwatch/` | `system-bridge-integration.md:168-172` |
 | Bridge logs | `journalctl -b -u snitchwatch-system-bridge.service -u snitchwatch-system-bridge-grpc.socket` | `system-bridge-integration.md:172` |
 | Bridge up without GUI | closing the GUI window must not stop `snitchwatch-bridge.service` | `rpm-ostree-layering.md` step 5 |
-| Daemon Health page (GUI drawer entry) | four checks: `opensnitchd reachable`, `firewall running`, `eBPF support`, `nftables support`; the pass condition is no warning banner | `crates/snitchwatch-kirigami/qml/GlobalDrawer.qml:167`; `phase2-manual-verification-runbook.md:315-335` |
+| Daemon Health page (GUI drawer entry) | four checks: `opensnitchd reachable`, `firewall running`, `eBPF support`, `nftables support`; pass = the status summary reads `Daemon reachable; firewall checks passed` and all four check rows show healthy; absence of the banner is not a pass (`daemon_health_model.rs:12-16,48-65`, `qml/main.qml:440`) | `crates/snitchwatch-kirigami/qml/GlobalDrawer.qml:167`; `phase2-manual-verification-runbook.md:315-335` |
 | Blocklist "Rule installed" is not proof the daemon loaded the hosts | `sudo grep "domains loaded" /var/log/opensnitchd.log` | `README.md` "M4" |
 | Scanner (userspace) | `scanner-cli` prints JSON; exit 0 clean, 1 actionable anomalies, 2 could not run | `crates/scanner-cli/src/main.rs:12-15` |
 | Scanner (privileged) | binary `snitchwatch-scanner-privileged`, broker `snitchwatch-scanner-broker`; no usage text read in this pass | `crates/scanner-privileged/Cargo.toml:17-18`; `crates/scanner-broker/Cargo.toml:7-8` |

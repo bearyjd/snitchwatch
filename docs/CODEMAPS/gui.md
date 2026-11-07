@@ -15,10 +15,10 @@ QML action --> model/controller (qinvokable) --> BridgeHandles::send ClientMessa
 - `bridge_runtime.rs`: `client_loop` :372, `connect_and_relay` :410, `await_authentication_ack` :508, `resolve_token_path` :290, `handles()` :688. Env: `SNITCHWATCH_WS_SOCKET`, `SNITCHWATCH_SYSTEM_BRIDGE`, `SNITCHWATCH_WS_TOKEN_PATH`.
 - `bridge_feed.rs:145` `BridgeFeedRust`: link status for the `main.qml` InlineMessage. Each model filters messages before queueing to Qt.
 
-### Rust <-> QML objects (cxx-qt)
+### Rust <-> QML objects (cxx-qt, non-exhaustive)
 BridgeFeed, `*Model` types (Connections, Rules, Traffic, Blocklists, Profiles, CuratedDefaults, DaemonHealth, DenyStatus, Geo, About) and `*Controller` types (Settings, Tray, Notification, Scanner, Wizard, RuleEditor, MakeRule, RulesIo, LearningReview, AnalysisExport), plus AppInfo. Qt-free logic sits in modules beside the wrappers (`connections/`, `rules/`, `geo/`, `learned/`); the crate itself always builds with Qt (`build.rs:17`) and integration tests link the cxx-qt code (`src/lib.rs:5`).
 
-### QML tree (`qml/`)
+### QML tree (`qml/`, non-exhaustive)
 `main.qml` -> `GlobalDrawer`, `StackNav`; pages: Connections, Rules (+ editor/import/simulator sheets), Blocklists, Profiles, CuratedGroups, Traffic, Geo (`Map*`), Diagnostics/DaemonHealth, Scanner, Learning, SilentMode, Onboarding, About. Alerts: `AlertHost`, `AlertWindow`, `PendingDecisionSheet`.
 
 ### Tray, notifications, modes

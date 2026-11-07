@@ -10,7 +10,7 @@ Detects drift on rpm-ostree/atomic Bazzite by delegating to `rpm-ostree`, `rpm -
 | `Scanner::run` over `Vec<Box<dyn Check>>`; `Check` trait | `scanner.rs:37,73`; `checks/mod.rs:100` |
 | Checks: flatpak, listeners (`ss`), shell_rc, systemd_user; outbound is a deferred stub | `checks/*.rs` |
 | 5-step expected-drift-vs-anomaly `classify(PathFacts)` | `classify.rs:80` |
-| `ScanStore` (new / outstanding / resolved), `BaselineStore` (TOFU per surface) | `stores/scans.rs:67`, `stores/baseline.rs:64` |
+| `ScanStore` (new / outstanding / resolved + userspace per-surface TOFU baseline), `BaselineStore` (privileged hash cache) | `stores/scans.rs:4-13,67,216-245`, `stores/baseline.rs:64` |
 | `Anomaly`, `ReportedFinding`, `ScanReport` | `finding.rs:9,45,55` |
 
 ## scanner-cli (bin)

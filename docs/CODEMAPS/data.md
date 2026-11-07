@@ -4,7 +4,7 @@
 ## Runtime (not persisted)
 | Item | Path | Writer -> reader |
 |---|---|---|
-| WS socket | `$XDG_RUNTIME_DIR/snitchwatch/bridge.sock` (bridge: `SNITCHWATCH_WS_SOCKET`) | `ws_server.rs:116` -> GUI `bridge_runtime.rs:266` |
+| WS socket | `$XDG_RUNTIME_DIR/snitchwatch/bridge.sock` (bridge: `SNITCHWATCH_WS_SOCKET`) | `ws_server.rs:116` -> GUI `bridge_runtime.rs:268` |
 | Token (32 random bytes, hex) | `token` beside the socket (`bridge-cli lib.rs:291-302`); `SNITCHWATCH_WS_TOKEN_PATH` overrides only the GUI lookup (`bridge_runtime.rs:287`) | `auth.rs:98` -> GUI |
 | System mode | `/run/snitchwatch/{opensnitchd,bridge}.sock`, token `/run/snitchwatch-auth/token` 0640 (`activation.rs:10-12`) | `auth.rs:111` -> GUI `bridge_runtime.rs:23` |
 
