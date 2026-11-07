@@ -1,46 +1,42 @@
-# Watchdog sweep: SIGSTOP phase (2026-11-06)
+# Sweep SIGSTOP phase: considered and rejected (2026-11-06)
 
-Scope: `crates/scanner-privileged` (`containment.rs`, `command.rs`) only.
+Scope: `crates/scanner-privileged` (`containment.rs`, `command.rs`).
 
 ## Problem
-1. `kill_descendants_with` scans `/proc`, then SIGKILLs the listed pids one by
-   one. A descendant forking in a tight loop (own session) forks again between
-   the scan and its own kill; those children are not in the list, get orphaned
-   when it dies, and survive both the sweep bound and `killpg(own_group)`.
-2. `expire_watchdog_with`'s `own_group <= 1` early return is unreachable in
-   production (pid comes from `getpid`) yet is the only path to Expired alive;
-   the invariant is undocumented.
+A descendant forking in a tight loop in its own session can fork between the
+sweep's scan and its kill. Those children are not in the scan, and if their
+parent dies first they are orphaned. Fable's LOW: they could survive both the
+2 s sweep bound and `killpg(own_group)`. A second, minor point: the
+`own_group <= 1` early return in `expire_watchdog_with` is unreachable in
+production but is the only way to end Expired with the scanner alive.
 
-## Approach
-1. Per pass with live descendants: SIGSTOP each (same pidfd + parent-checked
-   path as the kill, so a recycled pid is never signalled), re-scan once to
-   catch children forked before the stop took effect (stop those too), then
-   SIGKILL the union. A stopped process cannot fork; SIGKILL works on stopped
-   processes. A stop failure other than ESRCH is counted but never aborts the
-   kill. Settled invariants unchanged: sweep before `killpg`, nothing logs or
-   blocks in between, one deadline checked per `/proc` entry and per signalled
-   pid (stops and kills), failed/truncated scans never count as empty, two
-   consecutive empty passes to complete.
-   The signal-generic helper is shared; `kill_if_descendant*` keep SIGKILL.
-2. `debug_assert!(own_group > 1)` documenting the invariant; the runtime guard
-   and its test stay.
+## Considered: a SIGSTOP phase
+Per pass, stop every live descendant (pidfd / parent-checked), re-scan once for
+late children, then SIGKILL. A stopped process cannot fork.
 
-Review follow-up: every pid a stop was issued for is recorded and killed on
-every exit path (deadline, failed re-scan), newest first, with the kill pass
-exempt from the deadline; the deadline is only checked before a stop. The
-fork-loop fixture uses a per-invocation marker and only counts and cleans up
-processes below its own root.
+## Why it was rejected (Codex review findings)
+1. Unwind cleanup: a panic mid-pass strands already-stopped pids; they stay
+   stopped, out of reach of the own-group kill when in another session.
+2. Bare-pid stop fallback: without a pidfd the stop goes by pid after a parent
+   check, so a recycled pid can be frozen.
+3. Unbounded kill pass: killing every stopped pid regardless of the deadline
+   can overrun main's 5 s exit wait.
+4. A failed kill after a successful stop is never reported: `killpg` kills the
+   scanner before the sweep's diagnostics are logged.
+5. With the scanner as a subreaper (as in production) the flat-out fork loop
+   dies without a stop phase: orphans stay in the subtree and the next pass
+   finds them. The end-to-end test passed with the stop phase disabled.
 
-## Tests (each seen failing first)
-- injected: stop precedes kill, re-scan catches late children (stopped, killed).
-- real: a setsid shell loop forking `sleep` flat out is fully dead after the sweep.
-- real: an already SIGSTOPped process is killed.
-- real: the stop path never signals a pid outside the tree.
-- injected: deadline bounds stops+kills; a failed stop still kills and counts.
-- `completion_needs_two_consecutive_empty_passes`: scan count 4 -> 5 (the
-  re-scan is one extra scan on a non-empty pass); expectations otherwise intact.
+The stop phase added more failure modes than it removed, so the sweep is
+unchanged.
 
-## Risks
-Fixture leaks (all children killed and reaped via guards). One word is banned
-in this crate's identifiers and comments (bridge `dormant_tests`); the state
-type is `WatchdogState`.
+## Kept
+- `debug_assert!(own_group > 1 || cfg!(test))` in `expire_watchdog`
+  documenting the invariant (the runtime guard and its test are unchanged).
+- Fixture hygiene: the fork-loop fixture uses a per-run unique marker (pid,
+  clock, counter), counts only `sleep <marker>` processes below its own root,
+  cleans up only its own subtree, and treats a failed or truncated observation
+  as an error, never as "none". The fork-loop test stays as a regression guard
+  of the existing sweep. Tests: `markers_are_unique_per_call`,
+  `a_foreign_process_with_the_same_argv_is_neither_counted_nor_killed`,
+  `a_failed_observation_is_an_error_not_an_empty_list`.
