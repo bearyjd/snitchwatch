@@ -76,6 +76,14 @@ const DESCENDANT_SWEEP: Duration = Duration::from_secs(2);
 /// `notify` is a best-effort, non-blocking diagnostic run only once the expiry
 /// has actually begun (not when the scanner is already leaving), before any kill.
 pub fn expire_watchdog(own_group: i32, notify: impl FnOnce()) {
+    // `main` passes its own getpid, always > 1. The refusal in
+    // `expire_watchdog_with` is the only way to end Expired with the scanner
+    // still alive, so production must never reach it. The unit tests of that
+    // refusal pass 1 on purpose, hence the `cfg!(test)` exemption.
+    debug_assert!(
+        own_group > 1 || cfg!(test),
+        "invalid scanner group {own_group}"
+    );
     expire_watchdog_with(
         own_group,
         || {
@@ -732,9 +740,7 @@ mod tests {
     /// Kill the fixture's whole group while its pid is still reserved
     /// (unreaped), then reap it and return its status.
     fn kill_group_then_reap(scanner: &mut Child) -> std::process::ExitStatus {
-        unsafe {
-            libc::kill(-(scanner.id() as i32), libc::SIGKILL);
-        }
+        crate::containment::fixture_signal::killpg(scanner.id() as i32);
         scanner.wait().unwrap()
     }
 
@@ -833,9 +839,7 @@ mod tests {
         };
         // Never leak a stuck fixture, whatever failed.
         if stalled > 0 && !gone(stalled) {
-            unsafe {
-                libc::kill(stalled, libc::SIGKILL);
-            }
+            crate::containment::fixture_signal::kill(stalled);
         }
         let status = kill_group_then_reap(&mut scanner);
         unsafe {
@@ -937,9 +941,7 @@ mod tests {
             let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
             // Never leak a fixture, whatever failed.
             for &pid in &survivors {
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                }
+                crate::containment::fixture_signal::kill(pid);
             }
             let status = kill_group_then_reap(&mut scanner);
             assert!(exited, "{mode}: the watchdog did not terminate the scanner");
@@ -1040,9 +1042,7 @@ mod tests {
         }
         let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
         for &pid in &survivors {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
+            crate::containment::fixture_signal::kill(pid);
         }
         let status = kill_group_then_reap(&mut scanner);
         assert!(exited, "the watchdog did not terminate the scanner");
@@ -1109,8 +1109,8 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(300));
                     },
                     |root| crate::containment::kill_descendants(root, DESCENDANT_SWEEP),
-                    |group| unsafe {
-                        libc::killpg(group, libc::SIGKILL);
+                    |group| {
+                        crate::containment::fixture_signal::killpg(group);
                     },
                     |_| {},
                 );
@@ -1170,9 +1170,7 @@ mod tests {
         }
         let survivors: Vec<i32> = reported.iter().copied().filter(|&pid| !gone(pid)).collect();
         for &pid in &survivors {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
+            crate::containment::fixture_signal::kill(pid);
         }
         let status = kill_group_then_reap(&mut scanner);
         assert!(exited, "{mode}: the scanner never exited");
@@ -1250,9 +1248,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             if !gone(escapee) {
-                unsafe {
-                    libc::kill(escapee, libc::SIGKILL);
-                }
+                crate::containment::fixture_signal::kill(escapee);
                 std::process::exit(3);
             }
             std::process::exit(0);
@@ -1273,9 +1269,7 @@ mod tests {
             .unwrap();
         let exited = exited_within(&scanner, Duration::from_secs(20));
         for pid in reported_pids(&pids) {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
+            crate::containment::fixture_signal::kill(pid);
         }
         let status = kill_group_then_reap(&mut scanner);
         assert!(exited, "the fixture never finished");
@@ -1351,9 +1345,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             let code = if gone(escapee) { 0 } else { 3 };
-            unsafe {
-                libc::kill(escapee, libc::SIGKILL);
-            }
+            crate::containment::fixture_signal::kill(escapee);
             std::process::exit(code);
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1372,9 +1364,7 @@ mod tests {
             .unwrap();
         let exited = exited_within(&scanner, Duration::from_secs(20));
         for pid in reported_pids(&pids) {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
+            crate::containment::fixture_signal::kill(pid);
         }
         let status = kill_group_then_reap(&mut scanner);
         assert!(exited, "the fixture never finished");
@@ -1469,9 +1459,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(200));
             let pids = reported_pids(std::path::Path::new(&file));
             if let Some(&helper) = pids.first() {
-                unsafe {
-                    libc::kill(helper, libc::SIGKILL);
-                }
+                crate::containment::fixture_signal::kill(helper);
                 std::process::exit(3);
             }
             std::process::exit(if result.is_err() { 0 } else { 5 });
@@ -1493,9 +1481,7 @@ mod tests {
             .unwrap();
         let exited = exited_within(&scanner, Duration::from_secs(20));
         for pid in reported_pids(&pids) {
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
+            crate::containment::fixture_signal::kill(pid);
         }
         let status = kill_group_then_reap(&mut scanner);
         assert!(exited, "{mode}: the fixture never finished");
