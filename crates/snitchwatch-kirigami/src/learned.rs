@@ -66,6 +66,13 @@ pub fn set_active(on: bool) -> bool {
     }
 }
 
+/// Whether the process-wide recorder has a file attached (tests only: no lib
+/// test may give it one, or every later window inherits the file's rows).
+#[cfg(test)]
+pub(crate) fn has_backend() -> bool {
+    global().has_backend()
+}
+
 /// Keep the recorded list in `path` from now on (once; later calls do
 /// nothing).
 pub fn attach(path: &Path) {

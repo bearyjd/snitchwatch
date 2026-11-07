@@ -40,6 +40,19 @@ impl Harness {
     fn pump_until_idle(&mut self) {
         self.pump_until(|h| !h.with(|c| *c.busy()));
     }
+    /// Wait until the production window's startup thread has applied its first
+    /// preferences push: it ran every step that could touch the recorder.
+    fn wait_preferences_loaded(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while native::ffi::probe(self.engine.pin_mut(), &QString::from("preferencesLoaded"))
+            .to_string()
+            != "ok"
+        {
+            assert!(Instant::now() < deadline, "preferences were never applied");
+            native::ffi::process_events();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
     fn request(&mut self) -> String {
         self.with(|mut c| {
             c.as_mut().request_export(&QString::from("{}"));
@@ -68,7 +81,30 @@ fn reply(link: &crate::bridge_runtime::test_link::TestLink, session: u64, id: St
 
 #[test]
 fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
+    // Loading the production main.qml writes process-wide silent-mode and
+    // learning state; hold the lock every other writer of it holds.
+    let _lock = crate::learned::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     common::init_headless_qt_env();
+    // Probes load the production main.qml, whose startup reads and writes the
+    // config dir: it must be a throwaway one, never the developer's.
+    let (original, isolated) = common::home_isolation();
+    assert_ne!(original.as_deref(), Some(isolated.as_os_str()));
+    assert_eq!(
+        std::env::var_os("HOME").as_deref(),
+        Some(isolated.as_os_str())
+    );
+    assert!(crate::paths::learned_path().starts_with(&isolated));
+    // The XDG spec (and Qt) want the runtime dir to be 0700.
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
+    assert!(std::path::Path::new(&runtime).starts_with(&isolated));
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(&runtime)
+            .expect("runtime dir")
+            .permissions(),
+    );
+    assert_eq!(mode & 0o777, 0o700, "runtime dir mode");
     let _app = QGuiApplication::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let link = crate::bridge_runtime::test_link::TestLink::new(runtime.handle().clone(), 32, 32);
@@ -85,6 +121,14 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
             &QUrl::from("qrc:/analysis_export_lifecycle_probe.qml"),
         );
         native::ffi::process_events();
+        // The startup thread used to attach the real learned file to the
+        // process-wide recorder, which every later learning window in this
+        // binary then inherited (#259): no lib test may leave it attached.
+        harness.wait_preferences_loaded();
+        assert!(
+            !crate::learned::has_backend(),
+            "a lib test attached a file to the process-wide learned recorder"
+        );
         harness.with(|mut c| {
             c.as_mut().rust_mut().test_handles = Some(link.handles.clone());
             c.as_mut().rust_mut().test_directory = Some(directory.path().join("exports"));
@@ -305,5 +349,65 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
     assert!(
         !captured.contains("curl-é") && !captured.contains(directory.path().to_str().unwrap()),
         "diagnostic canary leaked"
+    );
+}
+
+/// The production main.qml writes process-wide silent-mode and learning state
+/// (AlertHost's `setSilentState`, the first preferences push). A scenario that
+/// loads it must wait for `learned::TEST_LOCK`, or it flips the mode or the
+/// window under a silent-answer test that is mid-window (#259).
+#[test]
+fn loading_main_qml_waits_for_the_process_wide_state_lock() {
+    use crate::settings::SilentMode;
+    let lock = crate::learned::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    crate::silent_mode::set_state(SilentMode::Allow);
+    crate::learned::set_active(false);
+    crate::learned::set_active(true);
+    // The worker says it is running before the observation window opens, so a
+    // slow thread start cannot make the window pass without the scenario ever
+    // having tried to load main.qml.
+    let (started_tx, started_rx) = mpsc::channel();
+    let scenario = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        stale_delivery_and_off_qt_save_keep_independent_lifetimes();
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the load scenario never started");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !scenario.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let choice = crate::silent_mode::current_choice();
+    let active = crate::learned::is_active();
+    crate::learned::set_active(false);
+    crate::silent_mode::set_state(SilentMode::Off);
+    drop(lock);
+    scenario.join().expect("the load scenario failed");
+    assert_eq!(choice, Some("allow"), "main.qml changed the silent mode");
+    assert!(active, "main.qml ended the learning window");
+}
+
+/// The exit hook deletes only the home this process created, and only in the
+/// creating process; the env var (which a test may repoint) is never trusted.
+#[test]
+fn the_exit_hook_removes_only_the_retained_home_in_its_creator() {
+    use std::path::Path;
+    let home = Path::new("/tmp/snitchwatch-probe-home-retained");
+    assert_eq!(
+        common::removal_target(Some(home), 41, 41).as_deref(),
+        Some(home)
+    );
+    assert_eq!(
+        common::removal_target(Some(home), 41, 42),
+        None,
+        "fork child"
+    );
+    assert_eq!(
+        common::removal_target(None, 41, 41),
+        None,
+        "nothing created"
     );
 }

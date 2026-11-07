@@ -284,6 +284,59 @@ fn run() -> anyhow::Result<()> {
 mod argument_tests {
     use super::*;
     use std::process::Command;
+
+    /// Whether `child` has exited, polled until `bound`, without reaping it:
+    /// its pid (and group) stays reserved, so no later signal can reach a
+    /// recycled one, and no other thread competes for the reap.
+    fn exited_without_reaping(child: &std::process::Child, bound: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
+        loop {
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let done = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    child.id(),
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            } == 0
+                && unsafe { info.si_pid() } != 0;
+            if done || start.elapsed() > bound {
+                return done;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// SIGKILL a child and its process group while the child is still
+    /// unreaped (its pid is reserved). Refuses a pid or group <= 1.
+    fn kill_unreaped_group(child: &mut std::process::Child) {
+        let pid = child.id() as i32;
+        if pid > 1 {
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+            }
+        }
+        let _ = child.kill();
+    }
+
+    #[test]
+    fn an_unreaped_child_group_is_killed_without_a_reaper_thread() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let mut child = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        kill_unreaped_group(&mut child);
+        let exited = exited_without_reaping(&child, std::time::Duration::from_secs(3));
+        // Never leak the fixture, whatever failed.
+        let _ = child.kill();
+        let status = child.wait().unwrap();
+        assert!(exited, "the group kill never ended the child");
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+    }
+
     #[test]
     fn private_directory_requires_safe_preprovisioning() {
         use std::os::unix::fs::{symlink, PermissionsExt};
@@ -376,29 +429,23 @@ mod argument_tests {
             panic!("watchdog did not terminate the fixture");
         }
         for mode in ["normal", "full", "closed"] {
-            let child = Command::new(std::env::current_exe().unwrap())
+            let mut child = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "argument_tests::watchdog_kills_its_group_with_a_bounded_best_effort_diagnostic", "--nocapture"])
                 .env(CHILD, mode)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn().unwrap();
-            let pid = child.id() as i32;
-            let (finished, result) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = finished.send(child.wait_with_output());
-            });
-            let output = match result.recv_timeout(Duration::from_secs(5)) {
-                Ok(output) => output.unwrap(),
-                Err(_) => {
-                    unsafe {
-                        libc::kill(-pid, libc::SIGKILL);
-                        libc::kill(pid, libc::SIGKILL);
-                    }
-                    let _ = result.recv_timeout(Duration::from_secs(2));
-                    panic!("watchdog or a check child blocked with {mode} diagnostic pipe");
-                }
-            };
+            // The child's stdout/stderr pipes are not drained while polling; that
+            // is safe only because the watchdog's group kill is unconditional.
+            // Polled without reaping: on a timeout the child is still ours, so
+            // the group kill cannot name a recycled pid.
+            if !exited_without_reaping(&child, Duration::from_secs(5)) {
+                kill_unreaped_group(&mut child);
+                let _ = child.wait();
+                panic!("watchdog or a check child blocked with {mode} diagnostic pipe");
+            }
+            let output = child.wait_with_output().unwrap();
             assert_eq!(output.status.signal(), Some(libc::SIGKILL), "{mode}");
             if mode == "normal" {
                 assert!(
