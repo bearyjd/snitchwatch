@@ -401,12 +401,6 @@ pub(crate) mod fixture_signal {
             .is_ok_and(|c| c.windows(marker.len()).any(|w| w == marker.as_bytes()))
     }
 
-    /// Whether `pid` is gone or a zombie (its cmdline is empty, and no exec
-    /// is coming).
-    fn gone_or_zombie(pid: i32) -> bool {
-        super::parent_and_zombie(pid).is_none_or(|(_, zombie)| zombie)
-    }
-
     /// `attempt` until it is not `Mismatch`, at most `tries` times with
     /// `pause` between. A process just spawned has an empty cmdline (new mm,
     /// args not yet copied) or its parent's until its exec lands, so a first
@@ -432,11 +426,28 @@ pub(crate) mod fixture_signal {
     /// [`kill_marked`], patient about a process that has not exec'd yet. A
     /// zombie or vanished pid is `Gone` at once: it has nothing left to exec.
     pub(crate) fn kill_marked_patiently(pid: i32, marker: &str) -> Verified {
+        patiently_with(pid, super::read_stat, super::has_other_tasks, || {
+            kill_marked(pid, marker)
+        })
+    }
+
+    /// The retry policy of [`kill_marked_patiently`] with `/proc` readers and
+    /// the kill attempt injected. `Gone` only for a pid that is vanished or a
+    /// zombie with no other task left (a zombie leader with running threads
+    /// still dies of SIGKILL). An unreadable `/proc` entry is `Refused`
+    /// (EMFILE, EACCES, hidepid...), never `Gone`, and is not retried.
+    pub(crate) fn patiently_with(
+        pid: i32,
+        stat: impl Fn(i32) -> io::Result<Option<(i32, bool)>>,
+        tasks: impl Fn(i32) -> io::Result<bool>,
+        mut attempt: impl FnMut() -> Verified,
+    ) -> Verified {
         retry_mismatch(50, std::time::Duration::from_millis(10), || {
-            if gone_or_zombie(pid) {
-                Verified::Gone
-            } else {
-                kill_marked(pid, marker)
+            match stat(pid) {
+                Err(e) => Verified::Refused(e.raw_os_error().unwrap_or(libc::EIO)),
+                Ok(None) => Verified::Gone,
+                Ok(Some((_, true))) if !tasks(pid).unwrap_or(true) => Verified::Gone,
+                Ok(_) => attempt(),
             }
         })
     }
@@ -719,6 +730,57 @@ pub(crate) mod fixture_signal {
             let took = start.elapsed();
             assert_eq!(got, Verified::Gone);
             assert!(took < std::time::Duration::from_millis(100), "{took:?}");
+        }
+
+        fn emfile() -> io::Error {
+            io::Error::from_raw_os_error(libc::EMFILE)
+        }
+
+        #[test]
+        fn an_unreadable_proc_entry_is_refused_not_gone_and_not_retried() {
+            let stats = Cell::new(0);
+            let attempts = Cell::new(0);
+            let got = patiently_with(
+                4242,
+                |_| {
+                    stats.set(stats.get() + 1);
+                    Err(emfile())
+                },
+                |_| Ok(false),
+                || {
+                    attempts.set(attempts.get() + 1);
+                    Verified::Sent
+                },
+            );
+            assert_eq!(got, Verified::Refused(libc::EMFILE));
+            assert_eq!((stats.get(), attempts.get()), (1, 0));
+        }
+
+        #[test]
+        fn only_a_vanished_or_fully_dead_zombie_is_gone() {
+            let attempts = Cell::new(0);
+            let run = |stat: Option<(i32, bool)>, tasks: io::Result<bool>| {
+                attempts.set(0);
+                let got = patiently_with(
+                    4242,
+                    |_| Ok(stat),
+                    |_| match &tasks {
+                        Ok(b) => Ok(*b),
+                        Err(_) => Err(emfile()),
+                    },
+                    || {
+                        attempts.set(attempts.get() + 1);
+                        Verified::Sent
+                    },
+                );
+                (got, attempts.get())
+            };
+            assert_eq!(run(None, Ok(false)), (Verified::Gone, 0));
+            assert_eq!(run(Some((1, true)), Ok(false)), (Verified::Gone, 0));
+            // A zombie leader with running threads, or unknown threads: tried.
+            assert_eq!(run(Some((1, true)), Ok(true)), (Verified::Sent, 1));
+            assert_eq!(run(Some((1, true)), Err(emfile())), (Verified::Sent, 1));
+            assert_eq!(run(Some((1, false)), Ok(false)), (Verified::Sent, 1));
         }
 
         #[test]
@@ -1450,6 +1512,11 @@ mod tests {
         }
     }
     /// Whether a chain of live parents leads from `pid` up to `root`.
+    /// A true result requires a live process whose parent is `root`, and
+    /// `root` is always an unreaped own child (`own_root()`/`Reaped`, asserted
+    /// to be above 1 and not `me()`), so nothing outside the fixture can become its child;
+    /// unpinned intermediate ancestors can only break a chain (spare), never
+    /// forge one.
     fn descends_from(pid: i32, root: i32) -> bool {
         let mut current = pid;
         for _ in 0..64 {
@@ -1684,7 +1751,7 @@ mod tests {
         let root = own_root();
         let mut holder = Reaped(
             Command::new("/usr/bin/sh")
-                .args(["-c", "sleep 29.5 & echo $!; wait"])
+                .args(["-c", &format!("sleep {} & echo $!; wait", unique_marker())])
                 .stdout(Stdio::piped())
                 .spawn()
                 .unwrap(),
