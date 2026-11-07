@@ -158,7 +158,7 @@ fn expire_watchdog_with(
     }
     if let Some(first) = &sweep.first_error {
         log(&format!(
-            "watchdog could not signal {} descendant(s); first error: {first}",
+            "watchdog descendant sweep had {} failed attempt(s); first error: {first}",
             sweep.failures
         ));
     }
@@ -213,26 +213,116 @@ impl Drop for ExpiryScope {
     }
 }
 
-/// Call when the main thread leaves (return, `exit`, or a panic via
-/// [`ExitGuard`]). `Running` -> `Exiting` (a later watchdog then does nothing)
-/// and the leftovers of the primitives that ran (a setsid escapee, a
-/// reparented orphan) are swept; mid-expiry, wait (bounded) for the watchdog's
-/// cleanup instead, so the process is not ended mid-sweep.
-pub fn finish_process() {
-    finish_process_with(|| {
-        let root = unsafe { libc::getpid() };
-        let sweep = crate::containment::kill_descendants(root, DESCENDANT_SWEEP);
-        if !sweep.complete || sweep.first_error.is_some() {
-            tracing::warn!(
-                failures = sweep.failures,
-                complete = sweep.complete,
-                "exit sweep left descendants"
-            );
-        }
-    });
+/// Written to stderr (best effort, see [`write_marker_nonblocking`]) when the
+/// exit sweep may have left a descendant alive. Kept next to the watchdog's.
+pub const EXIT_SWEEP_INCOMPLETE_MARKER: &[u8] = b"\nSNITCHWATCH_SCANNER_EXIT_SWEEP_INCOMPLETE\n";
+/// Keep in sync with scanner-broker's watchdog termination contract.
+pub const WATCHDOG_TIMEOUT_MARKER: &[u8] = b"\nSNITCHWATCH_SCANNER_WATCHDOG_TIMEOUT\n";
+
+/// The process exit status when the exit sweep was incomplete. It takes
+/// precedence over every normal status (0 clean, 1 error, 2 new anomalies).
+pub const EXIT_SWEEP_INCOMPLETE: i32 = 3;
+
+/// The hard deadline (seconds) armed on `Running` -> `Exiting`: the sweep
+/// bound plus a margin for the diagnostic and the process teardown.
+const EXIT_ALARM_SECS: u32 = DESCENDANT_SWEEP.as_secs() as u32 + 5;
+
+/// Whether `sweep` may have left a descendant alive.
+fn sweep_incomplete(sweep: &crate::containment::Sweep) -> bool {
+    !sweep.complete || sweep.first_error.is_some()
 }
 
-fn finish_process_with(sweep: impl FnOnce()) {
+/// `code`, unless the exit sweep was incomplete: then
+/// [`EXIT_SWEEP_INCOMPLETE`]. No sweep (the watchdog owns the exit): `code`.
+pub fn exit_code(code: i32, sweep: Option<&crate::containment::Sweep>) -> i32 {
+    match sweep {
+        Some(sweep) if sweep_incomplete(sweep) => EXIT_SWEEP_INCOMPLETE,
+        _ => code,
+    }
+}
+
+/// Best effort, bounded: one write of `marker` to `fd`, only if `fd` is a FIFO
+/// (other destinations may block whatever the flags), after setting
+/// `O_NONBLOCK` on it. `marker` must be shorter than `PIPE_BUF`, so the write
+/// emits all of it or nothing. Every failure is ignored.
+pub fn write_marker_nonblocking(fd: i32, marker: &[u8]) {
+    debug_assert!(marker.len() < libc::PIPE_BUF);
+    // SAFETY: `metadata` is a zeroed plain C struct that `fstat` only writes
+    // into; `fcntl` and `write` take a caller-owned fd (an invalid one just
+    // fails) and `write` reads `marker.len()` bytes from a live slice.
+    unsafe {
+        let mut metadata: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd, &mut metadata) != 0 || metadata.st_mode & libc::S_IFMT != libc::S_IFIFO {
+            return;
+        }
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return;
+        }
+        let _ = libc::write(fd, marker.as_ptr().cast(), marker.len());
+    }
+}
+
+/// Production `arm_alarm`: the default SIGALRM action terminates the process.
+/// Nothing in this crate installs a SIGALRM handler or blocks the signal; the
+/// disposition is reset and the signal unblocked on this thread anyway, because
+/// an ignored disposition and a blocked mask both survive exec and would
+/// silently defeat the bound. SIGALRM is process-directed, so it is delivered
+/// to any thread that does not block it, such as this one.
+fn arm_exit_alarm(seconds: u32) {
+    // SAFETY: `set` is a live, zero-initialised `sigset_t` that `sigemptyset`
+    // and `sigaddset` fill in; `pthread_sigmask` reads it and ignores the old
+    // mask (null); `signal` with `SIG_DFL` and `alarm` touch no memory of ours.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGALRM);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        libc::signal(libc::SIGALRM, libc::SIG_DFL);
+        libc::alarm(seconds);
+    }
+}
+
+/// Test only: make [`finish_process`]'s sweep report itself incomplete
+/// without signalling anything (re-exec fixtures of the exit status).
+#[cfg(test)]
+static FAKE_INCOMPLETE_EXIT_SWEEP: AtomicBool = AtomicBool::new(false);
+
+/// Call when the main thread leaves (return, `exit`, or a panic via
+/// [`ExitGuard`]). `Running` -> `Exiting` (a later watchdog then does nothing),
+/// a hard alarm is armed, and the leftovers of the primitives that ran (a
+/// setsid escapee, a reparented orphan) are swept; mid-expiry, wait (bounded)
+/// for the watchdog's cleanup instead, so the process is not ended mid-sweep.
+/// Returns the sweep, if this call ran it. After the sweep only the
+/// non-blocking marker is written: nothing that could hang the exit.
+pub fn finish_process() -> Option<crate::containment::Sweep> {
+    let sweep = finish_process_with(arm_exit_alarm, || {
+        #[cfg(test)]
+        if FAKE_INCOMPLETE_EXIT_SWEEP.load(Ordering::SeqCst) {
+            return crate::containment::Sweep {
+                complete: false,
+                failures: 1,
+                first_error: None,
+            };
+        }
+        // SAFETY: `getpid` has no preconditions.
+        let root = unsafe { libc::getpid() };
+        crate::containment::kill_descendants(root, DESCENDANT_SWEEP)
+    });
+    if sweep.as_ref().is_some_and(sweep_incomplete) {
+        write_marker_nonblocking(libc::STDERR_FILENO, EXIT_SWEEP_INCOMPLETE_MARKER);
+    }
+    sweep
+}
+
+/// [`finish_process`] with the alarm and the sweep injected. Arms the alarm
+/// (once: only on `Running` -> `Exiting`, before the sweep) and returns the
+/// sweep it ran. The alarm bounds a hung exit (a stuck sweep or teardown); it
+/// does not kill escaped descendants (a cgroup or a lifetime owner would).
+fn finish_process_with(
+    arm_alarm: impl FnOnce(u32),
+    sweep: impl FnOnce() -> crate::containment::Sweep,
+) -> Option<crate::containment::Sweep> {
     let mut state = match WATCHDOG_STATE.0.lock() {
         Ok(state) => state,
         Err(poison) => {
@@ -244,22 +334,54 @@ fn finish_process_with(sweep: impl FnOnce()) {
         Phase::Running => {
             state.phase = Phase::Exiting;
             drop(state);
-            sweep();
+            arm_alarm(EXIT_ALARM_SECS);
+            Some(sweep())
         }
-        Phase::Expiring => {
-            let _ = WATCHDOG_STATE
-                .1
-                .wait_timeout_while(state, WATCHDOG_CLEANUP_WAIT, |s| s.phase == Phase::Expiring);
-        }
-        Phase::Expired | Phase::Exiting => {}
+        Phase::Expiring => await_watchdog_cleanup(state, WATCHDOG_CLEANUP_WAIT),
+        Phase::Expired | Phase::Exiting => None,
     }
 }
 
+/// Waits up to `wait` for a mid-expiry watchdog to finish its own sweep. If it
+/// has not (the phase is still `Expiring`), its descendants may still be alive
+/// and the process is about to exit, so the result is an unfinished sweep,
+/// which [`exit_code`] turns into [`EXIT_SWEEP_INCOMPLETE`]. A watchdog that did
+/// finish leaves nothing for this exit to report (`None`).
+fn await_watchdog_cleanup(
+    state: MutexGuard<'static, WatchdogState>,
+    wait: Duration,
+) -> Option<crate::containment::Sweep> {
+    let (state, _) = WATCHDOG_STATE
+        .1
+        .wait_timeout_while(state, wait, |s| s.phase == Phase::Expiring)
+        .unwrap_or_else(|poison| poison.into_inner());
+    (state.phase == Phase::Expiring).then_some(crate::containment::Sweep {
+        complete: false,
+        failures: 0,
+        first_error: None,
+    })
+}
+
+/// Runs [`finish_process`], then ends the process with [`exit_code`] of
+/// `code` (the run's own status: 0, 1 or 2).
+pub fn exit_after_sweep(code: i32) -> ! {
+    let sweep = finish_process();
+    std::process::exit(exit_code(code, sweep.as_ref()))
+}
+
 /// Runs [`finish_process`] when dropped, including while a panic unwinds.
+/// Its `Drop` cannot return a status, so on an incomplete sweep it ends the
+/// process itself with [`EXIT_SWEEP_INCOMPLETE`], unless a panic is unwinding
+/// (the panic's own non-zero status stands; `exit` mid-unwind would skip the
+/// rest of it). Sound: the sweep already ran and `exit` skips only the
+/// destructors still pending, so declare the guard first in `main`.
 pub struct ExitGuard;
 impl Drop for ExitGuard {
     fn drop(&mut self) {
-        finish_process();
+        let sweep = finish_process();
+        if !std::thread::panicking() && sweep.as_ref().is_some_and(sweep_incomplete) {
+            std::process::exit(EXIT_SWEEP_INCOMPLETE);
+        }
     }
 }
 
@@ -632,6 +754,7 @@ mod tests {
     use crate::containment::test_fixtures::reaped::Reaped;
     use crate::containment::test_fixtures::scanner_fixture::ScannerFixture;
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    mod exit_tests;
     fn fixture(script: &str) -> io::Result<String> {
         capture(
             Command::new("/usr/bin/sh").args(["-c", script]),
@@ -1141,7 +1264,7 @@ mod tests {
     /// `main` leaving, without the real sweep (which would reach other tests'
     /// children in this process).
     fn begin_exit() {
-        finish_process_with(|| {});
+        finish_process_with(|_| {}, || sweep_with(0));
     }
 
     /// A spawn authorized before the watchdog fires (paused before `spawn()`,
@@ -1338,7 +1461,13 @@ mod tests {
         .join();
         assert!(WATCHDOG_STATE.0.is_poisoned());
         let swept = std::cell::Cell::new(false);
-        finish_process_with(|| swept.set(true));
+        finish_process_with(
+            |_| {},
+            || {
+                swept.set(true);
+                sweep_with(0)
+            },
+        );
         assert!(swept.get());
         assert_eq!(watchdog_state().phase, Phase::Exiting);
         WATCHDOG_STATE.0.clear_poison();

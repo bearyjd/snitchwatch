@@ -12,6 +12,13 @@
 //! `/var/lib/snitchwatch-scanner/scans.db`, which requires the elevated
 //! access pkexec grants). Override is useful for a non-privileged manual/dev
 //! run against a writable path.
+//!
+//! Exit status: 0 clean; 1 the scan could not run (error on stderr); 2 new
+//! anomalies found; 3 the exit sweep was incomplete (a descendant of this
+//! process may have survived it; marker `SNITCHWATCH_SCANNER_EXIT_SWEEP_INCOMPLETE`
+//! on a piped stderr), which takes precedence over 0, 1 and 2. Killed by
+//! SIGKILL with `SNITCHWATCH_SCANNER_WATCHDOG_TIMEOUT` on stderr: the watchdog
+//! fired. Killed by SIGALRM: the exit itself hung past its hard bound.
 
 use std::path::PathBuf;
 
@@ -19,8 +26,6 @@ use scanner_privileged::facts::LiveSystem;
 use scanner_privileged::{run_privileged_scan, ScanReport, ScanStore};
 
 const DEFAULT_DB: &str = "/var/lib/snitchwatch-scanner/scans.db";
-// Keep in sync with scanner-broker's watchdog termination contract.
-const WATCHDOG_TIMEOUT_MARKER: &[u8] = b"\nSNITCHWATCH_SCANNER_WATCHDOG_TIMEOUT\n";
 
 #[derive(Debug)]
 struct Args {
@@ -75,28 +80,13 @@ fn start_privileged_watchdog_after(timeout: std::time::Duration) -> anyhow::Resu
 /// Best effort only: a blocked or broken diagnostic must never delay the kill.
 /// Broker stderr is a pipe. Other destinations may have blocking I/O semantics,
 /// so omit the marker there rather than weakening the watchdog's deadline.
+/// The single nonblocking write either emits the complete marker or fails;
+/// the unconditional group kill follows either way.
 fn notify_watchdog_timeout() {
-    unsafe {
-        let mut metadata: libc::stat = std::mem::zeroed();
-        if libc::fstat(libc::STDERR_FILENO, &mut metadata) != 0
-            || metadata.st_mode & libc::S_IFMT != libc::S_IFIFO
-        {
-            return;
-        }
-        let flags = libc::fcntl(libc::STDERR_FILENO, libc::F_GETFL);
-        if flags < 0
-            || libc::fcntl(libc::STDERR_FILENO, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0
-        {
-            return;
-        }
-        // Shorter than PIPE_BUF: this single nonblocking write either emits the
-        // complete marker or fails. The unconditional group kill follows either way.
-        let _ = libc::write(
-            libc::STDERR_FILENO,
-            WATCHDOG_TIMEOUT_MARKER.as_ptr().cast(),
-            WATCHDOG_TIMEOUT_MARKER.len(),
-        );
-    }
+    scanner_privileged::command::write_marker_nonblocking(
+        libc::STDERR_FILENO,
+        scanner_privileged::command::WATCHDOG_TIMEOUT_MARKER,
+    );
 }
 
 /// Best-effort active-deployment checksum from `rpm-ostree status --json`.
@@ -228,16 +218,29 @@ fn validate_database_files(db: &std::path::Path, owner: u32) -> anyhow::Result<(
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     // However `run` ends (return, error, panic): leave through the watchdog_state's
     // exit transition, which excludes a concurrent watchdog expiry. A panic
     // reaches this guard only by unwinding, so this relies on panic=unwind
-    // (the default; never set `panic = "abort"` for this binary).
+    // (the default; never set `panic = "abort"` for this binary). Otherwise
+    // `exit_after_sweep` leaves first (`exit` skips the guard's drop).
     let _exit = scanner_privileged::command::ExitGuard;
-    run()
+    let code = match run() {
+        Ok(code) => code,
+        Err(error) => {
+            // What returning the error from `main` printed, but before the
+            // sweep: nothing that can block runs after it. Errors ignored, as there.
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "Error: {error:?}");
+            1
+        }
+    };
+    scanner_privileged::command::exit_after_sweep(code)
 }
 
-fn run() -> anyhow::Result<()> {
+/// The scan's own exit status (0 clean, 2 new anomalies); `main` may still
+/// replace it with 3 if the exit sweep is incomplete.
+fn run() -> anyhow::Result<i32> {
     init_logging();
     let elevated = unsafe { libc::geteuid() } == 0;
     let args = parse_args_from(std::env::args().skip(1), elevated)?;
@@ -271,13 +274,13 @@ fn run() -> anyhow::Result<()> {
     }
 
     // Exit non-zero if any new anomaly was found, so a caller (or the report
-    // UI's invocation wrapper) can react without parsing output.
-    if report.reconciled.new.is_empty() {
-        Ok(())
+    // UI's invocation wrapper) can react without parsing output. An incomplete
+    // exit sweep turns either status into 3 (see the module docs).
+    Ok(if report.reconciled.new.is_empty() {
+        0
     } else {
-        scanner_privileged::command::finish_process();
-        std::process::exit(2);
-    }
+        2
+    })
 }
 
 #[cfg(test)]
