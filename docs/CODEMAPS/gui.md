@@ -1,4 +1,4 @@
-<!-- Generated: 2026-11-06 | Files scanned: 40 | Token estimate: ~910 -->
+<!-- Generated: 2026-11-06 | Token estimate: ~880 (o200k_base) -->
 # GUI
 
 ## snitchwatch-kirigami (target shell; excluded from `default-members`)
@@ -16,7 +16,7 @@ QML action --> model/controller (qinvokable) --> BridgeHandles::send ClientMessa
 - `bridge_feed.rs:145` `BridgeFeedRust`: link status for the `main.qml` InlineMessage. Each model filters messages before queueing to Qt.
 
 ### Rust <-> QML objects (cxx-qt)
-BridgeFeed, `*Model` types (Connections, Rules, Traffic, Blocklists, Profiles, CuratedDefaults, DaemonHealth, DenyStatus, Geo, About) and `*Controller` types (Settings, Tray, Notification, Scanner, Wizard, RuleEditor, MakeRule, RulesIo, LearningReview, AnalysisExport), plus AppInfo. Qt-free cores sit beside each wrapper (`connections/`, `rules/`, `geo/`, `learned/`) so tests need no Qt.
+BridgeFeed, `*Model` types (Connections, Rules, Traffic, Blocklists, Profiles, CuratedDefaults, DaemonHealth, DenyStatus, Geo, About) and `*Controller` types (Settings, Tray, Notification, Scanner, Wizard, RuleEditor, MakeRule, RulesIo, LearningReview, AnalysisExport), plus AppInfo. Qt-free logic sits in modules beside the wrappers (`connections/`, `rules/`, `geo/`, `learned/`); the crate itself always builds with Qt (`build.rs:17`) and integration tests link the cxx-qt code (`src/lib.rs:5`).
 
 ### QML tree (`qml/`)
 `main.qml` -> `GlobalDrawer`, `StackNav`; pages: Connections, Rules (+ editor/import/simulator sheets), Blocklists, Profiles, CuratedGroups, Traffic, Geo (`Map*`), Diagnostics/DaemonHealth, Scanner, Learning, SilentMode, Onboarding, About. Alerts: `AlertHost`, `AlertWindow`, `PendingDecisionSheet`.

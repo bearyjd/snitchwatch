@@ -9,7 +9,6 @@ put a secret value in this file, in a unit, or in a shell history: the bridge
 handshake token is a generated file, not a variable (see `docs/RUNBOOK.md`).
 
 Required column: "no" means the code has a default or tolerates absence.
-Nothing below is required for a normal desktop session.
 
 ## Runtime: bridge (`snitchwatch-bridge-cli`)
 
@@ -35,10 +34,6 @@ Variables fixed by the shipped units (not read from your shell):
 | user unit | `SNITCHWATCH_GRPC_BIND=127.0.0.1:50051`, `SNITCHWATCH_WS_SOCKET=%t/snitchwatch/bridge.sock`, `RUST_LOG=info` | `packaging/systemd/snitchwatch-bridge.service:33,39,40` |
 | system unit | `SNITCHWATCH_SYSTEM_BRIDGE=1`, `SNITCHWATCH_WS_SOCKET=/run/snitchwatch/bridge.sock`, `SNITCHWATCH_WS_TOKEN_PATH=/run/snitchwatch-auth/token`, `HOME=/var/lib/snitchwatch`, `XDG_STATE_HOME=/var/lib` | `packaging/system/snitchwatch-system-bridge.service:20-24` |
 | system Flatpak | `SNITCHWATCH_SYSTEM_BRIDGE=1` (`--env=`) | `packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml:79` |
-
-Note: the README says the `SNITCHWATCH_GRPC_BIND` default is `127.0.0.1:50051`
-(README.md "Environment variables"); the code and `--help` say `127.0.0.1:0`.
-`50051` is what the user unit sets, not the code default.
 
 ## Runtime: GUI (`snitchwatch-kirigami`)
 
@@ -113,18 +108,18 @@ lines, sourced by the justfile and scripts).
 |---|---|---|
 | `QT_QPA_PLATFORM=offscreen`, `QT_QUICK_CONTROLS_STYLE=Basic` | `crates/snitchwatch-kirigami/tests/smoke.rs:28-32` (set if unset); `.github/workflows/ci.yml` kirigami job; justfile `qml-test` | Headless Qt. Default Kirigami style hangs offscreen (`main.rs:40-44` comment). |
 | `QT_FORCE_STDERR_LOGGING=1` | justfile `qml-test`; `ci.yml` qmltestrunner step | QML test output to stderr. |
-| `QT_QUICK_BACKEND=software` | justfile `kirigami-screenshots` | Screenshot recipe only. |
+| `QT_QUICK_BACKEND=software` | justfile `kirigami-screenshots`; `crates/snitchwatch-kirigami/tests/native-tray/run.sh:46,57` | Software Qt Quick renderer for the screenshot recipe and the native tray fixture. |
 | `QT_LOGGING_RULES`, `QML_XHR_ALLOW_FILE_READ/WRITE` | `crates/snitchwatch-kirigami/tests/geo_qml.rs:29`, `crates/snitchwatch-kirigami/tests/status_pages_keyboard_qml.rs:219`, `crates/snitchwatch-kirigami/tests/level_rule_unavailable_once_qml.rs:33` | Set inside individual probes. |
 | `CI` | `crates/snitchwatch-kirigami/src/notification_signals/bus_tests.rs:33,156`; `ci.yml` kirigami job (`CI: "true"`) | When set, missing `dbus-daemon`/`xdg-dbus-proxy` fails the private-bus tests instead of skipping. |
 | `SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS` | `tests/mock_opensnitchd/src/lib.rs:75` | Shrinks the mock's AskRule deadline (clamped; cannot exceed the real 120 s). Read once per process. |
 | `SNITCHWATCH_DBIP_PROOF`, `SNITCHWATCH_DBIP_CITY_PROOF` | `crates/snitchwatch-kirigami/src/geo/install/tests.rs:158,540`; `crates/snitchwatch-kirigami/tests/geo_validation_worker.rs:177` | Path to a real DB-IP file for proof tests; the tests `expect` it, so leave them unset in normal runs. |
 | `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `SNITCHWATCH_WS_SOCKET`, `SNITCHWATCH_WS_TOKEN_PATH` | set to tempdirs by many `crates/snitchwatch-kirigami/tests/*_qml.rs` (e.g. `tray_lifecycle_qml.rs:33-35`, `learning_end_qml.rs:37`) | Test isolation; see `docs/CONTRIBUTING.md` "Test safety". |
 | `SNITCHWATCH_TEST_*`, `*_CHILD` | `scanner-privileged/src/{command,containment,main}.rs`, `snitchwatch-bridge/src/history/tests.rs:502`, others | Internal re-exec markers for child-process tests; not user-facing. |
-| `PATH` | `crates/scanner-core/src/inspector.rs:127`, `crates/snitchwatch-bridge/src/diagnostics/kernel_probe.rs:19` | Searched for helper programs (`nft`, scanner tools); unset means "not found". |
+| `PATH` | `crates/scanner-core/src/inspector.rs:127`, `crates/snitchwatch-bridge/src/diagnostics/kernel_probe.rs:19` | Searched when looking up programs by name (`nft` probe in the bridge; `SystemInspector::which` in scanner-core); unset means "not found". |
 | `SW_STEPS` | `crates/snitchwatch-kirigami/tests/support/probe_runner.rs:64` | QML probe step limit; default `1000000`. |
 | `SNITCHWATCH_TRAY_TEST_SDK` | `crates/snitchwatch-kirigami/tests/native-tray/run.sh:58` | Flatpak SDK for the native tray fixture; default `org.kde.Sdk//6.11`. |
 | `SNITCHWATCH_WEB_BASE`, `SNITCHWATCH_TAURI_BASE` | `tests/web_smoke/playwright.config.ts:11`, `tests/tauri_smoke/playwright.config.ts:10` | Playwright base URL; default `http://127.0.0.1:3031`. |
-| `SNITCHWATCH_MOCK_DAEMON_RUNNING` | `tests/tauri_smoke/tests/wizard_branches.spec.ts:26`, `tray_states.spec.ts:25` | When set, those specs run instead of skipping. |
+| `SNITCHWATCH_MOCK_DAEMON_RUNNING` | `tests/tauri_smoke/tests/wizard_branches.spec.ts:26`, `tray_states.spec.ts:25` | When unset, those specs skip (they need `mock_opensnitchd` on `127.0.0.1:50051`). |
 | `R16_CANDIDATE_REVIEWED_SHA` | repository variable (`vars.`), `.github/workflows/candidate-gui.yml` | Owner-set full SHA authorising the candidate build and publish. Not a secret; the owner sets it (see `docs/RUNBOOK.md`). |
 | `XDG_{DATA,CONFIG,CACHE}_HOME` | `.github/workflows/candidate-gui.yml:53-55` | Job-local dirs under `runner.temp`. |
 

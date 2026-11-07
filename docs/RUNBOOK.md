@@ -1,6 +1,6 @@
 # Runbook
 
-Only what the repo defines. Each row cites its source; where there is none the
+Each row cites its source; where there is none the
 text says "Not defined in the repo". Variables: `docs/ENV.md`. Contributor
 workflow: `docs/CONTRIBUTING.md`.
 
@@ -59,8 +59,8 @@ decision (hard rule above).
 | `release.yml` runs on `v*` tags: rebuild, reproducibility check, install check, RustSec gate, then (environment `release`) refuse if the tag moved or a release exists, attest, create a **draft** release only | `.github/workflows/release.yml` header; `bridge-release-artifact.md` "Cutting a release" 3 |
 | `workflow_dispatch` of `Release` builds and verifies without publishing | `release.yml:6-9`; `bridge-release-artifact.md` |
 | Maintainer compares the draft's sha256 with the local build, runs the attestation check, publishes the draft, pins the sha256 in the image | `bridge-release-artifact.md` "Cutting a release" 4 |
-| Candidate GUI: `candidate-gui.yml` triggers only on a push to `r16-candidate`. Build runs only if repo variable `R16_CANDIDATE_REVIEWED_SHA` equals the pushed SHA, else a `register` job holds. Publisher needs green exact-head `ci.yml`, validates the packet, creates the lightweight tag `r16-candidate` if missing and a draft, uploads assets, and then **automatically makes the prerelease public** (`draft: false, prerelease: true, make_latest: 'false'`), so a push of the reviewed SHA publishes without further approval; it never overwrites assets and never becomes "latest" | `.github/workflows/candidate-gui.yml:4-30,245,259-260`; `docs/packaging/r13-candidate-gui-ci.md` |
-| A published candidate is never replaced; failure leaves a draft and HOLD; a full rerun builds a new candidate needing fresh acceptance | `r13-candidate-gui-ci.md` |
+| Candidate GUI: `candidate-gui.yml` triggers only on a push to `r16-candidate`. Build runs only if repo variable `R16_CANDIDATE_REVIEWED_SHA` equals the pushed SHA, else a `register` job holds. Publisher needs green exact-head `ci.yml`, validates the packet, creates the lightweight tag `r16-candidate` if missing and a draft, uploads assets, and then **automatically makes the prerelease public** (`draft: false, prerelease: true, make_latest: 'false'`), so after the owner sets the variable, the push itself publishes with no further workflow step; it never overwrites assets and never becomes "latest" | `.github/workflows/candidate-gui.yml:4-30,245,259-260`; `docs/packaging/r13-candidate-gui-ci.md` |
+| The workflow refuses an existing release or mismatched tag and does not overwrite assets; failure leaves a draft and HOLD; a full rerun builds a new candidate needing fresh acceptance | `r13-candidate-gui-ci.md` |
 
 The file `docs/packaging/r13-candidate-gui-ci.md` is titled "r16 system GUI
 candidate CI"; the filename is historical.
@@ -79,14 +79,14 @@ other argument (`crates/snitchwatch-bridge-cli/src/cli.rs:49-60`).
 | System sockets | `systemctl status snitchwatch-system-bridge-grpc.socket snitchwatch-system-bridge.service`; `ls -l /run/snitchwatch/` | `system-bridge-integration.md:168-172` |
 | Bridge logs | `journalctl -b -u snitchwatch-system-bridge.service -u snitchwatch-system-bridge-grpc.socket` | `system-bridge-integration.md:172` |
 | Bridge up without GUI | closing the GUI window must not stop `snitchwatch-bridge.service` | `rpm-ostree-layering.md` step 5 |
-| Daemon Health page (GUI drawer entry) | four checks: `opensnitchd reachable`, `firewall running`, `eBPF support`, `nftables support`; a warning banner appears when unhealthy | `crates/snitchwatch-kirigami/qml/GlobalDrawer.qml:167`; `phase2-manual-verification-runbook.md:315-335` |
+| Daemon Health page (GUI drawer entry) | four checks: `opensnitchd reachable`, `firewall running`, `eBPF support`, `nftables support`; the pass condition is no warning banner | `crates/snitchwatch-kirigami/qml/GlobalDrawer.qml:167`; `phase2-manual-verification-runbook.md:315-335` |
 | Blocklist "Rule installed" is not proof the daemon loaded the hosts | `sudo grep "domains loaded" /var/log/opensnitchd.log` | `README.md` "M4" |
 | Scanner (userspace) | `scanner-cli` prints JSON; exit 0 clean, 1 actionable anomalies, 2 could not run | `crates/scanner-cli/src/main.rs:12-15` |
 | Scanner (privileged) | binary `snitchwatch-scanner-privileged`, broker `snitchwatch-scanner-broker`; no usage text read in this pass | `crates/scanner-privileged/Cargo.toml:17-18`; `crates/scanner-broker/Cargo.toml:7-8` |
 
 ## Common issues
 
-Only items the repo documents.
+Items below are the ones the repo documents.
 
 | Symptom | Cause / fix | Source |
 |---|---|---|
@@ -97,7 +97,7 @@ Only items the repo documents.
 | Flatpak GUI cannot see the bridge | A successful TCP connection from inside the sandbox means `--share=network` leaked; the socket under `xdg-run/snitchwatch` should be visible | `phase2-manual-verification-runbook.md:89-97` |
 | Per-user unit shadows the image's unit | Remove `~/.config/systemd/user/snitchwatch-bridge.service` (and drop-ins) | `bridge-release-artifact.md` "Known limitations" |
 | Several users: only the first user's bridge binds `127.0.0.1:50051`; any local process can bind it first | Not deny-safe (#35); use the system flavour | `bridge-release-artifact.md` "Known limitations" |
-| Rootless daemon fails with a misleading "kernel might not be compatible" | Shipped config uses `ProcMonitorMethod: ebpf`, which loads under a root daemon only (issue #6) | `phase2-manual-verification-runbook.md:150-152` |
+| Rootless daemon fails with a misleading "kernel might not be compatible" | Shipped config uses `ProcMonitorMethod: ebpf`, which loads under a root daemon; a rootless run fails with that message (issue #6) | `phase2-manual-verification-runbook.md:150-152` |
 | Playwright "missing browser" | Run `just web-smoke-install` / `just tauri-smoke-install`; not a code regression | `README.md` |
 | Reboot into a new image | Read "Before rebooting into the image: the /etc merge" | `system-bridge-integration.md:212` |
 | Known flaky tests | #259 open; seven Timer-driven probes lack the re-entrancy guard (#279) | `HANDOFF.md:29` |
@@ -107,7 +107,7 @@ Only items the repo documents.
 | Item | Status |
 |---|---|
 | Undo a `deny` opt-in | Documented: see "Bridge cannot be restored under `deny`" above |
-| `rpm-ostree rollback`, rebasing the image back, un-layering `opensnitch` | Not defined in the repo (no match for "rollback" in `docs/packaging/` or `packaging/README.md`) |
+| `rpm-ostree rollback`, rebasing the image back, un-layering `opensnitch` | Not defined in the repo for Snitchwatch or `opensnitch` (no match for "rollback" in `docs/packaging/` or `packaging/README.md`). Only the opt-in endpoint-events recipe has its own way back, e.g. `sudo rpm-ostree uninstall rsyslog ...` (`packaging/endpoint-events/README.md:443`) |
 | Undoing a published release or candidate | Not defined in the repo; the candidate workflow only forbids overwriting or deleting (`r13-candidate-gui-ci.md`) |
 
 ## Alerting and escalation

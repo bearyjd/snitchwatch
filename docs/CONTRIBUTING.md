@@ -8,16 +8,16 @@ is silent the text says "Not defined in the repo".
 
 | Need | Detail | Source |
 |---|---|---|
-| Rust | README says "Rust 1.75+"; no `rust-version`, `rust-toolchain.toml` or clippy/rustfmt override exists; CI uses `dtolnay/rust-toolchain@stable`; release builds pin 1.99.1 | `README.md` "Building"; `Cargo.toml:38-42`; `ci.yml`; `packaging/release/pins.env:2` |
+| Rust | README declares no minimum version; no `rust-version`, `rust-toolchain.toml` or clippy/rustfmt override exists; CI uses `dtolnay/rust-toolchain@stable`; release builds pin 1.99.1 | `README.md` "Building"; `Cargo.toml:38-42`; `ci.yml`; `packaging/release/pins.env:2` |
 | `protoc` | `snitchwatch-proto/build.rs` compiles `vendor/opensnitch/proto/ui.proto`; `snitchwatch-bridge` and `-bridge-cli` depend on it, so the default build needs it | `CLAUDE.md` (build commands); `ci.yml` (`protobuf-compiler`) |
 | Submodule | `git submodule update --init --recursive`; `vendor/opensnitch` is read-only, pinned `v1.8.0` | `README.md` "Building"; `CLAUDE.md`; `.gitmodules` |
 | `just` | All commands below | `justfile` |
 | Tauri build deps | `snitchwatch-tauri` is a default member; its build links webkit2gtk even for `cargo check` | `ci.yml` (`libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`, ...) |
-| Qt6 + KDE Frameworks 6 (Kirigami) dev packages | Needed only for `kirigami-spike` and `snitchwatch-kirigami`, which are excluded from `default-members`; plain `cargo build`/`cargo check`/`cargo test` (what CI runs) skip them, but `just build`, `just check` and `just test` use `--workspace` (`justfile:24-25,27-28,33-35`) and DO compile them, so they need Qt6/KF6. Without Qt, run the plain cargo commands. Build Kirigami explicitly with `cargo build -p snitchwatch-kirigami` | `CLAUDE.md`; `Cargo.toml:24-36`; `justfile` `kirigami-dev` |
+| Qt6 + KDE Frameworks 6 (Kirigami) dev packages | Needed for `kirigami-spike` and `snitchwatch-kirigami`, which are excluded from `default-members`; plain `cargo build`/`cargo check`/`cargo test` (what CI runs) skip them, but `just build`, `just check` and `just test` use `--workspace` (`justfile:24-25,27-28,33-35`) and DO compile them, so they need Qt6/KF6. Without Qt, run the plain cargo commands. Build Kirigami explicitly with `cargo build -p snitchwatch-kirigami` | `CLAUDE.md`; `Cargo.toml:24-36`; `justfile` `kirigami-dev` |
 | Fedora package set known to build and test Kirigami | `gcc gcc-c++ make protobuf-compiler dbus-daemon xdg-dbus-proxy qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel qt6-qttools-devel plasma-integration kf6-kirigami-devel` | `ci.yml` job `kirigami` |
 | `qmltestrunner-qt6` | Ships in `qt6-qtdeclarative-devel` | `justfile` `qml-test`; `ci.yml` |
 | Playwright (one time) | `just web-smoke-install`, `just tauri-smoke-install`; a "missing browser" failure is a setup gap, not a regression. `just doctor` reports what is missing | `README.md` "Playwright smoke suites"; `justfile` `doctor` |
-| podman | Only for `release-*` and `endpoint-events-verify` recipes | `justfile` |
+| podman | Used by the `release-*` and `endpoint-events-verify` recipes | `justfile` |
 | `python3` + PyYAML, `shellcheck` (optional) | `just package-check` | `justfile` `package-check`; `ci.yml` job `package-check` |
 
 ## Commands
@@ -60,7 +60,7 @@ is silent the text says "Not defined in the repo".
 |---|---|---|
 | Bridge unit + integration | `crates/snitchwatch-bridge` | `just test-bridge` (fast, "most iteration happens here", `CLAUDE.md`) |
 | Bridge protocol end to end | `tests/bridge_protocol_test.rs` and `tests/bridge_protocol_test/*.rs`, wired via `tests/integration/Cargo.toml:7-10` | `MockOpensnitchd` (`tests/mock_opensnitchd`) stands in for the daemon; a real in-process bridge plus a real WebSocket client over the Unix socket with the handshake token. Template: `ask_rule_round_trip_*` |
-| Blocklists | `tests/fixtures/blocklists/` (tiny ABP/domains/StevenBlack samples, one malformed `garbage.bin`) | `just test-blocklists` |
+| Blocklists | `tests/fixtures/blocklists/` (small samples such as `abp-tiny.txt` and `stevenblack-tiny.txt`, plus the malformed `garbage.bin`) | `just test-blocklists` |
 | Scanner, userspace | `scanner_core::testkit::MockInspector`; example `crates/scanner-core/tests/userspace_scan.rs` | no production call sites; no real `rpm-ostree`/`ostree`/`flatpak`/`ss` needed |
 | Scanner, privileged | `FakeFacts` (the `SystemFacts` trait) in `crates/scanner-privileged/tests/end_to_end.rs` | mirror it; the unit-test mock is not visible to integration tests |
 | Kirigami Rust tests | `crates/snitchwatch-kirigami/tests/*.rs` (headless Qt) | `QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic cargo test -p snitchwatch-kirigami --locked` (as CI) |

@@ -1,4 +1,4 @@
-<!-- Generated: 2026-11-06 | Files scanned: 48 | Token estimate: ~940 -->
+<!-- Generated: 2026-11-06 | Token estimate: ~810 (o200k_base) -->
 # Bridge (`snitchwatch-bridge` lib, `snitchwatch-bridge-cli` bin)
 
 Lib: 246 .rs files (many `*_tests.rs`). CLI orchestration: `crates/snitchwatch-bridge-cli/src/lib.rs` (`run` :88, `run_with_options` :94, `run_system` :139, `run_with_incoming` :169). `main.rs` is sync and handles `--help/--version` before any socket exists.
@@ -32,5 +32,4 @@ Lib: 246 .rs files (many `*_tests.rs`). CLI orchestration: `crates/snitchwatch-b
 | `sqlite_file.rs`, `state_file.rs` | owner-only file helpers |
 
 ## Notes
-- `history/mod.rs` says "dormant"; a guard test bans references outside the module (`history/dormant_tests.rs`).
-- Curated rules and blocklists install only on the system bridge with persistent storage.
+- `history/mod.rs` says "dormant". `history/dormant_tests.rs` fails if code outside the history owner files names six lifecycle/pins types or the identifiers `lifecycle`/`pins` (:9-19,102-117); it does not cover other history APIs.

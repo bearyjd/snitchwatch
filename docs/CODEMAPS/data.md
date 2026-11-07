@@ -1,4 +1,4 @@
-<!-- Generated: 2026-11-06 | Files scanned: 34 | Token estimate: ~940 -->
+<!-- Generated: 2026-11-06 | Token estimate: ~790 (o200k_base) -->
 # Data: persisted and exchanged
 
 ## Runtime (not persisted)

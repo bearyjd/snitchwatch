@@ -1,4 +1,4 @@
-<!-- Generated: 2026-11-06 | Files scanned: 20 | Token estimate: ~940 -->
+<!-- Generated: 2026-11-06 | Token estimate: ~910 (o200k_base) -->
 # Dependencies
 
 ## External processes and services

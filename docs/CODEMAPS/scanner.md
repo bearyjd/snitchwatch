@@ -1,4 +1,4 @@
-<!-- Generated: 2026-11-06 | Files scanned: 30 | Token estimate: ~950 -->
+<!-- Generated: 2026-11-06 | Token estimate: ~840 (o200k_base) -->
 # Scanner (Component B)
 
 Detects drift on rpm-ostree/atomic Bazzite by delegating to `rpm-ostree`, `rpm -V`, ostree (no reimplemented manifests). Specs: `docs/superpowers/specs/2026-07-04-scanner-*-design.md`.
@@ -6,7 +6,7 @@ Detects drift on rpm-ostree/atomic Bazzite by delegating to `rpm-ostree`, `rpm -
 ## scanner-core (userspace tier, lib, 19 .rs files)
 | Item | Where (`crates/scanner-core/src/`) |
 |---|---|
-| `SystemInspector` trait (all shell-outs/file reads); `RealSystem` | `inspector.rs:44,67` |
+| `SystemInspector` trait (shell-outs and file reads); `RealSystem` | `inspector.rs:44,67` |
 | `Scanner::run` over `Vec<Box<dyn Check>>`; `Check` trait | `scanner.rs:37,73`; `checks/mod.rs:100` |
 | Checks: flatpak, listeners (`ss`), shell_rc, systemd_user; outbound is a deferred stub | `checks/*.rs` |
 | 5-step expected-drift-vs-anomaly `classify(PathFacts)` | `classify.rs:80` |
