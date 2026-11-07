@@ -20,7 +20,7 @@ Detects drift on rpm-ostree/atomic Bazzite by delegating to `rpm-ostree`, `rpm -
 - `src/main.rs` (`--db`, `--json`; default db `/var/lib/snitchwatch-scanner/scans.db` :28; exit 0/1/2, 3 = incomplete exit sweep (`command::exit_code`), module docs :16); `scan::run_privileged_scan` `src/scan.rs:33`.
 - `SystemFacts` trait, `LiveSystem` impl: `src/facts.rs:21,64`.
 - Checks (`src/checks/`): `kargs` (`/proc/cmdline` vs `rpm-ostree kargs`), `lockdown`, `modules`, `rootkit` (`chkrootkit`, skipped if absent).
-- `command.rs`: bounded subprocess runner `run` :425, `trusted_program` :388 (only `/usr/bin`, `/usr/sbin`, :344), watchdog `expire_watchdog` :78.
+- `command.rs`: bounded subprocess runner `run` :547, `trusted_program` :510 (only `/usr/bin`, `/usr/sbin`, :466), watchdog `expire_watchdog` :78.
 - `containment.rs`: descendant sweep `kill_descendants` :229.
 - `store.rs:92` own `ScanStore` (adds `check_type`).
 - Invariant: never a daemon (`src/lib.rs` header).

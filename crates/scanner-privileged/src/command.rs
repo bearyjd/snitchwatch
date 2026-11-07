@@ -265,10 +265,19 @@ pub fn write_marker_nonblocking(fd: i32, marker: &[u8]) {
 
 /// Production `arm_alarm`: the default SIGALRM action terminates the process.
 /// Nothing in this crate installs a SIGALRM handler or blocks the signal; the
-/// disposition is reset anyway in case an ignored one was inherited across exec.
+/// disposition is reset and the signal unblocked on this thread anyway, because
+/// an ignored disposition and a blocked mask both survive exec and would
+/// silently defeat the bound. SIGALRM is process-directed, so it is delivered
+/// to any thread that does not block it, such as this one.
 fn arm_exit_alarm(seconds: u32) {
-    // SAFETY: `signal` with `SIG_DFL` and `alarm` touch no memory of ours.
+    // SAFETY: `set` is a live, zero-initialised `sigset_t` that `sigemptyset`
+    // and `sigaddset` fill in; `pthread_sigmask` reads it and ignores the old
+    // mask (null); `signal` with `SIG_DFL` and `alarm` touch no memory of ours.
     unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGALRM);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
         libc::signal(libc::SIGALRM, libc::SIG_DFL);
         libc::alarm(seconds);
     }
@@ -328,14 +337,29 @@ fn finish_process_with(
             arm_alarm(EXIT_ALARM_SECS);
             Some(sweep())
         }
-        Phase::Expiring => {
-            let _ = WATCHDOG_STATE
-                .1
-                .wait_timeout_while(state, WATCHDOG_CLEANUP_WAIT, |s| s.phase == Phase::Expiring);
-            None
-        }
+        Phase::Expiring => await_watchdog_cleanup(state, WATCHDOG_CLEANUP_WAIT),
         Phase::Expired | Phase::Exiting => None,
     }
+}
+
+/// Waits up to `wait` for a mid-expiry watchdog to finish its own sweep. If it
+/// has not (the phase is still `Expiring`), its descendants may still be alive
+/// and the process is about to exit, so the result is an unfinished sweep,
+/// which [`exit_code`] turns into [`EXIT_SWEEP_INCOMPLETE`]. A watchdog that did
+/// finish leaves nothing for this exit to report (`None`).
+fn await_watchdog_cleanup(
+    state: MutexGuard<'static, WatchdogState>,
+    wait: Duration,
+) -> Option<crate::containment::Sweep> {
+    let (state, _) = WATCHDOG_STATE
+        .1
+        .wait_timeout_while(state, wait, |s| s.phase == Phase::Expiring)
+        .unwrap_or_else(|poison| poison.into_inner());
+    (state.phase == Phase::Expiring).then_some(crate::containment::Sweep {
+        complete: false,
+        failures: 0,
+        first_error: None,
+    })
 }
 
 /// Runs [`finish_process`], then ends the process with [`exit_code`] of

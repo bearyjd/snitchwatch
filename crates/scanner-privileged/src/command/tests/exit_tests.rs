@@ -70,6 +70,60 @@ fn the_exit_alarm_is_armed_once_on_exiting_before_the_sweep() {
 }
 
 #[test]
+fn arming_the_exit_alarm_unblocks_an_inherited_sigalrm_mask() {
+    // Own thread, so the changed mask never reaches another test's thread.
+    std::thread::spawn(|| {
+        let blocked = |set: &libc::sigset_t| unsafe { libc::sigismember(set, libc::SIGALRM) == 1 };
+        // SAFETY: `set` and `old` are live, zero-initialised `sigset_t`s that the
+        // libc calls fill in or read; only this test thread's mask is changed.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGALRM);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()),
+                0
+            );
+            let mut now: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut now);
+            assert!(blocked(&now), "the fixture failed to block SIGALRM");
+            // 0 seconds: cancels any alarm instead of arming one.
+            arm_exit_alarm(0);
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut now);
+            assert!(!blocked(&now), "arming left SIGALRM blocked");
+        }
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn a_watchdog_that_never_finishes_makes_the_exit_sweep_incomplete() {
+    let _lock = serial();
+    watchdog_state().phase = Phase::Expiring;
+    let sweep = await_watchdog_cleanup(watchdog_state(), Duration::from_millis(20))
+        .expect("an unfinished watchdog sweep is reported");
+    assert!(!sweep.complete);
+    assert_eq!(exit_code(0, Some(&sweep)), EXIT_SWEEP_INCOMPLETE);
+    assert_eq!(watchdog_state().phase, Phase::Expiring);
+}
+
+#[test]
+fn a_watchdog_that_finishes_in_time_leaves_the_exit_status_alone() {
+    let _lock = serial();
+    watchdog_state().phase = Phase::Expiring;
+    let finisher = std::thread::spawn(|| {
+        let mut state = watchdog_state();
+        state.phase = Phase::Expired;
+        WATCHDOG_STATE.1.notify_all();
+    });
+    let outcome = await_watchdog_cleanup(watchdog_state(), Duration::from_secs(5));
+    finisher.join().unwrap();
+    assert!(outcome.is_none());
+    assert_eq!(exit_code(2, outcome.as_ref()), 2);
+}
+
+#[test]
 fn an_expired_scanner_arms_no_exit_alarm() {
     let _lock = serial();
     // Group 1 is refused after the expiry began: nothing is killed, the
