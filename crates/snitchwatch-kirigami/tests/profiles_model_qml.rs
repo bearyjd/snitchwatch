@@ -25,6 +25,10 @@ use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
 #[allow(unused_imports)]
 use snitchwatch_kirigami::profiles_model as _;
 
+// Isolates HOME and the XDG dirs before `main` (tests/common/mod.rs).
+#[allow(dead_code)]
+mod common;
+
 #[test]
 fn profiles_model_registers_and_ingest_invokable_runs() {
     if std::env::var_os("QT_QPA_PLATFORM").is_none() {

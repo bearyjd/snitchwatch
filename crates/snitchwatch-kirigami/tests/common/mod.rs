@@ -73,7 +73,6 @@ pub fn capture_stderr<F: FnOnce()>(f: F) -> String {
 /// keeps the stderr assertions load-bearing, a silent removal in a future Qt
 /// would reintroduce exactly the vacuous-assertion bug it was added to fix.
 pub fn init_headless_qt_env() {
-    home_isolation();
     if std::env::var_os("QT_QPA_PLATFORM").is_none() {
         std::env::set_var("QT_QPA_PLATFORM", "offscreen");
     }
@@ -85,40 +84,116 @@ pub fn init_headless_qt_env() {
     }
 }
 
-/// The HOME the process started with, and the throwaway home every probe runs
-/// under instead (see [`init_headless_qt_env`]). Probes load the production
-/// main.qml in-process, whose startup reads and writes the config dir, so
-/// HOME and the XDG dirs point at a per-process tempdir (0700, removed at exit)
-/// and never at the developer's own `~/.config/snitchwatch`.
-pub fn home_isolation() -> &'static (Option<std::ffi::OsString>, std::path::PathBuf) {
-    static HOME: std::sync::OnceLock<(Option<std::ffi::OsString>, std::path::PathBuf)> =
-        std::sync::OnceLock::new();
-    static REMOVE_AT_EXIT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+/// Env var holding the HOME the process was started with (set by the
+/// constructor below, before `main`).
+#[allow(dead_code)] // only home_isolation() reads it
+const ORIGINAL_HOME_VAR: &str = "SNITCHWATCH_PROBE_ORIGINAL_HOME";
+/// Env var holding the throwaway home (removed at exit).
+const PROBE_HOME_VAR: &str = "SNITCHWATCH_PROBE_HOME";
+
+/// The HOME the process started with, and the throwaway home every test binary
+/// that declares `mod common;` runs under instead.
+///
+/// Probes run the app's own startup in-process (settings, learned list, bridge
+/// socket), which reads and writes `~/.config/snitchwatch`; the constructor
+/// below points HOME and the XDG dirs at a per-process directory so a plain
+/// `cargo test` never touches the developer's own files.
+#[allow(dead_code)] // only the lib test that checks the isolation calls it
+pub fn home_isolation() -> (Option<std::ffi::OsString>, std::path::PathBuf) {
+    (
+        std::env::var_os(ORIGINAL_HOME_VAR),
+        std::path::PathBuf::from(
+            std::env::var_os(PROBE_HOME_VAR).expect(
+                "the home-isolation constructor did not run (is this a Linux test binary?)",
+            ),
+        ),
+    )
+}
+
+#[cfg(target_os = "linux")]
+mod isolate {
+    use std::ffi::{c_char, CStr};
+
+    #[used]
+    #[link_section = ".init_array"]
+    static ISOLATE_BEFORE_MAIN: extern "C" fn() = isolate_before_main;
+
     extern "C" fn remove_home() {
-        if let Some(dir) = REMOVE_AT_EXIT.get() {
+        if let Some(dir) = std::env::var_os(super::PROBE_HOME_VAR) {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
-    HOME.get_or_init(|| {
-        let original = std::env::var_os("HOME");
-        let dir = tempfile::Builder::new()
-            .prefix("snitchwatch-probe-home")
-            .tempdir()
-            .expect("throwaway probe home")
-            .keep();
-        for (var, sub) in [
-            ("XDG_CONFIG_HOME", ".config"),
-            ("XDG_STATE_HOME", ".state"),
-            ("XDG_DATA_HOME", ".data"),
-            ("XDG_RUNTIME_DIR", "run"),
-        ] {
-            std::fs::create_dir_all(dir.join(sub)).expect("probe home subdirectory");
-            std::env::set_var(var, dir.join(sub));
+
+    fn die(message: &[u8]) -> ! {
+        // SAFETY: plain write(2) and _exit(2) on a valid buffer.
+        unsafe {
+            libc::write(2, message.as_ptr().cast(), message.len());
+            libc::_exit(1)
         }
-        std::env::set_var("HOME", &dir);
-        let _ = REMOVE_AT_EXIT.set(dir.clone());
-        // SAFETY: `remove_home` only reads a set-once static.
-        unsafe { libc::atexit(remove_home) };
-        (original, dir)
-    })
+    }
+
+    /// `<dir>/<sub>` as a NUL-terminated string in `out`.
+    fn join(dir: &[u8], sub: &[u8], out: &mut [u8; 4096]) -> *const c_char {
+        if dir.len() + sub.len() + 2 > out.len() {
+            die(b"probe home path too long\n");
+        }
+        out[..dir.len()].copy_from_slice(dir);
+        out[dir.len()] = b'/';
+        out[dir.len() + 1..dir.len() + 1 + sub.len()].copy_from_slice(sub);
+        out[dir.len() + 1 + sub.len()] = 0;
+        out.as_ptr().cast()
+    }
+
+    /// Runs from `.init_array` before `main`, while the process is still
+    /// single-threaded, so the `setenv` calls cannot race a `getenv`. Only libc
+    /// calls on stack buffers, plus one small `Vec` copy of the directory name.
+    extern "C" fn isolate_before_main() {
+        let mut template = [0u8; 4096];
+        // SAFETY: libc calls on NUL-terminated stack buffers; the pointers
+        // `getenv` returns are copied before any `setenv`.
+        unsafe {
+            let tmp = libc::getenv(c"TMPDIR".as_ptr());
+            let base: &[u8] = if tmp.is_null() {
+                b"/tmp"
+            } else {
+                CStr::from_ptr(tmp).to_bytes()
+            };
+            let dir_ptr = join(base, b"snitchwatch-probe-home-XXXXXX", &mut template)
+                .cast_mut()
+                .cast::<c_char>();
+            if libc::mkdtemp(dir_ptr).is_null() {
+                die(b"cannot create the probe home\n");
+            }
+            let dir = CStr::from_ptr(dir_ptr).to_bytes().to_vec();
+            let home = libc::getenv(c"HOME".as_ptr());
+            if !home.is_null() {
+                libc::setenv(c"SNITCHWATCH_PROBE_ORIGINAL_HOME".as_ptr(), home, 1);
+            }
+            libc::setenv(c"SNITCHWATCH_PROBE_HOME".as_ptr(), dir_ptr, 1);
+            libc::setenv(c"HOME".as_ptr(), dir_ptr, 1);
+            let mut path = [0u8; 4096];
+            for (var, sub) in [
+                (c"XDG_CONFIG_HOME", &b".config"[..]),
+                (c"XDG_STATE_HOME", b".state"),
+                (c"XDG_DATA_HOME", b".data"),
+                (c"XDG_RUNTIME_DIR", b"run"),
+            ] {
+                let p = join(&dir, sub, &mut path);
+                // mkdir's mode is masked by the umask; fix it up and check.
+                let mut st: libc::stat = std::mem::zeroed();
+                if libc::mkdir(p, 0o700) != 0
+                    || libc::chmod(p, 0o700) != 0
+                    || libc::stat(p, &mut st) != 0
+                    || st.st_mode & 0o777 != 0o700
+                {
+                    die(b"cannot create a 0700 probe home subdirectory\n");
+                }
+                libc::setenv(var.as_ptr(), p, 1);
+            }
+            libc::setenv(c"QT_QPA_PLATFORM".as_ptr(), c"offscreen".as_ptr(), 0);
+            libc::setenv(c"QT_QUICK_CONTROLS_STYLE".as_ptr(), c"Basic".as_ptr(), 0);
+            libc::setenv(c"QT_FORCE_STDERR_LOGGING".as_ptr(), c"1".as_ptr(), 0);
+            libc::atexit(remove_home);
+        }
+    }
 }

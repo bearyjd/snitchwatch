@@ -95,7 +95,16 @@ fn stale_delivery_and_off_qt_save_keep_independent_lifetimes() {
         std::env::var_os("HOME").as_deref(),
         Some(isolated.as_os_str())
     );
-    assert!(crate::paths::learned_path().starts_with(isolated));
+    assert!(crate::paths::learned_path().starts_with(&isolated));
+    // The XDG spec (and Qt) want the runtime dir to be 0700.
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
+    assert!(std::path::Path::new(&runtime).starts_with(&isolated));
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(&runtime)
+            .expect("runtime dir")
+            .permissions(),
+    );
+    assert_eq!(mode & 0o777, 0o700, "runtime dir mode");
     let _app = QGuiApplication::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let link = crate::bridge_runtime::test_link::TestLink::new(runtime.handle().clone(), 32, 32);
