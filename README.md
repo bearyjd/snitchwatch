@@ -23,7 +23,9 @@ status.
 
 ## Building
 
-Requires: Rust 1.75+ and a protobuf compiler (`protoc`).
+Requires: a Rust toolchain (no minimum version is declared in `Cargo.toml`; CI uses
+the stable toolchain and release builds pin rustc 1.99.1 in
+`packaging/release/pins.env`) and a protobuf compiler (`protoc`).
 
 ```bash
 git submodule update --init --recursive
@@ -132,7 +134,8 @@ installed version's exact Unix-socket flag spelling.)
 
 Environment variables:
 
-- `SNITCHWATCH_GRPC_BIND` — gRPC bind address (default `127.0.0.1:50051`)
+- `SNITCHWATCH_GRPC_BIND` — gRPC bind address (default `127.0.0.1:0`, a random port;
+  the shipped user unit sets `127.0.0.1:50051`)
 - `SNITCHWATCH_WS_SOCKET` — WS Unix domain socket path (default
   `$XDG_RUNTIME_DIR/snitchwatch/bridge.sock`)
 - `RUST_LOG` — tracing filter, e.g. `info`, `snitchwatch_bridge=debug`
