@@ -25,6 +25,12 @@ Scope: `crates/scanner-privileged` (`containment.rs`, `command.rs`) only.
 2. `debug_assert!(own_group > 1)` documenting the invariant; the runtime guard
    and its test stay.
 
+Review follow-up: every pid a stop was issued for is recorded and killed on
+every exit path (deadline, failed re-scan), newest first, with the kill pass
+exempt from the deadline; the deadline is only checked before a stop. The
+fork-loop fixture uses a per-invocation marker and only counts and cleans up
+processes below its own root.
+
 ## Tests (each seen failing first)
 - injected: stop precedes kill, re-scan catches late children (stopped, killed).
 - real: a setsid shell loop forking `sleep` flat out is fully dead after the sweep.

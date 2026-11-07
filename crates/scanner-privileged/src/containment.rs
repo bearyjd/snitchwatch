@@ -244,7 +244,8 @@ pub struct Sweep {
 /// is no evidence of "none". One deadline covers scans and signalling alike.
 /// Each pass SIGSTOPs what it found, re-scans once for children forked in the
 /// meantime (stopping them too), then SIGKILLs all of it; a failed stop is
-/// counted but never skips the kill.
+/// counted but never skips the kill. The deadline only cuts work before a
+/// stop: every pid a stop was issued for is killed whatever happens.
 pub fn kill_descendants(root: i32, bound: Duration) -> Sweep {
     let deadline = Instant::now() + bound;
     kill_descendants_with(
@@ -286,33 +287,53 @@ fn kill_descendants_with(
                     return sweep;
                 }
             }
-            Ok(Some(mut live)) => {
+            Ok(Some(live)) => {
                 empty_passes = 0;
                 let mut tree: HashSet<i32> = live.iter().copied().chain([root]).collect();
+                // Every pid a stop was issued for. Whatever cuts the pass
+                // short (the deadline, a failed re-scan), these are killed
+                // below: a stopped process left behind would stay stopped
+                // past the own-group kill, out of its reach.
+                let mut stopped: Vec<i32> = Vec::with_capacity(live.len());
                 // Freeze what the scan found: a stopped process cannot fork.
-                if !signal_all(&live, &tree, deadline, &mut stop, &mut sweep) {
-                    return sweep;
-                }
+                let mut cut =
+                    !stop_all(&live, &tree, deadline, &mut stop, &mut stopped, &mut sweep);
                 // Children forked between the scan and the stop: stop them
                 // too. A failed or cut-short re-scan only loses that catch;
                 // the next pass still looks.
-                match scan() {
-                    Ok(Some(again)) => {
-                        let late: Vec<i32> =
-                            again.into_iter().filter(|p| !tree.contains(p)).collect();
-                        tree.extend(late.iter().copied());
-                        if !signal_all(&late, &tree, deadline, &mut stop, &mut sweep) {
-                            return sweep;
+                if !cut {
+                    match scan() {
+                        Ok(Some(again)) => {
+                            let late: Vec<i32> =
+                                again.into_iter().filter(|p| !tree.contains(p)).collect();
+                            tree.extend(late.iter().copied());
+                            cut = !stop_all(
+                                &late,
+                                &tree,
+                                deadline,
+                                &mut stop,
+                                &mut stopped,
+                                &mut sweep,
+                            );
                         }
-                        live.extend(late);
+                        Ok(None) => {}
+                        Err(e) => {
+                            sweep.failures += 1;
+                            sweep.first_error.get_or_insert(e);
+                        }
                     }
-                    Ok(None) => {}
-                    Err(e) => {
+                }
+                // Not bounded by the deadline: one syscall per pid, and the
+                // deadline only ever cuts work before a stop. Newest first,
+                // so a child dies before the parent whose death would
+                // reparent it.
+                for &pid in stopped.iter().rev() {
+                    if let Err(e) = kill(pid, &tree) {
                         sweep.failures += 1;
                         sweep.first_error.get_or_insert(e);
                     }
                 }
-                if !signal_all(&live, &tree, deadline, &mut kill, &mut sweep) {
+                if cut {
                     return sweep;
                 }
             }
@@ -322,20 +343,24 @@ fn kill_descendants_with(
     sweep
 }
 
-/// Run `signal` on each of `pids`, counting failures into `sweep` (a failure
-/// never stops the rest). `false`: the deadline passed first.
-fn signal_all(
+/// SIGSTOP each of `pids`, recording every pid a stop was issued for in
+/// `stopped` (a failed stop still counts: its pid gets the kill) and counting
+/// failures into `sweep`. The deadline is checked before each stop, never
+/// after one. `false`: the deadline passed first.
+fn stop_all(
     pids: &[i32],
     tree: &HashSet<i32>,
     deadline: Instant,
-    signal: &mut impl FnMut(i32, &HashSet<i32>) -> io::Result<()>,
+    stop: &mut impl FnMut(i32, &HashSet<i32>) -> io::Result<()>,
+    stopped: &mut Vec<i32>,
     sweep: &mut Sweep,
 ) -> bool {
     for &pid in pids {
         if Instant::now() >= deadline {
             return false;
         }
-        if let Err(e) = signal(pid, tree) {
+        stopped.push(pid);
+        if let Err(e) = stop(pid, tree) {
             sweep.failures += 1;
             sweep.first_error.get_or_insert(e);
         }
@@ -632,24 +657,6 @@ mod tests {
         assert!(live_descendants(me(), past).unwrap().is_none());
     }
 
-    #[test]
-    fn the_deadline_is_checked_per_pid() {
-        let mut kills = 0;
-        let sweep = kill_descendants_with(
-            1,
-            Instant::now() + Duration::from_millis(50),
-            || Ok(Some(vec![2, 3, 4, 5, 6, 7, 8, 9])),
-            |_, _| Ok(()),
-            |_, _| {
-                kills += 1;
-                std::thread::sleep(Duration::from_millis(40));
-                Ok(())
-            },
-        );
-        assert!(!sweep.complete);
-        assert!(kills <= 3, "kept signalling past the bound: {kills}");
-    }
-
     extern "C" fn pause_forever(_: *mut libc::c_void) -> *mut libc::c_void {
         loop {
             unsafe { libc::pause() };
@@ -854,7 +861,7 @@ mod tests {
         assert!(sweep.complete);
         assert_eq!(
             *events.borrow(),
-            ["stop 10", "stop 11", "kill 10", "kill 11"]
+            ["stop 10", "stop 11", "kill 11", "kill 10"]
         );
     }
 
@@ -877,27 +884,96 @@ mod tests {
         assert_eq!(sweep.first_error.unwrap().raw_os_error(), Some(libc::EPERM));
     }
 
-    #[test]
-    fn the_deadline_bounds_stops_and_kills_together() {
-        let signals = std::cell::Cell::new(0);
-        let slow = |_: i32, _: &HashSet<i32>| {
-            signals.set(signals.get() + 1);
-            std::thread::sleep(Duration::from_millis(40));
-            Ok(())
-        };
+    type Scans = Vec<io::Result<Option<Vec<i32>>>>;
+
+    /// Runs a sweep with recording stops and kills. Each stop sleeps
+    /// `stop_ms`; a kill of `kill_fails` fails with EPERM. Returns the sweep,
+    /// the pids a stop was issued for and the pids a kill was issued for.
+    fn record(
+        deadline_ms: u64,
+        scans: Scans,
+        stop_ms: u64,
+        kill_fails: i32,
+    ) -> (Sweep, Vec<i32>, Vec<i32>) {
+        let mut scans = scans.into_iter();
+        let stops = std::cell::RefCell::new(Vec::new());
+        let kills = std::cell::RefCell::new(Vec::new());
         let sweep = kill_descendants_with(
             1,
-            Instant::now() + Duration::from_millis(50),
-            || Ok(Some(vec![2, 3, 4, 5, 6, 7, 8, 9])),
-            slow,
-            slow,
+            Instant::now() + Duration::from_millis(deadline_ms),
+            || scans.next().unwrap_or(Ok(Some(vec![]))),
+            |pid, _| {
+                stops.borrow_mut().push(pid);
+                std::thread::sleep(Duration::from_millis(stop_ms));
+                Ok(())
+            },
+            |pid, _| {
+                kills.borrow_mut().push(pid);
+                if pid == kill_fails {
+                    Err(io::Error::from_raw_os_error(libc::EPERM))
+                } else {
+                    Ok(())
+                }
+            },
         );
+        (sweep, stops.into_inner(), kills.into_inner())
+    }
+
+    fn sorted(mut pids: Vec<i32>) -> Vec<i32> {
+        pids.sort_unstable();
+        pids
+    }
+
+    #[test]
+    fn the_deadline_is_checked_before_each_stop_and_every_stopped_pid_is_killed() {
+        let live = vec![2, 3, 4, 5, 6, 7, 8, 9];
+        let (sweep, stops, kills) = record(50, vec![Ok(Some(live))], 40, 0);
         assert!(!sweep.complete);
-        assert!(
-            signals.get() <= 3,
-            "signalled past the bound: {}",
-            signals.get()
-        );
+        assert!((1..=3).contains(&stops.len()), "stops: {stops:?}");
+        assert_eq!(sorted(kills), sorted(stops), "a stopped pid was abandoned");
+    }
+
+    #[test]
+    fn the_deadline_expiring_after_the_initial_stops_still_kills_them() {
+        // Both stops finish (40 ms) after the 30 ms deadline.
+        let (sweep, stops, kills) = record(30, vec![Ok(Some(vec![10, 11]))], 20, 0);
+        assert!(!sweep.complete);
+        assert_eq!(sorted(stops), [10, 11]);
+        assert_eq!(sorted(kills), [10, 11]);
+    }
+
+    #[test]
+    fn the_deadline_expiring_after_the_late_stops_still_kills_them() {
+        // 10 is stopped (30 ms), the re-scan finds 11, stopping it ends at 60 ms.
+        let scans = vec![Ok(Some(vec![10])), Ok(Some(vec![10, 11]))];
+        let (sweep, stops, kills) = record(50, scans, 30, 0);
+        assert!(!sweep.complete);
+        assert_eq!(sorted(stops), [10, 11]);
+        assert_eq!(sorted(kills), [10, 11]);
+    }
+
+    #[test]
+    fn a_failed_or_truncated_rescan_still_kills_what_was_stopped() {
+        let scans = vec![
+            Ok(Some(vec![10])),
+            Err(io::Error::from_raw_os_error(libc::EMFILE)),
+        ];
+        let (sweep, stops, kills) = record(5_000, scans, 0, 0);
+        assert_eq!(stops.first(), Some(&10));
+        assert_eq!(kills.first(), Some(&10));
+        assert_eq!(sweep.failures, 1);
+        let scans = vec![Ok(Some(vec![10])), Ok(None)];
+        let (_, stops, kills) = record(5_000, scans, 0, 0);
+        assert_eq!(stops.first(), Some(&10));
+        assert_eq!(kills.first(), Some(&10));
+    }
+
+    #[test]
+    fn a_failing_kill_does_not_stop_the_others_being_killed() {
+        let (sweep, _, kills) = record(5_000, vec![Ok(Some(vec![10, 11, 12]))], 0, 11);
+        assert_eq!(sorted(kills[..3].to_vec()), [10, 11, 12]);
+        assert_eq!(sweep.failures, 1);
+        assert_eq!(sweep.first_error.unwrap().raw_os_error(), Some(libc::EPERM));
     }
 
     #[test]
@@ -926,37 +1002,77 @@ mod tests {
         assert!(wait_dead(&mut child));
     }
 
-    /// Kills (and does not reap: they are init's) every live process whose
-    /// argv is `sleep <marker>`, whatever the test did.
-    struct MarkedSleeps(&'static str);
+    /// A marker no other test invocation shares: pid, clock and a counter.
+    fn unique_marker() -> String {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        format!("29.{}{:09}{n}", me(), nanos)
+    }
+
+    /// The live `sleep <marker>` processes below `root` only: a process
+    /// elsewhere with the same argv is never counted. On drop the whole
+    /// subtree of `root` (the fixture's own) is swept, nothing else.
+    struct MarkedSleeps {
+        marker: String,
+        root: i32,
+    }
     impl MarkedSleeps {
         fn alive(&self) -> Vec<i32> {
-            let want = format!("sleep\0{}\0", self.0).into_bytes();
-            let mut found = Vec::new();
-            for entry in std::fs::read_dir("/proc").unwrap().flatten() {
-                let Some(pid) = entry
-                    .file_name()
-                    .to_str()
-                    .and_then(|n| n.parse::<i32>().ok())
-                else {
-                    continue;
-                };
-                let hit = std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want);
-                if hit && state_of(pid).is_some_and(|s| s != b'Z') {
-                    found.push(pid);
-                }
-            }
-            found
+            let want = format!("sleep\0{}\0", self.marker).into_bytes();
+            let below = live_descendants(self.root, Instant::now() + Duration::from_secs(5))
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            below
+                .into_iter()
+                .filter(|pid| {
+                    std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want)
+                })
+                .collect()
         }
     }
     impl Drop for MarkedSleeps {
         fn drop(&mut self) {
-            for pid in self.alive() {
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                }
-            }
+            kill_descendants(self.root, Duration::from_secs(5));
         }
+    }
+
+    #[test]
+    fn markers_are_unique_per_call() {
+        let (a, b) = (unique_marker(), unique_marker());
+        assert_ne!(a, b);
+        assert!(a.starts_with(&format!("29.{}", me())));
+    }
+
+    #[test]
+    fn a_foreign_process_with_the_same_argv_is_neither_counted_nor_killed() {
+        let mut fixture_root = Reaped(
+            Command::new("/usr/bin/sh")
+                .args(["-c", "read _"])
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let marker = MarkedSleeps {
+            marker: "29.7316".into(),
+            root: fixture_root.0.id() as i32,
+        };
+        // Same argv, but not below the fixture's root.
+        let mut decoy = Reaped(
+            Command::new("/usr/bin/sleep")
+                .arg0("sleep")
+                .arg("29.7316")
+                .spawn()
+                .unwrap(),
+        );
+        assert!(marker.alive().is_empty(), "counted a foreign process");
+        drop(marker);
+        assert!(alive(&mut decoy), "cleanup killed a foreign process");
+        assert!(alive(&mut fixture_root));
     }
 
     /// A shell in its own session forks `sleep`s as fast as it can (bounded
@@ -966,7 +1082,7 @@ mod tests {
     /// pass), so the ordering tests above are what pin the phase itself.
     #[test]
     fn a_session_forking_flat_out_is_fully_dead_after_the_sweep() {
-        let marker = MarkedSleeps("29.7316");
+        let name = unique_marker();
         let mut command = Command::new("/usr/bin/sh");
         // Like the scanner, `root` adopts orphans: they stay in its subtree.
         unsafe {
@@ -976,13 +1092,17 @@ mod tests {
             command
                 .args([
                     "-c",
-                    "setsid sh -c 'n=0; while [ $n -lt 300 ]; do sleep 29.7316 & n=$((n+1)); done; wait' & read _",
+                    &format!("setsid sh -c 'n=0; while [ $n -lt 300 ]; do sleep {name} & n=$((n+1)); done; wait' & read _"),
                 ])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .spawn()
                 .unwrap(),
         );
+        let marker = MarkedSleeps {
+            marker: name,
+            root: root.0.id() as i32,
+        };
         let start = Instant::now();
         while marker.alive().len() < 20 && start.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(2));
