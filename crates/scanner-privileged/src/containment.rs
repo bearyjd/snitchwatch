@@ -1870,7 +1870,7 @@ mod tests {
     /// A group leader that is neither marked, ours, nor a zombie child of
     /// ours keeps its group.
     #[test]
-    fn killpg_marked_spares_a_leader_it_cannot_identify() {
+    fn killpg_marked_spares_a_leader_it_cannot_vouch_for() {
         let marker = unique_marker();
         let pid = orphan_sleeper(&marker);
         let verdict = fixture_signal::killpg_marked(pid, "some-other-marker");
