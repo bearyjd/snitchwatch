@@ -807,16 +807,51 @@ mod tests {
         }
     }
 
+    /// A fixture root of its own: a child that only waits. Cleanup of a
+    /// fixture rooted here can touch nothing but this child's subtree.
+    fn own_root() -> Reaped {
+        Reaped(
+            Command::new("/usr/bin/sh")
+                .args(["-c", "read _"])
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        )
+    }
+
     #[test]
     fn a_failed_observation_is_an_error_not_an_empty_list() {
+        let root = own_root();
         let fixture = MarkedSleeps {
             marker: unique_marker(),
-            root: me(),
+            root: root.0.id() as i32,
         };
         let past = Instant::now() - Duration::from_secs(1);
         assert!(fixture.try_alive(past).is_err());
-        // Killing nothing: `me()` has no marked sleepers below it.
-        std::mem::forget(fixture);
+    }
+
+    /// A fixture whose assertion fails unwinds through its cleanup, which
+    /// must sweep its own subtree only: a sibling owned by another test
+    /// (here a plain child of the test process) must survive.
+    #[test]
+    fn a_failing_fixture_does_not_clean_up_a_sibling() {
+        let mut sibling = sleeper();
+        let root = own_root();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let fixture = MarkedSleeps {
+                marker: unique_marker(),
+                root: root.0.id() as i32,
+            };
+            fixture
+                .try_alive(Instant::now() - Duration::from_secs(1))
+                .unwrap();
+        }));
+        assert!(unwound.is_err());
+        assert!(
+            alive(&mut sibling),
+            "the unwinding fixture killed a sibling"
+        );
+        drop(root);
     }
 
     #[test]
