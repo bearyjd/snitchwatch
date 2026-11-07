@@ -475,6 +475,35 @@ pub(crate) mod fixture_signal {
         format!("29.{}{:09}{n}", unsafe { libc::getpid() }, nanos)
     }
 
+    /// Whether `pid` is gone or only a zombie; an unreadable `/proc` entry
+    /// (after a few tries) is an error, never "dead".
+    pub(crate) fn dead_with(
+        pid: i32,
+        stat: impl Fn(i32) -> io::Result<Option<(i32, bool)>>,
+    ) -> io::Result<bool> {
+        let mut last = None;
+        for _ in 0..5 {
+            match stat(pid) {
+                Ok(seen) => return Ok(seen.is_none_or(|(_, zombie)| zombie)),
+                Err(e) => last = Some(e),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        Err(last.expect("at least one try"))
+    }
+
+    /// [`dead_with`] on the real `/proc`; panics loudly on an unreadable entry
+    /// so a test cannot pass on a failed observation.
+    pub(crate) fn dead(pid: i32) -> bool {
+        dead_with(pid, super::read_stat)
+            .unwrap_or_else(|e| panic!("cannot tell whether pid {pid} is dead: {e}"))
+    }
+
+    /// `/proc/<pid>/stat` as (parent, zombie), `None` when vanished.
+    pub(crate) fn proc_stat(pid: i32) -> io::Result<Option<(i32, bool)>> {
+        super::read_stat(pid)
+    }
+
     /// A raw `fork()` result as a pid, or the OS error.
     pub(crate) fn fork_result(result: i32) -> io::Result<i32> {
         if result < 0 {
@@ -856,14 +885,11 @@ mod tests {
         let mut bystander = sleeper();
         assert!(kill_descendants(root.0.id() as i32, Duration::from_secs(3)).complete);
         let start = Instant::now();
-        while std::path::Path::new(&format!("/proc/{descendant}")).exists()
-            && !parent_and_zombie(descendant).is_some_and(|(_, z)| z)
-            && start.elapsed() < Duration::from_secs(3)
-        {
+        while !dead(descendant) && start.elapsed() < Duration::from_secs(3) {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(
-            parent_and_zombie(descendant).is_none_or(|(_, zombie)| zombie),
+            dead(descendant),
             "descendant {descendant} survived the sweep"
         );
         assert!(alive(&mut root), "the root itself is not swept");
@@ -1144,10 +1170,15 @@ mod tests {
         }
         let swept = kill_descendants(root, Duration::from_secs(3));
         // Read as bytes here: the code under test must not be its own oracle.
-        let alive = std::fs::read(format!("/proc/{child}/stat")).is_ok_and(|stat| {
-            let tail = &stat[stat.iter().rposition(|&b| b == b')').unwrap() + 1..];
-            tail.trim_ascii_start().first() != Some(&b'Z')
-        });
+        // A vanished entry is dead; any other read error is not an answer.
+        let alive = match std::fs::read(format!("/proc/{child}/stat")) {
+            Ok(stat) => {
+                let tail = &stat[stat.iter().rposition(|&b| b == b')').unwrap() + 1..];
+                tail.trim_ascii_start().first() != Some(&b'Z')
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+            Err(e) => panic!("cannot read the descendant's stat: {e}"),
+        };
         assert!(swept.complete);
         assert!(!alive, "the non-UTF-8-named descendant survived");
     }
@@ -1656,29 +1687,7 @@ mod tests {
         }
     }
 
-    /// Whether `pid` is gone or only a zombie; an unreadable `/proc` entry
-    /// (after a few tries) is an error, never "dead".
-    fn dead_with(
-        pid: i32,
-        stat: impl Fn(i32) -> io::Result<Option<(i32, bool)>>,
-    ) -> io::Result<bool> {
-        let mut last = None;
-        for _ in 0..5 {
-            match stat(pid) {
-                Ok(seen) => return Ok(seen.is_none_or(|(_, zombie)| zombie)),
-                Err(e) => last = Some(e),
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        Err(last.expect("at least one try"))
-    }
-
-    /// [`dead_with`] on the real `/proc`; panics loudly on an unreadable entry
-    /// so a test cannot pass on a failed observation.
-    fn dead(pid: i32) -> bool {
-        dead_with(pid, read_stat)
-            .unwrap_or_else(|e| panic!("cannot tell whether pid {pid} is dead: {e}"))
-    }
+    use fixture_signal::{dead, dead_with};
 
     #[test]
     fn an_unreadable_proc_entry_is_an_error_not_dead() {

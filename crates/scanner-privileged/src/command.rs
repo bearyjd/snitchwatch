@@ -700,18 +700,29 @@ mod tests {
             io::ErrorKind::NotFound
         );
     }
-    /// Gone, or a zombie waiting for whoever inherited it.
+    /// Gone, or a zombie waiting for whoever inherited it; a stat read error
+    /// (EMFILE, hidepid...) is an error, never "gone".
+    fn gone_with(
+        pid: i32,
+        stat: impl Fn(i32) -> io::Result<Option<(i32, bool)>>,
+    ) -> io::Result<bool> {
+        crate::containment::fixture_signal::dead_with(pid, stat)
+    }
+
+    /// [`gone_with`] on the real `/proc`; panics loudly (pid and error) when
+    /// an entry is unreadable, so a failed observation cannot read as "gone".
     fn gone(pid: i32) -> bool {
-        (unsafe { libc::kill(pid, 0) }) != 0
-            || std::fs::read_to_string(format!("/proc/{pid}/stat"))
-                .map(|stat| {
-                    stat.rsplit(')')
-                        .next()
-                        .unwrap_or("")
-                        .trim_start()
-                        .starts_with('Z')
-                })
-                .unwrap_or(true)
+        gone_with(pid, crate::containment::fixture_signal::proc_stat)
+            .unwrap_or_else(|e| panic!("cannot tell whether pid {pid} is gone: {e}"))
+    }
+
+    #[test]
+    fn an_unreadable_proc_entry_is_an_error_not_gone() {
+        let emfile = |_| Err(io::Error::from_raw_os_error(libc::EMFILE));
+        assert!(gone_with(4242, emfile).is_err());
+        assert!(gone_with(4242, |_| Ok(None)).unwrap());
+        assert!(gone_with(4242, |_| Ok(Some((1, true)))).unwrap());
+        assert!(!gone_with(4242, |_| Ok(Some((1, false)))).unwrap());
     }
 
     /// Whether `scanner` has exited, observed without reaping it, so its pid
