@@ -24,9 +24,9 @@ a B always also looks like a D.
 | Result | How to recognise it | Meaning / next |
 |---|---|---|
 | A | `opensnitch.o` and `opensnitch-procs.o` load, no attach errors, `Process monitor method ebpf`, attribution matches (section 4); the dns module is noted separately, it does not decide A/B | prebuilt modules work here; ship the `.o` files in the tower image and flip the tower checks together with our config (section 6) |
-| B | `module specs error` / `module collection error` (the latter carries the verifier text) / `opening kprobe` / `opening kretprobe` / `Error loading opensnitch.o (collection)` (`procmon/ebpf/ebpf.go:141`), then fallback to `/proc` | modules do not fit this kernel; try the in-image build (section 5) |
+| B | `module specs error` / `module collection error` (the latter carries the verifier text) / `opening kprobe` / `opening kretprobe` / `Error loading opensnitch.o (collection)` (`procmon/ebpf/ebpf.go:141`) / `eBPF module opensnitch.o malformed, bpfmap[..] nil` (about `ebpf.go:204`); load errors then fall back to `/proc`, but attach errors (`opening kprobe/kretprobe`) are only warnings and the daemon stays on ebpf. The same rule applies to `opensnitch-procs.o`: a specs/collection error for it is B (main module fine, procs rejected by the kernel) | modules do not fit this kernel; try the in-image build (section 5) |
 | C | loads and attaches, but attribution is wrong | silent wrong-process attribution, worse than failing: do NOT ship; keep `proc`; this is the case that could justify a CO-RE port upstream |
-| D | fallback to `/proc` with `might not be compatible` and **no** preceding `module specs error` / `module collection error` line (a missing `.o` is skipped at debug level and ends in that same message, `core/ebpf.go:41-43,59-62`), or a `[eBPF] unable to remove memlock` warning | environment problem (missing files, privileges, rlimit), not a kernel verdict: check the `ls` of all three directories, fix the install and rerun |
+| D | `might not be compatible` that names `opensnitch.o` or `opensnitch-procs.o` with **no** preceding `module specs error` / `module collection error` line (a missing `.o` is skipped at debug level and ends in that same message, `core/ebpf.go:41-43,59-62`), or a `[eBPF] unable to remove memlock` warning, or `opensnitch-procs.o not available` caused by a tracefs/perf-map problem and not by a specs/collection error. Precedence: a memlock warning plus any load failure is D first; a memlock warning followed by a clean load is recorded, not D | environment problem (missing files, privileges, rlimit), not a kernel verdict: check the `ls` of all three directories, fix the install and rerun |
 
 ## 1. Safety rules (read before running anything)
 
@@ -93,17 +93,20 @@ a B always also looks like a D.
    DEBUG, 1 INFO, `log/log.go:36-46`) in the test config. The tower image overwrites `ebpf` to `proc` after `stage.sh`
    (`docs/packaging/system-bridge-integration.md:102-105`), so a `proc` result from
    `grep -E 'ProcMonitorMethod|LogLevel|DefaultAction' /etc/opensnitchd/default-config.json`
-   means the test is not valid yet. A level of 0 or lower is required for the load lines and -1 for section 4: both shipped configs set
+   means the test is not valid yet. The `module loaded` and `Process monitor method` lines are Info (level 1 or lower is enough); the `trying to load` lines need 0 or lower and section 4 needs -1. Both shipped configs set
    `"LogLevel": 2` (IMPORTANT, `log/log.go:38-42`), which drops the info-level lines this
    test relies on, and the level from the config is applied before the CLI log flags, so a
    `-debug` flag does not substitute for it. Put the `LogLevel` used in the section 7 report.
 5. Start the daemon as root and capture the full log. Main file: `/var/log/opensnitchd.log`
    (the `LogFile` setting). The systemd unit is `opensnitch.service` (not `opensnitchd`;
-   `recipe.yml:85-93`): `journalctl -u opensnitch` only helps if `LogFile` is unset.
+   `recipe.yml:85-93`; **UNVERIFIED** on the tower image, which builds its daemon from source): `journalctl -u opensnitch` only helps if `LogFile` is unset.
 6. Read the log for these, at `LogLevel: -1` (sources: `core/ebpf.go`,
    `procmon/monitor/init.go`, `procmon/ebpf/ebpf.go`, `dns/ebpfhook.go`):
-   - **pass:** three `[eBPF] module loaded: <path>` lines (`ebpf.go:56`) and
-     `Process monitor method ebpf` (`init.go:96`), and **none** of the failure lines below;
+   - **pass:** `[eBPF] module loaded: <path>` for `opensnitch.o` and `opensnitch-procs.o` (`ebpf.go:56`) and
+     `Process monitor method ebpf` (`init.go:96`), and **none** of the failure lines below. A
+     third line for `opensnitch-dns.o` is reported separately (dns does not decide A/B; it
+     loads through the same `LoadEbpfModule`, `dns/ebpfhook.go:118`, so a missing dns `.o` prints
+     the same `might not be compatible` text: read which module the message names);
    - **main module failed (B or D):** `[eBPF] module specs error` or `[eBPF] module
      collection error: <text>`, ending in `unable to load eBPF module (...). Your kernel
      version (<ver>) might not be compatible.` (`ebpf.go:60`; grep `might not be
@@ -113,15 +116,18 @@ a B always also looks like a D.
      (`procmon/ebpf/ebpf.go:147-187`); count these as failures even if `module loaded` printed;
    - **`[eBPF] unable to remove memlock`** (`procmon/ebpf/ebpf.go:126-128`, runs before any
      load): an environment problem (privileges / rlimit), outcome D, not a kernel verdict;
-   - **only `opensnitch-procs.o` missing (outcome D for that module):** `Process monitor method ebpf` *and*
+   - **`opensnitch-procs.o` problem:** `Process monitor method ebpf` *and*
      `opensnitch-procs.o not available: ...` (`init.go:105-106`): still on ebpf with the proc
-     monitors alongside, so read both lines;
+     monitors alongside, so read both lines. Classify by the error before it (specs/collection
+     error: B; none: D, covering a missing file, a tracefs mount failure or a perf map failure);
    - **dns module:** `opensnitch-dns.o` failing only warns (`EBPF-DNS: Unable to attach
      ebpf listener`); note it, it does not decide A/B.
    The verifier output is part of the `module collection error` text (cilium/ebpf returns it
-   there). At `LogLevel` 0 or lower full verifier logging is already on (`ebpf.go:32-33`), so that
-   error can be hundreds of lines: keep the whole log as a file and quote at most the first and
-   last lines in the report. **UNVERIFIED** that `dmesg` shows anything useful; record
+   there). Full verifier logging is requested only when the level is **exactly 0** (DEBUG,
+   `if log.GetLogLevel() == log.DEBUG`, `ebpf.go:31-33`), so at the -1 used here the error text is
+   shorter and **UNVERIFIED** as to how much verifier detail it carries. If the result is B,
+   rerun once at `LogLevel: 0` to get the full verifier text; that error can be hundreds of
+   lines, so keep the whole log as a file and quote at most the first and last lines. **UNVERIFIED** that `dmesg` shows anything useful; record
    `dmesg | tail -50` anyway, but treat the log line as the primary evidence.
 
 A clean load is **necessary, not sufficient** (section 4).
@@ -150,7 +156,9 @@ Non-CO-RE modules built against other headers can load yet read wrong offsets.
    Record per case: expected path, `proc` result, `ebpf` result. Only a mismatch that appears
    under `ebpf` and not under `proc` is outcome C; a mismatch in both is daemon-wide behaviour
    to report separately. Also record connections attributed to an empty/unknown process under
-   `ebpf` that `proc` mode resolves.
+   `ebpf` that `proc` mode resolves. An unattributed connection logs as `srcport:srcip (uid:N)
+   ->(proto)-> host:port` with no path (`conman/connection.go:315`); a nil connection logs no
+   attribution at all (`main.go:411`).
 
 ## 5. Procedure C: in-image build (only if section 3 failed as B)
 
@@ -164,7 +172,9 @@ The upstream build is not CO-RE and needs kernel sources (`ebpf_prog/README`):
    outcome B is final for the prebuilt route and the next step is an upstream/CO-RE
    decision, not more attempts.
 3. clang + llvm (version **UNVERIFIED**), then
-   `make KERNEL_DIR=/usr/src/kernels/$(uname -r)/` in the scratch copy (clang -> LLVM IR ->
+   `make KERNEL_DIR=/usr/src/kernels/$(uname -r)/ KERNEL_HEADERS=/usr/src/kernels/$(uname -r)/` in the
+   scratch copy (the Makefile's `KERNEL_HEADERS` default is a Debian path, `ebpf_prog/Makefile:8`;
+   the README passes both, line 18) (clang -> LLVM IR ->
    `llc -march=bpf`; `llvm-strip -g` is a separate step, README line 20).
 4. Install the three `.o` under `/usr/local/lib/opensnitchd/ebpf/` and repeat sections 3
    (steps 4-6) and 4.
