@@ -23,6 +23,10 @@ use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 #[allow(unused_imports)]
 use snitchwatch_kirigami::bridge_bindings as _;
 
+// Isolates HOME and the XDG dirs before `main` (tests/common/mod.rs).
+#[allow(dead_code)]
+mod common;
+
 #[test]
 fn main_qml_loads_with_kirigami_and_appinfo() {
     if std::env::var_os("QT_QPA_PLATFORM").is_none() {
