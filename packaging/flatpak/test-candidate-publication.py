@@ -12,7 +12,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 SHA = 'a' * 40
 WORKFLOW = '.github/workflows/candidate-gui.yml'
-REF = f'bearyjd/snitchwatch/{WORKFLOW}@refs/heads/r16-candidate'
+REF = f'bearyjd/snitchwatch/{WORKFLOW}@refs/heads/r16.1-candidate'
 
 
 def encode(value):
@@ -29,7 +29,7 @@ const spec = JSON.parse(fs.readFileSync(process.argv[2]));
 const calls = [];
 const missing = () => { const error = new Error('missing'); error.status = 404; throw error; };
 const repo = {owner: 'bearyjd', repo: 'snitchwatch'};
-const context = {repo, eventName: 'push', ref: 'refs/heads/r16-candidate', ...spec.context};
+const context = {repo, eventName: 'push', ref: 'refs/heads/r16.1-candidate', ...spec.context};
 const core = {exportVariable: (key, value) => {process.env[key] = value;}, info: () => {}};
 const github = {rest: {
   repos: {
@@ -110,8 +110,8 @@ class Publication(unittest.TestCase):
                         'runtime/org.freedesktop.Sdk.Extension.rust-stable/x86_64/25.08']}}
         assets['generator-provenance.json'] = encode({'generator': pin,
             'cargo_lock_sha256': digest(lock), 'generated_sources_sha256': digest(assets['generated-cargo-sources.json'])})
-        packet = {'schema': 1, 'repository': 'bearyjd/snitchwatch', 'target': 'r16-candidate',
-                  'ref': 'refs/heads/r16-candidate', 'source_commit': SHA, 'workflow_sha': SHA,
+        packet = {'schema': 1, 'repository': 'bearyjd/snitchwatch', 'target': 'r16.1-candidate',
+                  'ref': 'refs/heads/r16.1-candidate', 'source_commit': SHA, 'workflow_sha': SHA,
                   'workflow_ref': REF, 'run_id': '22', 'run_attempt': '1', 'profile': 'system'}
         import base64
         spec = {'validate': self.validate, 'publish': self.publish, 'context': {},
@@ -120,7 +120,7 @@ class Publication(unittest.TestCase):
                            'Cargo.lock': base64.b64encode(lock).decode(),
                            'packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml': base64.b64encode(manifest).decode(),
                            'packaging/flatpak/cargo-generator-pin.json': base64.b64encode(encode(pin)).decode()},
-                'runs': [{'id': 12, 'head_sha': SHA, 'head_branch': 'r16-candidate', 'event': 'push',
+                'runs': [{'id': 12, 'head_sha': SHA, 'head_branch': 'r16.1-candidate', 'event': 'push',
                           'status': 'completed', 'conclusion': 'success', 'run_attempt': 1,
                           'repository': {'full_name': 'bearyjd/snitchwatch'}}],
                 'jobs': [{'name': name, 'head_sha': SHA, 'run_attempt': 1, 'conclusion': 'success'}
@@ -180,7 +180,7 @@ class Publication(unittest.TestCase):
         result = self.exercise()
         self.assertTrue(result['ok'], result)
         create = next(call[1] for call in result['calls'] if call[0] == 'create')
-        self.assertEqual(create['tag_name'], 'r16-candidate')
+        self.assertEqual(create['tag_name'], 'r16.1-candidate')
         self.assertEqual(create['target_commitish'], SHA)
         self.assertTrue(create['draft'])
         self.assertTrue(create['prerelease'])
@@ -205,7 +205,7 @@ class Publication(unittest.TestCase):
                 self.refused(self.exercise(use_old_name))
 
     def test_prior_round_context_is_refused(self):
-        for old in ['r13-candidate', 'r14-candidate', 'r15-candidate', 'r15.1-candidate']:
+        for old in ['r13-candidate', 'r14-candidate', 'r15-candidate', 'r15.1-candidate', 'r16-candidate']:
             with self.subTest(round=old):
                 self.refused(self.exercise(lambda a, e, p, s: s.update(
                     {'context': {'ref': f'refs/heads/{old}'}})))
@@ -217,7 +217,7 @@ class Publication(unittest.TestCase):
         self.assertTrue(result['ok'], result)
         self.assertEqual(result['calls'][0], ['tag', {
             'owner': 'bearyjd', 'repo': 'snitchwatch',
-            'ref': 'refs/tags/r16-candidate', 'sha': SHA}])
+            'ref': 'refs/tags/r16.1-candidate', 'sha': SHA}])
         self.assertEqual(result['calls'][1][0], 'create')
         self.assertEqual([call[0] for call in result['calls']].count('tag'), 1)
 
@@ -253,7 +253,7 @@ class Publication(unittest.TestCase):
     def test_packet_identity_substitutions(self):
         for key, wrong in {'schema': 2, 'repository': 'attacker/snitchwatch', 'target': 'v13',
                            'ref': 'refs/heads/main', 'source_commit': 'f' * 40, 'workflow_sha': 'f' * 40,
-                           'workflow_ref': REF.replace('r16-candidate', 'main'), 'run_id': '23',
+                           'workflow_ref': REF.replace('r16.1-candidate', 'main'), 'run_id': '23',
                            'run_attempt': '2', 'profile': 'legacy'}.items():
             with self.subTest(key=key):
                 self.refused(self.exercise(lambda a, e, p, s: p.update({key: wrong})))
@@ -280,7 +280,7 @@ class Publication(unittest.TestCase):
 
     def test_ref_target_context(self):
         for change in [{'GITHUB_WORKFLOW_SHA': 'f' * 40}, {'REVIEWED_SHA': 'f' * 40},
-                       {'GITHUB_WORKFLOW_REF': REF.replace('r16-candidate', 'main')},
+                       {'GITHUB_WORKFLOW_REF': REF.replace('r16.1-candidate', 'main')},
                        {'PACKET_SHA256': 'f' * 64}]:
             with self.subTest(change=change):
                 self.refused(self.exercise(env_change=change))
@@ -313,25 +313,25 @@ class Publication(unittest.TestCase):
                 return run
             return lambda a, e, p, s: s.update({'runs': [
                 build(i, *run) for i, run in enumerate(newest_first)]})
-        in_flight = ('r16-candidate', 'in_progress', None)
+        in_flight = ('r16.1-candidate', 'in_progress', None)
         main_green = ('main', 'completed', 'success')
         for accepted in [(in_flight, main_green),
-                         (('r16-candidate', 'queued', None), main_green),
+                         (('r16.1-candidate', 'queued', None), main_green),
                          (('', 'in_progress', None, 1), main_green)]:
             with self.subTest(accepted=accepted):
                 result = self.exercise(runs(*accepted))
                 self.assertTrue(result['ok'], result)
-        for newest_first in [(('r16-candidate', 'completed', 'failure'), main_green),
-                             (('r16-candidate', 'completed', 'cancelled'), main_green),
+        for newest_first in [(('r16.1-candidate', 'completed', 'failure'), main_green),
+                             (('r16.1-candidate', 'completed', 'cancelled'), main_green),
                              (in_flight, ('main', 'completed', 'failure')),
                              (in_flight, ('main', 'queued', None)),
                              # A failed/cancelled newer run that is re-run must not expose green A.
-                             (('r16-candidate', 'in_progress', None, 2), main_green),
-                             (('r16-candidate', 'queued', None, 2), main_green),
-                             (in_flight, ('r16-candidate', 'in_progress', None, 3), main_green),
+                             (('r16.1-candidate', 'in_progress', None, 2), main_green),
+                             (('r16.1-candidate', 'queued', None, 2), main_green),
+                             (in_flight, ('r16.1-candidate', 'in_progress', None, 3), main_green),
                              # Unknown attempt on an unfinished run fails closed.
-                             (('r16-candidate', 'in_progress', None, None), main_green),
-                             (('r16-candidate', 'in_progress', None, '1'), main_green)]:
+                             (('r16.1-candidate', 'in_progress', None, None), main_green),
+                             (('r16.1-candidate', 'in_progress', None, '1'), main_green)]:
             with self.subTest(runs=newest_first):
                 self.refused(self.exercise(runs(*newest_first)))
 
@@ -367,18 +367,18 @@ class Publication(unittest.TestCase):
     def test_round_trigger_and_artifact_identities(self):
         # PyYAML's YAML 1.1 loader treats the workflow key "on" as True.
         trigger = self.workflow.get('on', self.workflow.get(True))
-        self.assertEqual(trigger['push']['branches'], ['r16-candidate'])
+        self.assertEqual(trigger['push']['branches'], ['r16.1-candidate'])
         ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
         ci_trigger = ci.get('on', ci.get(True))
-        self.assertEqual(ci_trigger['push']['branches'], ['main', 'r16-candidate'])
+        self.assertEqual(ci_trigger['push']['branches'], ['main', 'r16.1-candidate'])
         for job, action in [('build', 'actions/upload-artifact@'),
                             ('publish', 'actions/download-artifact@')]:
             step = next(step for step in self.workflow['jobs'][job]['steps']
                         if step.get('uses', '').startswith(action))
-            self.assertEqual(step['with']['name'], 'r16-system-gui-candidate')
+            self.assertEqual(step['with']['name'], 'r16.1-system-gui-candidate')
         builder = (ROOT / 'packaging/flatpak/build-candidate.py').read_text()
-        self.assertIn('--default-branch=r16-candidate', builder)
-        self.assertIn('f"app/{APP}/x86_64/r16-candidate"', builder)
+        self.assertIn('--default-branch=r16.1-candidate', builder)
+        self.assertIn('f"app/{APP}/x86_64/r16.1-candidate"', builder)
         self.assertNotIn('r13-candidate', builder)
         self.assertNotIn('r15-candidate', builder)
         self.assertNotIn('r15.1-candidate', builder)
@@ -403,7 +403,7 @@ class Publication(unittest.TestCase):
             self.assertNotIn('checkout', step['uses'])
             self.assertRegex(step['uses'], r'@[a-f0-9]{40}$')
         self.assertIn("github.event_name == 'push'", publisher['if'])
-        self.assertIn('vars.R16_CANDIDATE_REVIEWED_SHA == github.sha', publisher['if'])
+        self.assertIn('vars.R16_1_CANDIDATE_REVIEWED_SHA == github.sha', publisher['if'])
         self.assertNotIn('secrets.', json.dumps(workflow['jobs']['build']))
         ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
         self.assertEqual(ci['permissions'], {'contents': 'read'})
