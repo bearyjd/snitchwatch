@@ -27,18 +27,18 @@ app itself must say which item flashes.
   back out. Unmarked items are never read (no `text`, `displayText`,
   `selectedText`, `preeditText`), so editors, rule/connection tables, the Rule
   Simulator, inputs, process names and hosts cannot leak, however they are
-  bound. The window title is traced two ways. Pages with the
-  default title delegate: authorized by identity, never by reading text. The
-  current page must have `textTraceTitle: true` and use Kirigami's own default
-  `titleDelegate` (its Component's `url` equals that of a pristine
-  `Kirigami.Page`; a custom delegate cannot fake that by borrowing a type
-  name). Then only the title `Heading` that is the direct child of the
-  `*TitleDelegate` in the page's own `globalToolBarItem` is read (the item
-  alone, no subtree or siblings), and `textTraceable: false` on it or the
-  delegate vetoes it. Text equality with the title is not an input.
-  Only the current page's own header is considered (`pageStack.globalToolBar`
-  is non-visual and is not walked), so an unmarked page's header, such as one below the
-  current page, is never authorized. Pages with a custom `titleDelegate`
+  bound. The window title is the current
+  page's own `title` property: while that page declares `textTraceTitle: true`
+  (a literal set in the page's own QML) the tracer connects to its
+  `titleChanged` and logs `window-title ...: <old> -> <new>` (and `+` when the
+  page becomes current). No rendered item is read: not the header, the title
+  delegate, its url or its type. For default-delegate pages the heading shows
+  exactly `page.title` (checked on real Kirigami for every `textTraceTitle`
+  title), so nothing is lost. An earlier version authorized the default
+  delegate's heading by comparing its Component `url` with a pristine
+  `Kirigami.Page`'s; QML code could spoof that url via `Qt.createQmlObject`, so
+  the check is gone rather than hardened. Only the current page is considered,
+  so an unmarked page's title is never read. Pages with a custom `titleDelegate`
   (Connections via `ConnectionsHeader.qml`, Rules, Profiles, Blocklists) mark
   only their fixed title heading `textTraceable`, never the search field,
   subscribe box or buttons next to it. `ConnectionDetailPage` (title is the
