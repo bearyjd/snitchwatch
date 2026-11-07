@@ -388,6 +388,50 @@ pub(crate) mod fixture_signal {
         kill_verified_with(pid, open_pidfd, send_kill, identity)
     }
 
+    /// SIGKILL the process group `group` after `identity` confirmed its
+    /// leader (pid == `group`) while a pidfd for it was held. Only for a
+    /// leader the caller has not reaped (or that is its own process): its pid
+    /// then cannot be recycled between the check and the `killpg`.
+    pub(crate) fn killpg_verified_with(
+        group: i32,
+        open: impl FnOnce(i32) -> io::Result<OwnedFd>,
+        killpg: impl FnOnce(i32),
+        identity: impl FnOnce(i32) -> bool,
+    ) -> Verified {
+        if target(group).is_none() {
+            return Verified::Unsafe;
+        }
+        let _fd = match open(group) {
+            Ok(fd) => fd,
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => return Verified::Gone,
+            Err(e) => return Verified::Refused(e.raw_os_error().unwrap_or(libc::EIO)),
+        };
+        if !identity(group) {
+            return Verified::Mismatch;
+        }
+        killpg(group);
+        Verified::Sent
+    }
+
+    /// [`killpg_verified_with`] on the real syscalls; the leader is the
+    /// caller's unreaped child (live or zombie), the caller itself, or
+    /// carries `marker` in its cmdline.
+    pub(crate) fn killpg_marked(group: i32, marker: &str) -> Verified {
+        killpg_verified_with(
+            group,
+            open_pidfd,
+            |g| unsafe {
+                libc::killpg(g, libc::SIGKILL);
+            },
+            |p| {
+                has_marker(p, marker)
+                    || p == unsafe { libc::getpid() }
+                    || super::parent_and_zombie(p)
+                        .is_some_and(|(parent, _)| parent == unsafe { libc::getpid() })
+            },
+        )
+    }
+
     /// SIGKILL `pid` only if its cmdline contains `marker` (a
     /// [`unique_marker`]), checked while its pidfd is held.
     pub(crate) fn kill_marked(pid: i32, marker: &str) -> Verified {
@@ -964,7 +1008,11 @@ mod tests {
             fixture_signal::kill_verified(self.child, |c| {
                 parent_and_zombie(c).is_some_and(|(parent, _)| parent == self.root)
             });
-            if fixture_signal::kill(self.root) {
+            // `P` is our child (a recycled pid is not): only then signal and reap it.
+            let sent = fixture_signal::kill_verified(self.root, |r| {
+                parent_and_zombie(r).is_some_and(|(parent, _)| parent == me())
+            });
+            if sent == fixture_signal::Verified::Sent {
                 unsafe {
                     libc::waitpid(self.root, std::ptr::null_mut(), 0);
                 }
@@ -1405,11 +1453,13 @@ mod tests {
                 0
             });
         }
+        let marker = unique_marker();
         let mut fixture = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "containment::tests::an_exhausted_fd_table_fails_the_scan_instead_of_emptying_it",
                 "--test-threads=1",
+                marker.as_str(),
             ])
             .env(CHILD, "1")
             .stdin(Stdio::null())
@@ -1421,7 +1471,7 @@ mod tests {
         // Polled without reaping, so the group kill below cannot name a
         // recycled pid; then the group first (the sleeper is in it), then reap.
         let finished = exited_unreaped(&fixture, Duration::from_secs(20));
-        fixture_signal::killpg(fixture.id() as i32);
+        fixture_signal::killpg_marked(fixture.id() as i32, &marker);
         let status = fixture.wait().unwrap();
         assert!(finished, "the fixture never finished");
         assert_eq!(
@@ -1761,6 +1811,119 @@ mod tests {
                 .spawn()
                 .unwrap(),
         )
+    }
+
+    fn devnull_fd(_: i32) -> io::Result<std::os::fd::OwnedFd> {
+        Ok(std::os::fd::OwnedFd::from(
+            std::fs::File::open("/dev/null").unwrap(),
+        ))
+    }
+
+    #[test]
+    fn killpg_verified_branches() {
+        use fixture_signal::{killpg_verified_with, Verified};
+        use std::cell::Cell;
+        let sent = Cell::new(0);
+        let go = |g: i32| sent.set(g);
+        let eperm = |_| Err(io::Error::from_raw_os_error(libc::EPERM));
+        let esrch = |_| Err(io::Error::from_raw_os_error(libc::ESRCH));
+        let unreachable_open = |_| -> io::Result<std::os::fd::OwnedFd> { panic!("opened") };
+        for bad in [-1, 0, 1] {
+            assert_eq!(
+                killpg_verified_with(bad, unreachable_open, go, |_| true),
+                Verified::Unsafe
+            );
+        }
+        assert_eq!(
+            killpg_verified_with(4242, eperm, go, |_| true),
+            Verified::Refused(libc::EPERM)
+        );
+        assert_eq!(
+            killpg_verified_with(4242, esrch, go, |_| true),
+            Verified::Gone
+        );
+        assert_eq!(
+            killpg_verified_with(4242, devnull_fd, go, |_| false),
+            Verified::Mismatch
+        );
+        assert_eq!(sent.get(), 0, "signalled without a verified leader");
+        assert_eq!(
+            killpg_verified_with(4242, devnull_fd, go, |_| true),
+            Verified::Sent
+        );
+        assert_eq!(sent.get(), 4242);
+    }
+
+    /// A pid that is not a child of ours (here a sleeper orphaned from its
+    /// shell, standing for a recycled pid), with a marker elsewhere.
+    fn orphan_sleeper(marker: &str) -> i32 {
+        let out = Command::new("/usr/bin/sh")
+            .args([
+                "-c",
+                &format!("sleep {marker} >/dev/null 2>&1 </dev/null & echo $!"),
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    }
+
+    /// A group leader that is neither marked, ours, nor a zombie child of
+    /// ours keeps its group.
+    #[test]
+    fn killpg_marked_spares_a_leader_it_cannot_vouch_for() {
+        let marker = unique_marker();
+        let pid = orphan_sleeper(&marker);
+        let verdict = fixture_signal::killpg_marked(pid, "some-other-marker");
+        std::thread::sleep(Duration::from_millis(200));
+        let survived = !dead(pid);
+        fixture_signal::kill_marked(pid, &marker);
+        assert_eq!(verdict, fixture_signal::Verified::Mismatch);
+        assert!(
+            survived,
+            "the group of an unidentified leader was signalled"
+        );
+    }
+
+    /// Our own unreaped child leads its group: marker or not, live or
+    /// zombie, the group (leader included) is killed.
+    #[test]
+    fn killpg_marked_kills_a_group_whose_leader_is_ours() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let marker = unique_marker();
+        let mut live = Command::new("/usr/bin/sleep")
+            .arg(&marker)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut zombie = Command::new("/usr/bin/true")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let exited = exited_unreaped(&zombie, Duration::from_secs(5));
+        let a = fixture_signal::killpg_marked(live.id() as i32, "some-other-marker");
+        let b = fixture_signal::killpg_marked(zombie.id() as i32, "some-other-marker");
+        let live_status = live.wait().unwrap();
+        zombie.wait().unwrap();
+        assert!(exited);
+        assert_eq!(a, fixture_signal::Verified::Sent);
+        assert_eq!(b, fixture_signal::Verified::Sent);
+        assert_eq!(live_status.signal(), Some(libc::SIGKILL));
+    }
+
+    /// The root of a fork tree that is not our child (a recycled pid) is not
+    /// signalled by the drop.
+    #[test]
+    fn a_fork_tree_drop_spares_a_root_that_is_not_ours() {
+        let marker = unique_marker();
+        let pid = orphan_sleeper(&marker);
+        drop(ForkedTree {
+            root: pid,
+            child: 0,
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let survived = !dead(pid);
+        fixture_signal::kill_marked(pid, &marker);
+        assert!(survived, "the drop killed a root that is not our child");
     }
 
     #[test]
