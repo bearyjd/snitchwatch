@@ -398,6 +398,34 @@ pub(crate) mod fixture_signal {
         })
     }
 
+    /// `attempt` until it is not `Mismatch`, at most `tries` times with
+    /// `pause` between. A process just spawned may still carry its parent's
+    /// cmdline until its exec lands, so a first `Mismatch` is not final; each
+    /// attempt re-verifies under a fresh pidfd, so a recycled pid still never
+    /// matches.
+    pub(crate) fn retry_mismatch(
+        tries: u32,
+        pause: std::time::Duration,
+        mut attempt: impl FnMut() -> Verified,
+    ) -> Verified {
+        let mut got = attempt();
+        for _ in 1..tries {
+            if got != Verified::Mismatch {
+                break;
+            }
+            std::thread::sleep(pause);
+            got = attempt();
+        }
+        got
+    }
+
+    /// [`kill_marked`], patient about a process that has not exec'd yet.
+    pub(crate) fn kill_marked_patiently(pid: i32, marker: &str) -> Verified {
+        retry_mismatch(50, std::time::Duration::from_millis(10), || {
+            kill_marked(pid, marker)
+        })
+    }
+
     /// A marker no other test invocation shares: pid, clock and a counter.
     pub(crate) fn unique_marker() -> String {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -577,6 +605,50 @@ pub(crate) mod fixture_signal {
         }
 
         #[test]
+        fn a_mismatch_is_retried_until_it_matches_but_only_so_often() {
+            let pause = std::time::Duration::from_millis(1);
+            let calls = Cell::new(0);
+            let got = retry_mismatch(5, pause, || {
+                calls.set(calls.get() + 1);
+                if calls.get() < 3 {
+                    Verified::Mismatch
+                } else {
+                    Verified::Sent
+                }
+            });
+            assert_eq!((got, calls.get()), (Verified::Sent, 3));
+            calls.set(0);
+            let got = retry_mismatch(4, pause, || {
+                calls.set(calls.get() + 1);
+                Verified::Mismatch
+            });
+            assert_eq!((got, calls.get()), (Verified::Mismatch, 4));
+            calls.set(0);
+            let got = retry_mismatch(4, pause, || {
+                calls.set(calls.get() + 1);
+                Verified::Refused(libc::EPERM)
+            });
+            assert_eq!((got, calls.get()), (Verified::Refused(libc::EPERM), 1));
+        }
+
+        /// The race seen on loaded hosts: a fresh process whose exec has not
+        /// landed carries its parent's cmdline; the marker arrives later.
+        #[test]
+        fn a_process_that_execs_late_is_still_killed() {
+            use std::os::unix::process::ExitStatusExt;
+            let marker = unique_marker();
+            let mut child = std::process::Command::new("/usr/bin/sh")
+                .args(["-c", "sleep 0.2; exec sleep \"$MARK\""])
+                .env("MARK", &marker)
+                .spawn()
+                .unwrap();
+            let got = kill_marked_patiently(child.id() as i32, &marker);
+            let status = child.wait().unwrap();
+            assert_eq!(got, Verified::Sent);
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
+        }
+
+        #[test]
         fn a_reaped_pid_is_gone_not_signalled() {
             let marker = unique_marker();
             let mut child = marked_sleep(&marker);
@@ -619,7 +691,7 @@ mod tests {
     }
     fn wait_dead(child: &mut Reaped) -> bool {
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(3) {
+        while start.elapsed() < Duration::from_secs(10) {
             if !alive(child) {
                 return true;
             }
@@ -1271,10 +1343,12 @@ mod tests {
             panic!("could not observe the fixture's survivors: {last:?}");
         }
     }
-    impl Drop for MarkedSleeps {
-        /// Never panics, whatever /proc says. Every signal goes through a
-        /// pidfd whose process is verified while it is held.
-        fn drop(&mut self) {
+    impl MarkedSleeps {
+        /// The cleanup `drop` runs (idempotent), with what each pid-file or
+        /// recorded kill came to. Never panics, whatever /proc says. Every
+        /// signal goes through a pidfd whose process is verified while held.
+        fn cleanup(&self) -> Vec<(i32, fixture_signal::Verified)> {
+            let mut results = Vec::new();
             // First what the fixture itself reported (no /proc scan needed),
             // in order: an escaped shell is listed before its sleepers, so it
             // stops forking before they are killed. Then what a scan saw.
@@ -1288,7 +1362,10 @@ mod tests {
                 .filter_map(|l| l.trim().parse::<i32>().ok());
             let known = self.known.lock().map(|k| k.clone()).unwrap_or_default();
             for pid in reported.chain(known) {
-                fixture_signal::kill_marked(pid, &self.marker);
+                results.push((
+                    pid,
+                    fixture_signal::kill_marked_patiently(pid, &self.marker),
+                ));
             }
             // Then what a best-effort scan (errors ignored) still finds below
             // `root`: its own subtree only (each pid's parent is the root or
@@ -1310,6 +1387,12 @@ mod tests {
                     });
                 }
             }
+            results
+        }
+    }
+    impl Drop for MarkedSleeps {
+        fn drop(&mut self) {
+            self.cleanup();
         }
     }
 
@@ -1333,12 +1416,30 @@ mod tests {
         assert!(fixture
             .try_alive(Instant::now() + Duration::from_secs(1))
             .is_err());
-        fixture.record(&[a.0.id() as i32, b.0.id() as i32]);
+        let (pa, pb) = (a.0.id() as i32, b.0.id() as i32);
+        fixture.record(&[pa, pb]);
+        let kills = fixture.cleanup();
         drop(fixture);
-        assert!(
-            wait_dead(&mut a) && wait_dead(&mut b),
-            "recorded sleepers survived"
-        );
+        // Both are waited for (no short circuit); on failure say what each
+        // looked like and what a second verified kill does, to tell a missed
+        // identity check from a kill that was sent but not yet effective.
+        let dead = [wait_dead(&mut a), wait_dead(&mut b)];
+        if !dead.iter().all(|&d| d) {
+            let report: Vec<String> = [(pa, dead[0]), (pb, dead[1])]
+                .iter()
+                .filter(|(_, d)| !d)
+                .map(|&(pid, _)| {
+                    format!(
+                        "pid {pid}: cmdline {:?}, stat {:?}, retried kill {:?}",
+                        std::fs::read(format!("/proc/{pid}/cmdline"))
+                            .map(|c| String::from_utf8_lossy(&c).into_owned()),
+                        parent_and_zombie(pid),
+                        fixture_signal::kill_marked(pid, &marker),
+                    )
+                })
+                .collect();
+            panic!("recorded sleepers survived: {report:?}; cleanup kills: {kills:?}");
+        }
     }
 
     /// Whether `pid` is gone or only a zombie.
