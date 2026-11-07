@@ -516,6 +516,11 @@ mod tests {
 
     #[test]
     fn needs_rule_is_remembered_and_bounded() {
+        // The registry is process-wide: this floods it past its cap, which
+        // would evict the marks of tests that hold the same lock.
+        let _lock = crate::learned::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         mark_needs_rule("9:ask-x");
         assert!(needs_rule("9:ask-x"));
         assert!(!needs_rule("9:ask-y"));

@@ -331,8 +331,12 @@ impl qobject::SettingsController {
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
             // Demo mode (screenshots) must not depend on this machine's file.
-            let applied = if crate::demo::enabled() {
-                // No transaction in demo mode: applied as is.
+            // Neither may a lib test that loads the production main.qml: it
+            // would point the process-wide learned recorder at a real file
+            // (and start its writer thread), and every learning window in the
+            // test binary would then inherit the file's rows (#259).
+            let applied = if crate::demo::enabled() || cfg!(test) {
+                // No transaction in demo mode or under test: applied as is.
                 None
             } else {
                 // An expired learning window is ended (and its mode restored)

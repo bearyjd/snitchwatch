@@ -130,6 +130,12 @@ impl Shared {
         }
     }
 
+    /// Whether a file backend (and with it the writer thread) is attached.
+    #[cfg(test)]
+    pub fn has_backend(&self) -> bool {
+        lock(&self.backend).is_some()
+    }
+
     /// A new window: forget everything held in memory.
     pub fn reset(&self) {
         *lock(&self.inner) = Inner::default();

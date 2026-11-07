@@ -28,6 +28,10 @@ use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
 #[allow(unused_imports)]
 use snitchwatch_kirigami::wizard_controller as _;
 
+// Isolates HOME and the XDG dirs before `main` (tests/common/mod.rs).
+#[allow(dead_code)]
+mod common;
+
 #[test]
 fn wizard_controller_registers_and_onboarding_page_loads() {
     if std::env::var_os("QT_QPA_PLATFORM").is_none() {

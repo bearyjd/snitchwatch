@@ -217,6 +217,10 @@ fn app_icon_is_generic_without_a_process_path() {
 
 #[test]
 fn a_silently_answered_row_needs_a_rule_once_it_is_decided() {
+    // The registry is process-wide, shared with the silent-answer tests.
+    let _lock = crate::learned::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let mut answered = row("7:silent-answered", None);
     assert!(!needs_rule_for_row(&answered), "unmarked");
     crate::silent_mode::mark_needs_rule("7:silent-answered");
