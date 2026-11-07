@@ -115,3 +115,51 @@ repaint, so nothing here is evidence for or against any of them.
 Next code step if (1) points at hypothesis 1: add a debug log of
 `PromptSlotStatus` `held` flips (the way PR #285 did for health), then
 look at the timestamps.
+
+## How to capture a text-change trace (SNITCHWATCH_TEXT_TRACE)
+
+Opt-in debug mode (off by default: without the flag the tracer is never
+created and never samples; only an inactive `Loader` and one environment
+lookup at startup remain). It samples once per rendered frame and logs changes
+of the text, visibility and opacity of an ALLOWLIST of text items, with a
+millisecond timestamp and the item's path. Only items under a
+`property bool textTraceable: true` mark are ever read: the window banners, the
+prompt-slot and learning banners' fixed message (not the holder line, which
+holds program and host), the Daemon Health message, the "Waiting for daemon
+statistics" placeholder, the rule button state label ("Waiting for the
+firewall") and the window title (the default title Heading of the current page's own
+header, authorized by the page using Kirigami's own default title delegate and
+having a fixed `textTraceTitle`, never by text; delegates are never authorized
+as a subtree; Connections, Rules,
+Profiles and Blocklists mark just their title heading; the connection detail
+page, whose title is a process name, is not traced). Editors, tables, the Rule
+Simulator, inputs, process names and hosts are never read. Marked text is
+logged only while on screen: visible, opacity above 0 and FULLY inside the
+window and every clipping ancestor (`(partly hidden)` otherwise); editable
+fields log `<editable field redacted>`; elided text logs `(elided)`. To add a
+mark, put `property bool textTraceable: true` on an item whose strings are all
+fixed (full list and rule in docs/superpowers/plans/2026-11-03-text-trace.md).
+The one exception to on-screen-only is the tray tooltip, logged on change under
+the label `tray-tooltip (not necessarily visible)`; a `Blocked: ...` tooltip
+(attacker-influenced process and host) is logged only as
+`Blocked: (details withheld)`. Limits: a change that starts and ends between
+two frames is not seen, opacity is rounded to tenths, clipping is checked by
+bounding box only, the holder line of the prompt-slot banner is not traced, and
+a flicker that is a pure rendering artefact (properties unchanged) leaves no
+line. So an empty trace over the flicker is itself a result (it points to
+hypothesis 2 or 3 above), not proof that nothing flashed. Run:
+
+    flatpak run --env=SNITCHWATCH_TEXT_TRACE=1 \
+      --env=SNITCHWATCH_LOG=snitchwatch_kirigami=debug \
+      org.snitchwatch.Snitchwatch 2>&1 | tee trace.log
+
+Then, with the window at the size where you see the flicker, open Daemon
+Health, scroll the wheel with the pointer over the title area for about 20 s,
+then do the same on Security Scan. Send `trace.log` (grep for `text-trace`).
+
+Line format: `text-trace t=<ms>ms <path> <field>: <old> -> <new> text: "..."`,
+where field is `vis` (V visible / H hidden), `op` (opacity x10) or `text`;
+`+`/`-` lines are items that appeared/disappeared; `tray-tooltip (not necessarily visible):` lines
+are the tray tooltip. A flash shows up as a `vis: H -> V` (or a `text:` change to
+"working"/"waiting") followed within a few ms by the reverse; the path names
+the item (`Type#childIndex[objectName]` per level).

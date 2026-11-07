@@ -107,6 +107,7 @@ fn main() {
                 "qml/SilentModePage.qml",
                 "qml/AlertHost.qml",
                 "qml/ScreenshotRunner.qml",
+                "qml/TextTrace.qml",
                 "qml/SegmentedChoice.qml",
                 "qml/AlertWindow.qml",
                 "qml/DiagnosticsPage.qml",

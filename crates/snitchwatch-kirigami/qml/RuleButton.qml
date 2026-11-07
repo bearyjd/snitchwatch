@@ -138,6 +138,7 @@ Item {
             }
             Controls.Label {
                 objectName: "ruleLabel"
+                property bool textTraceable: true
                 Layout.fillWidth: true
                 elide: Text.ElideRight
                 textFormat: Text.PlainText

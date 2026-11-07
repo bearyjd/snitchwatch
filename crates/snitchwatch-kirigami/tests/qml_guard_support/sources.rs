@@ -396,5 +396,6 @@ pub const ALL_QML: &[(&str, &str)] = &[
     ("SizedOverlaySheet.qml", SIZED_SHEET),
     ("TrafficPage.qml", include_str!("../../qml/TrafficPage.qml")),
     ("Theme.qml", include_str!("../../qml/Theme.qml")),
+    ("TextTrace.qml", include_str!("../../qml/TextTrace.qml")),
     ("TrayMenu.qml", include_str!("../../qml/TrayMenu.qml")),
 ];

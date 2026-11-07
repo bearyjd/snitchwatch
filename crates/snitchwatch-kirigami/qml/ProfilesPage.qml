@@ -24,6 +24,7 @@ import com.snitchwatch.shell
 Kirigami.ScrollablePage {
     id: page
     title: "Profiles"
+    property bool textTraceTitle: true
 
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property ProfilesModel model
@@ -61,6 +62,7 @@ Kirigami.ScrollablePage {
         spacing: Kirigami.Units.largeSpacing
 
         Kirigami.Heading {
+            property bool textTraceable: true
             text: page.title
             level: 1
             Layout.alignment: Qt.AlignVCenter

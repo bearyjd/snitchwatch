@@ -23,6 +23,7 @@ RowLayout {
 
     // Selectable (batch 8): a level-1 heading on one line, as before.
     SelectableText {
+        property bool textTraceable: true
         text: header.title
         level: 1
         textFormat: Text.PlainText

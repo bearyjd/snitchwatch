@@ -75,6 +75,7 @@ import com.snitchwatch.shell
 Kirigami.ScrollablePage {
     id: page
     title: "Rules"
+    property bool textTraceTitle: true
 
     // Injected by the caller (main.qml) so the model's lifetime is owned there.
     property RulesModel model
@@ -283,6 +284,7 @@ Kirigami.ScrollablePage {
         spacing: Kirigami.Units.largeSpacing
 
         SelectableText {
+            property bool textTraceable: true
             text: page.title
             level: 1
             Layout.alignment: Qt.AlignVCenter

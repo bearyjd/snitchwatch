@@ -102,6 +102,7 @@ ColumnLayout {
     Kirigami.InlineMessage {
         Layout.fillWidth: true
         visible: true
+        property bool textTraceable: true
         type: Kirigami.MessageType.Warning
         text: "A connection is waiting for your answer."
         actions: [

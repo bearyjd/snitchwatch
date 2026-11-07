@@ -17,6 +17,7 @@ import com.snitchwatch.shell
 Kirigami.ScrollablePage {
     id: page
     title: "About"
+    property bool textTraceTitle: true
 
     // Where the Flatpak runtime describes this instance; tests point it at
     // a fixture.

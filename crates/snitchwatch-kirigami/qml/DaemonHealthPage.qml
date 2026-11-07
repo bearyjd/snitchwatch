@@ -5,6 +5,7 @@ import org.kde.kirigami as Kirigami
 Kirigami.ScrollablePage {
     id: page
     title: "Daemon Health"
+    property bool textTraceTitle: true
 
     required property var model
     // Deny-mode status (DenyStatusModel); main.qml passes it, so a page made
@@ -19,6 +20,7 @@ Kirigami.ScrollablePage {
             Layout.fillWidth: true
             type: Kirigami.MessageType.Warning
             visible: page.model.hasProblem
+            property bool textTraceable: true
             text: page.model.statusSummary
         }
 
