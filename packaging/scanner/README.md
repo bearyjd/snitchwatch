@@ -55,6 +55,14 @@ the watchdog still kills the group; the broker reports a generic failure because
 the termination cause is unknown. Unmarked SIGKILL, including possible OOM kills,
 is never assumed to be a timeout.
 
+Exit status: 0 clean, 1 the scan could not run, 2 new anomalies. 3 means the
+exit sweep of the scanner's descendants was incomplete (one may have survived);
+it takes precedence over 0, 1 and 2, and comes with a best-effort
+`SNITCHWATCH_SCANNER_EXIT_SWEEP_INCOMPLETE` marker on a stderr pipe. A hard
+`alarm` (sweep bound + 5 s) armed when the scanner starts to exit ends a hung
+exit with SIGALRM; it does not kill escaped descendants. The broker accepts
+only 0 and 2 as a report, so it reports 3 (and SIGALRM) as a generic failure.
+
 The broker is a new privilege-adjacent interface: review it and the host package
 before deployment. Automated tests use fake executables and a private D-Bus
 session; they do not request real authorization or run a root scan. Live desktop

@@ -266,7 +266,8 @@ fn ignore_gone(e: io::Error) -> io::Result<()> {
 pub struct Sweep {
     /// A pass found no live descendant before the bound.
     pub complete: bool,
-    /// Signals that failed for a reason other than the process being gone.
+    /// Attempts or setup steps that failed for a reason other than the process
+    /// being gone.
     pub failures: u32,
     pub first_error: Option<io::Error>,
 }
