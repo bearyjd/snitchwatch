@@ -365,7 +365,17 @@ fn loading_main_qml_waits_for_the_process_wide_state_lock() {
     crate::silent_mode::set_state(SilentMode::Allow);
     crate::learned::set_active(false);
     crate::learned::set_active(true);
-    let scenario = std::thread::spawn(stale_delivery_and_off_qt_save_keep_independent_lifetimes);
+    // The worker says it is running before the observation window opens, so a
+    // slow thread start cannot make the window pass without the scenario ever
+    // having tried to load main.qml.
+    let (started_tx, started_rx) = mpsc::channel();
+    let scenario = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        stale_delivery_and_off_qt_save_keep_independent_lifetimes();
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the load scenario never started");
     let deadline = Instant::now() + Duration::from_secs(3);
     while !scenario.is_finished() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
@@ -378,4 +388,26 @@ fn loading_main_qml_waits_for_the_process_wide_state_lock() {
     scenario.join().expect("the load scenario failed");
     assert_eq!(choice, Some("allow"), "main.qml changed the silent mode");
     assert!(active, "main.qml ended the learning window");
+}
+
+/// The exit hook deletes only the home this process created, and only in the
+/// creating process; the env var (which a test may repoint) is never trusted.
+#[test]
+fn the_exit_hook_removes_only_the_retained_home_in_its_creator() {
+    use std::path::Path;
+    let home = Path::new("/tmp/snitchwatch-probe-home-retained");
+    assert_eq!(
+        common::removal_target(Some(home), 41, 41).as_deref(),
+        Some(home)
+    );
+    assert_eq!(
+        common::removal_target(Some(home), 41, 42),
+        None,
+        "fork child"
+    );
+    assert_eq!(
+        common::removal_target(None, 41, 41),
+        None,
+        "nothing created"
+    );
 }

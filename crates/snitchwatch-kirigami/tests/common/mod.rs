@@ -110,17 +110,59 @@ pub fn home_isolation() -> (Option<std::ffi::OsString>, std::path::PathBuf) {
     )
 }
 
+/// What the exit hook may delete: only the directory this process created, and
+/// only in the process that created it (a fork child must not delete the
+/// parent's home). The env var is never consulted.
+#[allow(dead_code)] // used by the Linux exit hook and a lib test
+pub fn removal_target(
+    retained: Option<&std::path::Path>,
+    owner_pid: i32,
+    current_pid: i32,
+) -> Option<std::path::PathBuf> {
+    match retained {
+        Some(home) if owner_pid == current_pid => Some(home.to_path_buf()),
+        _ => None,
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod isolate {
-    use std::ffi::{c_char, CStr};
+    use std::ffi::{c_char, CStr, CString};
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+
+    /// The directory this process created (a leaked `CString`), set by the
+    /// constructor before `main`; the exit hook deletes this and nothing the
+    /// environment says.
+    static RETAINED_HOME: AtomicPtr<c_char> = AtomicPtr::new(std::ptr::null_mut());
+    /// The pid that created it.
+    static OWNER_PID: AtomicI32 = AtomicI32::new(0);
 
     #[used]
     #[link_section = ".init_array"]
     static ISOLATE_BEFORE_MAIN: extern "C" fn() = isolate_before_main;
 
     extern "C" fn remove_home() {
-        if let Some(dir) = std::env::var_os(super::PROBE_HOME_VAR) {
+        let raw = RETAINED_HOME.load(Ordering::SeqCst);
+        // SAFETY: `raw` is null or the leaked, NUL-terminated `CString` stored
+        // by the constructor, never freed.
+        let retained = (!raw.is_null()).then(|| unsafe { CStr::from_ptr(raw) });
+        let retained =
+            retained.map(|c| std::path::Path::new(std::ffi::OsStr::from_bytes(c.to_bytes())));
+        // SAFETY: getpid has no preconditions.
+        let current = unsafe { libc::getpid() };
+        if let Some(dir) =
+            super::removal_target(retained, OWNER_PID.load(Ordering::SeqCst), current)
+        {
             let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// `setenv`, or exit: a failure would leave the developer's real value in
+    /// place and the tests running against it.
+    unsafe fn set(var: &CStr, value: *const c_char, overwrite: i32) {
+        if libc::setenv(var.as_ptr(), value, overwrite) != 0 {
+            die(b"cannot set a probe home environment variable\n");
         }
     }
 
@@ -133,7 +175,7 @@ mod isolate {
     }
 
     /// `<dir>/<sub>` as a NUL-terminated string in `out`.
-    fn join(dir: &[u8], sub: &[u8], out: &mut [u8; 4096]) -> *const c_char {
+    fn join(dir: &[u8], sub: &[u8], out: &mut [u8; 4096]) -> *mut c_char {
         if dir.len() + sub.len() + 2 > out.len() {
             die(b"probe home path too long\n");
         }
@@ -141,7 +183,7 @@ mod isolate {
         out[dir.len()] = b'/';
         out[dir.len() + 1..dir.len() + 1 + sub.len()].copy_from_slice(sub);
         out[dir.len() + 1 + sub.len()] = 0;
-        out.as_ptr().cast()
+        out.as_mut_ptr().cast()
     }
 
     /// Runs from `.init_array` before `main`, while the process is still
@@ -153,24 +195,29 @@ mod isolate {
         // `getenv` returns are copied before any `setenv`.
         unsafe {
             let tmp = libc::getenv(c"TMPDIR".as_ptr());
-            let base: &[u8] = if tmp.is_null() {
-                b"/tmp"
-            } else {
-                CStr::from_ptr(tmp).to_bytes()
-            };
-            let dir_ptr = join(base, b"snitchwatch-probe-home-XXXXXX", &mut template)
-                .cast_mut()
-                .cast::<c_char>();
+            // An empty or relative TMPDIR is treated as unset.
+            let tmp = (!tmp.is_null())
+                .then(|| CStr::from_ptr(tmp).to_bytes())
+                .filter(|dir| dir.first() == Some(&b'/'));
+            let dir_ptr = join(
+                tmp.unwrap_or(b"/tmp"),
+                b"snitchwatch-probe-home-XXXXXX",
+                &mut template,
+            );
             if libc::mkdtemp(dir_ptr).is_null() {
                 die(b"cannot create the probe home\n");
             }
             let dir = CStr::from_ptr(dir_ptr).to_bytes().to_vec();
+            if let Ok(retained) = CString::new(dir.clone()) {
+                RETAINED_HOME.store(retained.into_raw(), Ordering::SeqCst);
+                OWNER_PID.store(libc::getpid(), Ordering::SeqCst);
+            }
             let home = libc::getenv(c"HOME".as_ptr());
             if !home.is_null() {
-                libc::setenv(c"SNITCHWATCH_PROBE_ORIGINAL_HOME".as_ptr(), home, 1);
+                set(c"SNITCHWATCH_PROBE_ORIGINAL_HOME", home, 1);
             }
-            libc::setenv(c"SNITCHWATCH_PROBE_HOME".as_ptr(), dir_ptr, 1);
-            libc::setenv(c"HOME".as_ptr(), dir_ptr, 1);
+            set(c"SNITCHWATCH_PROBE_HOME", dir_ptr, 1);
+            set(c"HOME", dir_ptr, 1);
             let mut path = [0u8; 4096];
             for (var, sub) in [
                 (c"XDG_CONFIG_HOME", &b".config"[..]),
@@ -188,11 +235,11 @@ mod isolate {
                 {
                     die(b"cannot create a 0700 probe home subdirectory\n");
                 }
-                libc::setenv(var.as_ptr(), p, 1);
+                set(var, p, 1);
             }
-            libc::setenv(c"QT_QPA_PLATFORM".as_ptr(), c"offscreen".as_ptr(), 0);
-            libc::setenv(c"QT_QUICK_CONTROLS_STYLE".as_ptr(), c"Basic".as_ptr(), 0);
-            libc::setenv(c"QT_FORCE_STDERR_LOGGING".as_ptr(), c"1".as_ptr(), 0);
+            set(c"QT_QPA_PLATFORM", c"offscreen".as_ptr(), 0);
+            set(c"QT_QUICK_CONTROLS_STYLE", c"Basic".as_ptr(), 0);
+            set(c"QT_FORCE_STDERR_LOGGING", c"1".as_ptr(), 0);
             libc::atexit(remove_home);
         }
     }
