@@ -382,6 +382,7 @@ class Publication(unittest.TestCase):
         self.assertNotIn('r13-candidate', builder)
         self.assertNotIn('r15-candidate', builder)
         self.assertNotIn('r15.1-candidate', builder)
+        self.assertNotIn('r16-candidate', builder)
 
     def test_runner_paths_are_evaluated_on_the_build_step(self):
         build = self.workflow['jobs']['build']
@@ -404,6 +405,11 @@ class Publication(unittest.TestCase):
             self.assertRegex(step['uses'], r'@[a-f0-9]{40}$')
         self.assertIn("github.event_name == 'push'", publisher['if'])
         self.assertIn('vars.R16_1_CANDIDATE_REVIEWED_SHA == github.sha', publisher['if'])
+        var = 'vars.R16_1_CANDIDATE_REVIEWED_SHA'
+        self.assertIn(f'{var} != github.sha', workflow['jobs']['register']['if'])
+        self.assertIn(f'{var} == github.sha', workflow['jobs']['build']['if'])
+        for job in ['build', 'publish']:
+            self.assertEqual(workflow['jobs'][job]['env']['REVIEWED_SHA'], '${{ ' + var + ' }}')
         self.assertNotIn('secrets.', json.dumps(workflow['jobs']['build']))
         ci = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
         self.assertEqual(ci['permissions'], {'contents': 'read'})
