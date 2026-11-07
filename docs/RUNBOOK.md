@@ -30,12 +30,12 @@ dial-in, closed-window fail-open, tray states, Daemon Health) are in
 | Item | User flavour | System flavour | Source |
 |---|---|---|---|
 | Socket dir | `$XDG_RUNTIME_DIR/snitchwatch/` (dir 0700, files 0600) | `/run/snitchwatch/` | `README.md` "Architecture"; `CLAUDE.md` "Settled" #3; `crates/snitchwatch-bridge/src/auth.rs:90` |
-| WS socket | `.../bridge.sock` | `/run/snitchwatch/bridge.sock`, root:`snitchwatch-ui` 0660 | `README.md`; `docs/packaging/system-bridge-integration.md:17-20` |
+| WS socket | `.../bridge.sock` | `/run/snitchwatch/bridge.sock`, root:`snitchwatch-ui` 0660 | `README.md`; `docs/packaging/system-bridge-integration.md:18-22` |
 | Handshake token | `.../token`, 0600; sent as first WS text frame on `/stream` | `/run/snitchwatch-auth/token`, mode 0640 | `README.md`; `crates/snitchwatch-bridge-cli/src/main.rs` header; `docs/packaging/system-bridge-integration.md:24-28` |
 | Daemon to bridge | gRPC TCP `127.0.0.1:50051` (set by the unit; dev/per-user only, not deny-safe, #35) | `/run/snitchwatch/opensnitchd.sock`, root:root 0600; no TCP fallback | `packaging/systemd/snitchwatch-bridge.service:33`; `system-bridge-integration.md:12-16` |
 | Unit | `snitchwatch-bridge.service` (`systemctl --user`) | `snitchwatch-system-bridge.service` + `-grpc.socket` + `-gui.socket` | `packaging/systemd/`, `packaging/system/` |
 | State | `$STATE_DIRECTORY` or `SNITCHWATCH_STATE_DIR`; `blocklists.sqlite3`, `profiles.sqlite3` (0600); none set means in-memory only | `/var/lib/snitchwatch` only | `README.md` "M4"; `cli.rs:71-75` |
-| GUI access (system) | `usermod -aG snitchwatch-ui <user>`, then a new login session | same | `system-bridge-integration.md:17-20` |
+| GUI access (system) | `usermod -aG snitchwatch-ui <user>`, then a new login session | same | `system-bridge-integration.md:18-22` |
 | Crash log (Tauri shell) | `$XDG_STATE_HOME/snitchwatch/crash.log` (default `~/.local/state/snitchwatch/crash.log`) | n/a | `README.md` "Crash log" |
 | GUI log (Kirigami) | `gui.log` in the state dir, only when `SNITCHWATCH_LOG` is set; previous run kept as `gui.log.1` | n/a | `crates/snitchwatch-kirigami/src/logging.rs:21-28` |
 
@@ -48,6 +48,10 @@ daemon falls back to its `DefaultAction`
 
 ## Release flow (documented mechanics)
 
+These rows describe what the repo's scripts and workflows do. Running any of
+them for a real release, tag or candidate is the owner's/tower session's
+decision (hard rule above).
+
 | Step | Source |
 |---|---|
 | Pins in `packaging/release/pins.env`; builder digest must match `release.yml` `container.image` (`release_shape.rs` fails otherwise) | `bridge-release-artifact.md` "Maintaining the pins" |
@@ -55,7 +59,7 @@ daemon falls back to its `DefaultAction`
 | `release.yml` runs on `v*` tags: rebuild, reproducibility check, install check, RustSec gate, then (environment `release`) refuse if the tag moved or a release exists, attest, create a **draft** release only | `.github/workflows/release.yml` header; `bridge-release-artifact.md` "Cutting a release" 3 |
 | `workflow_dispatch` of `Release` builds and verifies without publishing | `release.yml:6-9`; `bridge-release-artifact.md` |
 | Maintainer compares the draft's sha256 with the local build, runs the attestation check, publishes the draft, pins the sha256 in the image | `bridge-release-artifact.md` "Cutting a release" 4 |
-| Candidate GUI: `candidate-gui.yml` triggers only on a push to `r16-candidate`. Build runs only if repo variable `R16_CANDIDATE_REVIEWED_SHA` equals the pushed SHA, else a `register` job holds. Publisher needs green exact-head `ci.yml`, validates the packet, creates a draft prerelease and the lightweight tag `r16-candidate`, never overwrites assets, never becomes "latest" | `.github/workflows/candidate-gui.yml:4-30`; `docs/packaging/r13-candidate-gui-ci.md` |
+| Candidate GUI: `candidate-gui.yml` triggers only on a push to `r16-candidate`. Build runs only if repo variable `R16_CANDIDATE_REVIEWED_SHA` equals the pushed SHA, else a `register` job holds. Publisher needs green exact-head `ci.yml`, validates the packet, creates the lightweight tag `r16-candidate` if missing and a draft, uploads assets, and then **automatically makes the prerelease public** (`draft: false, prerelease: true, make_latest: 'false'`), so a push of the reviewed SHA publishes without further approval; it never overwrites assets and never becomes "latest" | `.github/workflows/candidate-gui.yml:4-30,245,259-260`; `docs/packaging/r13-candidate-gui-ci.md` |
 | A published candidate is never replaced; failure leaves a draft and HOLD; a full rerun builds a new candidate needing fresh acceptance | `r13-candidate-gui-ci.md` |
 
 The file `docs/packaging/r13-candidate-gui-ci.md` is titled "r16 system GUI
@@ -63,8 +67,8 @@ candidate CI"; the filename is historical.
 
 ## Health checks that exist
 
-There is no HTTP health endpoint, metrics endpoint or `status` subcommand.
-`snitchwatch-bridge-cli` accepts only `--help`/`--version` and ignores every
+The repo defines no HTTP health endpoint, metrics endpoint or `status`
+subcommand. `snitchwatch-bridge-cli` accepts only `--help`/`--version` and ignores every
 other argument (`crates/snitchwatch-bridge-cli/src/cli.rs:49-60`).
 
 | Check | Command or place | Source |
@@ -72,8 +76,8 @@ other argument (`crates/snitchwatch-bridge-cli/src/cli.rs:49-60`).
 | Bridge CLI usage | `snitchwatch-bridge-cli --help` / `--version` (safe: exits before any socket or token) | `cli.rs:49`; `main.rs:1-10` |
 | Bridge running (user) | `systemctl --user is-active snitchwatch-bridge.service` | `rpm-ostree-layering.md` step 5 |
 | Daemon up and dialing | `systemctl is-active opensnitch.service`; `jq` on `/etc/opensnitchd/default-config.json` (`Server.Address`, `DefaultAction`) | `rpm-ostree-layering.md` step 5 |
-| System sockets | `systemctl status snitchwatch-system-bridge-grpc.socket snitchwatch-system-bridge.service`; `ls -l /run/snitchwatch/` | `system-bridge-integration.md:168-171` |
-| Bridge logs | `journalctl -b -u snitchwatch-system-bridge.service -u snitchwatch-system-bridge-grpc.socket` | `system-bridge-integration.md:171` |
+| System sockets | `systemctl status snitchwatch-system-bridge-grpc.socket snitchwatch-system-bridge.service`; `ls -l /run/snitchwatch/` | `system-bridge-integration.md:168-172` |
+| Bridge logs | `journalctl -b -u snitchwatch-system-bridge.service -u snitchwatch-system-bridge-grpc.socket` | `system-bridge-integration.md:172` |
 | Bridge up without GUI | closing the GUI window must not stop `snitchwatch-bridge.service` | `rpm-ostree-layering.md` step 5 |
 | Daemon Health page (GUI drawer entry) | four checks: `opensnitchd reachable`, `firewall running`, `eBPF support`, `nftables support`; a warning banner appears when unhealthy | `crates/snitchwatch-kirigami/qml/GlobalDrawer.qml:167`; `phase2-manual-verification-runbook.md:315-335` |
 | Blocklist "Rule installed" is not proof the daemon loaded the hosts | `sudo grep "domains loaded" /var/log/opensnitchd.log` | `README.md` "M4" |

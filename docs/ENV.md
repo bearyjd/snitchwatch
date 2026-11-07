@@ -1,10 +1,12 @@
 # Environment variables
 
-Every variable the code or scripts read, with the file and line that reads it
-(line numbers are for commit 606083d2; re-run the greps if they drift). Never
-put a secret value in this file, in a unit, or in a shell history: the only
-secret-like value in this repo is the bridge handshake token, and it is a
-generated file, not a variable (see `docs/RUNBOOK.md`).
+The variables the program code and shipped units read, plus the notable build, release and
+test knobs, with the file and line that reads each (line numbers are for commit 606083d2;
+re-run the greps if they drift). Not exhaustive: Cargo-provided `CARGO_*` variables, GitHub
+Actions context variables (`GITHUB_*`, `RUNNER_TEMP`) and generic shell variables are not
+listed one by one. Never
+put a secret value in this file, in a unit, or in a shell history: the bridge
+handshake token is a generated file, not a variable (see `docs/RUNBOOK.md`).
 
 Required column: "no" means the code has a default or tolerates absence.
 Nothing below is required for a normal desktop session.
@@ -46,12 +48,12 @@ Note: the README says the `SNITCHWATCH_GRPC_BIND` default is `127.0.0.1:50051`
 | `SNITCHWATCH_WS_SOCKET` | `crates/snitchwatch-kirigami/src/bridge_runtime.rs:268` | no | Client socket override. |
 | `SNITCHWATCH_SYSTEM_BRIDGE` | `.../bridge_runtime.rs:269` | no | Exactly `1` selects `/run/snitchwatch/bridge.sock`; otherwise `$XDG_RUNTIME_DIR/snitchwatch/bridge.sock`. |
 | `SNITCHWATCH_WS_TOKEN_PATH` | `.../bridge_runtime.rs:287` | no | Token file override; custom sockets default to a sibling token, the system socket to `/run/snitchwatch-auth/token` (`cli.rs:81-83`). |
-| `SNITCHWATCH_LOG` | `.../logging.rs:110` | no | EnvFilter for the GUI log; when set, also writes `gui.log` in the state dir (`logging.rs:21-28,66-69`). Takes priority over `RUST_LOG`. |
-| `RUST_LOG` | `.../logging.rs:111` | no | Used if `SNITCHWATCH_LOG` is unset; no file log. Default `info`; an unparsable filter falls back to `info`. |
+| `SNITCHWATCH_LOG` | `.../logging.rs:110` | no | EnvFilter for the GUI log; when set to a non-blank value, also writes `gui.log` in the state dir (`logging.rs:21-28,66-69`). Takes priority over `RUST_LOG`. A blank or whitespace-only value counts as unset (`logging.rs:60-76`). |
+| `RUST_LOG` | `.../logging.rs:111` | no | Used if `SNITCHWATCH_LOG` is unset or blank; no file log. Default `info`; an unparsable filter falls back to `info`. |
 | `SNITCHWATCH_SCANNER_BIN` | `.../scanner.rs:124` | no | Scanner binary for the native transport; default `scanner_broker::SCANNER`. Ignored inside a Flatpak (`/.flatpak-info` selects the broker, `scanner.rs:120`). |
 | `SNITCHWATCH_GEOIP_DB` | `.../geo/resolver.rs:423` | no | Explicit country DB path; highest priority, even when stale (`resolver.rs:432-435`). |
 | `SNITCHWATCH_GEOIP_CITY_DB` | `.../geo/resolver.rs:436` | no | Explicit city DB path (ignored if `SNITCHWATCH_GEOIP_DB` is set). |
-| `HOME` | `.../paths.rs:133`, `.../app_icons.rs:408` | no | Base for per-user paths. Unset or empty falls back to a checked per-user root under `/tmp` (`paths.rs:121-127`). |
+| `HOME` | `.../paths.rs:133`, `.../app_icons.rs:408` | no | Base for per-user paths. In `paths.rs`, unset or empty falls back to a checked per-user root under `/tmp` (`paths.rs:121-127`); `app_icons.rs` has no such fallback and simply skips the HOME-derived dirs (`app_icons.rs:408,417`). |
 | `XDG_STATE_HOME` | `.../paths.rs:14` | no | State dir (crash log, `gui.log`); default under `HOME`. |
 | `XDG_DATA_HOME` | `.../paths.rs:18`, `.../geo/resolver.rs:425`, `.../geo/install.rs:34`, `.../app_icons.rs:413` | no | Data dir (GeoIP databases, `.desktop` icon lookup). |
 | `XDG_CONFIG_HOME` | `.../paths.rs:27,31,39,44,50` | no | Config dir (settings, autostart file, learned data). |
@@ -64,7 +66,7 @@ Note: the README says the `SNITCHWATCH_GRPC_BIND` default is `127.0.0.1:50051`
 | Variable | Read at | Rule |
 |---|---|---|
 | `SNITCHWATCH_DEMO` | `crates/snitchwatch-kirigami/src/demo.rs:24` | Exactly `1` enables demo mode (fake rows, bridge never started); anything else, including `true`, is off (`demo.rs:18-20`). |
-| `SNITCHWATCH_SCREENSHOT_DIR` | `.../demo.rs:32` | Honoured only with `SNITCHWATCH_DEMO=1` and a non-empty value (`demo.rs:27-29`). |
+| `SNITCHWATCH_SCREENSHOT_DIR` | `.../demo.rs:33` | Honoured only with `SNITCHWATCH_DEMO=1` and a non-empty value (`demo.rs:27-29`). |
 | `SNITCHWATCH_TEXT_TRACE` | `.../bridge_bindings.rs:61` | Exactly `1` turns the on-screen text change log on; `""`, `0`, `true`, `yes` are off (test at `bridge_bindings.rs:71-76`). |
 
 ## Scanner (`scanner-cli`)
@@ -90,7 +92,10 @@ lines, sourced by the justfile and scripts).
 | `SW_RUST_VERSION` | `pins.env:2` | `1.99.1`; the build dies if the builder's rustc differs (`build-bridge.sh:103`). |
 | `SW_PROTOC_VERSION` | `pins.env:3` | `33.5` (`build-bridge.sh:108`). |
 | `SW_ARCH` | `pins.env:4` | `x86_64`. |
-| `SW_OPENSNITCH_COMMIT`, `SW_OPENSNITCH_TAG` | `pins.env:5-6` | Must equal the `vendor/opensnitch` gitlink (`build-bridge.sh:119-123`). |
+| `SW_OPENSNITCH_COMMIT` | `pins.env:5` | Must equal the `vendor/opensnitch` gitlink and checked-out HEAD (`build-bridge.sh:119,123`). |
+| `SW_OPENSNITCH_TAG` | `pins.env:6` | `v1.8.0`; recorded as `opensnitch_tag` in the MANIFEST (`bridge_artifact.py:311`), not compared with the gitlink. |
+| `RUSTC_WRAPPER`, `RUSTC`, `CARGO_BUILD_RUSTC(_WRAPPER)`, `CARGO_BUILD_RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_{LINKER,RUSTFLAGS}`, `RUSTC_WORKSPACE_WRAPPER` | `build-bridge.sh:41-43,91-93` | Always unset by the build (logged if they were set) so the MANIFEST's build command stays exact. |
+| `TMPDIR` | `packaging/scanner/stage.sh:20` | Parent of the staging snapshot dir; default `/tmp`. |
 | `SW_RELEASE_TAG` | `build-bridge.sh:171`, justfile `release-bridge` | Non-empty means release mode: must be `v<crate version>`, clean tree, repo-root `LICENSE`. |
 | `ALLOW_DIRTY` | `build-bridge.sh:181` | `1` allows a dirty tree (dev only; recorded as `dirty` in the MANIFEST). |
 | `SW_GIT_SHA` | `build-bridge.sh:160` | Commit being built; default HEAD, must equal HEAD. CI sets it in the "Resolve the commit to build" step (`release.yml:99`). |
@@ -109,12 +114,17 @@ lines, sourced by the justfile and scripts).
 | `QT_QPA_PLATFORM=offscreen`, `QT_QUICK_CONTROLS_STYLE=Basic` | `crates/snitchwatch-kirigami/tests/smoke.rs:28-32` (set if unset); `.github/workflows/ci.yml` kirigami job; justfile `qml-test` | Headless Qt. Default Kirigami style hangs offscreen (`main.rs:40-44` comment). |
 | `QT_FORCE_STDERR_LOGGING=1` | justfile `qml-test`; `ci.yml` qmltestrunner step | QML test output to stderr. |
 | `QT_QUICK_BACKEND=software` | justfile `kirigami-screenshots` | Screenshot recipe only. |
-| `QT_LOGGING_RULES`, `QML_XHR_ALLOW_FILE_READ/WRITE` | `tests/geo_qml.rs:29`, `tests/status_pages_keyboard_qml.rs:219`, `tests/level_rule_unavailable_once_qml.rs:33` | Set inside individual probes. |
+| `QT_LOGGING_RULES`, `QML_XHR_ALLOW_FILE_READ/WRITE` | `crates/snitchwatch-kirigami/tests/geo_qml.rs:29`, `crates/snitchwatch-kirigami/tests/status_pages_keyboard_qml.rs:219`, `crates/snitchwatch-kirigami/tests/level_rule_unavailable_once_qml.rs:33` | Set inside individual probes. |
 | `CI` | `crates/snitchwatch-kirigami/src/notification_signals/bus_tests.rs:33,156`; `ci.yml` kirigami job (`CI: "true"`) | When set, missing `dbus-daemon`/`xdg-dbus-proxy` fails the private-bus tests instead of skipping. |
 | `SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS` | `tests/mock_opensnitchd/src/lib.rs:75` | Shrinks the mock's AskRule deadline (clamped; cannot exceed the real 120 s). Read once per process. |
-| `SNITCHWATCH_DBIP_PROOF`, `SNITCHWATCH_DBIP_CITY_PROOF` | `crates/snitchwatch-kirigami/src/geo/install/tests.rs:158,540`; `tests/geo_validation_worker.rs:177` | Path to a real DB-IP file for proof tests; the tests `expect` it, so leave them unset in normal runs. |
+| `SNITCHWATCH_DBIP_PROOF`, `SNITCHWATCH_DBIP_CITY_PROOF` | `crates/snitchwatch-kirigami/src/geo/install/tests.rs:158,540`; `crates/snitchwatch-kirigami/tests/geo_validation_worker.rs:177` | Path to a real DB-IP file for proof tests; the tests `expect` it, so leave them unset in normal runs. |
 | `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `SNITCHWATCH_WS_SOCKET`, `SNITCHWATCH_WS_TOKEN_PATH` | set to tempdirs by many `crates/snitchwatch-kirigami/tests/*_qml.rs` (e.g. `tray_lifecycle_qml.rs:33-35`, `learning_end_qml.rs:37`) | Test isolation; see `docs/CONTRIBUTING.md` "Test safety". |
-| `SNITCHWATCH_TEST_*`, `*_CHILD` | `scanner-privileged/src/{command,containment,main}.rs`, `snitchwatch-bridge/src/history/tests.rs:481`, others | Internal re-exec markers for child-process tests; not user-facing. |
+| `SNITCHWATCH_TEST_*`, `*_CHILD` | `scanner-privileged/src/{command,containment,main}.rs`, `snitchwatch-bridge/src/history/tests.rs:502`, others | Internal re-exec markers for child-process tests; not user-facing. |
+| `PATH` | `crates/scanner-core/src/inspector.rs:127`, `crates/snitchwatch-bridge/src/diagnostics/kernel_probe.rs:19` | Searched for helper programs (`nft`, scanner tools); unset means "not found". |
+| `SW_STEPS` | `crates/snitchwatch-kirigami/tests/support/probe_runner.rs:64` | QML probe step limit; default `1000000`. |
+| `SNITCHWATCH_TRAY_TEST_SDK` | `crates/snitchwatch-kirigami/tests/native-tray/run.sh:58` | Flatpak SDK for the native tray fixture; default `org.kde.Sdk//6.11`. |
+| `SNITCHWATCH_WEB_BASE`, `SNITCHWATCH_TAURI_BASE` | `tests/web_smoke/playwright.config.ts:11`, `tests/tauri_smoke/playwright.config.ts:10` | Playwright base URL; default `http://127.0.0.1:3031`. |
+| `SNITCHWATCH_MOCK_DAEMON_RUNNING` | `tests/tauri_smoke/tests/wizard_branches.spec.ts:26`, `tray_states.spec.ts:25` | When set, those specs run instead of skipping. |
 | `R16_CANDIDATE_REVIEWED_SHA` | repository variable (`vars.`), `.github/workflows/candidate-gui.yml` | Owner-set full SHA authorising the candidate build and publish. Not a secret; the owner sets it (see `docs/RUNBOOK.md`). |
 | `XDG_{DATA,CONFIG,CACHE}_HOME` | `.github/workflows/candidate-gui.yml:53-55` | Job-local dirs under `runner.temp`. |
 

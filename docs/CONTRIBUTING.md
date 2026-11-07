@@ -9,11 +9,11 @@ is silent the text says "Not defined in the repo".
 | Need | Detail | Source |
 |---|---|---|
 | Rust | README says "Rust 1.75+"; no `rust-version`, `rust-toolchain.toml` or clippy/rustfmt override exists; CI uses `dtolnay/rust-toolchain@stable`; release builds pin 1.99.1 | `README.md` "Building"; `Cargo.toml:38-42`; `ci.yml`; `packaging/release/pins.env:2` |
-| `protoc` | `snitchwatch-proto/build.rs` compiles `vendor/opensnitch/proto/ui.proto`; every default member depends on it | `CLAUDE.md` (build commands); `ci.yml` (`protobuf-compiler`) |
+| `protoc` | `snitchwatch-proto/build.rs` compiles `vendor/opensnitch/proto/ui.proto`; `snitchwatch-bridge` and `-bridge-cli` depend on it, so the default build needs it | `CLAUDE.md` (build commands); `ci.yml` (`protobuf-compiler`) |
 | Submodule | `git submodule update --init --recursive`; `vendor/opensnitch` is read-only, pinned `v1.8.0` | `README.md` "Building"; `CLAUDE.md`; `.gitmodules` |
 | `just` | All commands below | `justfile` |
 | Tauri build deps | `snitchwatch-tauri` is a default member; its build links webkit2gtk even for `cargo check` | `ci.yml` (`libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`, ...) |
-| Qt6 + KDE Frameworks 6 (Kirigami) dev packages | Needed only for `kirigami-spike` and `snitchwatch-kirigami`, which are excluded from `default-members`; a plain `cargo build`/`just build` never touches them. Build explicitly with `cargo build -p snitchwatch-kirigami` | `CLAUDE.md`; `Cargo.toml:24-36`; `justfile` `kirigami-dev` |
+| Qt6 + KDE Frameworks 6 (Kirigami) dev packages | Needed only for `kirigami-spike` and `snitchwatch-kirigami`, which are excluded from `default-members`; plain `cargo build`/`cargo check`/`cargo test` (what CI runs) skip them, but `just build`, `just check` and `just test` use `--workspace` (`justfile:24-25,27-28,33-35`) and DO compile them, so they need Qt6/KF6. Without Qt, run the plain cargo commands. Build Kirigami explicitly with `cargo build -p snitchwatch-kirigami` | `CLAUDE.md`; `Cargo.toml:24-36`; `justfile` `kirigami-dev` |
 | Fedora package set known to build and test Kirigami | `gcc gcc-c++ make protobuf-compiler dbus-daemon xdg-dbus-proxy qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel qt6-qttools-devel plasma-integration kf6-kirigami-devel` | `ci.yml` job `kirigami` |
 | `qmltestrunner-qt6` | Ships in `qt6-qtdeclarative-devel` | `justfile` `qml-test`; `ci.yml` |
 | Playwright (one time) | `just web-smoke-install`, `just tauri-smoke-install`; a "missing browser" failure is a setup gap, not a regression. `just doctor` reports what is missing | `README.md` "Playwright smoke suites"; `justfile` `doctor` |
@@ -39,7 +39,7 @@ is silent the text says "Not defined in the repo".
 | `web-smoke` | Run the Playwright smoke tests against a freshly built bridge. |
 | `web-smoke-install` | Install the Playwright Firefox channel into `tests/web_smoke/node_modules`. |
 | `tauri-dev` | Run the Tauri shell in dev mode (kept until Tauri/`web/` are retired; Kirigami is the shell that ships). |
-| `tauri-build` | Build a release Tauri bundle. |
+| `tauri-build` | `cargo build -p snitchwatch-tauri --release`. Its comment mentions deb/rpm/appimage, but the body runs no bundler. |
 | `tauri-smoke` | Playwright smoke test for the Tauri shell (needs `npm install` in `tests/tauri_smoke` first). |
 | `tauri-smoke-install` | One-time install of the Playwright deps. |
 | `kirigami-dev` | Run the Kirigami shell (needs Qt6 + KF6 dev packages). |
@@ -113,7 +113,7 @@ Runs on push to `main` and `r16-candidate`, and on every pull request.
 ## PR checklist (what is actually enforced)
 
 - [ ] `just check` clean (clippy `-D warnings`); CI re-runs it on default members.
-- [ ] `just test` passes; for Kirigami-touching work also run the Kirigami tests, since the default-members CI jobs do not build Kirigami (`CLAUDE.md`).
+- [ ] `just test` passes (`--workspace`, so it includes Kirigami and needs Qt6/KF6); the default-members CI jobs do not build Kirigami, only the separate `kirigami` job does (`CLAUDE.md`).
 - [ ] `just fmt` run (not enforced by CI).
 - [ ] `just package-check` if you touched `packaging/`, the justfile, or release scripts.
 - [ ] A plan doc exists for anything beyond a small fix.
@@ -127,7 +127,7 @@ Runs on push to `main` and `r16-candidate`, and on every pull request.
 |---|---|
 | Never run `snitchwatch-bridge-cli` without `--help`/`--version` outside an isolated `XDG_RUNTIME_DIR`: it starts a bridge and replaces a running bridge's socket and token (issue #34). `just run-bridge` does exactly that | `CLAUDE.md` |
 | Any test that spawns a bridge must point `XDG_RUNTIME_DIR` at a tempdir (`crates/snitchwatch-tauri/tests/bridge_runtime_starts.rs` once did not) | `CLAUDE.md` |
-| Run Kirigami and lib tests with a throwaway `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR`. Some probes set `XDG_CONFIG_HOME` to a tempdir themselves (`tests/learning_end_qml.rs:37`, `tests/level_rule_unavailable_qml.rs:31`, `tests/silent_mode_onboarding_qml.rs:33`) but not all of them, and the GUI derives its config, state and data paths from these variables or `HOME` (`src/paths.rs:14-50`). Owner instruction: a plain run can rewrite `~/.config/snitchwatch` before the #259 fix lands | `crates/snitchwatch-kirigami/src/paths.rs`; owner instruction |
+| Run Kirigami and lib tests with a throwaway `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR`. Some probes set `XDG_CONFIG_HOME` to a tempdir themselves (`crates/snitchwatch-kirigami/tests/learning_end_qml.rs:37`, `crates/snitchwatch-kirigami/tests/level_rule_unavailable_qml.rs:31`, `crates/snitchwatch-kirigami/tests/silent_mode_onboarding_qml.rs:33`) but not all of them, and the GUI derives its config, state and data paths from these variables or `HOME` (`src/paths.rs:14-50`). Owner instruction: a plain run can rewrite `~/.config/snitchwatch` before the #259 fix lands | `crates/snitchwatch-kirigami/src/paths.rs`; owner instruction |
 | #259 status: `HANDOFF.md:29` lists "#259 (learned/silent tests) is still open". The research note `docs/superpowers/research/2026-11-06-flake-259.md` does not exist on this branch's base (only three `scan-page-flicker`/`title-flicker` notes do) | `HANDOFF.md:29`; `ls docs/superpowers/research` |
 | `history::dormant_tests` (`crates/snitchwatch-bridge/src/history/dormant_tests.rs`, test `primitives_have_no_production_call_sites`) scans every `crates/*/src/**.rs` and fails if a file outside the history owner files mentions the whole identifiers `lifecycle` or `pins` (code only; comments and string literals are stripped) or the types `PinRegistry`, `PinId`, `ReaderGate`, `ReaderPermit`, `AcceptanceSeq`, `Generation` (`dormant_tests.rs:8-19,100-113,120-126,140-163`). Do not use those words as identifiers in other `.rs` sources | that file |
 | Never point a test at a live `opensnitchd`, a real Bazzite host, or `sudo`; use the doubles above. A real-daemon-only behaviour is a gap to flag, not to improvise (`.agent_native/agent_roadmap.md` item 7) | `CLAUDE.md` |
