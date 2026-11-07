@@ -15,9 +15,9 @@
 // `property bool textTraceable: true` (an item's own value overrides what it
 // inherits, so `false` opts a part of a marked subtree back out). Unmarked
 // items are never read: not their text, not displayText/selectedText. The
-// window title comes from the page stack's toolbar, and only while the current
-// page declares `textTraceTitle: true` (a fixed, literal title). Marks live in
-// the component files; docs/superpowers/plans/2026-11-03-text-trace.md lists them.
+// window title is the current page's own `title` property (never a rendered
+// item), and only while that page declares `textTraceTitle: true` (a fixed,
+// literal title). Marks live in the component files; docs/superpowers/plans/2026-11-03-text-trace.md lists them.
 //
 // Defence in depth for marked items: text is logged only while the item is
 // visible, effective opacity > 0 and FULLY inside the window and every
@@ -26,7 +26,6 @@
 // labelled exception (see onTrayTooltipChanged) and withholds the
 // RecentBlock "Blocked: <what>" detail.
 import QtQuick
-import org.kde.kirigami as Kirigami
 
 Item {
     id: tracer
@@ -36,7 +35,7 @@ Item {
     property Item overlay: null
     // The tray tooltip is not an item, so main.qml hands the string in.
     property string trayTooltip: ""
-    // The page stack whose toolbar carries the window title; tests may replace it.
+    // The page stack whose current page carries the window title; tests may replace it.
     property var pageStack: Window.window ? Window.window.pageStack : null
 
     // One finished log line; also written with console.warn.
@@ -97,81 +96,37 @@ Item {
                  r: Math.min(r.r, c.r), b: Math.min(r.b, c.b) };
     }
 
-    // The ONE item to read as the CURRENT page's default title, or null: only
-    // while that page's title is a fixed literal (`textTraceTitle`).
-    // Authorization is by identity, never by reading text. pageStack.globalToolBar
-    // is non-visual, so use the page's own `globalToolBarItem` (the header
-    // rendered for this page only). The page must use Kirigami's own default
-    // `titleDelegate`: its Component comes from the same file as a pristine
-    // Kirigami.Page's, which no custom delegate can fake by borrowing a type
-    // name. Inside that header only the delegate's own title Heading is
-    // authorized (the item alone, no subtree or siblings), unless
-    // `textTraceable: false` vetoes it on the heading or the delegate. Custom
-    // delegates mark their own headings `textTraceable` instead.
-    function titleToolbar() {
-        const ps = pageStack;
-        const page = ps ? ps.currentItem : null;
-        if (!page || page.textTraceTitle !== true || !page.globalToolBarItem
-                || !usesDefaultTitleDelegate(page)) {
-            return null;
+    // The window title: the CURRENT page's own `title` property, and only
+    // while that page declares `textTraceTitle: true` (a literal set in the
+    // page's own QML). Nothing rendered is read: not the header, not the title
+    // delegate, not its url or type, so there is no identity to forge. For a
+    // default-delegate page the rendered heading shows exactly page.title.
+    readonly property var titledPage: {
+        const page = pageStack ? pageStack.currentItem : null;
+        return page && page.textTraceTitle === true ? page : null;
+    }
+    property string titleOld: ""
+
+    onTitledPageChanged: {
+        titleOld = titledPage ? String(titledPage.title) : "";
+        if (primed && titledPage) {
+            emit("window-title (page title, not necessarily visible): + " + quote(titleOld));
         }
-        return findTitle(page.globalToolBarItem);
     }
 
-    property string defaultDelegateUrl: ""
-
-    function usesDefaultTitleDelegate(page) {
-        const delegate = page.titleDelegate;
-        if (!delegate) {
-            return false;
+    Connections {
+        target: tracer.titledPage
+        function onTitleChanged() {
+            const cur = String(tracer.titledPage.title);
+            tracer.emit("window-title (page title, not necessarily visible): "
+                        + tracer.quote(tracer.titleOld) + " -> " + tracer.quote(cur));
+            tracer.titleOld = cur;
         }
-        if (defaultDelegateUrl === "") {
-            const probe = pageProbe.createObject(null);
-            defaultDelegateUrl = probe.titleDelegate.url.toString();
-            probe.destroy();
-        }
-        return defaultDelegateUrl !== "" && delegate.url.toString() === defaultDelegateUrl;
-    }
-
-    Component { id: pageProbe; Kirigami.Page {} }
-
-    // True if `textTraceable: false` is set on the item or an ancestor up to
-    // and including `stop`.
-    function isVetoed(item, stop) {
-        for (let it = item; it; it = it.parent) {
-            if (it.textTraceable === false) {
-                return true;
-            }
-            if (it === stop) {
-                break;
-            }
-        }
-        return false;
-    }
-
-    function findTitle(item) {
-        if (/TitleDelegate$/.test(typeName(item))) {
-            const kids = item.children;
-            for (let i = 0; i < kids.length; ++i) {
-                if (typeName(kids[i]) === "Heading") {
-                    return isVetoed(kids[i], item) ? null : kids[i];
-                }
-            }
-            return null;
-        }
-        const kids = item.children;
-        for (let i = 0; kids && i < kids.length; ++i) {
-            const hit = findTitle(kids[i]);
-            if (hit) {
-                return hit;
-            }
-        }
-        return null;
     }
 
     // `clipRect` is the window rect narrowed by every clip:true ancestor;
     // `allowed` is the inherited allowlist state.
-    function walk(item, path, out, opacity, clipRect, allowed, toolbar) {
+    function walk(item, path, out, opacity, clipRect, allowed) {
         const op = opacity * item.opacity;
         let clip = clipRect;
         if (item.clip) {
@@ -181,8 +136,7 @@ Item {
         if (item.textTraceable !== undefined) {
             ok = item.textTraceable === true;
         }
-        // The default title heading is authorized itself, never its subtree.
-        if ((ok || item === toolbar) && typeof item.text === "string"
+        if (ok && typeof item.text === "string"
                 && (item.lineCount !== undefined || item.cursorPosition !== undefined)) {
             const r = bounds(item);
             const within = r.l >= clip.l - 1 && r.r <= clip.r + 1 && r.t >= clip.t - 1 && r.b <= clip.b + 1;
@@ -203,7 +157,7 @@ Item {
         }
         const kids = item.children;
         for (let i = 0; i < kids.length; ++i) {
-            walk(kids[i], path + "/" + segment(kids[i], i), out, op, clip, ok, toolbar);
+            walk(kids[i], path + "/" + segment(kids[i], i), out, op, clip, ok);
         }
     }
 
@@ -246,10 +200,9 @@ Item {
         const win = tracer.Window.window;
         const view = win ? { l: 0, t: 0, r: win.width, b: win.height }
                          : { l: -Infinity, t: -Infinity, r: Infinity, b: Infinity };
-        const toolbar = titleToolbar();
-        walk(target, segment(target, 0), snap, 1, view, false, toolbar);
+        walk(target, segment(target, 0), snap, 1, view, false);
         if (overlay) {
-            walk(overlay, "overlay", snap, 1, view, false, toolbar);
+            walk(overlay, "overlay", snap, 1, view, false);
         }
         if (primed) {
             Object.keys(snap).forEach(function (k) { diff(k, previous[k], snap[k]); });
@@ -287,6 +240,7 @@ Item {
     }
 
     Component.onCompleted: {
+        titleOld = titledPage ? String(titledPage.title) : "";
         trayTooltipOld = safeTooltip(trayTooltip);
         sample();
     }
