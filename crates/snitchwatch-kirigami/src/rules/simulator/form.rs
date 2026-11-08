@@ -66,6 +66,7 @@ impl SimulationForm {
             iface_out: text(&self.iface_out),
             checksums,
             checksums_enabled,
+            refuse_source_network: false,
         }
     }
 

@@ -310,3 +310,91 @@ fn a_program_path_pattern_says_what_it_matches() {
         );
     }
 }
+
+/// opensnitchd 1.9 refuses `network` + `source.network` in an enabled rule
+/// (`DaemonPolicy`): the editor refuses saving it in the bridge's words, and
+/// a daemon of unknown version (an older bridge) keeps today's answer.
+#[test]
+fn source_network_is_refused_only_for_a_daemon_that_refuses_it() {
+    use snitchwatch_bridge::rule_policy::{PolicyContext, SOURCE_NETWORK_REFUSED};
+    let newer = PolicyContext {
+        refuse_source_network: true,
+    };
+    let lan = draft(vec![
+        path("/usr/bin/curl"),
+        condition("source.network", MatchKind::Network, "192.168.0.0/16"),
+    ]);
+    assert!(check(&lan, None).problems.is_empty());
+    assert!(check_in(&lan, None, PolicyContext::default())
+        .problems
+        .is_empty());
+    let refused = check_in(&lan, None, newer).problems;
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    // A list member's problem says which member it is.
+    assert!(refused[0].contains(SOURCE_NETWORK_REFUSED), "{refused:?}");
+    // dest.network is fine, and so is a disabled rule (the daemon doesn't
+    // compile it).
+    let dest = draft(vec![
+        path("/usr/bin/curl"),
+        condition("dest.network", MatchKind::Network, "192.168.0.0/16"),
+    ]);
+    assert!(check_in(&dest, None, newer).problems.is_empty());
+    let off = RuleDraft {
+        enabled: false,
+        ..lan.clone()
+    };
+    assert!(check_in(&off, None, newer).problems.is_empty());
+}
+
+/// A rule the daemon already holds stays editable on a newer daemon, so the
+/// user can change it to `dest.network`; and the cautions still compare
+/// against it.
+#[test]
+fn an_existing_source_network_rule_stays_editable_with_its_cautions() {
+    use snitchwatch_bridge::rule_policy::PolicyContext;
+    let newer = PolicyContext {
+        refuse_source_network: true,
+    };
+    let old = json!({
+        "name": "899-lan", "enabled": true, "action": "deny", "duration": "always",
+        "operator": { "type": "list", "operand": "list", "operands": [
+            { "type": "simple", "operand": "process.path", "data": "/usr/bin/curl",
+              "sensitive": true },
+            { "type": "network", "operand": "source.network", "data": "10.0.0.0/8" },
+        ]},
+    });
+    let loaded = RuleDraft::from_wire(&old).expect("editable");
+    assert_eq!(loaded.conditions[1].operand, "source.network");
+    let fixed = RuleDraft {
+        action: "allow".into(),
+        conditions: vec![
+            loaded.conditions[0].clone(),
+            condition("dest.network", MatchKind::Network, "10.0.0.0/8"),
+        ],
+        ..loaded.clone()
+    };
+    let checked = check_in(&fixed, Some(&old), newer);
+    assert!(checked.problems.is_empty(), "{:?}", checked.problems);
+    assert_eq!(
+        checked.cautions,
+        check(&fixed, Some(&old)).cautions,
+        "the old rule is read whatever the daemon refuses now"
+    );
+    assert!(!checked.cautions.is_empty(), "deny to allow loosens it");
+}
+
+#[test]
+fn only_source_network_is_marked_refused_by_a_newer_daemon() {
+    let marked: Vec<&str> = operands()
+        .iter()
+        .filter(|o| o.refused_by_newer_daemon)
+        .map(|o| o.operand)
+        .collect();
+    assert_eq!(marked, ["source.network"]);
+    let json = serde_json::to_value(operands()).unwrap();
+    assert!(json
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|o| o["refusedByNewerDaemon"] == Value::Bool(true)));
+}

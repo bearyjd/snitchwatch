@@ -34,6 +34,11 @@ const USER_NAME: &str = "resolved to a numeric user id on the daemon host when t
 const LISTS: &str = "can't simulate list contents (the lists are files on the daemon host)";
 const BAD_PAIRING: &str = "opensnitchd can't apply this condition type to this operand (the \
      daemon would fail on a match), so it isn't simulated";
+/// `network` + `source.network` on a daemon that refuses it (`DaemonPolicy`).
+pub(in crate::rules) const REFUSED_BY_NEWER_DAEMON: &str =
+    "opensnitchd 1.9 and newer refuses to load this rule";
+/// A network operand under `simple` or `regexp` on a 1.9 or newer daemon.
+pub(in crate::rules) const NEWER_DAEMON_CRASHES: &str = "opensnitchd crashes on this combination";
 const UNKNOWN_NETWORK: &str = "not a CIDR or one of the default aliases (LAN, MULTICAST); a \
      custom alias from the daemon host's network_aliases.json can't be resolved here";
 const NESTED_LIST: &str = "a list inside a list: opensnitchd compiles only one level of members \
@@ -344,8 +349,7 @@ fn evaluate_leaf(leaf: &Leaf, input: &SimulationInput) -> Outcome {
         "user.name" => Outcome::unsupported(operand, USER_NAME),
         "process.parent.path" => parent_path(leaf, input),
         "process.hash.md5" | "process.hash.sha1" => hash(leaf, input),
-        "dest.network" => network_operand(leaf, input.dest_ip.as_deref(), DEST_IP),
-        "source.network" => network_operand(leaf, input.src_ip.as_deref(), SRC_IP),
+        "dest.network" | "source.network" => network_operand(leaf, input),
         _ => match (text_subject(operand, input), leaf.kind) {
             (Subject::NotAnOperand, _) => Outcome::definite(Truth::No),
             (_, Kind::Network | Kind::Lists) => Outcome::unsupported(operand, BAD_PAIRING),
@@ -534,19 +538,34 @@ fn hash_with_checksums_on(leaf: &Leaf, input: &SimulationInput) -> Outcome {
 }
 
 /// `dest.network` / `source.network`: `Match` passes a `net.IP`, which only
-/// the `network` type can compare. `simple` would panic in the daemon; `reCmp`
-/// sees a non-string and returns false.
-fn network_operand(leaf: &Leaf, ip: Option<&str>, input: &'static str) -> Outcome {
+/// the `network` type can compare. `simple` would panic in the daemon; v1.8.0's
+/// `reCmp` sees a non-string and returns false. A daemon that refuses
+/// `source.network` (1.9 and newer, `SimulationInput::refuse_source_network`)
+/// skips such a rule when it loads its rules, and crashes on a network operand
+/// under another type: both are reported as not simulated, with why.
+fn network_operand(leaf: &Leaf, input: &SimulationInput) -> Outcome {
+    let (ip, missing) = if leaf.operand == "source.network" {
+        (input.src_ip.as_deref(), SRC_IP)
+    } else {
+        (input.dest_ip.as_deref(), DEST_IP)
+    };
+    let newer = input.refuse_source_network;
     match leaf.kind {
+        Kind::Network if newer && leaf.operand == "source.network" => {
+            return Outcome::unsupported(&leaf.operand, REFUSED_BY_NEWER_DAEMON)
+        }
         Kind::Network => {}
+        Kind::Regexp | Kind::Simple if newer => {
+            return Outcome::unsupported(&leaf.operand, NEWER_DAEMON_CRASHES)
+        }
         Kind::Regexp => return Outcome::definite(Truth::No),
         Kind::Simple | Kind::Lists => return Outcome::unsupported(&leaf.operand, BAD_PAIRING),
     }
     let Some(text) = ip else {
-        return Outcome::unevaluated(&leaf.operand, input);
+        return Outcome::unevaluated(&leaf.operand, missing);
     };
     let Some(ip) = network::parse_ip(text) else {
-        return Outcome::invalid(&leaf.operand, input);
+        return Outcome::invalid(&leaf.operand, missing);
     };
     match network::contains(&leaf.data, ip) {
         Some(inside) => Outcome::from_bool(inside),

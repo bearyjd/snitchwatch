@@ -29,7 +29,7 @@ pub use diagnostic_wire::{CheckKind, CheckStatus, DiagnosticCheck};
 pub use profile_wire::{ProfileRuleWire, ProfileSummary};
 pub use reply_to::ReplyTo;
 pub use rule_wire::{RuleCommandOutcome, RuleHitWire};
-pub use status_wire::{AboutInfo, ConnectionsStatus, StorageStatus, TrafficEvent};
+pub use status_wire::{AboutInfo, ConnectionsStatus, DaemonPolicy, StorageStatus, TrafficEvent};
 pub use verdict_wire::{
     effective_verdict_duration, AutoAnswer, ConnectionRow, VerdictAction, VerdictDuration,
     VerdictScope,
@@ -427,6 +427,9 @@ pub enum ServerMessage {
         storage: StorageStatus,
         hits: Vec<RuleHitWire>,
     },
+    /// Sent after `Authenticated` and on every daemon version change
+    /// (capability `daemonPolicyV1`). Older clients ignore the action.
+    DaemonPolicy(DaemonPolicy),
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -785,16 +788,12 @@ fn redacted_message_debug<T: Serialize>(
 }
 
 #[cfg(test)]
-mod tests;
-
-#[cfg(test)]
 mod blocklist_message_tests;
-
-#[cfg(test)]
-mod profile_message_tests;
-
-#[cfg(test)]
-mod filtering_pause_tests;
-
 #[cfg(test)]
 mod daemon_statistics_message_tests;
+#[cfg(test)]
+mod filtering_pause_tests;
+#[cfg(test)]
+mod profile_message_tests;
+#[cfg(test)]
+mod tests;

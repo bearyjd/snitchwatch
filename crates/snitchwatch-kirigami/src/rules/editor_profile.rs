@@ -8,8 +8,9 @@
 
 use std::hash::{Hash, Hasher};
 
-use snitchwatch_bridge::profiles::materializer::materialize_rule;
+use snitchwatch_bridge::profiles::materializer::materialize_rule_in;
 use snitchwatch_bridge::profiles::store::ProfileRule;
+use snitchwatch_bridge::rule_policy::PolicyContext;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ProfileRuleWire};
 
 use super::editor::{check, plain_problems, EditorCheck, RuleDraft};
@@ -46,8 +47,16 @@ pub fn profile_rule(draft: &RuleDraft) -> ProfileRule {
     }
 }
 
-/// Check a draft for `profile_id` exactly as the bridge will install it.
+/// Check a draft for `profile_id` exactly as the bridge will install it, for
+/// a daemon with v1.8.0's rules.
+#[cfg(test)]
 pub fn check_profile(draft: &RuleDraft, profile_id: &str) -> EditorCheck {
+    check_profile_in(draft, profile_id, PolicyContext::default())
+}
+
+/// [`check_profile`] for the daemon `policy` describes: a `source.network`
+/// condition a 1.9 daemon refuses is a problem here, not only at submit.
+pub fn check_profile_in(draft: &RuleDraft, profile_id: &str, policy: PolicyContext) -> EditorCheck {
     let normalized = as_profile_rule(draft);
     let mut result = EditorCheck {
         warnings: check(&normalized, None).warnings,
@@ -56,7 +65,7 @@ pub fn check_profile(draft: &RuleDraft, profile_id: &str) -> EditorCheck {
     if normalized.action == "allow" {
         result.warnings.push(ALLOW_LOSES.into());
     }
-    match materialize_rule(profile_id, &profile_rule(draft)) {
+    match materialize_rule_in(profile_id, &profile_rule(draft), policy) {
         Err(problems) => result.problems = plain_problems(&problems),
         // The import preview's cautions (an allow for every app, a launcher
         // anywhere, …) take the second click, as for any new rule:
@@ -129,6 +138,31 @@ mod tests {
             rule,
             "a profile rule never carries those"
         );
+    }
+
+    /// An open profile draft follows the daemon: `source.network` is a problem
+    /// for a 1.9 daemon (as the bridge refuses it at submit) and fine for 1.8.
+    #[test]
+    fn a_profile_draft_with_source_network_follows_the_daemon_policy() {
+        let draft = RuleDraft {
+            conditions: vec![
+                condition("process.path", MatchKind::Exact, "/usr/bin/curl", true),
+                condition(
+                    "source.network",
+                    MatchKind::Network,
+                    "192.168.0.0/16",
+                    false,
+                ),
+            ],
+            ..new_draft()
+        };
+        let newer = PolicyContext {
+            refuse_source_network: true,
+        };
+        assert!(check_profile_in(&draft, "home", PolicyContext::default())
+            .problems
+            .is_empty());
+        assert!(!check_profile_in(&draft, "home", newer).problems.is_empty());
     }
 
     /// The bridge's own profile checks, not a weaker copy.

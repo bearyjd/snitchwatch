@@ -8,7 +8,8 @@
 //! What the bridge refuses because of it is
 //! `crate::rule_policy::PolicyContext`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::watch;
 
 /// A daemon's `major.minor`. Ordered by major, then minor, so `1.10` is
 /// newer than `1.9`.
@@ -65,6 +66,12 @@ fn digits_end(bytes: &[u8], start: usize) -> usize {
             .count()
 }
 
+impl std::fmt::Display for DaemonVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
 /// The version from the daemon's latest `ping` that carried a readable
 /// `Statistics.daemon_version`, shared between the gRPC service (which
 /// writes it) and every path that checks a rule before sending it.
@@ -78,33 +85,56 @@ fn digits_end(bytes: &[u8], start: usize) -> usize {
 /// it, and it is forgotten when no stream is current any more
 /// (`DaemonCommands::observe_daemon_version`), so a daemon that restarts as
 /// another version is not judged by the old one; an unreadable `ping`
-/// value leaves it alone.
-#[derive(Debug, Clone, Default)]
-pub struct SharedDaemonVersion(Arc<Mutex<Option<DaemonVersion>>>);
+/// value leaves it alone. [`Self::subscribe`] is told about every change
+/// (and only changes), including the forget, so each GUI connection can
+/// re-send its `DaemonPolicy`.
+#[derive(Debug, Clone)]
+pub struct SharedDaemonVersion(Arc<watch::Sender<Option<DaemonVersion>>>);
+
+impl Default for SharedDaemonVersion {
+    fn default() -> Self {
+        Self(Arc::new(watch::Sender::new(None)))
+    }
+}
 
 impl SharedDaemonVersion {
     /// Replace the version, readable or not.
     pub fn set(&self, version: Option<DaemonVersion>) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = version;
+        self.0
+            .send_if_modified(|current| replace_if_changed(current, version));
     }
 
     /// What a `ping` reported: replaces the version when readable, leaves
     /// it alone when not. True when the stored value changed (a first
     /// readable version counts), so the caller can recheck what was sent
-    /// under the old one.
+    /// under the old one; [`Self::subscribe`] is told on the same changes.
     pub fn observe(&self, version: Option<DaemonVersion>) -> bool {
         let Some(version) = version else {
             return false;
         };
-        let mut stored = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let changed = *stored != Some(version);
-        *stored = Some(version);
-        changed
+        self.0
+            .send_if_modified(|current| replace_if_changed(current, Some(version)))
     }
 
     pub fn get(&self) -> Option<DaemonVersion> {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+        *self.0.borrow()
     }
+
+    /// A receiver that wakes on every change of the version after this
+    /// call; the current value counts as seen.
+    pub fn subscribe(&self) -> watch::Receiver<Option<DaemonVersion>> {
+        self.0.subscribe()
+    }
+}
+
+/// Store `version` in `current`; `true` (notify) only when it differs.
+/// `send_if_modified` stores even with no receiver, unlike `send`.
+fn replace_if_changed(current: &mut Option<DaemonVersion>, version: Option<DaemonVersion>) -> bool {
+    if *current == version {
+        return false;
+    }
+    *current = version;
+    true
 }
 
 #[cfg(test)]
@@ -164,5 +194,40 @@ mod tests {
         assert_eq!(shared.get(), Some(DaemonVersion::new(1, 8)));
         shared.set(None);
         assert_eq!(shared.get(), None);
+    }
+
+    #[test]
+    fn daemon_policy_notifier_fires_only_when_the_version_changes() {
+        let shared = SharedDaemonVersion::default();
+        let mut rx = shared.subscribe();
+        shared.set(None);
+        assert!(!rx.has_changed().unwrap(), "None -> None is no change");
+        assert!(!shared.observe(DaemonVersion::parse("garbage")));
+        assert!(
+            !rx.has_changed().unwrap(),
+            "an unreadable ping is no change"
+        );
+        assert!(shared.observe(DaemonVersion::parse("1.8.0")));
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(*rx.borrow_and_update(), Some(DaemonVersion::new(1, 8)));
+        assert!(!shared.observe(DaemonVersion::parse("mock-1.8.3")));
+        assert!(!rx.has_changed().unwrap(), "same major.minor is no change");
+        assert!(shared.observe(DaemonVersion::parse("1.9.0")));
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(*rx.borrow_and_update(), Some(DaemonVersion::new(1, 9)));
+        shared.set(None);
+        assert!(
+            rx.has_changed().unwrap(),
+            "forgetting the version is a change"
+        );
+        assert_eq!(*rx.borrow_and_update(), None);
+    }
+
+    #[test]
+    fn daemon_policy_version_is_kept_with_no_subscriber() {
+        let shared = SharedDaemonVersion::default();
+        assert!(shared.observe(DaemonVersion::parse("1.9.0")));
+        assert_eq!(shared.get(), Some(DaemonVersion::new(1, 9)));
+        assert_eq!(DaemonVersion::new(1, 10).to_string(), "1.10");
     }
 }

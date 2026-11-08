@@ -7,7 +7,7 @@ fn socket_path(dir: &tempfile::TempDir) -> PathBuf {
     dir.path().join("bridge.sock")
 }
 
-fn default_handles() -> WsHandles {
+pub(super) fn default_handles() -> WsHandles {
     let (broadcast_tx, _) = broadcast::channel(16);
     let (inbound_tx, _) = mpsc::channel(16);
     let store = Arc::new(crate::blocklists::store::BlocklistStore::open_in_memory().unwrap());
@@ -18,7 +18,13 @@ fn default_handles() -> WsHandles {
         inbound: inbound_tx,
         blocklists: Arc::new(BlocklistsManager::new(store)),
         profiles: Arc::new(crate::profiles::ProfilesManager::new(profile_store)),
+        daemon_version: Default::default(),
     }
+}
+
+/// A version receiver for the pump tests: no daemon, never a change.
+fn no_version() -> watch::Receiver<Option<crate::daemon_config::DaemonVersion>> {
+    crate::daemon_config::SharedDaemonVersion::default().subscribe()
 }
 
 /// Spawn a `WsServer` bound to a fresh Unix socket in `dir`, returning
@@ -43,6 +49,7 @@ async fn spawn_server_with_inbound(
         inbound: inbound_tx,
         blocklists: Arc::new(BlocklistsManager::new(store)),
         profiles: Arc::new(crate::profiles::ProfilesManager::new(profile_store)),
+        daemon_version: Default::default(),
     };
 
     let path = socket_path(dir);
@@ -54,7 +61,7 @@ async fn spawn_server_with_inbound(
     (path, broadcast_tx, inbound_rx, join)
 }
 
-async fn connect(path: &PathBuf) -> tokio_tungstenite::WebSocketStream<UnixStream> {
+pub(super) async fn connect(path: &PathBuf) -> tokio_tungstenite::WebSocketStream<UnixStream> {
     // Retry briefly: the listener may not have finished binding yet
     // since `spawn_server` returns as soon as the spawn is scheduled.
     let mut last_err = None;
@@ -140,6 +147,7 @@ async fn outbound_failure_releases_presence_with_stalled_inbound() {
         failing_sink,
         never_receives,
         handles,
+        no_version(),
         None,
     ));
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -365,6 +373,14 @@ async fn connection_with_correct_token_round_trips() {
         other => panic!("expected SetVerdict, got {other:?}"),
     }
 
+    // The daemon's policy is the second frame (`DAEMON_POLICY_V1`).
+    let policy = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+        .await
+        .expect("should receive the daemon policy")
+        .expect("stream should not end")
+        .expect("frame should not error");
+    assert!(matches!(policy, TMessage::Text(ref text) if text.contains("daemonPolicy")));
+
     // 3. Broadcast messages still flow to the client after handshake.
     broadcast_tx
         .send(ServerMessage::InsertConnectionRows { rows: vec![] })
@@ -524,7 +540,13 @@ async fn pump_drops_an_oversized_frame_before_parsing_it() {
     ])
     .chain(futures_util::stream::pending());
     let sink = Box::pin(futures_util::sink::drain::<Message>());
-    let pump = tokio::spawn(pump_authenticated(sink, Box::pin(frames), handles, None));
+    let pump = tokio::spawn(pump_authenticated(
+        sink,
+        Box::pin(frames),
+        handles,
+        no_version(),
+        None,
+    ));
 
     let first = tokio::time::timeout(std::time::Duration::from_secs(2), inbound_rx.recv())
         .await
@@ -561,7 +583,13 @@ async fn import_requests_carry_a_reply_channel_to_their_connection() {
             Ok::<_, std::io::Error>(tx)
         },
     ));
-    let pump = tokio::spawn(pump_authenticated(sink, Box::pin(frames), handles, None));
+    let pump = tokio::spawn(pump_authenticated(
+        sink,
+        Box::pin(frames),
+        handles,
+        no_version(),
+        None,
+    ));
 
     let request = tokio::time::timeout(std::time::Duration::from_secs(2), inbound_rx.recv())
         .await
@@ -625,6 +653,7 @@ async fn modern_context_dies_on_both_pump_directions_and_task_cancellation() {
             Box::pin(sink),
             tokio_stream::wrappers::ReceiverStream::new(frame_rx),
             handles,
+            no_version(),
             Some(1000),
         ));
         frame_tx.send(Ok(Message::Text(r#"{"action":"prepareCuratedBroadOptIn","requestId":"prepare-1","id":"dns-resolved","purpose":"enable"}"#.into()))).await.unwrap();
@@ -675,6 +704,8 @@ async fn malformed_modern_result_is_private_and_invalidates_only_sender_ticket()
             .unwrap();
         let ack = client.next().await.unwrap().unwrap();
         assert!(ack.into_text().unwrap().contains("curatedBroadOptInV1"));
+        let daemon_policy = client.next().await.unwrap().unwrap();
+        assert!(daemon_policy.into_text().unwrap().contains("daemonPolicy"));
         client.send(TMessage::Text(r#"{"action":"prepareCuratedBroadOptIn","requestId":"p1","id":"dns-resolved","purpose":"enable"}"#.into())).await.unwrap();
         let ClientMessage::PrepareCuratedBroadOptIn {
             context: Some(context),
@@ -825,6 +856,15 @@ async fn analysis_export_private_real_websocket_and_refusals() {
             .into_text()
             .unwrap()
             .contains("authenticated"));
+        // The daemon's policy always follows the acknowledgement.
+        assert!(socket
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap()
+            .contains("daemonPolicy"));
     }
     requester.send(TMessage::Text(r#"{"action":"requestCacheSummaryExport","requestId":"private-1","schemaVersion":1,"filters":{}}"#.into())).await.unwrap();
     let message = inbound.recv().await.unwrap();
@@ -1093,6 +1133,7 @@ async fn analysis_export_outbound_failure_cancels_retained_worker() {
         Box::pin(sink),
         Box::pin(frames),
         handles,
+        no_version(),
         None,
     ));
     let ClientMessage::RequestCacheSummaryExport {

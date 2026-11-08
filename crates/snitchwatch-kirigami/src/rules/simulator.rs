@@ -124,6 +124,12 @@ pub struct SimulationInput {
     pub checksums: Option<BTreeMap<String, String>>,
     /// Whether opensnitchd computes checksums (`Rules.EnableChecksums`).
     pub checksums_enabled: Option<bool>,
+    /// The bridge said the daemon refuses `network` + `source.network`
+    /// (`DaemonPolicy`, opensnitchd 1.9 and newer). Such a rule, and a
+    /// network operand under another type, is then reported as not
+    /// simulated, with why. `false`: v1.8.0's matching (an older bridge, or
+    /// a daemon of unknown version).
+    pub refuse_source_network: bool,
 }
 
 /// An operand the simulator can't evaluate at all.

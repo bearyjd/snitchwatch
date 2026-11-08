@@ -56,6 +56,12 @@ pub const BLOCKLIST_LEFTOVERS: &str = "blocklistLeftovers";
 /// Private bounded cache summary protocol; advertised only after service hookup.
 pub const AI_CACHE_SUMMARY_EXPORT_V1: &str = "aiCacheSummaryExportV1";
 
+/// The bridge sends `ServerMessage::DaemonPolicy` right after the
+/// acknowledgement and again whenever the daemon's version changes: what the
+/// connected daemon refuses (`crate::rule_policy::PolicyContext`). Without it
+/// a client assumes v1.8.0's rules.
+pub const DAEMON_POLICY_V1: &str = "daemonPolicyV1";
+
 /// What this bridge advertises to every authenticated client.
 pub fn advertised() -> Vec<String> {
     vec![
@@ -69,6 +75,7 @@ pub fn advertised() -> Vec<String> {
         CURATED_GROUPS_V1.to_string(),
         BLOCKLIST_LEFTOVERS.to_string(),
         AI_CACHE_SUMMARY_EXPORT_V1.to_string(),
+        DAEMON_POLICY_V1.to_string(),
     ]
 }
 
@@ -119,7 +126,8 @@ mod tests {
                     "curatedBroadOptInV1",
                     "curatedGroupsV1",
                     "blocklistLeftovers",
-                    "aiCacheSummaryExportV1"
+                    "aiCacheSummaryExportV1",
+                    "daemonPolicyV1"
                 ],
             })
         );
@@ -141,5 +149,17 @@ mod tests {
                 capabilities: Vec::new()
             }
         );
+    }
+
+    /// A client from before `DaemonPolicy` fails to decode it, which its
+    /// dispatcher already treats as an action to ignore; the frame never
+    /// precedes the acknowledgement it does decode.
+    #[test]
+    fn a_v0_1_1_client_cannot_mistake_a_daemon_policy_for_anything_else() {
+        let policy = ServerMessage::DaemonPolicy(crate::ws_messages::DaemonPolicy::for_daemon(
+            Some(crate::daemon_config::DaemonVersion::new(1, 9)),
+        ));
+        let wire = serde_json::to_string(&policy).unwrap();
+        assert!(serde_json::from_str::<V011ServerMessage>(&wire).is_err());
     }
 }

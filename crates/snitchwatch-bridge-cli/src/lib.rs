@@ -309,6 +309,9 @@ where
         inbound: inbound_tx.clone(),
         blocklists: blocklists_mgr.clone(),
         profiles: profiles_mgr.clone(),
+        // The same handle the gRPC service writes; a `Default` here would
+        // compile and leave every GUI on v1.8.0's policy.
+        daemon_version: ui_service_inner.daemon_version_handle(),
     };
     let ws_server = WsServer::new(config.ws_socket_path.clone(), token.clone(), ws_handles);
     let ws_listener = match activated_ws {

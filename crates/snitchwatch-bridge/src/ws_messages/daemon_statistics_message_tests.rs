@@ -28,3 +28,33 @@ fn daemon_statistics_round_trips_via_json() {
     let parsed: ServerMessage = serde_json::from_value(json).unwrap();
     assert_eq!(parsed, msg);
 }
+
+#[test]
+fn daemon_policy_round_trips_via_json() {
+    let msg = ServerMessage::DaemonPolicy(DaemonPolicy::for_daemon(Some(
+        crate::daemon_config::DaemonVersion::new(1, 9),
+    )));
+    let json = serde_json::to_value(&msg).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "action": "daemonPolicy",
+            "refuseSourceNetwork": true,
+            "daemonVersion": "1.9",
+        })
+    );
+    let parsed: ServerMessage = serde_json::from_value(json).unwrap();
+    assert_eq!(parsed, msg);
+}
+
+#[test]
+fn daemon_policy_for_an_unknown_or_1_8_daemon_refuses_nothing() {
+    let unknown = DaemonPolicy::for_daemon(None);
+    assert!(!unknown.refuse_source_network);
+    assert_eq!(unknown.daemon_version, None);
+    let old = DaemonPolicy::for_daemon(Some(crate::daemon_config::DaemonVersion::new(1, 8)));
+    assert!(!old.refuse_source_network);
+    let decoded: ServerMessage =
+        serde_json::from_str(r#"{"action":"daemonPolicy","refuseSourceNetwork":false}"#).unwrap();
+    assert_eq!(decoded, ServerMessage::DaemonPolicy(unknown));
+}

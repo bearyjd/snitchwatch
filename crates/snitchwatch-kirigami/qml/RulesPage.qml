@@ -566,6 +566,7 @@ Kirigami.ScrollablePage {
                 if (row.appliesToAllApps) {
                     lines.push(row.allAppsHint, row.flagBadge);
                 }
+                lines.push(row.model.notLoadedReason);
                 if (row.readOnlyReason.length > 0) {
                     lines.push("read-only");
                 }
@@ -649,6 +650,8 @@ Kirigami.ScrollablePage {
                             onClicked: page.openRuleByName(row.shadowBy)
                         }
                     }
+                    // The connected daemon skips this rule (`rules::daemon_refusal`).
+                    RuleRowNotes { reason: row.model.notLoadedReason; Layout.fillWidth: true }
                     // Issue #44: what deleting this all-apps rule changes.
                     Controls.Label {
                         objectName: "allAppsHint"
