@@ -188,7 +188,7 @@ fn sha1_rule() -> Value {
 
 #[test]
 fn a_sha1_condition_is_compared_with_the_md5_like_v1_8_0() {
-    // v1.8.0 only ever computes the MD5 (`EnableChecksums`, loader.go:70-75;
+    // v1.8.0 only ever computes the MD5 (`EnableChecksums`, loader.go:88-93;
     // `HasChecksums`, which would add the SHA1, has no caller), and `Match`
     // compares every checksum the process has with the condition's data, so a
     // sha1 condition is a comparison with the MD5.

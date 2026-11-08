@@ -511,10 +511,10 @@ fn hash_with_checksum_setting_unknown(leaf: &Leaf, input: &SimulationInput) -> O
 /// so a process with none still matches.
 ///
 /// opensnitchd v1.8.0 only ever computes the MD5: `EnableChecksums`
-/// (loader.go:70-75) adds it, and `HasChecksums` (loader.go:77-86), which would
+/// (loader.go:88-93) adds it, and `HasChecksums` (loader.go:95-104), which would
 /// add the SHA1 for a `process.hash.sha1` rule, has no caller anywhere in the
 /// vendored tree. So every `process.hash.*` condition's data is compared with
-/// the MD5 (operator.go:384-395), and the MD5 is the one input needed.
+/// the MD5 (operator.go:496-507), and the MD5 is the one input needed.
 fn hash_with_checksums_on(leaf: &Leaf, input: &SimulationInput) -> Outcome {
     let Some(checksums) = &input.checksums else {
         return Outcome::unevaluated(&leaf.operand, CHECKSUM_MD5);

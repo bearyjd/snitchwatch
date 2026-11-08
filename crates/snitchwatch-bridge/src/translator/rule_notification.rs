@@ -9,7 +9,7 @@
 //!
 //! **Why `CHANGE_RULE` for a toggle rather than `ENABLE_RULE`/`DISABLE_RULE`:**
 //! all three daemon handlers end in `c.rules.Replace(r, r.Duration == Always)`
-//! (`vendor/opensnitch/daemon/ui/notifications.go:87-126`); `ENABLE`/`DISABLE`
+//! (`vendor/opensnitch/daemon/ui/notifications.go:91-130`); `ENABLE`/`DISABLE`
 //! merely force `r.Enabled` before replacing. The Rules model already sends the
 //! desired `enabled` value inside the rule (`RulesModel::toggle_enabled` ->
 //! `RulesStore::toggled_rule_json`), so `CHANGE_RULE` expresses the whole
@@ -49,7 +49,7 @@ pub fn notification_for_effect(
             (Action::ChangeRule, vec![rule])
         }
         // DELETE_RULE reads only `rul.Name`
-        // (`vendor/opensnitch/daemon/ui/notifications.go:132`), so a name-only
+        // (`vendor/opensnitch/daemon/ui/notifications.go:136`), so a name-only
         // Rule is correct and complete here. Deliberately NOT routed through
         // `rule_from_wire`: there is no operator to validate, and requiring one
         // would make deleting a rule impossible.
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn notification_type_is_never_none() {
         // A NONE-typed notification tells the daemon to close the stream
-        // (`notifications.go:405-408`). Nothing this function emits may be one.
+        // (`notifications.go:409-412`). Nothing this function emits may be one.
         for effect in [
             UpstreamEffect::UpdateRule {
                 rule_id: "r".to_string(),

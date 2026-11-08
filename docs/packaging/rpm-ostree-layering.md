@@ -35,7 +35,8 @@ bridge as a systemd `--user` service.
 **Corrected 2026-07-31 (see issue #7):** opensnitch is *not* packaged in
 Fedora's repos or Bazzite's COPR set — `rpm-ostree install opensnitch`
 fails with "No match for argument". Layer the upstream GitHub release RPM
-instead (v1.8.0 matches this repo's vendored submodule pin):
+instead (the vendored submodule is upstream master `a1353848` with a `ui.proto`
+unchanged from v1.8.0; the RPM itself is still the released v1.8.0):
 
 ```bash
 curl -LO https://github.com/evilsocket/opensnitch/releases/download/v1.8.0/opensnitch-1.8.0-1.x86_64.rpm

@@ -21,6 +21,8 @@
 
 ## Source facts (v1.8.0)
 
+Line numbers below are v1.8.0's. At the a1353848 pin: `logger.go` struct is 22-50, queue sizing 96-101; `procmon/details.go` path gate is 269-286.
+
 - `LoggerConfig` fields: `Name, Format, Protocol, Server, WriteTimeout, ConnectTimeout, Tag, Workers, MaxConnectAttempts` (`log/loggers/logger.go:23-51`); nested at `Server.Loggers` (`ui/config/config.go:48`).
 - Only `remote` emits JSON (`remote.go:85-91`); each object ends in `"\n\n"` (`formats/json.go:77`), so blank frames arrive and must be dropped. JSON ignores `Tag`.
 - `Workers` unset keeps the manager's 4-slot queue (`logger.go:97-101`) and one connection (`remote.go:113`); `Workers: 1` would shrink the queue to 1.
@@ -56,7 +58,7 @@
 - [x] HIGH, fail-open activation: the listener is `snitchwatch-endpoint-events.service` (its own rsyslog instance), `BindsTo`/`After`/`PartOf` the table's unit; the table's unit reloads atomically (`ExecReload` re-applies the replace-in-one-transaction file) and deletes only on stop. Proven under systemd: broken table means no listener; no unprotected moment across restarts.
 - [x] HIGH, routed ingress: input-hook rejects for tcp/514 to 127.0.0.0/8 and ::1 from any interface but `lo`.
 - [x] MEDIUM, broken-config fallback: separate instance, `ExecStartPre=rsyslogd -N1`, `abortOnUncleanConfig`, a default ruleset with no actions; proven a misspelt ruleset never opens 514.
-- [x] MEDIUM, path gate: accepts the daemon's `Kernel connection` and comm values (procmon/details.go:258-275); producer-derived fixtures in verify.sh.
+- [x] MEDIUM, path gate: accepts the daemon's `Kernel connection` and comm values (procmon/details.go:258-275 at v1.8.0; 269-286 at a1353848); producer-derived fixtures in verify.sh.
 - [x] LOW: protocol allowlist from conman/connection.go, dotted-quad IPv4, uint32 user_id; the rest documented as shape checks Vigie must validate. verify.sh: receiver readiness plus positive controls, error-aware sink reads, the live journal, the broken-config test.
 
 ### Task 3: Real config proof

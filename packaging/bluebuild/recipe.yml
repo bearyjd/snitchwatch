@@ -44,12 +44,12 @@ modules:
   #    #7): opensnitch is NOT packaged in Fedora's repos or Bazzite's COPR
   #    set — `rpm-ostree install opensnitch` fails with "No match for
   #    argument" (verified live on a Bazzite host and a clean fedora:43
-  #    container). Install the upstream GitHub release RPM by URL instead,
-  #    pinned to v1.8.0 to match this repo's vendored submodule. The GUI
-  #    (`opensnitch-ui`) is deliberately NOT installed, since Snitchwatch
-  #    replaces it. `info` is an explicit RPM dependency; `nftables` and
-  #    `libnetfilter_queue` are interception deps (present in Bazzite,
-  #    declared for safety — idempotent).
+  #    container). Install the upstream v1.8.0 release RPM by URL instead
+  #    (the vendored submodule is at master a1353848: same ui.proto, but
+  #    master's daemon work is not in this RPM). The GUI (`opensnitch-ui`)
+  #    is deliberately NOT installed, since Snitchwatch replaces it. `info`
+  #    is an explicit RPM dependency; `nftables` and `libnetfilter_queue`
+  #    are interception deps (present in Bazzite, declared for safety).
   - type: rpm-ostree
     install:
       - info

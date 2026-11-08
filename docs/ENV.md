@@ -93,7 +93,7 @@ lines, sourced by the justfile and scripts).
 | `SW_PROTOC_VERSION` | `pins.env:3` | `33.5` (`build-bridge.sh:108`). |
 | `SW_ARCH` | `pins.env:4` | `x86_64`. |
 | `SW_OPENSNITCH_COMMIT` | `pins.env:5` | Must equal the `vendor/opensnitch` gitlink and checked-out HEAD (`build-bridge.sh:119,123`). |
-| `SW_OPENSNITCH_TAG` | `pins.env:6` | `v1.8.0`; recorded as `opensnitch_tag` in the MANIFEST (`bridge_artifact.py:311`), not compared with the gitlink. |
+| `SW_OPENSNITCH_TAG` | `pins.env:6` | `master-a1353848` (a label: upstream master is untagged); recorded as `opensnitch_tag` in the MANIFEST (`bridge_artifact.py:311`), not compared with the gitlink. |
 | `RUSTC_WRAPPER`, `RUSTC`, `CARGO_BUILD_RUSTC(_WRAPPER)`, `CARGO_BUILD_RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_{LINKER,RUSTFLAGS}`, `RUSTC_WORKSPACE_WRAPPER` | `build-bridge.sh:41-43,91-93` | Always unset by the build (logged if they were set) so the MANIFEST's build command stays exact. |
 | `TMPDIR` | `packaging/scanner/stage.sh:20` | Parent of the staging snapshot dir; default `/tmp`. |
 | `SW_RELEASE_TAG` | `build-bridge.sh:171`, justfile `release-bridge` | Non-empty means release mode: must be `v<crate version>`, clean tree, repo-root `LICENSE`. |

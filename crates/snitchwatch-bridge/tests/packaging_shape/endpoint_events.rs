@@ -628,7 +628,7 @@ fn template_matches(template: &str, value: &str) -> bool {
 }
 
 /// codex round 2, MEDIUM: the daemon emits non-absolute paths for kernel
-/// connections and unresolved executables (procmon/details.go:258-275); the
+/// connections and unresolved executables (procmon/details.go:269-286); the
 /// gate must keep those events. Patterns are checked as rsyslog would apply
 /// them to these producer-derived values.
 #[test]

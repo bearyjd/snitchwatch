@@ -5,7 +5,7 @@ Two independent products, one Cargo workspace (`Cargo.toml`: 11 crates + `tests/
 
 ## Component A: Snitchwatch (GUI over opensnitchd)
 ```
- opensnitchd (root, Go, vendor/opensnitch v1.8.0)
+ opensnitchd (root, Go, vendor/opensnitch master a1353848; installed daemon is the v1.8.0 RPM)
      | gRPC client dials IN (ui.proto `Ui` service)
      v   Unix sock /run/snitchwatch/opensnitchd.sock (system) | TCP 127.0.0.1 (per-user, "not deny-safe")
  snitchwatch-bridge (lib) hosted by snitchwatch-bridge-cli (bin)

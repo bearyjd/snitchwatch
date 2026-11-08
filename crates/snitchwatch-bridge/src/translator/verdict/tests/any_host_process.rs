@@ -13,7 +13,7 @@ fn any_host_scope_matches_on_process_path() {
     assert_eq!(op.operand, "process.path");
     assert_eq!(op.data, "/usr/bin/curl");
     // A non-sensitive simple operator compares with Unicode case folding
-    // (`strings.EqualFold`, operator.go:224-226); Linux paths aren't.
+    // (`strings.EqualFold`, operator.go:286-288); Linux paths aren't.
     assert!(op.sensitive, "process.path must match case-sensitively");
 }
 
@@ -152,7 +152,7 @@ fn host_scopes_refuse_to_remember_a_rule_without_a_process_path() {
 // -- issue #44: process-bound rules need process-distinct names. If two
 // programs' rules for the same verdict/host/port shared a name, the
 // daemon would store the second as `<name>-2` (`setUniqueName`,
-// loader.go:332-341) while the bridge and the Rules page still call it
+// loader.go:351-360) while the bridge and the Rules page still call it
 // `<name>` — so a later toggle or delete there would edit the *other*
 // program's rule. --
 

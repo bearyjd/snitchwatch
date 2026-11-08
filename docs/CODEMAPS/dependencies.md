@@ -4,7 +4,7 @@
 ## External processes and services
 | What | Used by | Notes |
 |---|---|---|
-| `opensnitchd` (Go, root) | bridge | dials gRPC `Ui` into the bridge; submodule `vendor/opensnitch` v1.8.0 read-only |
+| `opensnitchd` (Go, root) | bridge | dials gRPC `Ui` into the bridge; submodule `vendor/opensnitch` pinned at upstream master `a1353848` (was v1.8.0 until 2026-11-08), read-only |
 | `rpm-ostree`, `rpm -V`, `ostree`, `flatpak`, `ss` | scanner-core `SystemInspector` | `inspector.rs` |
 | `chkrootkit`, `modinfo`, sysfs, `/proc/cmdline` | scanner-privileged | via `SystemFacts` |
 | `pkexec` + polkit | kirigami native path, broker | `packaging/polkit/` |

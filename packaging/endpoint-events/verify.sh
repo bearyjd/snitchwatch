@@ -209,7 +209,7 @@ event() { # type
       Rule: "<nil>", Action: "<nil>", Type: $type}'
 }
 # Producer-derived path values (vendor/opensnitch/daemon/procmon/details.go:
-# 258-275): a kernel task, and a process whose exe couldn't be read (its
+# 269-286): a kernel task, and a process whose exe couldn't be read (its
 # comm). Both are root, so user_id is omitted (protobuf omitempty).
 producer_events() {
     event 0 | jq -c '.Event.process_path = "Kernel connection" | del(.Event.user_id)

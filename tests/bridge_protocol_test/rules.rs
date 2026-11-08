@@ -16,7 +16,7 @@ use super::*;
 ///     fails it is silently discarded by a real daemon, which is what issue #14
 ///     was, and would make this feature look like it works while doing nothing.
 ///   * the type is never `NONE`, which would order the daemon to close the
-///     stream (`vendor/opensnitch/daemon/ui/notifications.go:405-408`).
+///     stream (`vendor/opensnitch/daemon/ui/notifications.go:409-412`).
 #[tokio::test]
 async fn rule_update_and_delete_reach_the_daemon_as_notifications() {
     use snitchwatch_bridge::ws_messages::ClientMessage;
@@ -117,7 +117,7 @@ async fn rule_update_and_delete_reach_the_daemon_as_notifications() {
     mock_opensnitchd::validate_rule_shape(&change.rules[0])
         .expect("a real daemon would silently reject this rule");
 
-    // Delete needs only the name (notifications.go:132).
+    // Delete needs only the name (notifications.go:136).
     bridge
         .inbound_tx
         .send(ClientMessage::DeleteRule {
