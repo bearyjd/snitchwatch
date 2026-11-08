@@ -15,9 +15,13 @@ Pre-alpha Rust workspace. Two independent products live in this one repo:
   intentionally shares no daemon, systemd unit, or privilege model with
   Component A — see "Settled decisions" below before proposing otherwise.
 
-`vendor/opensnitch` is a **read-only git submodule** pinned at `v1.8.0`
-(upstream reference for `ui.proto`, default config shape, etc.) — never edit
-files under it. If `git status` shows it as dirty with only an untracked
+`vendor/opensnitch` is a **read-only git submodule** pinned at upstream
+master `a1353848` (2026-07-26, v1.8.0 + 224 commits; owner decision
+2026-11-08), fetched from the fork `bearyjd/opensnitch` branch
+`snitchwatch/stable` (identical to upstream master) — upstream reference for
+`ui.proto` (unchanged from v1.8.0), default config shape, etc. — never edit
+files under it. The bluebuild image still installs the released v1.8.0 RPM;
+building the daemon from the pin needs Go >= 1.25. If `git status` shows it as dirty with only an untracked
 `.omc/` (or similar tooling-artifact) path inside it, that's tooling noise,
 not a real change; don't commit a submodule pointer bump for it.
 
@@ -146,7 +150,9 @@ after real back-and-forth. Read the source doc before proposing a change.
    polkit" — merging would break that. See `AUDIT.md` decision #1.
 2. **Component A keeps riding `opensnitchd`** for interception; a
    from-scratch nfqueue/eBPF daemon is explicitly deferred (too
-   security-critical to justify before the frontend is proven out).
+   security-critical to justify before the frontend is proven out). The
+   shipped daemon is still the v1.8.0 release RPM; only the vendored
+   reference moved to master `a1353848` (2026-11-08).
 3. **Distribution: bluebuild image (primary) + documented rpm-ostree
    layering (alternative) + Flatpak GUI.** The bridge needs no
    `CAP_NET_RAW`/privileged capability — only `opensnitchd` does — but
