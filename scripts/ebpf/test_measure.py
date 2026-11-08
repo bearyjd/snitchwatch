@@ -393,13 +393,15 @@ class UnknownRate(unittest.TestCase):
 
 
 class Compare(unittest.TestCase):
-    def make_run(self, root, label, cpus, rss, unknown=10, dur=86400, workload="w1"):
+    def make_run(self, root, label, cpus, rss, unknown=10, dur=86400, workload="w1",
+                 truncated=False, span=None):
         root = Path(root)
         with open(root / f"{label}.csv", "w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(measure.COLUMNS)
+            span = dur if span is None else span
             for i, (c, r) in enumerate(zip(cpus, rss)):
-                w.writerow([i * 60, "x", "d", 1, c, r, 4, "", ""])
+                w.writerow([span * (i + 1) / len(cpus), "x", "d", 1, c, r, 4, "", ""])
         doc = lambda n, flt: {"format": measure.EXPORT_FORMAT, "schemaVersion": 1,  # noqa: E731
                               "filterKinds": {"application": flt},
                               "requestedWindow": {"a": 1},
@@ -407,8 +409,11 @@ class Compare(unittest.TestCase):
                                            "groupOmissions": {k: {"groups": 0, "observations": 0}
                                                               for k in measure.GROUP_LIMITS}},
                               "groups": [{"count": n}]}
-        (root / f"{label}-t.json").write_text(json.dumps(doc(100, False)))
-        (root / f"{label}-m.json").write_text(json.dumps(doc(unknown, True)))
+        total, miss = doc(100, False), doc(unknown, True)
+        if truncated:
+            miss["coverage"]["rowOmissions"] = {"x": 5}
+        (root / f"{label}-t.json").write_text(json.dumps(total))
+        (root / f"{label}-m.json").write_text(json.dumps(miss))
         man = root / f"{label}.json"
         man.write_text(json.dumps({
             "format": measure.RUN_FORMAT, "schemaVersion": 1, "label": label,
@@ -467,7 +472,79 @@ class Compare(unittest.TestCase):
             a = self.make_run(d, "proc", [1.0], [1024])
             b = self.make_run(d, "ebpf", [1.0], [1024], workload="w2")
             self.assertEqual(measure.main(["compare", str(a), str(b)]), 1)
-            self.assertEqual(measure.main(["compare", str(a), str(a)]), 0)
+            c = self.make_run(d, "ebpf2", [1.0], [1024])
+            self.assertEqual(measure.main(["compare", str(a), str(c)]), 0)
+
+    def edit(self, man, **kw):
+        doc = json.loads(man.read_text())
+        doc.update(kw)
+        man.write_text(json.dumps(doc))
+
+    def test_non_finite_duration_refused(self):
+        for bad in ("NaN", "Infinity", "-Infinity"):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0], [1024])
+                b = self.make_run(d, "ebpf", [1.0], [1024])
+                txt = b.read_text().replace("86400", bad)
+                b.write_text(txt)
+                with self.assertRaisesRegex(ValueError, "durationS"):
+                    measure.compare(a, b)
+
+    def test_manifest_paths_must_stay_inside_manifest_dir(self):
+        for bad in ("../outside.csv", "/etc/passwd", "sub/../../x.csv"):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0], [1024])
+                b = self.make_run(d, "ebpf", [1.0], [1024])
+                self.edit(b, samplesCsv=bad)
+                with self.assertRaisesRegex(ValueError, "samplesCsv"):
+                    measure.compare(a, b)
+
+    def test_zero_cpu_samples_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0], [1024])
+            b = self.make_run(d, "ebpf", [""], [1024])
+            with self.assertRaisesRegex(ValueError, "cpu samples"):
+                measure.compare(a, b)
+
+    def test_short_sample_span_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0, 2.0], [1024, 1024])
+            b = self.make_run(d, "ebpf", [1.0, 2.0], [1024, 1024], span=1000)
+            with self.assertRaisesRegex(ValueError, "span"):
+                measure.compare(a, b)
+
+    def test_truncated_export_nulls_unknown_delta_and_marks_biased(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0], [1024])
+            b = self.make_run(d, "ebpf", [1.0], [1024], truncated=True)
+            r = measure.compare(a, b)
+        self.assertIsNone(r["delta"]["unknown_rate"])
+        self.assertIs(r["biased"], True)
+        self.assertIsNotNone(r["delta"]["cpu_mean"])
+
+    def test_clean_runs_not_biased(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = measure.compare(self.make_run(d, "proc", [1.0], [1024]),
+                                self.make_run(d, "ebpf", [1.0], [1024]))
+        self.assertIs(r["biased"], False)
+
+    def test_bad_csv_rows_exit_1_not_traceback(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0], [1024])
+            b = self.make_run(d, "ebpf", [1.0], [1024])
+            (Path(d) / "ebpf.csv").write_text("t_s,cpu_pct,rss_kib\nabc,1,2\n")
+            self.assertEqual(measure.main(["compare", str(a), str(b)]), 1)
+            (Path(d) / "ebpf.csv").write_bytes(b"t_s\n\x00\n")
+            self.assertEqual(measure.main(["compare", str(a), str(b)]), 1)
+            (Path(d) / "ebpf.csv").write_text("cpu_pct,rss_kib\n1,2\n")
+            self.assertEqual(measure.main(["compare", str(a), str(b)]), 1)
+
+    def test_comparing_a_manifest_with_itself_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0], [1024])
+            with self.assertRaisesRegex(ValueError, "itself"):
+                measure.compare(a, a)
+            self.assertEqual(measure.main(["compare", str(a), str(Path(d) / "." / "proc.json")]), 1)
 
 
 if __name__ == "__main__":

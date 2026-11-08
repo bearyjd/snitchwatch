@@ -13,6 +13,7 @@ import argparse
 import csv
 import io
 import json
+import math
 import os
 import stat
 import statistics
@@ -26,6 +27,7 @@ COMM_LEN = 15  # kernel truncates /proc/<pid>/comm to 15 chars
 EXPORT_FORMAT = "snitchwatch-cache-summary"
 RUN_FORMAT = "snitchwatch-measure-run"
 DURATION_TOLERANCE = 0.01  # runs may differ by 1% in declared duration
+MIN_SPAN_FRACTION = 0.5  # sampled span (max t_s) must cover >= 50% of durationS
 
 
 def read_process(proc, pid):
@@ -186,6 +188,7 @@ def summarize(rows):
     if cpu:
         out["cpu_mean"] = statistics.fmean(cpu)
         out["cpu_median"] = statistics.median(cpu)
+        # p95 = upper nearest-rank: index int(0.95*n), clamped to the last sample.
         out["cpu_p95"] = cpu[min(len(cpu) - 1, int(0.95 * len(cpu)))]
     if pts:
         out["rss_start_mib"], out["rss_end_mib"] = pts[0][1], pts[-1][1]
@@ -292,8 +295,9 @@ def _load_run(path, label):
     if doc.get("schemaVersion") != 1:
         raise ValueError(f"{label}: unsupported schemaVersion {doc.get('schemaVersion')!r}")
     dur = doc.get("durationS")
-    if isinstance(dur, bool) or not isinstance(dur, (int, float)) or dur <= 0:
-        raise ValueError(f"{label}: durationS missing or not a positive number")
+    if isinstance(dur, bool) or not isinstance(dur, (int, float)) \
+            or not math.isfinite(dur) or dur <= 0:
+        raise ValueError(f"{label}: durationS missing or not a finite positive number")
     workload = doc.get("workload")
     if not isinstance(workload, str) or not workload:
         raise ValueError(f"{label}: workload missing")
@@ -301,7 +305,17 @@ def _load_run(path, label):
     for key in ("samplesCsv", "unknownTotal", "unknownMissing"):
         if not isinstance(doc.get(key), str) or not doc[key]:
             raise ValueError(f"{label}: {key} missing")
-    stats = summarize(list(csv.DictReader(io.StringIO(read_regular_text(base / doc["samplesCsv"])))))
+        rel = Path(doc[key])
+        if rel.is_absolute() or ".." in rel.parts:
+            raise ValueError(f"{label}: {key} must be a relative path inside the manifest directory")
+    rows = list(csv.DictReader(io.StringIO(read_regular_text(base / doc["samplesCsv"]))))
+    stats = summarize(rows)
+    if not stats["cpu_samples"]:
+        raise ValueError(f"{label}: no cpu samples in {doc['samplesCsv']}")
+    span = max(float(r["t_s"]) for r in rows)
+    if span < MIN_SPAN_FRACTION * dur:
+        raise ValueError(f"{label}: sample span {span:g}s is below "
+                         f"{MIN_SPAN_FRACTION:.0%} of durationS {dur:g}s")
     unk = unknown_rate(_load(base / doc["unknownTotal"]), _load(base / doc["unknownMissing"]))
     return {"duration_s": dur, "workload": workload, "cpu_mean": stats["cpu_mean"],
             "cpu_p95": stats["cpu_p95"], "rss_start_mib": stats["rss_start_mib"],
@@ -318,13 +332,17 @@ def compare(proc_manifest, ebpf_manifest):
     Refuses runs whose declared duration (within 1%) or workload differ: such
     a comparison would measure the load, not the collector.
     """
+    if Path(proc_manifest).resolve() == Path(ebpf_manifest).resolve():
+        raise ValueError("cannot compare a manifest with itself")
     runs = {"proc": _load_run(proc_manifest, "proc"), "ebpf": _load_run(ebpf_manifest, "ebpf")}
     p, e = runs["proc"], runs["ebpf"]
     if abs(p["duration_s"] - e["duration_s"]) > DURATION_TOLERANCE * max(p["duration_s"], e["duration_s"]):
         raise ValueError(f"mismatched duration: proc {p['duration_s']}s vs ebpf {e['duration_s']}s")
     if p["workload"] != e["workload"]:
         raise ValueError(f"mismatched workload: proc {p['workload']!r} vs ebpf {e['workload']!r}")
-    runs["delta"] = {k: None if p[k] is None or e[k] is None else e[k] - p[k]
+    runs["biased"] = bool(p["warnings"] or e["warnings"])
+    runs["delta"] = {k: None if p[k] is None or e[k] is None
+                     or (k == "unknown_rate" and runs["biased"]) else e[k] - p[k]
                      for k in DELTA_KEYS}
     return runs
 
@@ -374,7 +392,7 @@ def main(argv=None):
     elif a.cmd == "compare":
         try:
             print(json.dumps(compare(a.proc, a.ebpf), indent=2))
-        except (ValueError, OSError) as e:
+        except (ValueError, OSError, csv.Error, TypeError, KeyError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
     else:
