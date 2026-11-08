@@ -15,6 +15,15 @@ they edit only; the orchestrator runs fmt/clippy/tests and commits.
    (compare with `git show origin/main:FILE | cmp`, then move the untracked copy to the scratchpad).
 3. Message `bazzite-tower-94` only with facts (SHAs). Never ask it to cut, promote, publish or repin.
 
+## Step 0: critique this plan BEFORE task 1 (about 20 minutes)
+The 2026-11-08 session started an independent critic on this plan and was cleared before it reported, so its findings are LOST. Run
+`oh-my-claudecode:critic` (model opus, read-only) on this file, `2026-11-08-source-network-gate.md`, `2026-11-08-opensnitch-master-pin.md`,
+`.omc/STATE.md` and the 2026-11-08 section of `HANDOFF.md`. Brief it to attack: task order and hidden dependencies; unattended-safety
+holes and Hard-stops completeness; wrong commands, paths and line cites (verify every `just` recipe and package name); missing failure cases
+(a MEDIUM review finding, a `kirigami` job failing twice, no podman for the release build, upstream force-push); the defaults taken for the
+owner; and paths that only exist in `/tmp` or other ephemeral state. Fix every BLOCKER and MAJOR in THIS file (commit on `docs/handoff-2026-11-08`,
+PR #340) before starting task 1; list the MINORs you rejected, and why, in the morning report.
+
 ## Tasks, in order (constraint: A before B and before the pin)
 1. **PR A: version-gated `source.network`** (`feat/source-network-gate`, worktree `/var/home/user/w3`, plan
    `docs/superpowers/plans/2026-11-08-source-network-gate.md`). STATE AT HAND-OFF: written by an opus executor, verified by the
@@ -51,7 +60,7 @@ they edit only; the orchestrator runs fmt/clippy/tests and commits.
 
 ## Merge rule
 Independent Opus review (code, plus security for kill/watchdog/bridge-trust changes) clean on the EXACT head, 6/6 CI all
-COMPLETED, state CLEAN, `bash /tmp/claude-1000/merge_when_green.sh PR FULLSHA` (**the 40-char SHA**; a short one only ends in "NOT merged").
+COMPLETED, state CLEAN, `bash /var/home/user/.cache/overnight/merge_when_green.sh PR FULLSHA` (a persistent copy: `/tmp` is a tmpfs lost on reboot) (**the 40-char SHA**; a short one only ends in "NOT merged").
 A MEDIUM or higher finding STOPS that PR (record it; the owner gives exceptions). Push only gated on a green test run.
 
 ## Safety rules (learned 2026-11-05..08)
