@@ -1,6 +1,6 @@
 # Plan: pin vendor/opensnitch to upstream master (a1353848) to include the unreleased eBPF/daemon work
 
-Date: 2026-11-08. Status: DRAFT, awaiting owner confirm.
+Date: 2026-11-08. Status: owner-approved (soft fork, 2026-11-08); the pin PR ends unmerged per overnight-run-6 task 3.
 
 **2026-11-08 update:** both read-only daemon reviews of `a1353848` are done (non-rule = GO/LOW; the rule engine refuses `network`+`source.network` and regexp/simple/range + network operands panic the daemon, so PR A's version gate must merge first). The owner chose a SOFT fork: step 0 below. The pin PR ends NOT merged (overnight-run-6 task 3).
 Owner decisions taken (2026-11-08): include **all of upstream master**; **pin one master commit and
@@ -44,8 +44,7 @@ cilium/ebpf 0.22. No release is coming soon. Newest master commit: `a1353848ba1b
 3. Prose: `CLAUDE.md:18` and the settled-decisions text (submodule is at upstream master a1353848; the
    bluebuild RPM still ships v1.8.0); the `recipe.yml:48` comment that claims the RPM matches the vendored
    submodule becomes false: reword it (no behaviour change, the RPM line stays).
-4. Verify unchanged: `proto/ui.proto` and `daemon/data/default-config.json` only. `daemon/rule` DID change (operator.go, operator_lists.go, loader.go; see the 2026-11-08 rule-engine review), so PR A's two vendor tests in `history/rule_identity_tests.rs` must be rewritten (overnight-run-6 task 3(iv)).
-   (operator.go for `rule_identity_tests.rs:328`, `network_aliases.json` for `simulator/network.rs:118`).
+4. Verify unchanged: `proto/ui.proto`, `daemon/data/default-config.json`, `daemon/data/network_aliases.json` (for `simulator/network.rs:118`). `daemon/data/rules/000-allow-localhost6.json` changed in its description text only. `daemon/rule` DID change (operator.go, operator_lists.go, loader.go + tests), so the `rule_identity_tests.rs:328` vendor citation and PR A's two vendor tests must be rewritten (overnight-run-6 task 3(iv)).
 5. Re-verify or annotate the changed-file citations (list above) against a1353848; mark the eBPF runbook's
    log-string/line cites "at v1.8.0 / re-check on the pinned commit". Add a runbook procedure: build the
    daemon + the three `.o` modules from the pin as a matched pair (Go >= 1.25 for the daemon).

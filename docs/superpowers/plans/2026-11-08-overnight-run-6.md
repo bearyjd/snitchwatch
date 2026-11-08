@@ -10,8 +10,8 @@ Claude subscription for everything, model set explicitly: opus for privileged/se
 explore/test-engineer/docs, haiku for lookups; no grunt tools. Executors CANNOT set HOME for cargo (sandbox): they edit only; the orchestrator
 runs fmt/clippy/tests and commits. Test runner: copy the pattern of `/var/home/user/.cache/prA.sh` (a gated script writing a log whose last
 line is `COMMITTED LOCALLY <sha>` or `NOT COMMITTED`); read only that line. Reviews: an independent Opus review (brief it with code and claims,
-NEVER your conclusion) AND codex as an extra reviewer (`codex exec` needs `</dev/null`). WARNING: `.omc/tools/gate.sh PR WORKTREE FULLSHA PROMPTFILE` itself MERGES when codex is clean and CI is 6/6; start it only after the Opus review(s) are clean on the same FULLSHA, otherwise run `codex exec` alone.
-**Merge tool:** `bash .omc/tools/merge_when_green.sh PR FULLSHA` (the 40-char SHA; a copy is also in `/var/home/user/.cache/overnight/`). If neither exists, STOP: do not hand-roll `gh pr merge`.
+NEVER your conclusion) AND codex as an extra reviewer (`codex exec` needs `</dev/null`). WARNING: `/var/home/user/Documents/vibe-code/snitchwatch/.omc/tools/gate.sh PR WORKTREE FULLSHA PROMPTFILE` itself MERGES when codex is clean and CI is 6/6; start it only after the Opus review(s) are clean on the same FULLSHA, otherwise run `codex exec` alone.
+**Merge tool:** `bash /var/home/user/Documents/vibe-code/snitchwatch/.omc/tools/merge_when_green.sh PR FULLSHA` (the 40-char SHA; a copy is also in `/var/home/user/.cache/overnight/`). If neither exists, STOP: do not hand-roll `gh pr merge`.
 
 ## Start (15 minutes, no changes)
 1. `.omc/STATE.md`, `gh pr list`, `gh issue list`, `git worktree list`, `df -h /tmp` (32G tmpfs; it filled on 2026-11-08), `git fetch`.
