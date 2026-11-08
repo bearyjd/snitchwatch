@@ -59,6 +59,7 @@
 
 use core::pin::Pin;
 use cxx_qt::Threading;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -164,8 +165,18 @@ impl Default for NotificationControllerRust {
 impl qobject::NotificationController {
     fn start_raise_feed(self: Pin<&mut Self>) {
         let qt_thread = self.qt_thread();
+        // One queued raise at a time: a flood of `Activate` calls from the
+        // session bus must not post one Qt event per call. The flag is cleared
+        // before the signal fires, so a raise during it queues the next one.
+        let queued = Arc::new(AtomicBool::new(false));
         crate::single_instance::raise_sink().register(move || {
-            let _ = qt_thread.queue(|qobject| qobject.raise_requested());
+            if !queued.swap(true, Ordering::AcqRel) {
+                let flag = queued.clone();
+                let _ = qt_thread.queue(move |qobject| {
+                    flag.store(false, Ordering::Release);
+                    qobject.raise_requested();
+                });
+            }
         });
     }
 

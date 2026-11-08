@@ -269,6 +269,16 @@ fn a_second_launch_raises_the_main_window() {
         raise.contains("root.raiseAndActivate();"),
         "a second launch no longer raises the window: {raise}"
     );
+    // The handler must sit in the `Connections` block that targets the controller.
+    let block = main
+        .split("function onRaiseRequested()")
+        .next()
+        .and_then(|before| before.rsplit("Connections {").next())
+        .expect("main.qml: no Connections block before onRaiseRequested");
+    assert!(
+        block.contains("target: notificationController"),
+        "onRaiseRequested is not under the notificationController Connections: {block}"
+    );
     assert!(
         main.contains("notificationController.startRaiseFeed();"),
         "main.qml no longer starts the raise feed, so a second launch is never heard"

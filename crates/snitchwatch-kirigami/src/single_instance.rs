@@ -9,7 +9,10 @@
 //! answered `Activate`). No session bus, a bus error, or an owner that does
 //! not answer in time (wedged, or shutting down) all mean "run as an
 //! ordinary instance", logged, so a hung first instance never makes the app
-//! impossible to start. Demo mode and `SNITCHWATCH_ALLOW_MULTIPLE=1` skip
+//! impossible to start; the whole guard is bounded ([`ForwardPolicy::bound`]),
+//! so even a bus that never completes its handshake cannot hold the start-up.
+//! Known gap: a primary whose window never loads (`main.qml` failed) still
+//! answers `Activate`, so later launches exit 0 and show nothing. Demo mode and `SNITCHWATCH_ALLOW_MULTIPLE=1` skip
 //! the guard entirely.
 //!
 //! **What the bus can do to us.** Any client of the same session bus may
@@ -49,12 +52,17 @@ pub const ENV_ALLOW_MULTIPLE: &str = "SNITCHWATCH_ALLOW_MULTIPLE";
 pub struct ForwardPolicy {
     pub timeout: Duration,
     pub retry_delay: Duration,
+    /// The whole guard, connection handshake included (`method_timeout` does
+    /// not cover it): a bus that accepts the socket and then never answers must
+    /// not stop the app from starting.
+    pub bound: Duration,
 }
 
 impl ForwardPolicy {
     pub const DEFAULT: Self = Self {
         timeout: Duration::from_secs(2),
         retry_delay: Duration::from_millis(500),
+        bound: Duration::from_secs(5),
     };
 }
 
@@ -170,10 +178,30 @@ pub fn acquire_with(env: &EnvSnapshot, policy: ForwardPolicy, sink: Arc<RaiseSin
     if let Some(reason) = skip_reason(env) {
         return Outcome::Skipped(reason);
     }
-    match env.bus_address.as_deref() {
-        Some(address) => acquire_at(address, policy, sink),
+    match env.bus_address.clone() {
+        Some(address) => acquire_bounded(address, policy, sink),
         None => Outcome::Skipped(SkipReason::NoSessionBus),
     }
+}
+
+/// [`acquire_at`] on its own thread, abandoned after `policy.bound`. A late
+/// result is dropped on that thread, so a `Guard` that arrives too late releases
+/// the name instead of holding it for a process that did not wait.
+fn acquire_bounded(address: String, policy: ForwardPolicy, sink: Arc<RaiseSink>) -> Outcome {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("single-instance".into())
+        .spawn(move || {
+            let _ = tx.send(acquire_at(&address, policy, sink));
+        });
+    if let Err(error) = spawned {
+        tracing::error!(%error, "single instance: could not start the guard; running anyway");
+        return Outcome::Skipped(SkipReason::BusError);
+    }
+    rx.recv_timeout(policy.bound).unwrap_or_else(|_| {
+        tracing::error!("single instance: the session bus did not answer in time; running anyway");
+        Outcome::Skipped(SkipReason::BusError)
+    })
 }
 
 /// Serve the object, then ask for the name (never replacing, never queued).
@@ -192,7 +220,12 @@ pub fn acquire_at(address: &str, policy: ForwardPolicy, sink: Arc<RaiseSink>) ->
         // zbus 5 reports a taken name as `Error::NameTaken`
         // (`connection/mod.rs`, `request_name_with_flags`); the raw reply is
         // matched too, so either form forwards.
-        Err(zbus::Error::NameTaken) | Ok(RequestNameReply::Exists) => forward(&conn, policy),
+        Err(zbus::Error::NameTaken) | Ok(RequestNameReply::Exists) => {
+            match forward(&conn, policy) {
+                Outcome::Skipped(_) => retake(conn),
+                decided => decided,
+            }
+        }
         Ok(RequestNameReply::InQueue) => {
             // Impossible with DoNotQueue; leave the queue and run anyway.
             let _ = conn.release_name(BUS_NAME);
@@ -206,6 +239,19 @@ pub fn acquire_at(address: &str, policy: ForwardPolicy, sink: Arc<RaiseSink>) ->
             );
             Outcome::Skipped(SkipReason::BusError)
         }
+    }
+}
+
+/// The owner did not answer: it may have exited since the name request. Ask for
+/// the name once more, so this process owns it if it is free now (the next launch
+/// then finds an owner) and otherwise runs as an ordinary second instance.
+fn retake(conn: Connection) -> Outcome {
+    match conn.request_name_with_flags(BUS_NAME, RequestNameFlags::DoNotQueue.into()) {
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => {
+            tracing::info!("single instance: the previous owner is gone; this is the running one");
+            Outcome::Primary(Guard { conn })
+        }
+        _ => Outcome::Skipped(SkipReason::OwnerUnresponsive),
     }
 }
 

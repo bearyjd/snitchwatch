@@ -83,7 +83,7 @@ The Qt side (`raiseRequested` -> `raiseAndActivate`) needs a headless QML test
   need a service file and is a separate decision.
 - A stale name cannot persist across a crash: the bus releases a name when its owner's connection
   drops, so no cleanup is needed (**UNVERIFIED** under Flatpak's `xdg-dbus-proxy`; check manually).
-- If the owner is alive but its Qt event loop is blocked, the second launch waits ~2.5 s and then
+- If the owner is alive but its Qt event loop is blocked, the second launch waits about 4.5 s (2 s, a 0.5 s pause, 2 s) and then
   opens a duplicate; accepted.
 
 ## Process

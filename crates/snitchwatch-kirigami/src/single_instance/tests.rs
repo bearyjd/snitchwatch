@@ -12,9 +12,19 @@ use crate::notification_signals::bus_tests::PrivateBus;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
+/// Short timeouts, for the wedged-owner test only.
 const FAST: ForwardPolicy = ForwardPolicy {
     timeout: Duration::from_millis(300),
     retry_delay: Duration::from_millis(50),
+    bound: Duration::from_secs(20),
+};
+
+/// Happy-path tests: `method_timeout` covers every call on the connection
+/// (Hello, RequestName, Activate), so a loaded CI runner needs room.
+const ROOMY: ForwardPolicy = ForwardPolicy {
+    timeout: Duration::from_secs(5),
+    retry_delay: Duration::from_millis(50),
+    bound: Duration::from_secs(20),
 };
 
 fn counting_sink() -> (Arc<RaiseSink>, Arc<AtomicU32>) {
@@ -38,6 +48,7 @@ fn env(demo: bool, allow_multiple: bool, bus_address: Option<&str>) -> EnvSnapsh
 #[test]
 fn the_production_policy_waits_two_seconds_then_retries_once_after_half_a_second() {
     assert_eq!(ForwardPolicy::DEFAULT.timeout, Duration::from_secs(2));
+    assert_eq!(ForwardPolicy::DEFAULT.bound, Duration::from_secs(5));
     assert_eq!(
         ForwardPolicy::DEFAULT.retry_delay,
         Duration::from_millis(500)
@@ -57,7 +68,7 @@ fn demo_allow_multiple_and_no_bus_skip_before_any_bus_is_touched() {
         Some(SkipReason::NoSessionBus)
     );
     assert_eq!(skip_reason(&env(false, false, bus)), None);
-    let outcome = acquire_with(&env(false, false, None), FAST, Arc::new(RaiseSink::new()));
+    let outcome = acquire_with(&env(false, false, None), ROOMY, Arc::new(RaiseSink::new()));
     assert!(matches!(
         outcome,
         Outcome::Skipped(SkipReason::NoSessionBus)
@@ -83,7 +94,7 @@ fn only_exactly_one_allows_multiple_instances() {
 fn an_unreachable_bus_runs_anyway() {
     let dir = tempfile::tempdir().unwrap();
     let address = format!("unix:path={}", dir.path().join("bus").display());
-    let outcome = acquire_at(&address, FAST, Arc::new(RaiseSink::new()));
+    let outcome = acquire_at(&address, ROOMY, Arc::new(RaiseSink::new()));
     assert!(matches!(outcome, Outcome::Skipped(SkipReason::BusError)));
 }
 
@@ -117,9 +128,9 @@ fn the_first_guard_is_primary_and_a_second_raises_it_exactly_once() {
         return;
     };
     let (sink, raised) = counting_sink();
-    let primary = acquire_at(bus.address(), FAST, sink);
+    let primary = acquire_at(bus.address(), ROOMY, sink);
     assert!(matches!(primary, Outcome::Primary(_)), "{primary:?}");
-    let second = acquire_at(bus.address(), FAST, Arc::new(RaiseSink::new()));
+    let second = acquire_at(bus.address(), ROOMY, Arc::new(RaiseSink::new()));
     assert!(matches!(second, Outcome::Forwarded), "{second:?}");
     assert_eq!(raised.load(Ordering::SeqCst), 1);
 }
@@ -130,8 +141,8 @@ fn an_activate_before_the_window_exists_is_delivered_once_it_does() {
         return;
     };
     let sink = Arc::new(RaiseSink::new());
-    let _primary = acquire_at(bus.address(), FAST, sink.clone());
-    let second = acquire_at(bus.address(), FAST, Arc::new(RaiseSink::new()));
+    let _primary = acquire_at(bus.address(), ROOMY, sink.clone());
+    let second = acquire_at(bus.address(), ROOMY, Arc::new(RaiseSink::new()));
     assert!(matches!(second, Outcome::Forwarded), "{second:?}");
     let raised = Arc::new(AtomicU32::new(0));
     let seen = raised.clone();
@@ -146,11 +157,61 @@ fn dropping_the_primary_releases_the_name_for_the_next_launch() {
     let Some(bus) = PrivateBus::start() else {
         return;
     };
-    let first = acquire_at(bus.address(), FAST, Arc::new(RaiseSink::new()));
-    assert!(matches!(first, Outcome::Primary(_)), "{first:?}");
-    drop(first);
-    let next = acquire_at(bus.address(), FAST, Arc::new(RaiseSink::new()));
+    let first = acquire_at(bus.address(), ROOMY, Arc::new(RaiseSink::new()));
+    let Outcome::Primary(guard) = first else {
+        panic!("not primary: {first:?}");
+    };
+    // The connection stays open, so only the explicit release can free the name.
+    let keep_open = guard.conn.clone();
+    drop(guard);
+    let next = acquire_at(bus.address(), ROOMY, Arc::new(RaiseSink::new()));
+    drop(keep_open);
     assert!(matches!(next, Outcome::Primary(_)), "{next:?}");
+}
+
+#[test]
+fn retaking_takes_a_name_that_became_free_and_never_steals_one() {
+    let Some(bus) = PrivateBus::start() else {
+        return;
+    };
+    let free = connect_serving(bus.address(), ROOMY, Arc::new(RaiseSink::new())).unwrap();
+    let outcome = retake(free);
+    let Outcome::Primary(holder) = outcome else {
+        panic!("a free name was not taken: {outcome:?}");
+    };
+    let rival = connect_serving(bus.address(), ROOMY, Arc::new(RaiseSink::new())).unwrap();
+    let stolen = retake(rival);
+    drop(holder);
+    assert!(
+        matches!(stolen, Outcome::Skipped(SkipReason::OwnerUnresponsive)),
+        "{stolen:?}"
+    );
+}
+
+#[test]
+fn a_bus_that_never_completes_the_handshake_cannot_hold_up_start() {
+    use std::os::unix::net::UnixListener;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("silent");
+    // Bound and listening, but nothing ever accepts or answers.
+    let _listener = UnixListener::bind(&path).unwrap();
+    let policy = ForwardPolicy {
+        bound: Duration::from_millis(600),
+        ..ROOMY
+    };
+    let started = Instant::now();
+    let outcome = acquire_with(
+        &env(false, false, Some(&format!("unix:path={}", path.display()))),
+        policy,
+        Arc::new(RaiseSink::new()),
+    );
+    let took = started.elapsed();
+    assert!(
+        matches!(outcome, Outcome::Skipped(SkipReason::BusError)),
+        "{outcome:?}"
+    );
+    assert!(took >= policy.bound, "returned before the bound: {took:?}");
+    assert!(took < Duration::from_secs(5), "not bounded: {took:?}");
 }
 
 /// Holds the name and receives `Activate`, but never answers it until told.

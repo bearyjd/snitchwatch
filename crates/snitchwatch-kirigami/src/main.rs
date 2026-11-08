@@ -35,7 +35,7 @@ fn main() {
     panic_hook::install(paths::crash_log_path());
 
     // One GUI per session: a second launch raises the running window and
-    // exits here, before it starts any thread or the bridge client. Skipped
+    // exits here, before the icon indexer, the bridge client or Qt start. Skipped
     // in demo mode, with SNITCHWATCH_ALLOW_MULTIPLE=1, or without a session
     // bus; any failure runs this process as an ordinary instance. Bound to a
     // name (never `_`) so the bus name is held until shutdown starts.
