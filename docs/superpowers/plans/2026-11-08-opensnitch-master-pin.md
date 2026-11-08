@@ -1,6 +1,8 @@
 # Plan: pin vendor/opensnitch to upstream master (a1353848) to include the unreleased eBPF/daemon work
 
 Date: 2026-11-08. Status: DRAFT, awaiting owner confirm.
+
+**2026-11-08 update:** both read-only daemon reviews of `a1353848` are done (non-rule = GO/LOW; the rule engine refuses `network`+`source.network` and regexp/simple/range + network operands panic the daemon, so PR A's version gate must merge first). The owner chose a SOFT fork: step 0 below. The pin PR ends NOT merged (overnight-run-6 task 3).
 Owner decisions taken (2026-11-08): include **all of upstream master**; **pin one master commit and
 bump `vendor/`**. This supersedes the settled "pinned at v1.8.0" note in `CLAUDE.md` (the owner's call).
 Claims not read from a file or `gh` output are marked **UNVERIFIED**.
@@ -34,6 +36,7 @@ cilium/ebpf 0.22. No release is coming soon. Newest master commit: `a1353848ba1b
 - "stock v1.8.0 ..." behavioural comments across crates describe the shipped daemon: leave them.
 
 ## Changes (one PR, branch `chore/pin-opensnitch-master`)
+0. Switch the `.gitmodules` url to `https://github.com/bearyjd/opensnitch.git`, `git submodule sync`, and pin `snitchwatch/stable` = `a1353848` (the fork's master is identical to upstream; the 3 patch branches are NOT in it). Risk: that fork branch is unprotected.
 1. `git -C vendor/opensnitch fetch origin`, check out `a1353848`, commit the gitlink bump.
 2. `pins.env`: `SW_OPENSNITCH_COMMIT=a1353848...`, `SW_OPENSNITCH_TAG=master-a1353848` (non-empty label;
    master is untagged). Update the `v1.8.0` text in `docs/packaging/bridge-release-artifact.md:100,145`
@@ -41,7 +44,7 @@ cilium/ebpf 0.22. No release is coming soon. Newest master commit: `a1353848ba1b
 3. Prose: `CLAUDE.md:18` and the settled-decisions text (submodule is at upstream master a1353848; the
    bluebuild RPM still ships v1.8.0); the `recipe.yml:48` comment that claims the RPM matches the vendored
    submodule becomes false: reword it (no behaviour change, the RPM line stays).
-4. Verify unchanged: `git diff --stat v1.8.0..a1353848 -- daemon/rule daemon/data proto/ui.proto`
+4. Verify unchanged: `proto/ui.proto` and `daemon/data/default-config.json` only. `daemon/rule` DID change (operator.go, operator_lists.go, loader.go; see the 2026-11-08 rule-engine review), so PR A's two vendor tests in `history/rule_identity_tests.rs` must be rewritten (overnight-run-6 task 3(iv)).
    (operator.go for `rule_identity_tests.rs:328`, `network_aliases.json` for `simulator/network.rs:118`).
 5. Re-verify or annotate the changed-file citations (list above) against a1353848; mark the eBPF runbook's
    log-string/line cites "at v1.8.0 / re-check on the pinned commit". Add a runbook procedure: build the
