@@ -17,9 +17,14 @@ they edit only; the orchestrator runs fmt/clippy/tests and commits.
 
 ## Tasks, in order (constraint: A before B and before the pin)
 1. **PR A: version-gated `source.network`** (`feat/source-network-gate`, worktree `/var/home/user/w3`, plan
-   `docs/superpowers/plans/2026-11-08-source-network-gate.md`). If the executor result is not in yet or not merged, finish it:
-   fmt/clippy/`cargo test -p snitchwatch-bridge -p mock-opensnitchd` on a throwaway HOME, commit, push, PR, code review + a security
-   review (a bridge/daemon trust boundary), mutation-check the gate (remove it: the 1.9 tests must fail), merge.
+   `docs/superpowers/plans/2026-11-08-source-network-gate.md`). STATE AT HAND-OFF: written by an opus executor, verified by the
+   orchestrator (clippy -D warnings clean; proto/bridge/bridge-cli/mock suites pass, bridge lib 1652), committed LOCALLY as `00094160`,
+   NOT pushed, no PR, no review, gate not yet mutation-checked. Do, in order: (a) re-check `git -C /var/home/user/w3 log -1` and `status`;
+   (b) mutation-check the gate (make `PolicyContext::for_daemon` never refuse: the 1.9 tests must fail); (c) apply the DEFAULT for the open
+   design point below; (d) push, PR (body: the Decisions + Risks from the plan, trail-check explanation), code review + a security
+   review (bridge/daemon trust boundary), merge on green. OPEN DESIGN POINT (owner has not decided; take this default and report it):
+   turning OFF an existing `source.network` rule on a >=1.9 daemon is refused with the generic `RefusedOperator` because the gate ignores
+   the enabled flag; the daemon does not compile disabled rules, so make `send()` apply the version check only to ENABLED rules.
 2. **PR B: GUI half** (same plan): capability/message `daemonRefusesSourceNetwork`, Kirigami editor hides the operand,
    simulator flags `network`+`source.network` ("daemon 1.9 refuses to load") and regexp+network operands ("daemon panics"). Kirigami
    bus tests need a SHORT worktree path (socket path < 108 bytes): `/var/home/user/w1`; the `kirigami` CI job takes ~20 min.
