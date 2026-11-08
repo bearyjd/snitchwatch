@@ -506,7 +506,7 @@ async fn the_enforcer_runs_a_pass_on_requests_and_on_each_rules_snapshot() {
     let (mgr, sink) = with_sink();
     let mgr = Arc::new(mgr);
     let (synced_tx, synced_rx) = tokio::sync::watch::channel(0u64);
-    let handles = mgr.clone().spawn_enforcer(Some(synced_rx));
+    let handles = mgr.clone().spawn_enforcer(vec![synced_rx]);
     let passes = || sink.calls.lock().unwrap().len();
     let wait_for = |n: usize| async move {
         for _ in 0..200 {
@@ -523,6 +523,85 @@ async fn the_enforcer_runs_a_pass_on_requests_and_on_each_rules_snapshot() {
     mgr.create_profile("home", "Home", vec![]).await.unwrap();
     mgr.activate("home").await.unwrap();
     wait_for(3).await;
+    for handle in handles {
+        handle.abort();
+    }
+}
+
+/// Reconcile runs at connect, before the first `ping` says the daemon is
+/// 1.9: a `source.network` rule is installed under v1.8.0's policy, then
+/// refused by name once the version is known. A repeat of the same version
+/// runs no pass.
+#[tokio::test]
+async fn a_source_network_rule_is_refused_once_a_ping_says_the_daemon_is_1_9() {
+    use crate::blocklists::Enforcement;
+    use crate::grpc_server::UiService;
+    use snitchwatch_proto::protocol::ui_server::Ui;
+    use snitchwatch_proto::protocol::{PingRequest, Statistics};
+
+    let service = UiService::new(
+        Arc::new(tokio::sync::Mutex::new(
+            crate::cache::connections::ConnectionCache::new(16),
+        )),
+        tokio::sync::broadcast::channel(16).0,
+        Arc::new(crate::tray_state::TrayStatePublisher::new()),
+        Arc::new(crate::notice::NoticeBus::new()),
+        Arc::new(crate::filter_pause::FilterPause::new()),
+    );
+    let sink = Arc::new(CapturingRuleSink {
+        version: service.daemon_version_handle(),
+        ..Default::default()
+    });
+    let mgr = Arc::new(manager().with_rule_sink(sink.clone()));
+    let handles = mgr
+        .clone()
+        .spawn_enforcer(vec![service.daemon_version_changed()]);
+    let ping = |daemon_version: &str| {
+        tonic::Request::new(PingRequest {
+            id: 1,
+            stats: Some(Statistics {
+                daemon_version: daemon_version.into(),
+                ..Default::default()
+            }),
+        })
+    };
+    async fn wait_until(mgr: &ProfilesManager, done: impl Fn(Option<Enforcement>) -> bool) {
+        for _ in 0..400 {
+            if done(mgr.rule_status("home", "lan")) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("status stayed {:?}", mgr.rule_status("home", "lan"));
+    }
+
+    mgr.create_profile("home", "Home", vec![]).await.unwrap();
+    let rule = ProfileRule {
+        id: "lan".into(),
+        action: "deny".into(),
+        operand: String::new(),
+        data: String::new(),
+        operator: Some(serde_json::json!({
+            "type": "network", "operand": "source.network", "data": "10.0.0.0/8",
+        })),
+    };
+    mgr.add_rule("home", rule).await.unwrap();
+    mgr.activate("home").await.unwrap();
+    wait_until(&mgr, |s| {
+        matches!(s, Some(Enforcement::RuleInstalled { .. }))
+    })
+    .await;
+
+    service.ping(ping("v1.9.0-rc1")).await.unwrap();
+    wait_until(&mgr, |s| {
+        matches!(s, Some(Enforcement::NotEnforced { reason })
+            if reason.contains(crate::rule_policy::SOURCE_NETWORK_REFUSED))
+    })
+    .await;
+    let passes = sink.calls.lock().unwrap().len();
+    service.ping(ping("1.9.0")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(sink.calls.lock().unwrap().len(), passes, "same version");
     for handle in handles {
         handle.abort();
     }

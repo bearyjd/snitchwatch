@@ -13,6 +13,8 @@
 use serde::{Deserialize, Serialize};
 use snitchwatch_proto::protocol::{Operator, Rule};
 
+use super::PolicyContext;
+
 /// Which caller a rule comes from; each adds its own checks on top of
 /// `validate_operator`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +84,23 @@ pub const PROFILE_USER_NAME_REFUSED: &str = "a profile rule can't match a user b
 
 /// Check a whole rule for `profile`. Returns every problem found.
 pub fn validate_user_rule(rule: &Rule, profile: PolicyProfile) -> Result<(), Vec<RuleProblem>> {
+    validate_user_rule_in(rule, profile, PolicyContext::default())
+}
+
+/// [`validate_user_rule`] for the daemon `context` describes.
+pub fn validate_user_rule_in(
+    rule: &Rule,
+    profile: PolicyProfile,
+    context: PolicyContext,
+) -> Result<(), Vec<RuleProblem>> {
     let mut problems = Vec::new();
+    match &rule.operator {
+        None => problem(&mut problems, "operator", NO_CONDITIONS),
+        Some(op) => match super::validate_operator_in(op, context.for_rule(rule.enabled)) {
+            Err(reason) => problem(&mut problems, "operator", reason),
+            Ok(()) => check_import_operator(op, profile, &mut problems),
+        },
+    }
     match profile {
         PolicyProfile::Import | PolicyProfile::Editor | PolicyProfile::ProfileRule => {
             check_rule(rule, profile, &mut problems)
@@ -102,16 +120,10 @@ fn problem(problems: &mut Vec<RuleProblem>, path: &str, reason: impl Into<String
     });
 }
 
-/// The checks every profile shares; they differ only in which durations
-/// they take and in the editor's extra checks on what is typed by hand.
+/// The checks every profile shares after the operator's; they differ only
+/// in which durations they take and in the editor's extra checks on what
+/// is typed by hand.
 fn check_rule(rule: &Rule, profile: PolicyProfile, problems: &mut Vec<RuleProblem>) {
-    match &rule.operator {
-        None => problem(problems, "operator", NO_CONDITIONS),
-        Some(op) => match super::validate_operator(op) {
-            Err(reason) => problem(problems, "operator", reason),
-            Ok(()) => check_import_operator(op, profile, problems),
-        },
-    }
     if let Err(reason) = crate::rule_name::validate_rule_name(&rule.name) {
         problem(problems, "name", reason);
     }

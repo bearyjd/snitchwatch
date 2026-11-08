@@ -46,13 +46,18 @@ use snitchwatch_proto::protocol::{Operator, Rule};
 
 use crate::cache::rules::{MAX_OPERATOR_LIST_LEN, MAX_RULE_FIELD_BYTES};
 
+mod context;
 mod narrowing;
 mod profile;
 mod regexp;
 
+pub use context::{PolicyContext, DEST_NETWORK_ONLY_SINCE, SOURCE_NETWORK_REFUSED};
+
 pub use narrowing::binds_to_programs;
 
-pub use profile::{enable_problems, validate_user_rule, PolicyProfile, RuleProblem};
+pub use profile::{
+    enable_problems, validate_user_rule, validate_user_rule_in, PolicyProfile, RuleProblem,
+};
 
 /// The fixed texts of [`validate_user_rule`]'s problems, for callers that
 /// show or test them.
@@ -71,13 +76,22 @@ pub fn check_wire_rule(
     value: &serde_json::Value,
     profile: PolicyProfile,
 ) -> Result<Rule, Vec<RuleProblem>> {
+    check_wire_rule_in(value, profile, PolicyContext::default())
+}
+
+/// [`check_wire_rule`] for the daemon `context` describes.
+pub fn check_wire_rule_in(
+    value: &serde_json::Value,
+    profile: PolicyProfile,
+    context: PolicyContext,
+) -> Result<Rule, Vec<RuleProblem>> {
     let rule = crate::rule_wire::rule_from_wire(value).map_err(|reason| {
         vec![RuleProblem {
             path: "rule".into(),
             reason,
         }]
     })?;
-    validate_user_rule(&rule, profile)?;
+    validate_user_rule_in(&rule, profile, context)?;
     Ok(rule)
 }
 
@@ -173,11 +187,18 @@ enum OperandKind {
 
 /// Check that an operator from a GUI has a shape opensnitchd evaluates as
 /// written: no panic, no silent match-all, no blocklist directory read.
+/// What every daemon refuses; see [`validate_operator_in`] for one daemon.
 pub fn validate_operator(op: &Operator) -> Result<(), String> {
+    validate_operator_in(op, PolicyContext::default())
+}
+
+/// [`validate_operator`], plus what the daemon `context` describes refuses
+/// (`context`'s module doc).
+pub fn validate_operator_in(op: &Operator, context: PolicyContext) -> Result<(), String> {
     if op.r#type == "list" {
-        return validate_list(op);
+        return validate_list(op, context);
     }
-    validate_leaf(op)?;
+    validate_leaf(op, context)?;
     if HASH_OPERANDS.contains(&op.operand.as_str()) {
         return Err(HASH_MATCHES_ALL.to_string());
     }
@@ -233,7 +254,7 @@ pub fn deletable(rule: &Rule) -> bool {
         && !crate::rule_name::is_reserved_name(&rule.name)
 }
 
-fn validate_list(op: &Operator) -> Result<(), String> {
+fn validate_list(op: &Operator, context: PolicyContext) -> Result<(), String> {
     // `Compile` sets a list's operand to `list`; `operator_from_wire` leaves
     // it empty.
     if !(op.operand.is_empty() || op.operand == "list") {
@@ -249,7 +270,7 @@ fn validate_list(op: &Operator) -> Result<(), String> {
         ));
     }
     for (index, member) in op.list.iter().enumerate() {
-        validate_leaf(member).map_err(|e| format!("list member {}: {e}", index + 1))?;
+        validate_leaf(member, context).map_err(|e| format!("list member {}: {e}", index + 1))?;
     }
     // Members are ANDed; `true` and hash members never narrow the list
     // while checksums are off. An all-`true` list is as explicit as `true`.
@@ -267,7 +288,7 @@ fn validate_list(op: &Operator) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_leaf(op: &Operator) -> Result<(), String> {
+fn validate_leaf(op: &Operator, context: PolicyContext) -> Result<(), String> {
     if !op.list.is_empty() {
         return Err("only a list operator may have members".to_string());
     }
@@ -275,6 +296,9 @@ fn validate_leaf(op: &Operator) -> Result<(), String> {
         return Err(format!(
             "operator operand or data is over {MAX_RULE_FIELD_BYTES} bytes"
         ));
+    }
+    if context.refuse_source_network && op.r#type == "network" && op.operand == "source.network" {
+        return Err(SOURCE_NETWORK_REFUSED.to_string());
     }
     match op.r#type.as_str() {
         "simple" if op.operand == "user.name" && is_uid(&op.data) => {

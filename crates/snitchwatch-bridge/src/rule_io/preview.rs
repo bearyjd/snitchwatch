@@ -7,7 +7,7 @@
 use super::caution;
 use super::{Document, PreviewError};
 use crate::cache::rules::RulesCache;
-use crate::rule_policy::{validate_user_rule, PolicyProfile, RuleProblem};
+use crate::rule_policy::{validate_user_rule_in, PolicyContext, PolicyProfile, RuleProblem};
 use crate::translator::verdict::strip_display_hazards;
 use serde::{Deserialize, Serialize};
 use snitchwatch_proto::protocol::{Operator, Rule};
@@ -105,11 +105,16 @@ pub struct CheckedRule {
 
 /// Parse and check every rule. No cache needed; this is the slow part.
 pub fn check_rules(document: &Document) -> Vec<CheckedRule> {
+    check_rules_in(document, PolicyContext::default())
+}
+
+/// [`check_rules`] for the daemon `context` describes.
+pub fn check_rules_in(document: &Document, context: PolicyContext) -> Vec<CheckedRule> {
     let mut checked: Vec<CheckedRule> = document
         .rules
         .iter()
         .enumerate()
-        .map(|(index, value)| check_rule(index as u32, value))
+        .map(|(index, value)| check_rule(index as u32, value, context))
         .collect();
     let mut seen: HashMap<String, u32> = HashMap::new();
     for rule in &checked {
@@ -132,7 +137,7 @@ pub fn check_rules(document: &Document) -> Vec<CheckedRule> {
     checked
 }
 
-fn check_rule(index: u32, value: &serde_json::Value) -> CheckedRule {
+fn check_rule(index: u32, value: &serde_json::Value, context: PolicyContext) -> CheckedRule {
     let raw_name = value.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let name = if crate::rule_name::validate_rule_name(raw_name).is_ok() {
         raw_name.to_string()
@@ -156,7 +161,7 @@ fn check_rule(index: u32, value: &serde_json::Value) -> CheckedRule {
                 reason: ENABLED_MISSING.into(),
             }])
         }
-        Ok(rule) => validate_user_rule(&rule, PolicyProfile::Import).map(|()| rule),
+        Ok(rule) => validate_user_rule_in(&rule, PolicyProfile::Import, context).map(|()| rule),
     };
     CheckedRule {
         index,

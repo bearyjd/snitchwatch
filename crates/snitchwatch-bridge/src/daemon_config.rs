@@ -24,6 +24,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value};
 
+mod version;
+pub use version::{DaemonVersion, SharedDaemonVersion};
+
 /// The settings the bridge uses. Each is `None` when the daemon's config
 /// lacks it or gives it the wrong type.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

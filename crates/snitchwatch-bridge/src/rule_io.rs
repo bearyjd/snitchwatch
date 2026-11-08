@@ -25,7 +25,9 @@
 //! Every error is fixed text: nothing echoes the file.
 
 use crate::cache::rules::{RulesCache, MAX_SNAPSHOT_RULES};
-use crate::rule_policy::{validate_user_rule, PolicyProfile, RuleProblem};
+use crate::rule_policy::{
+    validate_user_rule, validate_user_rule_in, PolicyContext, PolicyProfile, RuleProblem,
+};
 use serde::{Deserialize, Serialize};
 use snitchwatch_proto::protocol::Rule;
 
@@ -33,8 +35,8 @@ mod caution;
 mod limits;
 mod preview;
 pub use preview::{
-    check_rules, classify, edit_cautions, only_enabled_differs, preview, same_rule, CheckedRule,
-    ImportItem, ImportKind, ImportPreview, PreviousRule, DUPLICATE_NAME, HIDDEN_NAME,
+    check_rules, check_rules_in, classify, edit_cautions, only_enabled_differs, preview, same_rule,
+    CheckedRule, ImportItem, ImportKind, ImportPreview, PreviousRule, DUPLICATE_NAME, HIDDEN_NAME,
 };
 
 pub const FORMAT: &str = "snitchwatch.rules";
@@ -257,13 +259,23 @@ pub fn export(cache: &RulesCache, now_unix_ms: u64) -> Result<Export, ExportUnav
 /// back to the document's rule shape, through `rule_from_wire`, then the
 /// `Import` profile.
 pub fn check_rule_for_apply(rule: &Rule) -> Result<Rule, Vec<RuleProblem>> {
+    check_rule_for_apply_in(rule, PolicyContext::default())
+}
+
+/// [`check_rule_for_apply`] for the daemon `context` describes: the one
+/// connected when the rule is sent, which may not be the one the preview
+/// was checked against.
+pub fn check_rule_for_apply_in(
+    rule: &Rule,
+    context: PolicyContext,
+) -> Result<Rule, Vec<RuleProblem>> {
     let reparsed = crate::rule_wire::rule_from_wire(&export_rule(rule)).map_err(|reason| {
         vec![RuleProblem {
             path: "rule".into(),
             reason,
         }]
     })?;
-    validate_user_rule(&reparsed, PolicyProfile::Import)?;
+    validate_user_rule_in(&reparsed, PolicyProfile::Import, context)?;
     Ok(reparsed)
 }
 

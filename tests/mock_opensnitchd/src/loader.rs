@@ -13,7 +13,8 @@
 //!   2. an `always` rule in memory changed to a temporary one loses its
 //!      file first (`deleteOldRuleFromDisk`; a stuck file stays, as the
 //!      daemon only logs that error);
-//!   3. an enabled rule that doesn't compile ([`validate_rule_shape`])
+//!   3. an enabled rule that doesn't compile ([`validate_rule_shape_for`]
+//!      at the model's `version`)
 //!      answers `ERROR`, the old rule kept in memory;
 //!   4. otherwise the rule replaces the old one in memory, and an `always`
 //!      rule's file is written, unless it is stuck: `ERROR`, with the
@@ -42,7 +43,7 @@ use snitchwatch_proto::protocol::{
 use tokio::sync::mpsc;
 
 use crate::round_trip::as_daemon_reports;
-use crate::{validate_duration, validate_rule_shape};
+use crate::{validate_duration, validate_rule_shape_for};
 
 /// What a stuck file's removal or write answers.
 pub const NOT_PERMITTED: &str = "operation not permitted";
@@ -61,6 +62,9 @@ pub struct LoaderModel {
     pub silent: BTreeSet<(i32, String)>,
     /// The daemon runs with live reload (on by default in `main.go`).
     pub live_reload: bool,
+    /// The version it compiles rules as ([`validate_rule_shape_for`]);
+    /// empty (the default) is v1.8.0.
+    pub version: String,
 }
 
 pub type SharedLoader = Arc<Mutex<LoaderModel>>;
@@ -76,6 +80,14 @@ impl LoaderModel {
             model.memory.insert(rule.name.clone(), rule.clone());
         }
         model
+    }
+
+    /// This daemon compiles rules as `version` does.
+    pub fn with_version(self, version: &str) -> Self {
+        Self {
+            version: version.to_string(),
+            ..self
+        }
     }
 
     pub fn shared(self) -> SharedLoader {
@@ -151,7 +163,9 @@ impl LoaderModel {
             }) {
                 Some("bad".to_string())
             } else {
-                validate_rule_shape(&compiled).err().map(|e| e.to_string())
+                validate_rule_shape_for(&compiled, &self.version)
+                    .err()
+                    .map(|e| e.to_string())
             };
             if let Some(failure) = failure {
                 if file_removed {
@@ -433,6 +447,29 @@ mod tests {
         bad.operator.as_mut().unwrap().data = "(".into();
         assert!(model.apply(&change(bad)).unwrap_err().contains("compiling"));
         assert!(!model.memory["a"].enabled);
+    }
+
+    #[test]
+    fn a_1_9_daemon_refuses_an_enabled_source_network_rule_and_1_8_stores_it() {
+        let source_network = |enabled: bool| {
+            let mut rule = rule("lan", enabled, "always");
+            rule.operator = Some(Operator {
+                r#type: "network".into(),
+                operand: "source.network".into(),
+                data: "192.168.0.0/16".into(),
+                ..Default::default()
+            });
+            rule
+        };
+        let mut old = LoaderModel::default();
+        assert_eq!(old.apply(&change(source_network(true))), Ok(()));
+        let mut new = LoaderModel::default().with_version("1.9.0");
+        let refused = new.apply(&change(source_network(true))).unwrap_err();
+        assert!(refused.starts_with("(2) error compiling rule"), "{refused}");
+        assert!(refused.contains("dest.network"), "{refused}");
+        assert!(!new.memory.contains_key("lan"));
+        // A disabled rule isn't compiled, so it is stored.
+        assert_eq!(new.apply(&change(source_network(false))), Ok(()));
     }
 
     #[test]

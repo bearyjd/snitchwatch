@@ -257,3 +257,156 @@ async fn subscribe_echoes_config() {
     assert_eq!(echoed.name, cfg.name);
     assert_eq!(echoed.version, cfg.version);
 }
+
+/// A ping that changes the stored daemon version bumps the profile
+/// enforcer's recheck trigger once; one that repeats it, or carries no
+/// readable version, doesn't.
+#[tokio::test]
+async fn only_a_ping_that_changes_the_daemon_version_triggers_a_recheck() {
+    use snitchwatch_proto::protocol::Statistics;
+
+    let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+    let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+    let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+    let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+    let filter_pause = Arc::new(FilterPause::new());
+    let service = UiService::new(cache, tx, tray_pub, notice_bus, filter_pause);
+    let mut changed = service.daemon_version_changed();
+    let ping = |daemon_version: &str| {
+        Request::new(PingRequest {
+            id: 1,
+            stats: Some(Statistics {
+                daemon_version: daemon_version.into(),
+                ..Default::default()
+            }),
+        })
+    };
+
+    service.ping(ping("1.9.0")).await.unwrap();
+    assert!(changed.has_changed().unwrap(), "unknown -> 1.9");
+    assert_eq!(*changed.borrow_and_update(), 1);
+
+    for same in ["1.9.0", "v1.9.1", "garbage", ""] {
+        service.ping(ping(same)).await.unwrap();
+        assert!(!changed.has_changed().unwrap(), "{same:?}");
+    }
+
+    service.ping(ping("1.8.0")).await.unwrap();
+    assert_eq!(*changed.borrow_and_update(), 2, "1.9 -> 1.8");
+}
+
+/// A `ping` carrying `daemon_version` as if from TCP peer `from` (`None`:
+/// no address, like the Unix socket).
+fn version_ping(daemon_version: &str, from: Option<std::net::SocketAddr>) -> Request<PingRequest> {
+    let mut request = Request::new(PingRequest {
+        id: 1,
+        stats: Some(snitchwatch_proto::protocol::Statistics {
+            daemon_version: daemon_version.into(),
+            ..Default::default()
+        }),
+    });
+    request
+        .extensions_mut()
+        .insert(tonic::transport::server::TcpConnectInfo {
+            local_addr: None,
+            remote_addr: from,
+        });
+    request
+}
+
+fn plain_service() -> UiService {
+    let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+    let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+    let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+    let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+    let filter_pause = Arc::new(FilterPause::new());
+    UiService::new(cache, tx, tray_pub, notice_bus, filter_pause)
+}
+
+fn hello_reply() -> NotificationReply {
+    NotificationReply {
+        id: 0,
+        code: NotificationReplyCode::Ok as i32,
+        ..Default::default()
+    }
+}
+
+/// With a current stream, only its peer's `ping` sets the version: a
+/// second local TCP peer pinging "1.8.0" can't lower a known 1.9.
+#[tokio::test]
+async fn only_the_stream_holders_ping_sets_the_daemon_version() {
+    let daemon = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 40001)));
+    let other = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 40002)));
+    let service = plain_service();
+    let mut changed = service.daemon_version_changed();
+    let (stream, _rx) = service.daemon_commands().open_stream(daemon);
+    assert!(service
+        .daemon_commands()
+        .on_reply(stream.id(), &hello_reply()));
+
+    service.ping(version_ping("1.9.0", daemon)).await.unwrap();
+    assert_eq!(
+        service.daemon_version_handle().get(),
+        Some(crate::daemon_config::DaemonVersion::new(1, 9))
+    );
+    assert_eq!(*changed.borrow_and_update(), 1);
+
+    for from in [other, None] {
+        service.ping(version_ping("1.8.0", from)).await.unwrap();
+        assert_eq!(
+            service.daemon_version_handle().get(),
+            Some(crate::daemon_config::DaemonVersion::new(1, 9)),
+            "{from:?}"
+        );
+        assert!(!changed.has_changed().unwrap(), "{from:?}");
+    }
+
+    service.ping(version_ping("1.8.0", daemon)).await.unwrap();
+    assert_eq!(
+        service.daemon_version_handle().get(),
+        Some(crate::daemon_config::DaemonVersion::new(1, 8))
+    );
+    assert_eq!(*changed.borrow_and_update(), 2);
+}
+
+/// On the Unix socket neither side has an address, so the holder's (any
+/// root peer's) `ping` is taken.
+#[tokio::test]
+async fn a_ping_without_an_address_sets_the_version_when_the_stream_has_none() {
+    let service = plain_service();
+    let (stream, _rx) = service.daemon_commands().open_stream(None);
+    assert!(service
+        .daemon_commands()
+        .on_reply(stream.id(), &hello_reply()));
+    service.ping(version_ping("1.9.0", None)).await.unwrap();
+    assert_eq!(
+        service.daemon_version_handle().get(),
+        Some(crate::daemon_config::DaemonVersion::new(1, 9))
+    );
+}
+
+/// Once no stream is current, the version is forgotten: a daemon that
+/// comes back as another version isn't judged by the old one.
+#[tokio::test]
+async fn the_daemon_version_is_forgotten_when_the_last_current_stream_closes() {
+    let daemon = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 40001)));
+    let service = plain_service();
+    let (first, _rx1) = service.daemon_commands().open_stream(daemon);
+    let (second, _rx2) = service.daemon_commands().open_stream(daemon);
+    assert!(service
+        .daemon_commands()
+        .on_reply(first.id(), &hello_reply()));
+    assert!(service
+        .daemon_commands()
+        .on_reply(second.id(), &hello_reply()));
+    service.ping(version_ping("1.9.0", daemon)).await.unwrap();
+
+    drop(second);
+    assert_eq!(
+        service.daemon_version_handle().get(),
+        Some(crate::daemon_config::DaemonVersion::new(1, 9)),
+        "the older stream is current again"
+    );
+    drop(first);
+    assert_eq!(service.daemon_version_handle().get(), None);
+}

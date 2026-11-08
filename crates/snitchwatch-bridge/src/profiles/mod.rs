@@ -45,7 +45,7 @@ use tracing::{error, info};
 pub use crate::profiles::enforcer::{DaemonProfileSink, NoopProfileRuleSink, ProfileRuleSink};
 
 use crate::blocklists::Enforcement;
-use crate::profiles::materializer::{materialize_profile, materialize_rule, valid_rule_id};
+use crate::profiles::materializer::{materialize_profile_in, materialize_rule_in, valid_rule_id};
 use crate::profiles::store::{ManualChoice, Profile, ProfileRule, ProfileStore, StoreError};
 use crate::rule_policy::RuleProblem;
 use crate::ws_messages::StorageStatus;
@@ -302,7 +302,8 @@ impl ProfilesManager {
         if profile.rules.len() >= MAX_RULES_PER_PROFILE {
             return Err(refused("rule", TOO_MANY_RULES));
         }
-        materialize_rule(profile_id, &rule).map_err(ProfilesError::Refused)?;
+        let context = self.rule_sink.policy_context();
+        materialize_rule_in(profile_id, &rule, context).map_err(ProfilesError::Refused)?;
         let rule_id = rule.id.clone();
         profile.rules.push(rule);
         self.store.upsert_profile(&profile)?;
@@ -400,9 +401,10 @@ impl ProfilesManager {
                 return;
             }
         };
+        let context = self.rule_sink.policy_context();
         let materialized = active
             .as_ref()
-            .map(|p| capped(materialize_profile(&p.id, &p.rules)))
+            .map(|p| capped(materialize_profile_in(&p.id, &p.rules, context)))
             .unwrap_or_default();
         let wanted: Vec<_> = materialized
             .iter()

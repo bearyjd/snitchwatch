@@ -16,7 +16,7 @@ use crate::busy::{BusyGuard, BusyNames};
 use crate::replier::display_reason;
 use snitchwatch_bridge::cache::rules::SharedRulesCache;
 use snitchwatch_bridge::daemon_commands::{CommandError, DaemonCommands, SendError};
-use snitchwatch_bridge::rule_io::{check_rule_for_apply, same_rule, ImportOutcome};
+use snitchwatch_bridge::rule_io::{check_rule_for_apply_in, same_rule, ImportOutcome};
 use snitchwatch_bridge::ws_messages::ServerMessage;
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
 use std::collections::HashMap;
@@ -226,7 +226,9 @@ impl Run<'_> {
         if !self.applier.unchanged(&rule.name, expected.as_ref()) {
             return self.not_sent(&rule.name, CHANGED_SINCE_PREVIEW).await;
         }
-        let checked = match check_rule_for_apply(&rule) {
+        // The daemon connected now, not the one the preview was checked for.
+        let context = self.applier.commands.policy_context();
+        let checked = match check_rule_for_apply_in(&rule, context) {
             Ok(checked) => checked,
             Err(problems) => {
                 let reason = problems

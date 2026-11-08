@@ -8,8 +8,8 @@ use snitchwatch_bridge::daemon_commands::{DaemonCommands, DaemonTransport};
 use snitchwatch_bridge::rule_io::only_enabled_differs;
 use snitchwatch_bridge::rule_name::is_reserved_curated_name;
 use snitchwatch_bridge::rule_policy::{
-    check_wire_rule, enable_problems, read_only_reason, validate_user_rule, PolicyProfile,
-    RuleProblem, CURATED_MANAGED_REASON,
+    check_wire_rule_in, enable_problems, read_only_reason, validate_operator_in,
+    validate_user_rule_in, PolicyContext, PolicyProfile, RuleProblem, CURATED_MANAGED_REASON,
 };
 use snitchwatch_bridge::translator::rule_notification::notification_for_effect;
 use snitchwatch_bridge::translator::upstream::UpstreamEffect;
@@ -77,6 +77,8 @@ pub(super) fn plan(
     curated_inert: bool,
 ) -> Result<Plan, Refusal> {
     let on_tcp = commands.transport() == DaemonTransport::Tcp;
+    // The connected daemon's version as of now; `send` checks it again.
+    let context = commands.policy_context();
     match command {
         Command::Delete { rule_id } => {
             if busy.contains(rule_id) {
@@ -87,9 +89,9 @@ pub(super) fn plan(
             };
             notification(&effect).map(Plan::Send)
         }
-        Command::Add { rule } => plan_add(rule, on_tcp, rules, busy),
+        Command::Add { rule } => plan_add(rule, on_tcp, context, rules, busy),
         Command::Update { rule_id, rule } => {
-            plan_update(rule_id, rule, on_tcp, curated_inert, rules, busy)
+            plan_update(rule_id, rule, on_tcp, curated_inert, context, rules, busy)
         }
     }
 }
@@ -97,13 +99,14 @@ pub(super) fn plan(
 fn plan_add(
     rule: &serde_json::Value,
     on_tcp: bool,
+    context: PolicyContext,
     rules: &SharedRulesCache,
     busy: &BusyNames,
 ) -> Result<Plan, Refusal> {
     if on_tcp {
         return Err(refusal("rule", TCP_REFUSED));
     }
-    let parsed = check_wire_rule(rule, PolicyProfile::Editor)?;
+    let parsed = check_wire_rule_in(rule, PolicyProfile::Editor, context)?;
     name_free(&lock(rules), &parsed.name, busy)?;
     let effect = UpstreamEffect::AddRule { rule: rule.clone() };
     let change = notification(&effect)?;
@@ -118,6 +121,7 @@ fn plan_update(
     rule: &serde_json::Value,
     on_tcp: bool,
     curated_inert: bool,
+    context: PolicyContext,
     rules: &SharedRulesCache,
     busy: &BusyNames,
 ) -> Result<Plan, Refusal> {
@@ -142,13 +146,14 @@ fn plan_update(
     if !renamed && only_enabled_differs(&old, &new) {
         if new.enabled && !old.enabled {
             may_turn_on(&new)?;
+            daemon_compiles(&new, context)?;
         }
         return Ok(Plan::Send(change));
     }
     if on_tcp {
         return Err(refusal("rule", TCP_REFUSED));
     }
-    validate_user_rule(&new, PolicyProfile::Editor)?;
+    validate_user_rule_in(&new, PolicyProfile::Editor, context)?;
     if renamed {
         name_free(&cache, &new.name, busy)?;
         return Ok(Plan::Rename { change, old });
@@ -210,6 +215,20 @@ fn may_turn_on(rule: &Rule) -> Result<(), Refusal> {
             ..p
         })
         .collect())
+}
+
+/// Turning a rule on makes the daemon compile it: not when the connected
+/// daemon refuses one of its conditions (opensnitchd 1.9's `source.network`),
+/// said here in the policy's words rather than as `send`'s bare refusal.
+fn daemon_compiles(rule: &Rule, context: PolicyContext) -> Result<(), Refusal> {
+    match rule
+        .operator
+        .as_ref()
+        .map(|op| validate_operator_in(op, context))
+    {
+        Some(Err(reason)) => Err(refusal("operator", &reason)),
+        _ => Ok(()),
+    }
 }
 
 /// The daemon notification for an effect; `rule_from_wire`, the reserved

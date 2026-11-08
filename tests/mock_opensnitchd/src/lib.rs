@@ -23,7 +23,9 @@ use tokio::sync::mpsc;
 use tonic::transport::{Channel, Endpoint};
 
 use rule_validation::validate_duration;
-pub use rule_validation::validate_rule_shape;
+pub use rule_validation::{
+    dest_network_only, validate_rule_shape, validate_rule_shape_for, DEFAULT_VERSION,
+};
 
 /// The real daemon's `AskRule` deadline
 /// (`vendor/opensnitch/daemon/ui/client.go:366`, `context.WithTimeout(...,
@@ -99,7 +101,19 @@ pub enum MockError {
 #[derive(Clone)]
 pub struct MockOpensnitchd {
     client: UiClient<Channel>,
+    /// What this daemon reports as `Statistics.daemon_version` in a `Ping`,
+    /// and the rules it compiles ([`validate_rule_shape_for`]). `Subscribe`
+    /// reports [`MOCK_KERNEL_RELEASE`] instead, as the real daemon does.
+    version: String,
 }
+
+/// What this mock reports as `ClientConfig.version` at `Subscribe`. The real
+/// daemon sends the host's kernel release there (`core.GetKernelVersion()`,
+/// `vendor/opensnitch/daemon/ui/notifications.go`), not its own version,
+/// which only arrives in a `Ping`'s `Statistics.daemon_version`. It reads as
+/// 6.7, so a bridge that took it for the daemon's version would treat the
+/// default 1.8 mock as 1.9 or newer.
+pub const MOCK_KERNEL_RELEASE: &str = "6.7.4-mock";
 
 // Same `MockError::Rpc(tonic::Status)` large variant as `validate_rule_shape`
 // below. Older clippy exempted these public methods (avoid-breaking-exported-
@@ -112,7 +126,19 @@ impl MockOpensnitchd {
     pub fn from_channel(channel: Channel) -> Self {
         Self {
             client: UiClient::new(channel),
+            version: DEFAULT_VERSION.to_string(),
         }
+    }
+
+    /// Report `version` (default [`DEFAULT_VERSION`]) in `Ping` statistics
+    /// and compile rules as that daemon does.
+    pub fn with_version(mut self, version: &str) -> Self {
+        self.version = version.to_string();
+        self
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
     /// Dial the bridge at `addr`. Caller is responsible for ensuring the
@@ -125,11 +151,7 @@ impl MockOpensnitchd {
         let mut last_err = None;
         for _ in 0..20 {
             match endpoint.connect().await {
-                Ok(channel) => {
-                    return Ok(Self {
-                        client: UiClient::new(channel),
-                    });
-                }
+                Ok(channel) => return Ok(Self::from_channel(channel)),
                 Err(e) => {
                     last_err = Some(e);
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -171,6 +193,8 @@ impl MockOpensnitchd {
     /// (`vendor/opensnitch/daemon/statistics/stats.go` `Serialize`): `rules`
     /// is its loader's `NumRules()`, every rule in memory, enabled or not
     /// ([`loader::LoaderModel::num_rules`]), and `uptime` is in seconds.
+    /// It carries this mock's version as `daemon_version`, the only place
+    /// the bridge learns it.
     pub async fn ping_reporting_rules(
         &mut self,
         id: u64,
@@ -182,7 +206,7 @@ impl MockOpensnitchd {
             snitchwatch_proto::protocol::Statistics {
                 rules,
                 uptime,
-                daemon_version: "mock-1.8.0".to_string(),
+                daemon_version: self.version.clone(),
                 ..Default::default()
             },
         )
@@ -193,7 +217,7 @@ impl MockOpensnitchd {
         let cfg = ClientConfig {
             id: 1,
             name: name.to_string(),
-            version: "mock-1.6.0".to_string(),
+            version: MOCK_KERNEL_RELEASE.to_string(),
             ..Default::default()
         };
         let echoed = self.client.subscribe(cfg).await?.into_inner();
@@ -202,11 +226,15 @@ impl MockOpensnitchd {
 
     /// Like [`Self::subscribe`], but takes a full `ClientConfig` the
     /// caller controls — used by tests that need to drive a specific
-    /// `is_firewall_running`/`config` value through the bridge.
+    /// `is_firewall_running`/`config` value through the bridge. An empty
+    /// `version` is filled in with [`MOCK_KERNEL_RELEASE`].
     pub async fn subscribe_with_config(
         &mut self,
-        cfg: ClientConfig,
+        mut cfg: ClientConfig,
     ) -> Result<ClientConfig, MockError> {
+        if cfg.version.is_empty() {
+            cfg.version = MOCK_KERNEL_RELEASE.to_string();
+        }
         let echoed = self.client.subscribe(cfg).await?.into_inner();
         Ok(echoed)
     }
@@ -226,7 +254,7 @@ impl MockOpensnitchd {
             .await
             .map_err(|_elapsed| MockError::AskRuleTimedOut(deadline))??
             .into_inner();
-        validate_rule_shape(&rule)?;
+        validate_rule_shape_for(&rule, &self.version)?;
         Ok(rule)
     }
 
@@ -246,7 +274,7 @@ impl MockOpensnitchd {
         let mut request = tonic::Request::new(conn);
         request.set_timeout(deadline);
         let rule = self.client.ask_rule(request).await?.into_inner();
-        validate_rule_shape(&rule)?;
+        validate_rule_shape_for(&rule, &self.version)?;
         Ok(rule)
     }
 

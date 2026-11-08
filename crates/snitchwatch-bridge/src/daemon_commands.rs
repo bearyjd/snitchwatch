@@ -273,6 +273,8 @@ pub struct DaemonCommands {
     /// The one list directory root a [`BlocklistCommand`] may point at, set
     /// once by the blocklist sink; until then none is sent.
     blocklist_root: Arc<std::sync::OnceLock<std::path::PathBuf>>,
+    /// The version rules are checked against (`version_gate`).
+    daemon_version: crate::daemon_config::SharedDaemonVersion,
 }
 
 /// Keeps a stream registered; dropping it closes the stream (also on a
@@ -371,6 +373,7 @@ impl DaemonCommands {
             ready: Arc::new(watch::channel(0).0),
             rules,
             blocklist_root: Arc::default(),
+            daemon_version: Default::default(),
         }
     }
 
@@ -519,7 +522,8 @@ impl DaemonCommands {
     ///
     /// Defense in depth for every path that builds a command (the GUI's go
     /// through `rule_wire::rule_from_wire` first): a `CHANGE_RULE`'s
-    /// operator must pass [`crate::rule_policy::validate_operator`], and no
+    /// operator must pass [`crate::rule_policy::validate_operator_in`] for
+    /// the connected daemon's version, and no
     /// rule may carry a reserved name (a blocklist one, a curated default's,
     /// or a packaged rule's). The bridge's own blocklist rules take
     /// [`send_blocklist`](Self::send_blocklist) and its curated defaults
@@ -534,13 +538,7 @@ impl DaemonCommands {
             warn!("refusing to send a rule command under a reserved rule name");
             return Err(SendError::ReservedName);
         }
-        if notification.r#type == Action::ChangeRule as i32
-            && notification.rules.iter().any(|rule| {
-                rule.operator
-                    .as_ref()
-                    .is_none_or(|op| crate::rule_policy::validate_operator(op).is_err())
-            })
-        {
+        if self.refuses_conditions(&notification) {
             warn!("refusing to send a rule whose condition the bridge won't send");
             return Err(SendError::RefusedOperator);
         }
@@ -681,6 +679,7 @@ impl DaemonCommands {
                 .filter_map(|(id, open)| open.hello.map(|hello| (hello, *id)))
                 .max()
                 .map(|(_, id)| id);
+            self.forget_version_without_current(&inner);
         }
         if inner.committed_by == Some(stream) {
             inner.committed_by = self.readopt_for_current(&inner);
@@ -780,6 +779,8 @@ pub use curated_command::CuratedCommand;
 #[path = "daemon_commands/profile_command.rs"]
 mod profile_command;
 pub use profile_command::ProfileCommand;
+
+mod version_gate;
 
 #[cfg(test)]
 #[path = "daemon_commands/tests.rs"]

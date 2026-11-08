@@ -114,6 +114,12 @@ pub struct UiService {
     /// The daemon's own settings from its latest `subscribe`
     /// (`crate::daemon_config`).
     daemon_config: crate::daemon_config::SharedDaemonConfig,
+    /// The daemon's version from its latest `ping` that reported a readable
+    /// one (never `subscribe`: see `SharedDaemonVersion`); `commands` checks
+    /// rules against it.
+    daemon_version: crate::daemon_config::SharedDaemonVersion,
+    /// Generation bumped each time a `ping` changes [`Self::daemon_version`].
+    daemon_version_changed: Arc<tokio::sync::watch::Sender<u64>>,
     /// How long a prompt waits before the bridge answers it itself
     /// (`crate::deferred_answers`).
     answer_timeout: Duration,
@@ -133,6 +139,7 @@ impl UiService {
         let rules = RulesSync::new(broadcast.clone());
         let prompt_slot =
             crate::prompt_slot::PromptSlotHandle::new(broadcast.clone(), notice_bus.clone());
+        let daemon_version = crate::daemon_config::SharedDaemonVersion::default();
         Self {
             cache,
             broadcast,
@@ -146,7 +153,10 @@ impl UiService {
             firewall_status: Arc::new(StdMutex::new(None)),
             alert_store: Arc::new(DaemonAlertStore::new()),
             diagnostics_ctx: Arc::new(OnceLock::new()),
-            commands: DaemonCommands::new(DaemonTransport::Tcp, rules.clone()),
+            commands: DaemonCommands::new(DaemonTransport::Tcp, rules.clone())
+                .with_daemon_version(daemon_version.clone()),
+            daemon_version,
+            daemon_version_changed: Arc::new(tokio::sync::watch::channel(0).0),
             rules,
             prompt_slot,
             daemon_config: Default::default(),
@@ -173,6 +183,11 @@ impl UiService {
         self.daemon_config.clone()
     }
 
+    /// The daemon's version from its latest readable `ping`.
+    pub fn daemon_version_handle(&self) -> crate::daemon_config::SharedDaemonVersion {
+        self.daemon_version.clone()
+    }
+
     /// The prompt slot, for the `RequestSnapshot` answer.
     pub fn prompt_slot_handle(&self) -> crate::prompt_slot::PromptSlotHandle {
         self.prompt_slot.clone()
@@ -191,7 +206,8 @@ impl UiService {
     /// root-only Unix socket uses the current one, and its counters judge a
     /// bridge restart's hit-count gap (N3). Call before taking handles.
     pub fn with_daemon_transport(mut self, transport: DaemonTransport) -> Self {
-        self.commands = DaemonCommands::new(transport, self.rules.clone());
+        self.commands = DaemonCommands::new(transport, self.rules.clone())
+            .with_daemon_version(self.daemon_version.clone());
         self.rules.hits().set_daemon_transport(transport);
         self
     }
@@ -216,6 +232,13 @@ impl UiService {
     /// blocklist reconcile trigger (issue #45).
     pub fn rules_synced(&self) -> tokio::sync::watch::Receiver<u64> {
         self.rules.synced()
+    }
+
+    /// Generation bumped each time a `ping` changes the stored daemon
+    /// version: the profile enforcer's recheck trigger, since a pass run
+    /// before the first `ping` checked rules against v1.8.0's policy.
+    pub fn daemon_version_changed(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.daemon_version_changed.subscribe()
     }
 
     /// Convenience: wrap into a tonic `UiServer<UiService>` ready for
@@ -261,6 +284,7 @@ impl UiService {
 #[tonic::async_trait]
 impl Ui for UiService {
     async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingReply>, Status> {
+        let peer = request.remote_addr();
         let req = request.into_inner();
         let id = req.id;
 
@@ -279,6 +303,15 @@ impl Ui for UiService {
         // diagnostics cover every connection, not just the ones the user was
         // prompted for.
         if let Some(stats) = req.stats {
+            // The only place the daemon reports its own version (Subscribe's
+            // is the kernel's): a readable one replaces the stored one, and
+            // a change asks for every rule to be checked again. Only the
+            // peer holding the current Notifications stream may set it.
+            let version = crate::daemon_config::DaemonVersion::parse(&stats.daemon_version);
+            if self.commands.observe_daemon_version(peer, version) {
+                self.daemon_version_changed
+                    .send_modify(|generation| *generation += 1);
+            }
             self.prompt_slot.observe(
                 stats.rule_misses,
                 stats.uptime,
@@ -500,7 +533,10 @@ impl Ui for UiService {
         self.liveness.touch();
         let conn = request.remote_addr();
         let cfg = request.into_inner();
-        info!(client = %cfg.name, version = %cfg.version, "client subscribed");
+        // `cfg.version` is the daemon host's kernel release
+        // (`core.GetKernelVersion()`, `daemon/ui/notifications.go`), not
+        // opensnitchd's: logged only, never stored as the daemon version.
+        info!(client = %cfg.name, kernel = %cfg.version, "client subscribed");
         // Never log `cfg.config` itself: see `daemon_config`.
         self.daemon_config
             .set(crate::daemon_config::DaemonConfigView::parse(&cfg.config));

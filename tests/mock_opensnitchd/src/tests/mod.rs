@@ -9,6 +9,14 @@ use tokio::sync::{broadcast, Mutex};
 use tonic::transport::Server;
 
 async fn spawn_bridge_grpc() -> SocketAddr {
+    spawn_bridge_grpc_with_version().await.0
+}
+
+/// A bridge's gRPC service, and the daemon version it read.
+async fn spawn_bridge_grpc_with_version() -> (
+    SocketAddr,
+    snitchwatch_bridge::daemon_config::SharedDaemonVersion,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
@@ -16,7 +24,9 @@ async fn spawn_bridge_grpc() -> SocketAddr {
     let tray_pub = Arc::new(snitchwatch_bridge::tray_state::TrayStatePublisher::new());
     let notice_bus = Arc::new(snitchwatch_bridge::notice::NoticeBus::new());
     let filter_pause = Arc::new(snitchwatch_bridge::filter_pause::FilterPause::new());
-    let svc = UiService::new(cache, tx, tray_pub, notice_bus, filter_pause).into_server();
+    let svc = UiService::new(cache, tx, tray_pub, notice_bus, filter_pause);
+    let version = svc.daemon_version_handle();
+    let svc = svc.into_server();
     tokio::spawn(async move {
         Server::builder()
             .add_service(svc)
@@ -25,7 +35,7 @@ async fn spawn_bridge_grpc() -> SocketAddr {
             .ok();
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
-    addr
+    (addr, version)
 }
 
 #[tokio::test]
@@ -42,6 +52,45 @@ async fn mock_can_subscribe_to_bridge() {
     let mut mock = MockOpensnitchd::connect(addr).await.unwrap();
     let echoed = mock.subscribe("opensnitchd-mock").await.unwrap();
     assert_eq!(echoed.name, "opensnitchd-mock");
+}
+
+/// The real daemon's Subscribe carries the kernel release, its Ping the
+/// daemon version: the bridge reads only the Ping's, and a later Subscribe
+/// (even an unreadable one) leaves it alone.
+#[tokio::test]
+async fn the_bridge_reads_the_version_from_ping_not_subscribe() {
+    use snitchwatch_bridge::daemon_config::DaemonVersion;
+    let (addr, version) = spawn_bridge_grpc_with_version().await;
+    let mut mock = MockOpensnitchd::connect(addr).await.unwrap();
+    assert_eq!(mock.version(), DEFAULT_VERSION);
+    mock.subscribe("opensnitchd-mock").await.unwrap();
+    assert_eq!(
+        version.get(),
+        None,
+        "{MOCK_KERNEL_RELEASE} is not a daemon version"
+    );
+    mock.ping_reporting_rules(1, 0, 5).await.unwrap();
+    assert_eq!(version.get(), Some(DaemonVersion::new(1, 8)));
+
+    let mut newer = MockOpensnitchd::connect(addr)
+        .await
+        .unwrap()
+        .with_version("1.9.0");
+    newer.ping_reporting_rules(2, 0, 6).await.unwrap();
+    assert_eq!(version.get(), Some(DaemonVersion::new(1, 9)));
+    mock.subscribe_with_config(ClientConfig {
+        version: "garbage".into(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        version.get(),
+        Some(DaemonVersion::new(1, 9)),
+        "a second Subscribe must not weaken a known 1.9"
+    );
+    mock.ping_reporting_rules(3, 0, 7).await.unwrap();
+    assert_eq!(version.get(), Some(DaemonVersion::new(1, 8)));
 }
 
 #[test]

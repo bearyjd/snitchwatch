@@ -13,17 +13,18 @@
 //! };
 //! ```
 //!
-//! [`check`](ProfileCommand::check) re-validates at the send point: a
+//! [`check_in`](ProfileCommand::check_in) re-validates at the send point: a
 //! `CHANGE_RULE` must be an enabled rule the bridge made (the prefix and the
 //! profile tag) that passes the `ProfileRule` policy (`always`, no precedence, no
-//! nolog, …); a `DELETE_RULE` names a rule under the prefix and nothing else.
+//! nolog, …) for the connected daemon's version; a `DELETE_RULE` names a rule
+//! under the prefix and nothing else.
 
 use snitchwatch_proto::protocol::{Action, Notification, Rule};
 
 use super::{DaemonCommands, PendingReply, SendError};
 use crate::profiles::materializer::made_by_bridge;
 use crate::rule_name::{is_reserved_profile_name, validate_rule_name};
-use crate::rule_policy::{validate_user_rule, PolicyProfile};
+use crate::rule_policy::{validate_user_rule_in, PolicyContext, PolicyProfile};
 
 /// A profile rule command built by the bridge itself.
 #[derive(Debug, Clone)]
@@ -66,7 +67,12 @@ impl ProfileCommand {
         self.notification.rules.first()
     }
 
+    #[cfg(test)]
     fn check(&self) -> Result<(), SendError> {
+        self.check_in(PolicyContext::default())
+    }
+
+    fn check_in(&self, context: PolicyContext) -> Result<(), SendError> {
         let [rule] = self.notification.rules.as_slice() else {
             return Err(SendError::RefusedOperator);
         };
@@ -84,7 +90,7 @@ impl ProfileCommand {
             return Err(SendError::NotAllowed);
         }
         let shaped = rule.enabled && made_by_bridge(rule);
-        if shaped && validate_user_rule(rule, PolicyProfile::ProfileRule).is_ok() {
+        if shaped && validate_user_rule_in(rule, PolicyProfile::ProfileRule, context).is_ok() {
             Ok(())
         } else {
             Err(SendError::RefusedOperator)
@@ -96,7 +102,7 @@ impl DaemonCommands {
     /// Send a profile rule command: the only path a rule under the profile
     /// prefix may take to the daemon; see the module doc.
     pub fn send_profile(&self, command: ProfileCommand) -> Result<PendingReply, SendError> {
-        command.check()?;
+        command.check_in(self.policy_context())?;
         self.dispatch(command.notification)
     }
 }
@@ -161,6 +167,25 @@ mod tests {
             }),
             Some(SendError::ReservedName)
         );
+    }
+
+    #[test]
+    fn a_source_network_rule_is_not_sent_to_a_1_9_daemon() {
+        let rule = ProfileRule {
+            id: "lan".into(),
+            action: "allow".into(),
+            operand: String::new(),
+            data: String::new(),
+            operator: Some(serde_json::json!({
+                "type": "network", "operand": "source.network", "data": "192.168.0.0/16",
+            })),
+        };
+        let command = ProfileCommand::install(materialize_rule("home", &rule).unwrap());
+        assert_eq!(command.check_in(PolicyContext::default()), Ok(()));
+        let newer = PolicyContext {
+            refuse_source_network: true,
+        };
+        assert_eq!(command.check_in(newer), Err(SendError::RefusedOperator));
     }
 
     #[test]
