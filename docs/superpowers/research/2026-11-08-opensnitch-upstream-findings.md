@@ -81,13 +81,15 @@ Verdict: CONFIRMED. Severity guess: low (debug leftover, log noise).
 
 Trigger: configure an RFC3164 (syslog) logger and have any task (for
 example IOC scanner, node/pid monitor) emit a `TaskNotification`.
-The matching RFC5424 formatter was not checked.
+The matching RFC5424 formatter has no such `println` (checked with a grep of
+`daemon/log` and `daemon/tasks/scheduler`).
 
 ## 4. Makefile version handling as text
 
-Verdict: CONFIRMED (both parts). Severity guess: low to medium (wrong
-compiler flags, possible build failure of the eBPF module; the compile
-impact itself was not tested).
+Verdict: CONFIRMED (both parts). Severity guess: low (unneeded flags on
+6.2 to 6.9, likely harmless; needed flags dropped on a 6.100+/10.x kernel; the
+wrong kernel is picked when several are installed; the compile impact itself
+was not tested).
 
 - `ebpf_prog/Makefile:6`: `KERNEL_VER ?= $(shell find /lib/modules/* ... | sort | tail -1 | cut -d/ -f4)`.
   Plain `sort` is lexicographic, so with `6.9.1` and `6.19.4` installed it
@@ -98,8 +100,9 @@ impact itself was not tested).
   Local results: `6.9.1`->1 (wrong), `6.2.0`->1 (wrong), `6.19.4`->1,
   `7.2.11`->1, `6.100.0`->0 (would be wrong), `10.1`->0 (wrong).
 - Effect at `Makefile:57-59`: `-Wno-microsoft-anon-tag -fms-extensions` is
-  added to `EXTRA_FLAGS` when the check is 1. Kernels 6.0 to 6.18 wrongly
-  get the flags. A hypothetical 6.100 or 10.x would wrongly lose them.
+  added to `EXTRA_FLAGS` when the check is 1. Kernels 6.2 to 6.9 wrongly
+  get the flags (6.0, 6.1 and 6.10 to 6.18 compare correctly: checked with
+  `expr`). A hypothetical 6.100 or 10.x would wrongly lose them.
 
 Trigger: building with several kernels installed under `/lib/modules`
 (wrong one selected), or building against any 6.2 to 6.9 kernel

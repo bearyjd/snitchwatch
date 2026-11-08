@@ -51,8 +51,9 @@ sets the policy while the sheet is closed or before it opens.
   `kirigami` job (~15-20 min per push) is the only way to run layer 1. Expect
   one or two CI iterations; keep the probe small.
 - New QML files must be registered in `build.rs` and
-  `tests/qml_guard_support/sources.rs`; a new probe file needs no registration
-  beyond its `qrc` entry (follow `source_network_gate_qml.rs`).
+  `tests/qml_guard_support/sources.rs`; a new probe needs no registration:
+  embed it as an inline string and `load_data` it under a nominal `qrc:/` URL,
+  as `source_network_gate_qml.rs` does.
 - `rules_model.rs` sits at the 800-line cap; put new Rust helpers in new files.
 
 ## Also fold in (optional, from the #342 reviews)
