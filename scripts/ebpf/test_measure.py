@@ -394,16 +394,16 @@ class UnknownRate(unittest.TestCase):
 
 class Compare(unittest.TestCase):
     def make_run(self, root, label, cpus, rss, unknown=10, dur=86400, workload="w1",
-                 truncated=False, span=None):
+                 truncated=False, span=None, ts=None, filters=None):
         root = Path(root)
         with open(root / f"{label}.csv", "w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(measure.COLUMNS)
             span = dur if span is None else span
             for i, (c, r) in enumerate(zip(cpus, rss)):
-                w.writerow([span * (i + 1) / len(cpus), "x", "d", 1, c, r, 4, "", ""])
+                w.writerow([span * i / max(1, len(cpus) - 1) if ts is None else ts[i], "x", "d", 1, c, r, 4, "", ""])
         doc = lambda n, flt: {"format": measure.EXPORT_FORMAT, "schemaVersion": 1,  # noqa: E731
-                              "filterKinds": {"application": flt},
+                              "filterKinds": {"application": flt, **(filters or {})},
                               "requestedWindow": {"a": 1},
                               "coverage": {"rowOmissions": {}, "unexaminedRetained": 0,
                                            "groupOmissions": {k: {"groups": 0, "observations": 0}
@@ -423,8 +423,8 @@ class Compare(unittest.TestCase):
 
     def test_compare_reports_both_runs_and_deltas(self):
         with tempfile.TemporaryDirectory() as d:
-            a = self.make_run(d, "proc", [1.0, 3.0], [102400, 204800], 20)
-            b = self.make_run(d, "ebpf", [0.5, 1.5], [102400, 153600], 10)
+            a = self.make_run(d, "proc", [1.0, 2.0, 3.0], [102400, 150000, 204800], 20)
+            b = self.make_run(d, "ebpf", [0.5, 1.0, 1.5], [102400, 120000, 153600], 10)
             r = measure.compare(a, b)
         self.assertAlmostEqual(r["proc"]["cpu_mean"], 2.0)
         self.assertAlmostEqual(r["ebpf"]["cpu_mean"], 1.0)
@@ -437,22 +437,22 @@ class Compare(unittest.TestCase):
 
     def test_mismatched_duration_refused(self):
         with tempfile.TemporaryDirectory() as d:
-            a = self.make_run(d, "proc", [1.0], [1024])
-            b = self.make_run(d, "ebpf", [1.0], [1024], dur=43200)
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, dur=43200)
             with self.assertRaisesRegex(ValueError, "duration"):
                 measure.compare(a, b)
 
     def test_mismatched_workload_refused(self):
         with tempfile.TemporaryDirectory() as d:
-            a = self.make_run(d, "proc", [1.0], [1024])
-            b = self.make_run(d, "ebpf", [1.0], [1024], workload="w2")
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, workload="w2")
             with self.assertRaisesRegex(ValueError, "workload"):
                 measure.compare(a, b)
 
     def test_missing_metadata_refused(self):
         with tempfile.TemporaryDirectory() as d:
-            a = self.make_run(d, "proc", [1.0], [1024])
-            b = self.make_run(d, "ebpf", [1.0], [1024])
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
             doc = json.loads(b.read_text())
             del doc["workload"]
             b.write_text(json.dumps(doc))
@@ -461,7 +461,7 @@ class Compare(unittest.TestCase):
 
     def test_wrong_format_refused(self):
         with tempfile.TemporaryDirectory() as d:
-            a = self.make_run(d, "proc", [1.0], [1024])
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
             b = Path(d) / "bad.json"
             b.write_text("{}")
             with self.assertRaisesRegex(ValueError, "not a"):
@@ -469,10 +469,10 @@ class Compare(unittest.TestCase):
 
     def test_cli_error_exit_code_on_mismatch(self):
         with tempfile.TemporaryDirectory() as d:
-            a = self.make_run(d, "proc", [1.0], [1024])
-            b = self.make_run(d, "ebpf", [1.0], [1024], workload="w2")
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, workload="w2")
             self.assertEqual(measure.main(["compare", str(a), str(b)]), 1)
-            c = self.make_run(d, "ebpf2", [1.0], [1024])
+            c = self.make_run(d, "ebpf2", [1.0] * 3, [1024] * 3)
             self.assertEqual(measure.main(["compare", str(a), str(c)]), 0)
 
     def edit(self, man, **kw):
@@ -483,8 +483,8 @@ class Compare(unittest.TestCase):
     def test_non_finite_duration_refused(self):
         for bad in ("NaN", "Infinity", "-Infinity"):
             with tempfile.TemporaryDirectory() as d:
-                a = self.make_run(d, "proc", [1.0], [1024])
-                b = self.make_run(d, "ebpf", [1.0], [1024])
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
                 txt = b.read_text().replace("86400", bad)
                 b.write_text(txt)
                 with self.assertRaisesRegex(ValueError, "durationS"):
@@ -493,30 +493,30 @@ class Compare(unittest.TestCase):
     def test_manifest_paths_must_stay_inside_manifest_dir(self):
         for bad in ("../outside.csv", "/etc/passwd", "sub/../../x.csv"):
             with tempfile.TemporaryDirectory() as d:
-                a = self.make_run(d, "proc", [1.0], [1024])
-                b = self.make_run(d, "ebpf", [1.0], [1024])
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
                 self.edit(b, samplesCsv=bad)
                 with self.assertRaisesRegex(ValueError, "samplesCsv"):
                     measure.compare(a, b)
 
     def test_zero_cpu_samples_refused(self):
         with tempfile.TemporaryDirectory() as d:
-            a = self.make_run(d, "proc", [1.0], [1024])
-            b = self.make_run(d, "ebpf", [""], [1024])
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [""] * 3, [1024] * 3)
             with self.assertRaisesRegex(ValueError, "cpu samples"):
                 measure.compare(a, b)
 
     def test_short_sample_span_refused(self):
         with tempfile.TemporaryDirectory() as d:
-            a = self.make_run(d, "proc", [1.0, 2.0], [1024, 1024])
-            b = self.make_run(d, "ebpf", [1.0, 2.0], [1024, 1024], span=1000)
+            a = self.make_run(d, "proc", [1.0, 2.0, 3.0], [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0, 2.0, 3.0], [1024] * 3, span=1000)
             with self.assertRaisesRegex(ValueError, "span"):
                 measure.compare(a, b)
 
     def test_truncated_export_nulls_unknown_delta_and_marks_biased(self):
         with tempfile.TemporaryDirectory() as d:
-            a = self.make_run(d, "proc", [1.0], [1024])
-            b = self.make_run(d, "ebpf", [1.0], [1024], truncated=True)
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, truncated=True)
             r = measure.compare(a, b)
         self.assertIsNone(r["delta"]["unknown_rate"])
         self.assertIs(r["biased"], True)
@@ -524,14 +524,14 @@ class Compare(unittest.TestCase):
 
     def test_clean_runs_not_biased(self):
         with tempfile.TemporaryDirectory() as d:
-            r = measure.compare(self.make_run(d, "proc", [1.0], [1024]),
-                                self.make_run(d, "ebpf", [1.0], [1024]))
+            r = measure.compare(self.make_run(d, "proc", [1.0] * 3, [1024] * 3),
+                                self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3))
         self.assertIs(r["biased"], False)
 
     def test_bad_csv_rows_exit_1_not_traceback(self):
         with tempfile.TemporaryDirectory() as d:
-            a = self.make_run(d, "proc", [1.0], [1024])
-            b = self.make_run(d, "ebpf", [1.0], [1024])
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
             (Path(d) / "ebpf.csv").write_text("t_s,cpu_pct,rss_kib\nabc,1,2\n")
             self.assertEqual(measure.main(["compare", str(a), str(b)]), 1)
             (Path(d) / "ebpf.csv").write_bytes(b"t_s\n\x00\n")
@@ -541,10 +541,86 @@ class Compare(unittest.TestCase):
 
     def test_comparing_a_manifest_with_itself_refused(self):
         with tempfile.TemporaryDirectory() as d:
-            a = self.make_run(d, "proc", [1.0], [1024])
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
             with self.assertRaisesRegex(ValueError, "itself"):
                 measure.compare(a, a)
             self.assertEqual(measure.main(["compare", str(a), str(Path(d) / "." / "proc.json")]), 1)
+
+    def test_intermediate_symlink_escape_refused(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as out:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
+            (Path(out) / "ebpf.csv").write_text((Path(d) / "ebpf.csv").read_text())
+            os.symlink(out, Path(d) / "link")
+            self.edit(b, samplesCsv="link/ebpf.csv")
+            with self.assertRaisesRegex(ValueError, "samplesCsv"):
+                measure.compare(a, b)
+
+    def test_lone_late_sample_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0], [1024], ts=[86400])
+            with self.assertRaisesRegex(ValueError, "samples"):
+                measure.compare(a, b)
+
+    def test_endpoint_only_and_gappy_coverage_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, ts=[0, 1000, 86400])
+            with self.assertRaisesRegex(ValueError, "gap"):
+                measure.compare(a, b)
+
+    def test_non_finite_or_negative_timestamps_refused(self):
+        for bad in ("nan", "inf", "-inf"):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, ts=[0, bad, 86400])
+                with self.assertRaisesRegex(ValueError, "t_s"):
+                    measure.compare(a, b)
+
+    def test_non_finite_or_negative_cpu_rss_refused(self):
+        for cpus, rss in (([1.0, "nan", 1.0], [1024] * 3), ([1.0, "inf", 1.0], [1024] * 3),
+                          ([1.0, -1.0, 1.0], [1024] * 3), ([1.0] * 3, [1024, -5, 1024]),
+                          ([1.0] * 3, [1024, "nan", 1024])):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", cpus, rss)
+                with self.assertRaisesRegex(ValueError, "cpu_pct|rss_kib"):
+                    measure.compare(a, b)
+
+    def test_mismatched_export_filters_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, filters={"scope": True})
+            with self.assertRaisesRegex(ValueError, "filter"):
+                measure.compare(a, b)
+
+    def test_malformed_filter_kinds_exit_1(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
+            t = Path(d) / "ebpf-t.json"
+            doc = json.loads(t.read_text())
+            doc["filterKinds"] = ["application"]
+            t.write_text(json.dumps(doc))
+            self.assertEqual(measure.main(["compare", str(a), str(b)]), 1)
+
+    def test_absurd_duration_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3, dur=1e30)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, dur=1e30)
+            with self.assertRaisesRegex(ValueError, "durationS"):
+                measure.compare(a, b)
+            self.assertEqual(measure.main(["compare", str(a), str(b)]), 1)
+
+    def test_overflow_and_attribute_errors_exit_1(self):
+        for exc in (OverflowError("x"), AttributeError("x")):
+            orig = measure.compare
+            measure.compare = lambda *a, e=exc: (_ for _ in ()).throw(e)
+            try:
+                self.assertEqual(measure.main(["compare", "a", "b"]), 1)
+            finally:
+                measure.compare = orig
 
 
 if __name__ == "__main__":

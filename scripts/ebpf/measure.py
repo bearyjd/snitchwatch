@@ -27,7 +27,14 @@ COMM_LEN = 15  # kernel truncates /proc/<pid>/comm to 15 chars
 EXPORT_FORMAT = "snitchwatch-cache-summary"
 RUN_FORMAT = "snitchwatch-measure-run"
 DURATION_TOLERANCE = 0.01  # runs may differ by 1% in declared duration
-MIN_SPAN_FRACTION = 0.5  # sampled span (max t_s) must cover >= 50% of durationS
+# Coverage is judged on the sample distribution, not on max(t_s) alone: the
+# timestamps must span (max - min) >= 50% of durationS, number >= 3, and have no
+# gap wider than 50% of durationS. A lone late sample, or just the two
+# endpoints, therefore cannot stand in for a run.
+MIN_SPAN_FRACTION = 0.5
+MAX_GAP_FRACTION = 0.5
+MIN_SAMPLES = 3
+MAX_DURATION_S = 366 * 86400.0  # one year; larger is a typo or hostile
 
 
 def read_process(proc, pid):
@@ -296,31 +303,74 @@ def _load_run(path, label):
         raise ValueError(f"{label}: unsupported schemaVersion {doc.get('schemaVersion')!r}")
     dur = doc.get("durationS")
     if isinstance(dur, bool) or not isinstance(dur, (int, float)) \
-            or not math.isfinite(dur) or dur <= 0:
-        raise ValueError(f"{label}: durationS missing or not a finite positive number")
+            or not math.isfinite(dur) or not 0 < dur <= MAX_DURATION_S:
+        raise ValueError(f"{label}: durationS missing or not a finite positive number <= one year")
     workload = doc.get("workload")
     if not isinstance(workload, str) or not workload:
         raise ValueError(f"{label}: workload missing")
     base = Path(path).parent
+    root = base.resolve()
+    files = {}
     for key in ("samplesCsv", "unknownTotal", "unknownMissing"):
         if not isinstance(doc.get(key), str) or not doc[key]:
             raise ValueError(f"{label}: {key} missing")
         rel = Path(doc[key])
-        if rel.is_absolute() or ".." in rel.parts:
+        # Lexical check, then resolve (follows intermediate symlinks) and require
+        # containment; read_regular_text additionally refuses a final symlink.
+        if rel.is_absolute() or ".." in rel.parts \
+                or not (root / rel).resolve().is_relative_to(root):
             raise ValueError(f"{label}: {key} must be a relative path inside the manifest directory")
-    rows = list(csv.DictReader(io.StringIO(read_regular_text(base / doc["samplesCsv"]))))
+        files[key] = base / rel
+    rows = list(csv.DictReader(io.StringIO(read_regular_text(files["samplesCsv"]))))
+    _check_rows(rows, label, dur)
     stats = summarize(rows)
     if not stats["cpu_samples"]:
         raise ValueError(f"{label}: no cpu samples in {doc['samplesCsv']}")
-    span = max(float(r["t_s"]) for r in rows)
-    if span < MIN_SPAN_FRACTION * dur:
-        raise ValueError(f"{label}: sample span {span:g}s is below "
-                         f"{MIN_SPAN_FRACTION:.0%} of durationS {dur:g}s")
-    unk = unknown_rate(_load(base / doc["unknownTotal"]), _load(base / doc["unknownMissing"]))
+    total_doc, missing_doc = _load(files["unknownTotal"]), _load(files["unknownMissing"])
+    filters = {"total": _filters(total_doc, f"{label} total"),
+               "missing": _filters(missing_doc, f"{label} missing-path")}
+    unk = unknown_rate(total_doc, missing_doc)
     return {"duration_s": dur, "workload": workload, "cpu_mean": stats["cpu_mean"],
             "cpu_p95": stats["cpu_p95"], "rss_start_mib": stats["rss_start_mib"],
             "rss_end_mib": stats["rss_end_mib"], "unknown_rate": unk["rate"],
-            "warnings": unk["warnings"]}
+            "filters": filters, "warnings": unk["warnings"]}
+
+
+def _finite(value, what, label, nonneg=True):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label}: {what} is not a number: {value!r}") from None
+    if not math.isfinite(v) or (nonneg and v < 0):
+        raise ValueError(f"{label}: {what} must be finite and non-negative: {value!r}")
+    return v
+
+
+def _check_rows(rows, label, dur):
+    """Validate sample values and that the timestamps actually cover the run."""
+    ts = sorted(_finite(r.get("t_s"), "t_s", label) for r in rows)
+    for r in rows:
+        for col in ("cpu_pct", "rss_kib"):
+            if r.get(col) not in (None, ""):
+                _finite(r[col], col, label)
+    if len(ts) < MIN_SAMPLES:
+        raise ValueError(f"{label}: only {len(ts)} samples; need >= {MIN_SAMPLES}")
+    if ts[-1] - ts[0] < MIN_SPAN_FRACTION * dur:
+        raise ValueError(f"{label}: sample span {ts[-1] - ts[0]:g}s is below "
+                         f"{MIN_SPAN_FRACTION:.0%} of durationS {dur:g}s")
+    gap = max(b - a for a, b in zip(ts, ts[1:]))
+    if gap > MAX_GAP_FRACTION * dur:
+        raise ValueError(f"{label}: sample gap {gap:g}s exceeds "
+                         f"{MAX_GAP_FRACTION:.0%} of durationS {dur:g}s")
+
+
+def _filters(doc, label):
+    f = doc.get("filterKinds") if isinstance(doc, dict) else None
+    if f is None:
+        return {}
+    if not isinstance(f, dict) or not all(isinstance(k, str) for k in f):
+        raise ValueError(f"{label}: filterKinds must be an object keyed by strings")
+    return f
 
 
 DELTA_KEYS = ("cpu_mean", "cpu_p95", "rss_start_mib", "rss_end_mib", "unknown_rate")
@@ -340,6 +390,9 @@ def compare(proc_manifest, ebpf_manifest):
         raise ValueError(f"mismatched duration: proc {p['duration_s']}s vs ebpf {e['duration_s']}s")
     if p["workload"] != e["workload"]:
         raise ValueError(f"mismatched workload: proc {p['workload']!r} vs ebpf {e['workload']!r}")
+    # Exports with different filters/scope are different populations: refuse.
+    if p["filters"] != e["filters"]:
+        raise ValueError(f"mismatched export filters: proc {p['filters']} vs ebpf {e['filters']}")
     runs["biased"] = bool(p["warnings"] or e["warnings"])
     runs["delta"] = {k: None if p[k] is None or e[k] is None
                      or (k == "unknown_rate" and runs["biased"]) else e[k] - p[k]
@@ -392,7 +445,8 @@ def main(argv=None):
     elif a.cmd == "compare":
         try:
             print(json.dumps(compare(a.proc, a.ebpf), indent=2))
-        except (ValueError, OSError, csv.Error, TypeError, KeyError) as e:
+        except (ValueError, OSError, csv.Error, TypeError, KeyError,
+                OverflowError, AttributeError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
     else:
