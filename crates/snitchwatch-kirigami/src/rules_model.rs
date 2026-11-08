@@ -517,9 +517,10 @@ impl qobject::RulesModel {
         let mut link_rx = crate::bridge_runtime::link_wake::subscribe();
         handles.runtime().spawn(async move {
             while link_rx.changed().await.is_ok() {
-                let policy = link_handles.daemon_policy();
+                // Read at apply time on the Qt thread: an earlier read could go stale.
+                let handles = link_handles.clone();
                 if link_thread
-                    .queue(move |qobject| qobject.set_daemon_policy(policy))
+                    .queue(move |qobject| qobject.set_daemon_policy(handles.daemon_policy()))
                     .is_err()
                 {
                     break;

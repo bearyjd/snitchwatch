@@ -38,6 +38,12 @@ const FILES: &[(&str, &str, usize, &[&str])] = &[
         ],
     ),
     (
+        "RuleRowNotes.qml",
+        include_str!("../qml/RuleRowNotes.qml"),
+        0,
+        &["objectName: \"notLoadedReason\""],
+    ),
+    (
         "RulesInspectorSheet.qml",
         include_str!("../qml/RulesInspectorSheet.qml"),
         11,
@@ -77,6 +83,7 @@ const ROW_MENUS: &[(&str, usize)] = &[
 /// `WrapAnywhere` is where an elided name became a wrapped one (plan class B,
 /// case 1: names and paths in sheets).
 const WRAPS: &[(&str, &[(&str, &str)])] = &[
+    ("RuleRowNotes.qml", &[]),
     (
         "RulesPage.qml",
         &[
