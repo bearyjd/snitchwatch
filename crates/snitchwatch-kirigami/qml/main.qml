@@ -249,6 +249,8 @@ Kirigami.ApplicationWindow {
         wizardController.probe();
         settingsController.refreshPreferences();
         notificationController.startBridgeFeed();
+        // A second launch while QML was loading is answered (raised) here.
+        notificationController.startRaiseFeed();
         trayController.startBridgeFeed();
         promptSlotStatus.startBridgeFeed();
         // SNITCHWATCH_DEMO=1 only (the model ignores the call otherwise).
@@ -679,6 +681,10 @@ Kirigami.ApplicationWindow {
     Connections {
         target: notificationController
         function onReviewRequested() {
+            root.raiseAndActivate();
+        }
+        // A second launch (single_instance.rs): show this window instead.
+        function onRaiseRequested() {
             root.raiseAndActivate();
         }
     }

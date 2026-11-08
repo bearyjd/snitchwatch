@@ -87,6 +87,12 @@ impl PrivateBus {
         })
     }
 
+    /// The bus' address, for code that connects itself
+    /// (`crate::single_instance`'s tests).
+    pub(crate) fn address(&self) -> &str {
+        &self.address
+    }
+
     pub(crate) async fn connect(&self) -> Connection {
         zbus::connection::Builder::address(self.address.as_str())
             .unwrap()

@@ -54,6 +54,11 @@ is silent the text says "Not defined in the repo".
 | `release-verify tarball sha256` | Verify a tarball against a known sha256 in a throwaway Fedora 45 container. |
 <!-- /AUTO-GENERATED -->
 
+`kirigami-dev` and `kirigami-build` binaries are single-instance per session
+(`src/single_instance.rs`): with one already running, a second launch only
+raises it and exits. Set `SNITCHWATCH_ALLOW_MULTIPLE=1` to run two builds at
+once; `kirigami-screenshots` is unaffected (demo mode skips the check).
+
 ## Testing
 
 | Suite | Where | How |
@@ -133,5 +138,6 @@ Runs on push to `main` and `r16.1-candidate`, and on every pull request.
 | Never point a test at a live `opensnitchd`, a real Bazzite host, or `sudo`; use the doubles above. A real-daemon-only behaviour is a gap to flag, not to improvise (`.agent_native/agent_roadmap.md` item 7) | `CLAUDE.md` |
 | `package-check` verifies a renamed copy of the unit so a dev machine's `~/.config/systemd/user/snitchwatch-bridge.service` cannot shadow it | `CLAUDE.md`; `justfile` |
 | `kirigami-screenshots` already isolates `XDG_RUNTIME_DIR` with `mktemp -d` and uses `SNITCHWATCH_DEMO=1` | `justfile` |
+| Single-instance tests use a private `dbus-daemon` reached by an explicit address (`src/single_instance/tests.rs`, `PrivateBus` from `src/notification_signals/bus_tests.rs`); never set `DBUS_SESSION_BUS_ADDRESS` in a lib test or call the guard against the real session bus. Plain `#[test]` only: the blocking zbus API must not run inside a tokio runtime | `crates/snitchwatch-kirigami/src/single_instance.rs` |
 
 Environment variables used by tests: see `docs/ENV.md`.

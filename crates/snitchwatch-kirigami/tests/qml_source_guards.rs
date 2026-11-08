@@ -255,6 +255,26 @@ fn a_new_prompt_never_raises_the_main_window() {
     );
 }
 
+/// A second launch raises this window (`single_instance.rs`): the signal is
+/// handled by the shared raise helper, and its feed is started on load.
+#[test]
+fn a_second_launch_raises_the_main_window() {
+    let main = code_lines(MAIN_QML);
+    let raise = main
+        .split("function onRaiseRequested()")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("main.qml no longer handles a second launch's raise request");
+    assert!(
+        raise.contains("root.raiseAndActivate();"),
+        "a second launch no longer raises the window: {raise}"
+    );
+    assert!(
+        main.contains("notificationController.startRaiseFeed();"),
+        "main.qml no longer starts the raise feed, so a second launch is never heard"
+    );
+}
+
 const DURATIONS_QML: &str = include_str!("../qml/Durations.qml");
 const SILENT_MODES_QML: &str = include_str!("../qml/SilentModes.qml");
 const ALERT_HOST_QML: &str = include_str!("../qml/AlertHost.qml");

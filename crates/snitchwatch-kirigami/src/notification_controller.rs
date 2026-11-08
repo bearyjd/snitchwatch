@@ -119,6 +119,21 @@ pub mod qobject {
         #[cxx_name = "reviewRequested"]
         fn review_requested(self: Pin<&mut NotificationController>);
 
+        /// Emitted when a second launch asked this instance to show itself
+        /// (`crate::single_instance`). `main.qml` connects it to the same
+        /// window-raise call `reviewRequested` uses.
+        #[qsignal]
+        #[cxx_name = "raiseRequested"]
+        fn raise_requested(self: Pin<&mut NotificationController>);
+
+        /// Route the single-instance raise requests to `raiseRequested`,
+        /// delivering one that arrived before the window existed. Called
+        /// once from `main.qml`'s `Component.onCompleted`; works with or
+        /// without a bridge.
+        #[qinvokable]
+        #[cxx_name = "startRaiseFeed"]
+        fn start_raise_feed(self: Pin<&mut NotificationController>);
+
         /// Start the live feed: subscribe to the bridge's notice broadcast
         /// and dispatch cooldown-gated desktop notifications. No-op when the
         /// bridge isn't running. Called from `main.qml`'s
@@ -147,6 +162,13 @@ impl Default for NotificationControllerRust {
 }
 
 impl qobject::NotificationController {
+    fn start_raise_feed(self: Pin<&mut Self>) {
+        let qt_thread = self.qt_thread();
+        crate::single_instance::raise_sink().register(move || {
+            let _ = qt_thread.queue(|qobject| qobject.raise_requested());
+        });
+    }
+
     fn start_bridge_feed(self: Pin<&mut Self>) {
         let (Some(notice_rx), Some(handles)) = (
             crate::bridge_runtime::notice_rx(),
