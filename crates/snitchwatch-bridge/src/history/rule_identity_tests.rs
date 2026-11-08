@@ -345,8 +345,7 @@ fn list_operand_names_match_the_vendored_daemon() {
 }
 
 /// The vendored daemon's operator types, and what `rule_policy` does with
-/// each. A new type upstream (master adds `range`) fails here until the
-/// policy decides about it.
+/// each. A new type upstream fails here until the policy decides about it.
 #[test]
 fn operator_types_match_the_vendored_daemon() {
     let go = include_str!("../../../../vendor/opensnitch/daemon/rule/operator.go");
@@ -359,8 +358,10 @@ fn operator_types_match_the_vendored_daemon() {
     vendored.sort_unstable();
     let accepted = ["list", "network", "regexp", "simple"];
     // `complex` is "for future use" and `lists` is Snitchwatch's own
-    // blocklist rules: never from a GUI.
-    let refused = ["complex", "lists"];
+    // blocklist rules: never from a GUI. `range` (new in 1.9) is unknown to
+    // the shipped v1.8.0 daemon, and 1.9 panics on it with a network
+    // operand: refused until the policy models it.
+    let refused = ["complex", "lists", "range"];
     let mut known: Vec<&str> = accepted.iter().chain(&refused).copied().collect();
     known.sort_unstable();
     assert_eq!(vendored, known);
@@ -370,14 +371,16 @@ fn operator_types_match_the_vendored_daemon() {
             "network" => "dest.network",
             "lists" => "lists.domains",
             "list" => "list",
+            "range" => "dest.port",
             _ => "dest.host",
         }
         .into(),
-        data: if r#type == "network" {
-            "10.0.0.0/8".into()
-        } else {
-            "example.com".into()
-        },
+        data: match r#type {
+            "network" => "10.0.0.0/8",
+            "range" => "1-1024",
+            _ => "example.com",
+        }
+        .into(),
         list: if r#type == "list" {
             vec![op("simple", "dest.host", "example.com")]
         } else {
@@ -400,16 +403,19 @@ fn operator_types_match_the_vendored_daemon() {
     }
 }
 
-/// v1.8.0's `Compile` takes either network operand with the `network`
-/// type; 1.9 (upstream master) takes only `dest.network`, which
-/// `rule_policy::PolicyContext` refuses from 1.9 on. A vendor bump fails
-/// here until these expectations are updated against the new source.
+/// The vendored daemon is 1.9 (upstream master): its `Compile` refuses the
+/// `network` type with any operand but `dest.network`, which
+/// `rule_policy::PolicyContext` refuses from 1.9 on, and its string
+/// callbacks panic on a network operand, so `simple`, `regexp` and `range`
+/// with one stay refused. The shipped daemon (the v1.8.0 RPM) still takes
+/// `source.network`. A vendor bump fails here until these expectations are
+/// updated against the new source.
 #[test]
 fn the_network_type_operand_rule_matches_the_vendored_daemon() {
     let version_go = include_str!("../../../../vendor/opensnitch/daemon/core/version.go");
     assert!(
-        version_go.contains("Version = \"1.8.0\""),
-        "the vendored daemon is no longer v1.8.0: re-check the network type's operands"
+        version_go.contains("Version = \"1.9.0\""),
+        "the vendored daemon is no longer 1.9.0: re-check the network type's operands"
     );
     let go = include_str!("../../../../vendor/opensnitch/daemon/rule/operator.go");
     let compile = go
@@ -422,15 +428,40 @@ fn the_network_type_operand_rule_matches_the_vendored_daemon() {
         .nth(1)
         .and_then(|rest| rest.split("} else if o.Type == Lists {").next())
         .expect("Compile has a Network branch before the Lists one");
-    assert!(network.contains("net.ParseCIDR"), "{network}");
-    for operand in ["OpSrcNetwork", "OpDstNetwork", "Operand"] {
-        assert!(
-            !network.contains(operand),
-            "v1.8.0's network branch doesn't look at the operand: {operand}"
-        );
+    assert!(
+        network.contains("if o.Operand != OpDstNetwork {"),
+        "1.9's network branch takes only dest.network: {network}"
+    );
+    assert!(!network.contains("OpSrcNetwork"), "{network}");
+    assert!(network.contains("o.compileNetwork()"), "{network}");
+    let compile_network = go
+        .split("func (o *Operator) compileNetwork() error {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("operator.go has a compileNetwork method");
+    assert!(compile_network.contains("net.ParseCIDR"), "{compile_network}");
+    assert!(
+        go.contains("type opCallback func(value string) bool"),
+        "1.9's string callbacks are what panic on a network operand"
+    );
+
+    let pinned = crate::daemon_config::DaemonVersion::parse("1.9.0");
+    let newer = crate::rule_policy::PolicyContext::for_daemon(pinned);
+    assert!(newer.refuse_source_network);
+    let validate = |o: &Operator| crate::rule_policy::validate_operator_in(o, newer);
+    assert!(validate(&op("network", "source.network", "10.0.0.0/8")).is_err());
+    assert_eq!(validate(&op("network", "dest.network", "10.0.0.0/8")), Ok(()));
+    for kind in ["simple", "regexp", "range"] {
+        for operand in ["dest.network", "source.network"] {
+            assert!(
+                validate(&op(kind, operand, "10.0.0.0/8")).is_err(),
+                "{kind} {operand}"
+            );
+        }
     }
-    let pinned = crate::daemon_config::DaemonVersion::parse("1.8.0");
-    assert!(!crate::rule_policy::PolicyContext::for_daemon(pinned).refuse_source_network);
+
+    let shipped = crate::daemon_config::DaemonVersion::parse("1.8.0");
+    assert!(!crate::rule_policy::PolicyContext::for_daemon(shipped).refuse_source_network);
     let source = op("network", "source.network", "10.0.0.0/8");
     assert_eq!(crate::rule_policy::validate_operator(&source), Ok(()));
 }
