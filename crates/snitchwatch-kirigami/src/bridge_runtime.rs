@@ -62,6 +62,8 @@ struct ConnectionState {
     decide_later: bool,
     curated_broad_opt_in: bool,
     analysis_export: bool,
+    /// `bridge_capabilities::DAEMON_POLICY_V1` and its latest `DaemonPolicy`.
+    daemon_policy: daemon_policy::SessionPolicy,
     /// This session's waiting prompts, for desktop notifications.
     pending_rows: pending_rows::PendingRows,
 }
@@ -452,6 +454,8 @@ async fn connect_and_relay(
         state.analysis_export =
             advertised(snitchwatch_bridge::bridge_capabilities::AI_CACHE_SUMMARY_EXPORT_V1);
     }
+    let policy_v1 = advertised(snitchwatch_bridge::bridge_capabilities::DAEMON_POLICY_V1);
+    daemon_policy::mark_advertised(connection, connection_id, policy_v1);
     let _ = broadcast_tx.send(ReceivedServerMessage {
         connection_id,
         message: ServerMessage::Authenticated {
@@ -477,6 +481,7 @@ async fn connect_and_relay(
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text) {
                     Ok(message) => {
                         pending_rows::observe(connection, connection_id, &message);
+                        daemon_policy::observe(connection, connection_id, &message);
                         forward_shell_message(
                             &message,
                             connection_id,
@@ -558,6 +563,7 @@ fn mark_connected_with(
     state.decide_later = false;
     state.curated_broad_opt_in = false;
     state.analysis_export = false;
+    state.daemon_policy = Default::default();
     state.pending_rows.clear();
     link_wake::bump();
     state.connection_id
@@ -610,6 +616,7 @@ fn disconnect_and_discard(
         state.decide_later = false;
         state.curated_broad_opt_in = false;
         state.analysis_export = false;
+        state.daemon_policy = Default::default();
         state.pending_rows.clear();
         link_wake::bump();
     }
@@ -748,6 +755,11 @@ pub use snitchwatch_bridge::filter_pause::PauseState as BridgePauseState;
 pub use snitchwatch_bridge::notice::Notice as BridgeNotice;
 pub use snitchwatch_bridge::tray_state::TrayState as BridgeTrayState;
 
+#[path = "bridge_runtime/daemon_policy.rs"]
+mod daemon_policy;
+#[cfg(test)]
+#[path = "bridge_runtime/daemon_policy_tests.rs"]
+mod daemon_policy_tests;
 #[path = "bridge_runtime/pending_rows.rs"]
 mod pending_rows;
 pub use pending_rows::PendingRow;

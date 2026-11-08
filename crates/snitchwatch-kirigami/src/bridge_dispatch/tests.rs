@@ -572,3 +572,19 @@ async fn run_feed_exits_when_snapshot_client_has_stopped() {
     .await
     .expect("stopped client must release its feed");
 }
+
+#[test]
+fn daemon_policy_and_a_new_session_route_to_the_daemon_policy_readers() {
+    let policy = ServerMessage::DaemonPolicy(snitchwatch_bridge::ws_messages::DaemonPolicy {
+        refuse_source_network: true,
+        daemon_version: Some("1.9".into()),
+    });
+    assert!(interests_daemon_policy(&policy));
+    assert!(interests_daemon_policy(&ServerMessage::Authenticated {
+        capabilities: Vec::new(),
+    }));
+    assert!(!interests_daemon_policy(
+        &ServerMessage::ClearConnectionRows
+    ));
+    assert!(!interests_rules(&policy));
+}

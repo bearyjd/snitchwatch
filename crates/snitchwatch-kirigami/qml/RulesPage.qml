@@ -566,6 +566,7 @@ Kirigami.ScrollablePage {
                 if (row.appliesToAllApps) {
                     lines.push(row.allAppsHint, row.flagBadge);
                 }
+                lines.push(row.model.notLoadedReason);
                 if (row.readOnlyReason.length > 0) {
                     lines.push("read-only");
                 }
@@ -648,6 +649,17 @@ Kirigami.ScrollablePage {
                             font: Kirigami.Theme.smallFont
                             onClicked: page.openRuleByName(row.shadowBy)
                         }
+                    }
+                    // The connected daemon skips this rule (`rules::daemon_refusal`).
+                    Controls.Label {
+                        objectName: "notLoadedReason"
+                        visible: text.length > 0
+                        textFormat: Text.PlainText
+                        text: row.model.notLoadedReason
+                        wrapMode: Text.Wrap
+                        font: Kirigami.Theme.smallFont
+                        color: Kirigami.Theme.negativeTextColor
+                        Layout.fillWidth: true
                     }
                     // Issue #44: what deleting this all-apps rule changes.
                     Controls.Label {

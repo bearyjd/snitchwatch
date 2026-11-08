@@ -131,6 +131,17 @@ pub fn interests_curated_defaults(msg: &ServerMessage) -> bool {
     )
 }
 
+/// True when `msg` says what the connected daemon refuses
+/// (`DaemonPolicy`, capability `daemonPolicyV1`), or starts a session (which
+/// resets it: an older bridge sends none). The runtime keeps the latest one
+/// too (`BridgeHandles::daemon_policy`), for a reader created after it came.
+pub fn interests_daemon_policy(msg: &ServerMessage) -> bool {
+    matches!(
+        msg,
+        ServerMessage::DaemonPolicy(_) | ServerMessage::Authenticated { .. }
+    )
+}
+
 /// True when `msg` carries daemon diagnostics report data (drives
 /// `DaemonHealthModel`).
 pub fn interests_diagnostics(msg: &ServerMessage) -> bool {

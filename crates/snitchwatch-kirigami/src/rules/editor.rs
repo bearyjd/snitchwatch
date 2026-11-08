@@ -14,7 +14,9 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use snitchwatch_bridge::rule_policy::{binds_to_programs, check_wire_rule, PolicyProfile};
+use snitchwatch_bridge::rule_policy::{
+    binds_to_programs, check_wire_rule, check_wire_rule_in, PolicyContext, PolicyProfile,
+};
 use snitchwatch_bridge::translator::process_binding::is_bindable_process_path;
 use snitchwatch_proto::protocol::Operator;
 
@@ -76,6 +78,10 @@ pub struct OperandChoice {
     pub kinds: Vec<MatchKind>,
     /// What the daemon compares, in plain words.
     pub help: &'static str,
+    /// A daemon that refuses `source.network` (`PolicyContext`) refuses
+    /// this operand: the sheet hides it then, except on a condition that
+    /// already uses it.
+    pub refused_by_newer_daemon: bool,
 }
 
 const TEXT: &[MatchKind] = &[MatchKind::Exact, MatchKind::Pattern];
@@ -205,6 +211,7 @@ pub fn operands() -> Vec<OperandChoice> {
             label,
             kinds: kinds.to_vec(),
             help,
+            refused_by_newer_daemon: operand == "source.network",
         })
         .collect()
 }
@@ -291,7 +298,10 @@ impl RuleDraft {
 
     /// A draft of an existing rule, or why the editor can't change it: the
     /// bridge's `Editor` profile refuses it, or it uses a condition the
-    /// builder doesn't offer. Such rules keep toggle and delete.
+    /// builder doesn't offer. Such rules keep toggle and delete. Read for
+    /// every daemon (no `PolicyContext`): a `source.network` rule a newer
+    /// daemon refuses stays editable, so it can be changed to one it takes;
+    /// [`check_in`] refuses saving it unchanged.
     pub fn from_wire(rule: &Value) -> Result<Self, String> {
         let parsed = check_wire_rule(rule, PolicyProfile::Editor)
             .map_err(|problems| plain_problems(&problems).join(" "))?;
@@ -427,13 +437,21 @@ pub(crate) fn plain_problems(
 }
 
 /// Check a draft as the bridge will, against `old` (the cached rule it
-/// replaces, in the wire shape) when editing.
+/// replaces, in the wire shape) when editing, for a daemon of unknown
+/// version.
 pub fn check(draft: &RuleDraft, old: Option<&Value>) -> EditorCheck {
+    check_in(draft, old, PolicyContext::default())
+}
+
+/// [`check`] for the daemon `context` describes (`DaemonPolicy`). `old` is
+/// read without it: the daemon already holds that rule, and the cautions
+/// compare against it whatever the daemon would refuse now.
+pub fn check_in(draft: &RuleDraft, old: Option<&Value>, context: PolicyContext) -> EditorCheck {
     let mut result = EditorCheck {
         warnings: warnings(draft),
         ..Default::default()
     };
-    match check_wire_rule(&draft.to_wire(), PolicyProfile::Editor) {
+    match check_wire_rule_in(&draft.to_wire(), PolicyProfile::Editor, context) {
         Err(problems) => result.problems = plain_problems(&problems),
         Ok(rule) => {
             let old = old.and_then(|old| check_wire_rule(old, PolicyProfile::Editor).ok());

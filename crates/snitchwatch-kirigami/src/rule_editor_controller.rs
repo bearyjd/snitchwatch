@@ -19,6 +19,7 @@ use crate::rules::editor::{self, RuleDraft};
 use crate::rules::editor_profile;
 use crate::rules::editor_view;
 use crate::rules::simulator::SimulationForm;
+use snitchwatch_bridge::rule_policy::PolicyContext;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 const SAVING: &str = "Saving…";
@@ -50,6 +51,11 @@ pub mod qobject {
         /// The profile a new rule is for (issue #46); empty for a firewall
         /// rule.
         #[qproperty(QString, profile_id, cxx_name = "profileId")]
+        /// The live bridge said its daemon refuses `network` +
+        /// `source.network` (`DaemonPolicy`): drafts are checked for it and
+        /// the sheet hides that operand. Refreshed from the bridge runtime
+        /// on every check; headless, what a probe sets.
+        #[qproperty(bool, refuse_source_network, cxx_name = "refuseSourceNetwork")]
         type RuleEditorController = super::RuleEditorControllerRust;
 
         /// The bridge confirmed the rule; the sheet closes.
@@ -132,6 +138,7 @@ pub struct RuleEditorControllerRust {
     editing_name: QString,
     check_json: QString,
     profile_id: QString,
+    refuse_source_network: bool,
     /// The cached rule being edited, for the cautions.
     old: Option<Value>,
     pending: editor_view::Pending,
@@ -165,10 +172,25 @@ impl qobject::RuleEditorController {
         self.check_draft(draft);
     }
 
+    /// The live session's daemon policy (`DaemonPolicy`), kept in
+    /// `refuseSourceNetwork`. Without a bridge runtime, the property as set.
+    fn daemon_policy(mut self: Pin<&mut Self>) -> PolicyContext {
+        if let Some(handles) = crate::bridge_runtime::handles() {
+            let refuse = handles.daemon_policy().refuse_source_network;
+            if refuse != self.refuse_source_network {
+                self.as_mut().set_refuse_source_network(refuse);
+            }
+        }
+        PolicyContext {
+            refuse_source_network: self.refuse_source_network,
+        }
+    }
+
     fn check_draft(mut self: Pin<&mut Self>, draft: &RuleDraft) -> editor::EditorCheck {
         let profile = self.profile_id.to_string();
+        let policy = self.as_mut().daemon_policy();
         let result = if profile.is_empty() {
-            editor::check(draft, self.old.as_ref())
+            editor::check_in(draft, self.old.as_ref(), policy)
         } else {
             editor_profile::check_profile(draft, &profile)
         };

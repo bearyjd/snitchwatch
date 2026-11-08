@@ -404,6 +404,54 @@ fn operator_type_and_operand_pairings_that_crash_the_daemon_are_unsupported() {
     assert!(result.unsupported_operands.is_empty());
 }
 
+/// A daemon that refuses `source.network` (`DaemonPolicy`, opensnitchd 1.9
+/// and newer) skips a `network` + `source.network` rule when it loads its
+/// rules, and crashes on a network operand under `simple` or `regexp`: the
+/// simulator says so instead of "doesn't match". `dest.network` under
+/// `network` is unaffected.
+#[test]
+fn a_newer_daemon_refuses_source_network_and_crashes_on_other_network_pairings() {
+    let newer = base_with(|i| {
+        i.dest_ip = Some("10.0.0.1".to_string());
+        i.src_ip = Some("10.0.0.2".to_string());
+        i.refuse_source_network = true;
+    });
+    let refused = run(op("network", "source.network", "10.0.0.0/8"), &newer);
+    assert!(refused.matched_rule.is_none(), "a refused rule matched");
+    assert_eq!(refused.unsupported_operands.len(), 1, "{refused:?}");
+    assert_eq!(refused.unsupported_operands[0].operand, "source.network");
+    assert_eq!(
+        refused.unsupported_operands[0].reason,
+        "opensnitchd 1.9 and newer refuses to load this rule"
+    );
+    for operator in [
+        op("regexp", "dest.network", ".*"),
+        op("regexp", "source.network", ".*"),
+        simple("dest.network", "10.0.0.0/8"),
+    ] {
+        let result = run(operator.clone(), &newer);
+        assert!(result.matched_rule.is_none(), "{operator} matched");
+        assert_eq!(result.unsupported_operands.len(), 1, "{operator}");
+        assert_eq!(
+            result.unsupported_operands[0].reason, "opensnitchd crashes on this combination",
+            "{operator}"
+        );
+    }
+    assert!(matched(op("network", "dest.network", "10.0.0.0/8"), &newer));
+}
+
+/// Without the policy (an older bridge, or a daemon of unknown version)
+/// v1.8.0's matching stays: `source.network` matches, `regexp` just doesn't.
+#[test]
+fn without_the_daemon_policy_network_operands_match_as_v1_8_0_does() {
+    let old = base_with(|i| i.src_ip = Some("10.0.0.2".to_string()));
+    assert!(!old.refuse_source_network);
+    assert!(matched(op("network", "source.network", "10.0.0.0/8"), &old));
+    let result = run(op("regexp", "source.network", ".*"), &old);
+    assert!(result.matched_rule.is_none());
+    assert!(result.unsupported_operands.is_empty(), "{result:?}");
+}
+
 // ---- comparison semantics --------------------------------------------------
 
 #[test]

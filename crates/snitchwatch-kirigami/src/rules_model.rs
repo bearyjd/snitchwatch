@@ -28,6 +28,7 @@ use crate::rules::insights::shadow::Analysis;
 use crate::rules::insights::state::AnalysisState;
 use crate::rules::row_store::RulesStore;
 use crate::rules::simulator::SimulationForm;
+use snitchwatch_bridge::rule_policy::PolicyContext;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 
 // Roles.
@@ -66,6 +67,8 @@ const ROLE_FLAG_BADGE: i32 = 24;
 /// Where the rule comes from, and its section's heading (`rules::sections`).
 const ROLE_SOURCE_LABEL: i32 = 25;
 const ROLE_SECTION_LABEL: i32 = 26;
+/// Why the connected daemon doesn't load the rule (`rules::daemon_refusal`).
+const ROLE_NOT_LOADED_REASON: i32 = 27;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -264,6 +267,8 @@ pub struct RulesModelRust {
     command_notes_text: QString,
     /// The page's toggles and deletes waiting for a result (#152).
     commands: CommandNotes,
+    /// What the live session's daemon refuses (`DaemonPolicy`).
+    daemon_policy: PolicyContext,
 }
 
 impl qobject::RulesModel {
@@ -306,6 +311,10 @@ impl qobject::RulesModel {
             ROLE_PRECEDENCE => QVariant::from(&(row as i32)),
             ROLE_SOURCE => QVariant::from(&QString::from(rule.source().key())),
             ROLE_BLOCKLIST_ID => QVariant::from(&QString::from(&rule.source().blocklist_id())),
+            ROLE_NOT_LOADED_REASON => QVariant::from(&QString::from(
+                crate::rules::daemon_refusal::not_loaded_reason(rule, self.daemon_policy)
+                    .unwrap_or_default(),
+            )),
             _ => QVariant::default(),
         }
     }
@@ -346,6 +355,7 @@ impl qobject::RulesModel {
         roles.insert(ROLE_FLAG_BADGE, QByteArray::from("flagBadge"));
         roles.insert(ROLE_SOURCE_LABEL, QByteArray::from("sourceLabel"));
         roles.insert(ROLE_SECTION_LABEL, QByteArray::from("sectionLabel"));
+        roles.insert(ROLE_NOT_LOADED_REASON, QByteArray::from("notLoadedReason"));
         roles
     }
 
@@ -474,7 +484,11 @@ impl qobject::RulesModel {
                 return QString::from("");
             }
         };
-        let result = crate::rules::simulator::simulate(&self.store, &form.to_input());
+        let input = crate::rules::simulator::SimulationInput {
+            refuse_source_network: self.daemon_policy.refuse_source_network,
+            ..form.to_input()
+        };
+        let result = crate::rules::simulator::simulate(&self.store, &input);
         match serde_json::to_string(&result) {
             Ok(json) => QString::from(&json),
             Err(e) => {
@@ -509,6 +523,10 @@ impl qobject::RulesModel {
                         return;
                     }
                     qobject.as_mut().note_session(connection_id);
+                    // Kept by the runtime: sent once, maybe before this feed.
+                    qobject
+                        .as_mut()
+                        .set_daemon_policy(session_handles.daemon_policy());
                     qobject.apply_server_message_json(&QString::from(&json));
                 });
             },
@@ -522,6 +540,7 @@ impl qobject::RulesModel {
 fn interests_rules_and_results(msg: &ServerMessage) -> bool {
     crate::bridge_dispatch::interests_rules(msg)
         || crate::rule_commands::interests_rule_results(msg)
+        || crate::bridge_dispatch::interests_daemon_policy(msg)
 }
 
 impl qobject::RulesModel {
@@ -628,7 +647,36 @@ impl qobject::RulesModel {
         });
     }
 
+    /// What the daemon refuses changed: re-read the rows' notes about it.
+    fn set_daemon_policy(mut self: Pin<&mut Self>, policy: PolicyContext) {
+        if self.daemon_policy == policy {
+            return;
+        }
+        self.as_mut().rust_mut().daemon_policy = policy;
+        let rows = self.store.len() as i32;
+        if rows > 0 {
+            let first = self.index(0, 0, &QModelIndex::default());
+            let last = self.index(rows - 1, 0, &QModelIndex::default());
+            let mut roles = QList::<i32>::default();
+            roles.append(ROLE_NOT_LOADED_REASON);
+            self.as_mut().data_changed(&first, &last, &roles);
+        }
+    }
+
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
+        // A new session starts from v1.8.0's rules; an older bridge sends no
+        // policy after it.
+        match &msg {
+            ServerMessage::Authenticated { .. } => {
+                return self.set_daemon_policy(PolicyContext::default());
+            }
+            ServerMessage::DaemonPolicy(policy) => {
+                return self.set_daemon_policy(PolicyContext {
+                    refuse_source_network: policy.refuse_source_network,
+                });
+            }
+            _ => {}
+        }
         if let ServerMessage::RuleCommandResult { .. } = msg {
             let finished = {
                 let this = self.as_mut().rust_mut().get_mut();

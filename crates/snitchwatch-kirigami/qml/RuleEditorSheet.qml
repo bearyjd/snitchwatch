@@ -110,6 +110,16 @@ SizedOverlaySheet {
         sheet.update({ conditions: list });
     }
 
+    // The operands a condition's picker offers: all of them, except one the
+    // connected daemon refuses (`refusedByNewerDaemon`, while the controller's
+    // `refuseSourceNetwork` is set) unless this condition already uses it.
+    function operandChoices(current) {
+        const refusing = !!sheet.controller && sheet.controller.refuseSourceNetwork;
+        return sheet.catalogue.operands.filter(function (o) {
+            return !refusing || !o.refusedByNewerDaemon || o.operand === current;
+        });
+    }
+
     function operandInfo(operand) {
         return sheet.catalogue.operands.find(function (o) { return o.operand === operand; })
             || { operand: operand, kinds: ["exact"], help: "" };
@@ -275,6 +285,7 @@ SizedOverlaySheet {
                 required property int index
                 readonly property var condition: sheet.draft.conditions[index] || ({})
                 readonly property var info: sheet.operandInfo(conditionRow.condition.operand)
+                readonly property var choices: sheet.operandChoices(conditionRow.condition.operand)
                 Layout.fillWidth: true
                 spacing: 0
 
@@ -283,14 +294,14 @@ SizedOverlaySheet {
                     RoundedComboBox {
                         objectName: "editorOperand"
                         Accessible.name: "Condition " + (conditionRow.index + 1) + ": " + displayText
-                        model: sheet.catalogue.operands.map(function (o) {
+                        model: conditionRow.choices.map(function (o) {
                             return o.group + ": " + o.label;
                         })
-                        currentIndex: sheet.catalogue.operands.findIndex(function (o) {
+                        currentIndex: conditionRow.choices.findIndex(function (o) {
                             return o.operand === conditionRow.condition.operand;
                         })
                         onActivated: function (i) {
-                            sheet.chooseOperand(conditionRow.index, sheet.catalogue.operands[i].operand);
+                            sheet.chooseOperand(conditionRow.index, conditionRow.choices[i].operand);
                         }
                     }
                     RoundedComboBox {

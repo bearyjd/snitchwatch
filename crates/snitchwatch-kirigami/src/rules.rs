@@ -29,6 +29,7 @@
 
 pub mod all_apps;
 pub mod command_notes;
+pub mod daemon_refusal;
 pub mod deciding;
 pub mod editor;
 pub mod editor_profile;
