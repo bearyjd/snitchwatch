@@ -36,7 +36,7 @@ fn recipe_config_defaults_to_allow_on_the_per_user_tcp_bind() {
 /// both shipped daemon configs pin the module directory the image installs
 /// to. `Ebpf.ModulesPath` is a real key (vendor/opensnitch
 /// daemon/procmon/ebpf/config.go:7); when set, `LoadEbpfModule` searches only
-/// that path (daemon/core/ebpf.go:25-27).
+/// that path (daemon/core/ebpf.go:23-25).
 #[test]
 fn both_daemon_configs_pin_the_ebpf_modules_path() {
     for rel in [

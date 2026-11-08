@@ -86,12 +86,16 @@ a B always also looks like a D.
      `rpm2cpio ... | cpio -idmv` in a scratch dir and copy them to
      `/usr/local/lib/opensnitchd/ebpf/` (writable on ostree; the daemon searches it
      first). Do not write to `/usr/lib` on an atomic image.
-   - The daemon searches `/usr/local/lib/opensnitchd/ebpf`, then `/usr/lib/opensnitchd/ebpf`,
-     then the deprecated `/etc/opensnitchd` (`daemon/core/ebpf.go:14-18`), and a failed load
-     `continue`s to the next path (`daemon/core/ebpf.go:43,48,53`). **Check all three directories for
-     stale `.o` files** (`ls -l` each), because a stale copy earlier in the order loads
-     instead of the test copy and a later one can mask a failure. Leave `Ebpf.ModulesPath`
-     unset (setting it restricts the search to that path).
+   - The shipped configs pin `"Ebpf":{"ModulesPath":"/usr/lib/opensnitchd/ebpf"}`, and when
+     it is set only that directory is searched (`daemon/core/ebpf.go:23-25`). For a copy in
+     `/usr/local`, ALSO set `"Ebpf":{"ModulesPath":"/usr/local/lib/opensnitchd/ebpf"}` in
+     the test config, or the daemon will not see it and the run scores a false D. With
+     the path pinned, check that one directory (`ls -l`) for stale `.o` files.
+   - Only if `ModulesPath` is unset does the daemon search `/usr/local/lib/opensnitchd/ebpf`,
+     then `/usr/lib/opensnitchd/ebpf`, then the deprecated `/etc/opensnitchd`
+     (`daemon/core/ebpf.go:14-18`), `continue`ing past a failed load (`daemon/core/ebpf.go:43,48,53`);
+     then check all three for stale `.o` files, since an earlier stale copy loads instead of
+     the test copy and a later one can mask a failure.
 4. Config: **set `"ProcMonitorMethod": "ebpf"` explicitly and `"LogLevel": -1`** (TRACE; 0 is
    DEBUG, 1 INFO, `log/log.go:36-46`) in the test config. If the image pins `proc` (the tower did; the shipped configs and `stage.sh` do not, `docs/packaging/system-bridge-integration.md:102-111`),
    a `proc` result from

@@ -106,7 +106,8 @@ said the bazzite-tower image overwrites the method to `"proc"` because eBPF
 failed to load on the owner's laptop kernel, snitchwatch#6. That failure was
 later shown to be a rootless-container permission artifact; the baked daemon
 runs as root and ebpf loads, see `packaging/bluebuild/recipe.yml` and
-`docs/superpowers/specs/2026-10-22-ebpf-groundwork.md`. Whether a given image
+`docs/superpowers/specs/2026-10-22-ebpf-groundwork.md`. Because `ModulesPath` is pinned, modules added under `/usr/local/lib/opensnitchd/ebpf`
+need a config edit to be found. Whether a given image
 actually has the module files installed is a separate question; the load-test
 runbook is `docs/superpowers/research/2026-11-07-ebpf-load-test-runbook.md`.) The BTF
 requirement is explained in
