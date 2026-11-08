@@ -31,7 +31,7 @@ cilium/ebpf 0.22. No release is coming soon. Newest master commit: `a1353848ba1b
   daemon (`go` is not installed here); the tower's builder must have Go >= 1.25 (**UNVERIFIED**).
 - ~21 files cite `vendor/opensnitch/...:LINE`. At risk: `notifications.go` citations in
   `grpc_server.rs:618`, `translator/rule_notification.rs:12,52`, `tests/bridge_protocol_test/rules.rs:19`,
-  `HANDOFF.md:837`, plan q04:26; the eBPF runbook (`ebpf.go:56,147-187`) and plan
+  `HANDOFF.md` (the `notifications.go:405-408` cite, line 853 at #340's head), plan q04:26; the eBPF runbook (`ebpf.go:56,147-187`) and plan
   `2026-10-29-ebpf-q05-q06.md:96-141`.
 - "stock v1.8.0 ..." behavioural comments across crates describe the shipped daemon: leave them.
 
@@ -49,7 +49,7 @@ cilium/ebpf 0.22. No release is coming soon. Newest master commit: `a1353848ba1b
    log-string/line cites "at v1.8.0 / re-check on the pinned commit". Add a runbook procedure: build the
    daemon + the three `.o` modules from the pin as a matched pair (Go >= 1.25 for the daemon).
 6. **Review the 25 daemon commits** (`git log v1.8.0..a1353848 -- daemon`) for behaviour the bridge relies
-   on (`notifications.go` +7/-3 touches CHANGE_CONFIG handling; `ui/`, `rule/`, `stats`): a read-only reviewer
+   on (`notifications.go` +7/-3 is `getClientConfig()` taking one `GetAll()` snapshot (a panic fix; CHANGE_CONFIG is unchanged; later lines shift by +4); `ui/`, `rule/`, `stats`): a read-only reviewer
    report is a precondition for merging.
 
 ## Verification

@@ -17,7 +17,7 @@ NEVER your conclusion) AND codex as an extra reviewer (`codex exec` needs `</dev
 1. `.omc/STATE.md`, `gh pr list`, `gh issue list`, `git worktree list`, `df -h /tmp` (32G tmpfs; it filled on 2026-11-08), `git fetch`.
 2. Untracked plan files in the primary checkout block `git merge --ff-only`. Move a file aside ONLY if `git show origin/main:FILE | cmp - FILE` says
    identical. `docs/superpowers/plans/2026-11-08-opensnitch-master-pin.md` is committed on the PR #340 branch (w4) but until #340 merges it is only
-   untracked in the primary checkout: do not move it before then; after #340 merges its copy is cmp-identical and can be moved aside.
+   untracked in the primary checkout: do not move it before then; after #340 merges its copy is cmp-identical and can be moved aside. If a copy differs from the committed one, it is an older draft: `diff` it, then move it to `/var/home/user/.cache/`.
 3. Message `bazzite-tower-94` only with facts (SHAs). Never ask it to cut, promote, publish or repin.
 
 ## Step 0: critique and checkpoint (about 25 minutes)
@@ -26,11 +26,11 @@ applied). Then task 0.
 
 ## Tasks, in order (A before B and before the pin; cut order at the bottom)
 0. **PR #340** (HANDOFF 2026-11-08 + this plan; docs branch worktree `/var/home/user/w4`, branch `docs/handoff-2026-11-08`). Independent Opus review of the
-   HANDOFF facts against `git`/`gh` on the exact head (this session had to correct its own text twice), then merge on green. Do NOT open a second docs PR
+   HANDOFF facts against `git`/`gh` on the exact head (this session had to correct its own text twice), then merge on green (Opus review + codex, per the Merge rule). If #340 is still open, it hit the 3-review-round bound on 2026-11-08 night with only text findings: re-verify its head once, fix, merge. Do NOT open a second docs PR
    with this plan: task 6 appends the run's outcome to HANDOFF in a follow-up PR from a fresh branch off main.
 1. **PR A: version-gated `source.network`** (`feat/source-network-gate`, worktree `/var/home/user/w3`, plan `2026-11-08-source-network-gate.md`, committed
    in the w3 commit). STATE AT HAND-OFF: written by an opus executor, verified (clippy -D warnings clean; proto/bridge/bridge-cli/mock suites pass),
-   committed LOCALLY as `00094160`, NOT pushed, no PR, no review. Do, in order: (a) `git -C /var/home/user/w3 log -1` / `status`; (b) apply the default for the
+   committed LOCALLY as `00094160`, NOT pushed, no PR, no review (SUPERSEDED: later pushed as PR #341; STATE.md has its head, and step (b) was applied on it). Do, in order: (a) `git -C /var/home/user/w3 log -1` / `status`; (b) apply the default for the
    open design point: in `version_gate.rs` `refuses_conditions`, only the `validate_operator_in(op, context)` call becomes `rule.enabled && ...`; the
    missing-operator refusal stays for every rule; add TWO failing-first tests (turning OFF a `source.network` rule is accepted on a 1.9 daemon; turning
    it ON is refused with the exact message). Rationale (verified in a1353848): `loader.go:261-268,431` skips `Compile()` for disabled rules; the CLI already
@@ -96,7 +96,7 @@ only `git worktree remove`. Any edit to `CLAUDE.md` must be reviewed, never just
 ## Owner-only on waking
 1. Merge the pin PR (or not). 2. Broker on exit 3: show the report with a containment warning instead of discarding it? 3. Ask the tower to confirm the root-only socket on
 r16.x (#35, #178). 4. CI speed-up yes/no. 5. Branch protection + README note on the fork `snitchwatch/stable`, before the pin's URL switch matters. 6. Tower manual check of
-the single-instance GUI. 7. The eBPF load test in the tower VM (you present). 8. Whether r16.2 carries the master daemon (only after the load test). 9. The 127 remote branches.
+the single-instance GUI. 7. The eBPF load test in the tower VM (you present). 8. Whether r16.2 carries the master daemon (only after the load test). 9. The ~130 remote branches.
 10. A primary with no window still answers `Activate`: design. 11. The exit-alarm-on-timed-out-wait change (cut from this run).
 
 ## Morning report (numbered, short)
