@@ -121,7 +121,7 @@ journalctl --user -u 'app-flatpak-org.snitchwatch.Snitchwatch-*' --since -10min
 ## Candidate publication CI
 
 The clean system-profile candidate builder and fixed prerelease publisher are
-specified in [r16.1 candidate GUI CI](../../docs/packaging/r13-candidate-gui-ci.md).
+specified in [r16.2 candidate GUI CI](../../docs/packaging/r13-candidate-gui-ci.md).
 Primary-reviewed immutable SHA authorization and green native/QML CI precede
 the guarded candidate-branch push; the publisher judges the newest exact-head
 CI run, skipping only an unfinished first attempt such as the one that push

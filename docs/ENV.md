@@ -124,7 +124,7 @@ lines, sourced by the justfile and scripts).
 | `SNITCHWATCH_TRAY_TEST_SDK` | `crates/snitchwatch-kirigami/tests/native-tray/run.sh:58` | Flatpak SDK for the native tray fixture; default `org.kde.Sdk//6.11`. |
 | `SNITCHWATCH_WEB_BASE`, `SNITCHWATCH_TAURI_BASE` | `tests/web_smoke/playwright.config.ts:11`, `tests/tauri_smoke/playwright.config.ts:10` | Playwright base URL; default `http://127.0.0.1:3031`. |
 | `SNITCHWATCH_MOCK_DAEMON_RUNNING` | `tests/tauri_smoke/tests/wizard_branches.spec.ts:26`, `tray_states.spec.ts:25` | When unset, those specs skip (they need `mock_opensnitchd` on `127.0.0.1:50051`). |
-| `R16_1_CANDIDATE_REVIEWED_SHA` | repository variable (`vars.`), `.github/workflows/candidate-gui.yml` | Owner-set full SHA authorising the candidate build and publish. Not a secret; the owner sets it (see `docs/RUNBOOK.md`). |
+| `R16_2_CANDIDATE_REVIEWED_SHA` | repository variable (`vars.`), `.github/workflows/candidate-gui.yml` | Owner-set full SHA authorising the candidate build and publish. Not a secret; the owner sets it (see `docs/RUNBOOK.md`). |
 | `XDG_{DATA,CONFIG,CACHE}_HOME` | `.github/workflows/candidate-gui.yml:53-55` | Job-local dirs under `runner.temp`. |
 
 No `.env.example` exists in the repo and no `.env` file is read by the code.
