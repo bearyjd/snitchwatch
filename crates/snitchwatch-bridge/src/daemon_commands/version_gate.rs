@@ -28,15 +28,16 @@ impl DaemonCommands {
     }
 
     /// Whether [`Self::send`] refuses `notification` for its conditions: a
-    /// `CHANGE_RULE` with a rule that has no operator, or one
-    /// [`validate_operator_in`] refuses for the connected daemon.
+    /// `CHANGE_RULE` with a rule that has no operator, or an enabled one
+    /// [`validate_operator_in`] refuses for the connected daemon (the daemon
+    /// does not compile disabled rules, so turning one off stays allowed).
     pub(super) fn refuses_conditions(&self, notification: &Notification) -> bool {
         let context = self.policy_context();
         notification.r#type == Action::ChangeRule as i32
             && notification.rules.iter().any(|rule| {
                 rule.operator
                     .as_ref()
-                    .is_none_or(|op| validate_operator_in(op, context).is_err())
+                    .is_none_or(|op| rule.enabled && validate_operator_in(op, context).is_err())
             })
     }
 }
@@ -91,6 +92,25 @@ mod tests {
         assert!(commands.clone().policy_context().refuse_source_network);
         version.set(None);
         assert_eq!(sent("source.network"), Some(SendError::NoDaemon));
+    }
+
+    #[test]
+    fn a_1_9_daemon_accepts_turning_a_source_network_rule_off_but_not_on() {
+        let version = SharedDaemonVersion::default();
+        version.set(DaemonVersion::parse("1.9.0"));
+        let commands = DaemonCommands::new(
+            DaemonTransport::Tcp,
+            RulesSync::new(broadcast::channel(8).0),
+        )
+        .with_daemon_version(version);
+        // The daemon skips `Compile()` for a disabled rule, so turning one
+        // off is safe; turning it on would make the daemon refuse to load it.
+        assert!(!commands.refuses_conditions(&change("source.network", false)));
+        assert!(commands.refuses_conditions(&change("source.network", true)));
+        assert_eq!(
+            commands.send(change("source.network", true)).err(),
+            Some(SendError::RefusedOperator)
+        );
     }
 
     #[test]
