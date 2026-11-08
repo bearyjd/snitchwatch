@@ -5,7 +5,7 @@
 
 use snitchwatch_proto::protocol::{Action, Notification};
 
-use tracing::warn;
+use tracing::debug;
 
 use super::{lock, ConnKey, DaemonCommands, Inner};
 use crate::daemon_config::{DaemonVersion, SharedDaemonVersion};
@@ -35,11 +35,15 @@ impl DaemonCommands {
         let inner = lock(&self.inner);
         let holder = inner.current.and_then(|id| inner.streams.get(&id));
         if let Some(holder) = holder.filter(|open| open.conn != peer) {
-            warn!(
-                ?peer,
-                holder = ?holder.conn,
-                "ignoring the daemon version in a ping from a peer that does not hold the stream"
-            );
+            // `debug`, not `warn`: any local peer on the TCP transport can ping
+            // at will, and a redial leaves a stale stream for about a second.
+            if version.is_some() {
+                debug!(
+                    ?peer,
+                    holder = ?holder.conn,
+                    "ignoring the daemon version in a ping from a peer that does not hold the stream"
+                );
+            }
             return false;
         }
         self.daemon_version.observe(version)
