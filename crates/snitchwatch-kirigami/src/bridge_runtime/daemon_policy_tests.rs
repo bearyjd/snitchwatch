@@ -107,7 +107,18 @@ async fn a_changed_policy_wakes_link_watchers() {
     daemon_policy::mark_advertised(&connection, session, true);
     let mut wake = link_wake::subscribe();
     wake.borrow_and_update();
-    daemon_policy::observe(&connection, session, &policy(true));
+    // Only a real change reports `true` (and so wakes); the same policy again
+    // and another session's frame do not.
+    assert!(daemon_policy::observe(&connection, session, &policy(true)));
     assert!(wake.has_changed().expect("the sender lives forever"));
     assert_eq!(handles.daemon_policy(), REFUSES);
+    assert!(!daemon_policy::observe(&connection, session, &policy(true)));
+    assert!(!daemon_policy::observe(
+        &connection,
+        session + 1,
+        &policy(false)
+    ));
+    assert_eq!(handles.daemon_policy(), REFUSES);
+    assert!(daemon_policy::observe(&connection, session, &policy(false)));
+    assert_eq!(handles.daemon_policy(), PolicyContext::default());
 }

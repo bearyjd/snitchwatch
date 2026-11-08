@@ -43,18 +43,19 @@ pub(super) fn mark_advertised(
 /// Keep session `connection_id`'s latest `DaemonPolicy`. Ignored from a
 /// session that has been replaced, or whose bridge didn't advertise it. A
 /// change (the daemon was replaced) wakes `link_wake`, so open sheets that
-/// follow the policy re-read it without a new frame of their own.
+/// follow the policy re-read it without a new frame of their own. Returns
+/// whether the stored policy changed (only then is the wake sent).
 pub(super) fn observe(
     connection: &Mutex<ConnectionState>,
     connection_id: u64,
     message: &ServerMessage,
-) {
+) -> bool {
     let ServerMessage::DaemonPolicy(policy) = message else {
-        return;
+        return false;
     };
     let mut state = connection.lock().unwrap_or_else(|p| p.into_inner());
     if state.connection_id != connection_id || !state.daemon_policy.advertised {
-        return;
+        return false;
     }
     let previous = state.daemon_policy;
     state.daemon_policy = SessionPolicy {
@@ -68,6 +69,7 @@ pub(super) fn observe(
     if changed {
         super::link_wake::bump();
     }
+    changed
 }
 
 impl BridgeHandles {

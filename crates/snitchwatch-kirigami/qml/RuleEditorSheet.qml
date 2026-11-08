@@ -177,8 +177,11 @@ SizedOverlaySheet {
         }
         // The daemon's policy changed while open: re-check the draft so its
         // problems (and Save) follow; the operand pickers re-bind on their own.
+        // Deferred: the change can be signalled from inside a controller call.
         function onRefuseSourceNetworkChanged() {
-            if (sheet.visible) sheet.controller.check(JSON.stringify(sheet.draft));
+            Qt.callLater(function () {
+                if (sheet.visible) sheet.controller.check(JSON.stringify(sheet.draft));
+            });
         }
     }
 
