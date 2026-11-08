@@ -33,6 +33,15 @@ use snitchwatch_proto::protocol::Rule;
 // the same allowance rather than boxing just for its own sake.
 #[allow(clippy::result_large_err)]
 pub fn validate_rule_shape(rule: &Rule) -> Result<(), MockError> {
+    validate_rule_shape_for(rule, DEFAULT_VERSION)
+}
+
+/// [`validate_rule_shape`] for a daemon reporting `version`: from 1.9
+/// (upstream master's `Compile`, `operator.go:186-188` there) a `network`
+/// condition compiles only with `dest.network`. An unreadable version is
+/// v1.8.0's rules, as the bridge reads it.
+#[allow(clippy::result_large_err)]
+pub fn validate_rule_shape_for(rule: &Rule, version: &str) -> Result<(), MockError> {
     validate_rule_name(&rule.name)?;
     validate_duration(&rule.duration)?;
 
@@ -40,8 +49,23 @@ pub fn validate_rule_shape(rule: &Rule) -> Result<(), MockError> {
         .operator
         .as_ref()
         .ok_or_else(|| MockError::InvalidRule("operator is None".to_string()))?;
-    validate_operator_compiles(operator)?;
+    validate_operator_compiles(operator, dest_network_only(version))?;
     Ok(())
+}
+
+/// The version a mock reports unless a test picks another (the shipped
+/// daemon's).
+pub const DEFAULT_VERSION: &str = "1.8.0";
+
+/// Whether a daemon reporting `version` (its first `major.minor`) is 1.9 or
+/// newer.
+pub fn dest_network_only(version: &str) -> bool {
+    static MAJOR_MINOR: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re =
+        MAJOR_MINOR.get_or_init(|| regex::Regex::new(r"([0-9]+)\.([0-9]+)").expect("valid regex"));
+    re.captures(version)
+        .and_then(|c| Some((c[1].parse::<u32>().ok()?, c[2].parse::<u32>().ok()?)))
+        .is_some_and(|major_minor| major_minor >= (1, 9))
 }
 
 /// The `operator.type` vocabulary the daemon actually recognizes
@@ -86,6 +110,12 @@ const KNOWN_OPERANDS: &[&str] = &[
 /// (operator.go `Match`: `OpDstNetwork`, `OpSrcNetwork`, `OpNetLists`).
 const IP_OPERANDS: &[&str] = &["dest.network", "source.network", "lists.nets"];
 
+/// `lists.ips` is a string in v1.8.0's `Match` (`con.DstIP.String()`) and
+/// panics upstream master outside the `lists` type: only `lists` compiles
+/// it either way. Not an [`IP_OPERANDS`] member, which would let the
+/// `network` type (`cmpNetwork`'s `value.(net.IP)`) take it.
+const LISTS_ONLY_OPERANDS: &[&str] = &["lists.ips"];
+
 fn is_known_operand(operand: &str) -> bool {
     KNOWN_OPERANDS.contains(&operand) || operand.starts_with("process.env.")
 }
@@ -112,7 +142,10 @@ fn is_known_operand(operand: &str) -> bool {
 /// time canary for that failure mode, mirroring [`validate_rule_name`]'s
 /// FIX-1-canary role.
 #[allow(clippy::result_large_err)]
-fn validate_operator_compiles(op: &snitchwatch_proto::protocol::Operator) -> Result<(), MockError> {
+fn validate_operator_compiles(
+    op: &snitchwatch_proto::protocol::Operator,
+    dest_network_only: bool,
+) -> Result<(), MockError> {
     if !KNOWN_OPERATOR_TYPES.contains(&op.r#type.as_str()) {
         return Err(MockError::InvalidRule(format!(
             "unknown operator type: `{}`",
@@ -161,6 +194,18 @@ fn validate_operator_compiles(op: &snitchwatch_proto::protocol::Operator) -> Res
                 .to_string(),
         ));
     }
+    if LISTS_ONLY_OPERANDS.contains(&op.operand.as_str()) && op.r#type != "lists" {
+        return Err(MockError::InvalidRule(
+            "a lists.ips operand without the lists type would panic the daemon or never match"
+                .to_string(),
+        ));
+    }
+    if dest_network_only && op.r#type == "network" && op.operand == "source.network" {
+        return Err(MockError::InvalidRule(
+            "opensnitchd 1.9 and newer only accepts dest.network for a network condition"
+                .to_string(),
+        ));
+    }
 
     // `Deserialize` (rule.go:113-127) keeps members only for the `list`
     // type, and only one level deep.
@@ -189,7 +234,7 @@ fn validate_operator_compiles(op: &snitchwatch_proto::protocol::Operator) -> Res
                         .to_string(),
                 ));
             }
-            validate_operator_compiles(member)?;
+            validate_operator_compiles(member, dest_network_only)?;
         }
     }
 

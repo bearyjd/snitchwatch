@@ -29,7 +29,7 @@ use snitchwatch_proto::protocol::{Operator, Rule};
 
 use crate::profiles::store::ProfileRule;
 use crate::rule_name::{is_reserved_profile_name, PROFILE_RULE_NAME_PREFIX};
-use crate::rule_policy::{validate_user_rule, PolicyProfile, RuleProblem};
+use crate::rule_policy::{validate_user_rule_in, PolicyContext, PolicyProfile, RuleProblem};
 
 /// The band prefix, under its Part 1 name.
 pub const PROFILE_BAND_PREFIX: &str = PROFILE_RULE_NAME_PREFIX;
@@ -66,6 +66,15 @@ pub fn rule_name(profile_id: &str, rule_id: &str) -> String {
 /// The daemon rule for one of `profile_id`'s rules, or why it can't be
 /// installed.
 pub fn materialize_rule(profile_id: &str, rule: &ProfileRule) -> Result<Rule, Vec<RuleProblem>> {
+    materialize_rule_in(profile_id, rule, PolicyContext::default())
+}
+
+/// [`materialize_rule`] for the daemon `context` describes.
+pub fn materialize_rule_in(
+    profile_id: &str,
+    rule: &ProfileRule,
+    context: PolicyContext,
+) -> Result<Rule, Vec<RuleProblem>> {
     if !valid_rule_id(&rule.id) {
         // Part 1 took any id; one that isn't a plain token could name the
         // same rule as another.
@@ -99,7 +108,7 @@ pub fn materialize_rule(profile_id: &str, rule: &ProfileRule) -> Result<Rule, Ve
         duration: "always".into(),
         operator: Some(operator),
     };
-    validate_user_rule(&materialized, PolicyProfile::ProfileRule)?;
+    validate_user_rule_in(&materialized, PolicyProfile::ProfileRule, context)?;
     Ok(materialized)
 }
 
@@ -126,12 +135,21 @@ pub fn materialize_profile(
     profile_id: &str,
     rules: &[ProfileRule],
 ) -> Vec<(String, Result<Rule, Vec<RuleProblem>>)> {
+    materialize_profile_in(profile_id, rules, PolicyContext::default())
+}
+
+/// [`materialize_profile`] for the daemon `context` describes.
+pub fn materialize_profile_in(
+    profile_id: &str,
+    rules: &[ProfileRule],
+    context: PolicyContext,
+) -> Vec<(String, Result<Rule, Vec<RuleProblem>>)> {
     let mut seen = std::collections::HashSet::new();
     rules
         .iter()
         .map(|rule| {
             let outcome = if seen.insert(rule.id.as_str()) {
-                materialize_rule(profile_id, rule)
+                materialize_rule_in(profile_id, rule, context)
             } else {
                 Err(vec![RuleProblem {
                     path: "id".into(),

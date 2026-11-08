@@ -185,6 +185,45 @@ fn validate_rule_shape_rejects_an_ip_operand_without_the_network_type() {
 }
 
 #[test]
+fn source_network_compiles_before_1_9_only() {
+    let source = leaf_rule("network", "source.network", "192.168.0.0/16");
+    let dest = leaf_rule("network", "dest.network", "192.168.0.0/16");
+    let listed = list_rule(vec![
+        list_member("network", "source.network", "10.0.0.0/8"),
+        list_member("simple", "dest.port", "22"),
+    ]);
+    assert_eq!(DEFAULT_VERSION, "1.8.0");
+    assert!(validate_rule_shape(&source).is_ok());
+    for older in ["1.8.0", "mock-1.8.0", "mock-1.6.0", "1.8", "", "garbage"] {
+        assert!(!dest_network_only(older), "{older:?}");
+        assert!(validate_rule_shape_for(&source, older).is_ok(), "{older:?}");
+        assert!(validate_rule_shape_for(&listed, older).is_ok(), "{older:?}");
+    }
+    for newer in ["1.9.0", "mock-1.9.0", "v1.9.0-rc1", "1.10", "2.0.1"] {
+        let err = validate_rule_shape_for(&source, newer).unwrap_err();
+        assert!(
+            matches!(&err, MockError::InvalidRule(msg) if msg.contains("only accepts dest.network")),
+            "{newer}: {err:?}"
+        );
+        assert!(validate_rule_shape_for(&listed, newer).is_err(), "{newer}");
+        assert!(validate_rule_shape_for(&dest, newer).is_ok(), "{newer}");
+    }
+}
+
+#[test]
+fn lists_ips_compiles_only_with_the_lists_type() {
+    for r#type in ["simple", "regexp", "network"] {
+        let err = validate_rule_shape(&leaf_rule(r#type, "lists.ips", "/tmp/x")).unwrap_err();
+        assert!(
+            matches!(&err, MockError::InvalidRule(msg) if msg.contains("panic")),
+            "{}: {err:?}",
+            r#type
+        );
+    }
+    assert!(validate_rule_shape(&leaf_rule("lists", "lists.ips", "/tmp/x")).is_ok());
+}
+
+#[test]
 fn validate_rule_shape_rejects_a_nested_list() {
     let inner = list_rule(vec![list_member("simple", "dest.host", "example.com")])
         .operator

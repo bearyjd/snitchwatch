@@ -289,8 +289,9 @@ impl ImportTask {
         if self.on_tcp() {
             return Err(TCP_REFUSED);
         }
+        let context = self.commands.policy_context();
         let checked = tokio::task::spawn_blocking(move || {
-            rule_io::parse_document(document).map(|doc| rule_io::check_rules(&doc))
+            rule_io::parse_document(document).map(|doc| rule_io::check_rules_in(&doc, context))
         })
         .await;
         let checked = match checked {

@@ -23,7 +23,9 @@ use tokio::sync::mpsc;
 use tonic::transport::{Channel, Endpoint};
 
 use rule_validation::validate_duration;
-pub use rule_validation::validate_rule_shape;
+pub use rule_validation::{
+    dest_network_only, validate_rule_shape, validate_rule_shape_for, DEFAULT_VERSION,
+};
 
 /// The real daemon's `AskRule` deadline
 /// (`vendor/opensnitch/daemon/ui/client.go:366`, `context.WithTimeout(...,
@@ -99,6 +101,9 @@ pub enum MockError {
 #[derive(Clone)]
 pub struct MockOpensnitchd {
     client: UiClient<Channel>,
+    /// What this daemon reports in `Subscribe` and `Ping`, and the rules it
+    /// compiles ([`validate_rule_shape_for`]).
+    version: String,
 }
 
 // Same `MockError::Rpc(tonic::Status)` large variant as `validate_rule_shape`
@@ -112,7 +117,24 @@ impl MockOpensnitchd {
     pub fn from_channel(channel: Channel) -> Self {
         Self {
             client: UiClient::new(channel),
+            version: DEFAULT_VERSION.to_string(),
         }
+    }
+
+    /// Report `version` (default [`DEFAULT_VERSION`]) and compile rules as
+    /// that daemon does.
+    pub fn with_version(mut self, version: &str) -> Self {
+        self.version = version.to_string();
+        self
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// The version string as this mock reports it.
+    fn reported_version(&self) -> String {
+        format!("mock-{}", self.version)
     }
 
     /// Dial the bridge at `addr`. Caller is responsible for ensuring the
@@ -125,11 +147,7 @@ impl MockOpensnitchd {
         let mut last_err = None;
         for _ in 0..20 {
             match endpoint.connect().await {
-                Ok(channel) => {
-                    return Ok(Self {
-                        client: UiClient::new(channel),
-                    });
-                }
+                Ok(channel) => return Ok(Self::from_channel(channel)),
                 Err(e) => {
                     last_err = Some(e);
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -182,7 +200,7 @@ impl MockOpensnitchd {
             snitchwatch_proto::protocol::Statistics {
                 rules,
                 uptime,
-                daemon_version: "mock-1.8.0".to_string(),
+                daemon_version: self.reported_version(),
                 ..Default::default()
             },
         )
@@ -193,7 +211,7 @@ impl MockOpensnitchd {
         let cfg = ClientConfig {
             id: 1,
             name: name.to_string(),
-            version: "mock-1.6.0".to_string(),
+            version: self.reported_version(),
             ..Default::default()
         };
         let echoed = self.client.subscribe(cfg).await?.into_inner();
@@ -202,11 +220,15 @@ impl MockOpensnitchd {
 
     /// Like [`Self::subscribe`], but takes a full `ClientConfig` the
     /// caller controls — used by tests that need to drive a specific
-    /// `is_firewall_running`/`config` value through the bridge.
+    /// `is_firewall_running`/`config` value through the bridge. An empty
+    /// `version` is filled in with this mock's.
     pub async fn subscribe_with_config(
         &mut self,
-        cfg: ClientConfig,
+        mut cfg: ClientConfig,
     ) -> Result<ClientConfig, MockError> {
+        if cfg.version.is_empty() {
+            cfg.version = self.reported_version();
+        }
         let echoed = self.client.subscribe(cfg).await?.into_inner();
         Ok(echoed)
     }
@@ -226,7 +248,7 @@ impl MockOpensnitchd {
             .await
             .map_err(|_elapsed| MockError::AskRuleTimedOut(deadline))??
             .into_inner();
-        validate_rule_shape(&rule)?;
+        validate_rule_shape_for(&rule, &self.version)?;
         Ok(rule)
     }
 
@@ -246,7 +268,7 @@ impl MockOpensnitchd {
         let mut request = tonic::Request::new(conn);
         request.set_timeout(deadline);
         let rule = self.client.ask_rule(request).await?.into_inner();
-        validate_rule_shape(&rule)?;
+        validate_rule_shape_for(&rule, &self.version)?;
         Ok(rule)
     }
 

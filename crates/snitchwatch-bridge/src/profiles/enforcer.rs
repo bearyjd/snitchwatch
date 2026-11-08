@@ -33,6 +33,7 @@ use crate::cache::rules::{RulesCache, SharedRulesCache};
 use crate::daemon_commands::{CommandError, DaemonCommands, ProfileCommand, SendError};
 use crate::profiles::materializer::made_by_bridge;
 use crate::rule_name::is_reserved_profile_name;
+use crate::rule_policy::PolicyContext;
 
 /// How long one profile rule command waits for the daemon.
 pub const PROFILE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -58,6 +59,12 @@ pub trait ProfileRuleSink: Send + Sync + 'static {
     /// Why this sink installs nothing at all, if it doesn't.
     fn not_applied_reason(&self) -> Option<&str> {
         None
+    }
+
+    /// The checks for the daemon this sink installs rules in (its
+    /// version's); a sink with no daemon behind it has v1.8.0's.
+    fn policy_context(&self) -> PolicyContext {
+        PolicyContext::default()
     }
 }
 
@@ -189,6 +196,10 @@ impl DaemonProfileSink {
 
 #[async_trait]
 impl ProfileRuleSink for DaemonProfileSink {
+    fn policy_context(&self) -> PolicyContext {
+        self.commands.policy_context()
+    }
+
     async fn apply(&self, wanted: &[Rule]) -> Vec<Enforcement> {
         let Some(cached) = self.cached_profile_rules() else {
             let reason = RULES_UNKNOWN_REASON.to_string();

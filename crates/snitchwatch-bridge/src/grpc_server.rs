@@ -114,6 +114,9 @@ pub struct UiService {
     /// The daemon's own settings from its latest `subscribe`
     /// (`crate::daemon_config`).
     daemon_config: crate::daemon_config::SharedDaemonConfig,
+    /// The daemon's version from its latest `subscribe` (or a `ping`, when
+    /// that gave none); `commands` checks rules against it.
+    daemon_version: crate::daemon_config::SharedDaemonVersion,
     /// How long a prompt waits before the bridge answers it itself
     /// (`crate::deferred_answers`).
     answer_timeout: Duration,
@@ -133,6 +136,7 @@ impl UiService {
         let rules = RulesSync::new(broadcast.clone());
         let prompt_slot =
             crate::prompt_slot::PromptSlotHandle::new(broadcast.clone(), notice_bus.clone());
+        let daemon_version = crate::daemon_config::SharedDaemonVersion::default();
         Self {
             cache,
             broadcast,
@@ -146,7 +150,9 @@ impl UiService {
             firewall_status: Arc::new(StdMutex::new(None)),
             alert_store: Arc::new(DaemonAlertStore::new()),
             diagnostics_ctx: Arc::new(OnceLock::new()),
-            commands: DaemonCommands::new(DaemonTransport::Tcp, rules.clone()),
+            commands: DaemonCommands::new(DaemonTransport::Tcp, rules.clone())
+                .with_daemon_version(daemon_version.clone()),
+            daemon_version,
             rules,
             prompt_slot,
             daemon_config: Default::default(),
@@ -173,6 +179,11 @@ impl UiService {
         self.daemon_config.clone()
     }
 
+    /// The daemon's version from its latest `subscribe`.
+    pub fn daemon_version_handle(&self) -> crate::daemon_config::SharedDaemonVersion {
+        self.daemon_version.clone()
+    }
+
     /// The prompt slot, for the `RequestSnapshot` answer.
     pub fn prompt_slot_handle(&self) -> crate::prompt_slot::PromptSlotHandle {
         self.prompt_slot.clone()
@@ -191,7 +202,8 @@ impl UiService {
     /// root-only Unix socket uses the current one, and its counters judge a
     /// bridge restart's hit-count gap (N3). Call before taking handles.
     pub fn with_daemon_transport(mut self, transport: DaemonTransport) -> Self {
-        self.commands = DaemonCommands::new(transport, self.rules.clone());
+        self.commands = DaemonCommands::new(transport, self.rules.clone())
+            .with_daemon_version(self.daemon_version.clone());
         self.rules.hits().set_daemon_transport(transport);
         self
     }
@@ -279,6 +291,11 @@ impl Ui for UiService {
         // diagnostics cover every connection, not just the ones the user was
         // prompted for.
         if let Some(stats) = req.stats {
+            // Subscribe's version wins; this only fills in a missing one.
+            self.daemon_version
+                .set_if_unknown(crate::daemon_config::DaemonVersion::parse(
+                    &stats.daemon_version,
+                ));
             self.prompt_slot.observe(
                 stats.rule_misses,
                 stats.uptime,
@@ -504,6 +521,9 @@ impl Ui for UiService {
         // Never log `cfg.config` itself: see `daemon_config`.
         self.daemon_config
             .set(crate::daemon_config::DaemonConfigView::parse(&cfg.config));
+        // Last write wins: unreadable clears it, so a `ping` may fill it in.
+        self.daemon_version
+            .set(crate::daemon_config::DaemonVersion::parse(&cfg.version));
         if let Some(lookup) = &self.account_lookup {
             self.rules.learn_account_names(lookup, &cfg.rules).await;
         }

@@ -518,3 +518,40 @@ fn every_invalid_fixture_fails_with_its_named_reason() {
         assert_eq!(got, reason, "{name}");
     }
 }
+
+/// opensnitchd 1.9 compiles a `network` condition only with `dest.network`
+/// (`rule_policy::PolicyContext`): the preview says so for a 1.9 daemon,
+/// and the apply checks again for the daemon connected when it sends, which
+/// may be a newer one than the preview saw.
+#[test]
+fn source_network_is_refused_for_the_daemon_connected_at_preview_and_at_apply() {
+    use crate::rule_policy::{PolicyContext, SOURCE_NETWORK_REFUSED};
+    let newer = PolicyContext {
+        refuse_source_network: true,
+    };
+    let source = json!({
+        "name": "lan-in", "enabled": true, "action": "allow", "duration": "always",
+        "operator": { "type": "network", "operand": "source.network", "data": "192.168.0.0/16" },
+    });
+    let doc = parse_document(document(vec![source, host_rule("b-host", "deny")])).unwrap();
+    let cache = synced(Vec::new());
+
+    // A 1.8 daemon (or an unknown one) takes it, as before.
+    let older = classify(&check_rules_in(&doc, PolicyContext::default()), &cache).unwrap();
+    assert_eq!(older, preview(&doc, &cache).unwrap());
+    assert!(older.applicable.contains_key("lan-in"));
+
+    let at_1_9 = classify(&check_rules_in(&doc, newer), &cache).unwrap();
+    assert_eq!(at_1_9.items[0].kind, ImportKind::Refused);
+    assert_eq!(at_1_9.items[0].problems[0].reason, SOURCE_NETWORK_REFUSED);
+    assert!(!at_1_9.applicable.contains_key("lan-in"));
+    assert!(at_1_9.applicable.contains_key("b-host"));
+
+    // Previewed against 1.8, applied once a 1.9 daemon subscribed.
+    let previewed = &older.applicable["lan-in"];
+    assert!(check_rule_for_apply(previewed).is_ok());
+    assert!(check_rule_for_apply_in(previewed, PolicyContext::default()).is_ok());
+    let problems = check_rule_for_apply_in(previewed, newer).unwrap_err();
+    assert_eq!(problems[0].reason, SOURCE_NETWORK_REFUSED);
+    assert!(check_rule_for_apply_in(&older.applicable["b-host"], newer).is_ok());
+}

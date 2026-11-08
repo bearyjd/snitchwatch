@@ -537,3 +537,82 @@ async fn an_unusable_request_id_is_not_echoed() {
         other => panic!("{other:?}"),
     }
 }
+
+/// The preview and the apply each check for the daemon connected at that
+/// moment (`rule_policy::PolicyContext`): a `source.network` rule previewed
+/// before a 1.9 daemon subscribed is refused at apply and never sent, and
+/// a new preview refuses it outright.
+#[tokio::test]
+async fn source_network_is_checked_for_the_daemon_connected_at_apply() {
+    use snitchwatch_bridge::daemon_config::DaemonVersion;
+    use snitchwatch_bridge::rule_io::{ImportKind, ImportOutcome};
+    use snitchwatch_bridge::rule_policy::SOURCE_NETWORK_REFUSED;
+    let mut daemon = daemon(Vec::new());
+    let (seen, _) = respond(&mut daemon, |_| Some((true, String::new())));
+    let import = task(&daemon, Duration::from_secs(600));
+    let mut rx = daemon.broadcast.subscribe();
+    let lan = serde_json::json!({
+        "name": "lan-in", "enabled": true, "action": "allow", "duration": "always",
+        "operator": { "type": "network", "operand": "source.network", "data": "192.168.0.0/16" },
+    });
+    let preview = |rules| ClientMessage::PreviewRulesImport {
+        request_id: "r-preview".into(),
+        document: document(rules),
+        reply: None,
+    };
+
+    import.try_route(preview(vec![lan.clone()]));
+    let ServerMessage::RulesImportPreview {
+        preview_id, items, ..
+    } = next_import_message(&mut rx).await
+    else {
+        panic!("expected a preview");
+    };
+    assert_eq!(
+        items[0].kind,
+        ImportKind::Add,
+        "an unknown daemon is v1.8.0"
+    );
+
+    daemon
+        .commands
+        .daemon_version()
+        .set(DaemonVersion::parse("mock-1.9.0"));
+    import.try_route(ClientMessage::ApplyRulesImport {
+        request_id: "r-apply".into(),
+        preview_id,
+        include: vec!["lan-in".into()],
+        reply: None,
+    });
+    let mut outcomes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await.unwrap() {
+                ServerMessage::RulesImportProgress { name, outcome, .. } => {
+                    outcomes.push((name, outcome))
+                }
+                ServerMessage::RulesImportResult { .. } => return,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the apply never ended");
+    assert_eq!(
+        outcomes,
+        vec![(
+            "lan-in".to_string(),
+            ImportOutcome::Refused {
+                reason: SOURCE_NETWORK_REFUSED.into()
+            }
+        )]
+    );
+    assert!(names(&seen).is_empty(), "nothing may reach a 1.9 daemon");
+
+    import.try_route(preview(vec![lan]));
+    let ServerMessage::RulesImportPreview { items, .. } = next_import_message(&mut rx).await else {
+        panic!("expected a preview");
+    };
+    assert_eq!(items[0].kind, ImportKind::Refused);
+    assert_eq!(items[0].problems[0].reason, SOURCE_NETWORK_REFUSED);
+}
