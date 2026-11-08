@@ -12,8 +12,8 @@
 //! impossible to start; the whole guard is bounded ([`ForwardPolicy::bound`]),
 //! so even a bus that never completes its handshake cannot hold the start-up.
 //! Known gap: a primary whose window never loads (`main.qml` failed) still
-//! answers `Activate`, so later launches exit 0 and show nothing. Demo mode and `SNITCHWATCH_ALLOW_MULTIPLE=1` skip
-//! the guard entirely.
+//! answers `Activate`, so later launches exit 0 and show nothing. Demo mode and
+//! `SNITCHWATCH_ALLOW_MULTIPLE=1` skip the guard entirely.
 //!
 //! **What the bus can do to us.** Any client of the same session bus may
 //! call the three methods; each one only raises the window. Their arguments
@@ -62,7 +62,7 @@ impl ForwardPolicy {
     pub const DEFAULT: Self = Self {
         timeout: Duration::from_secs(2),
         retry_delay: Duration::from_millis(500),
-        bound: Duration::from_secs(5),
+        bound: Duration::from_secs(6),
     };
 }
 
@@ -187,6 +187,11 @@ pub fn acquire_with(env: &EnvSnapshot, policy: ForwardPolicy, sink: Arc<RaiseSin
 /// [`acquire_at`] on its own thread, abandoned after `policy.bound`. A late
 /// result is dropped on that thread, so a `Guard` that arrives too late releases
 /// the name instead of holding it for a process that did not wait.
+///
+/// Worst case is `bound` plus one `method_timeout`, not `bound`: when the send
+/// races the timeout, the late `Guard` lands in the channel and is dropped here,
+/// on the calling thread, with `rx`; its `release_name` blocks up to the method
+/// timeout.
 fn acquire_bounded(address: String, policy: ForwardPolicy, sink: Arc<RaiseSink>) -> Outcome {
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
@@ -251,7 +256,13 @@ fn retake(conn: Connection) -> Outcome {
             tracing::info!("single instance: the previous owner is gone; this is the running one");
             Outcome::Primary(Guard { conn })
         }
-        _ => Outcome::Skipped(SkipReason::OwnerUnresponsive),
+        // zbus reports a name that is still taken as `Error::NameTaken`: the usual
+        // wedged-owner case, not worth a warning.
+        Err(zbus::Error::NameTaken) | Ok(_) => Outcome::Skipped(SkipReason::OwnerUnresponsive),
+        Err(error) => {
+            tracing::warn!(%error, "single instance: could not ask for the bus name again");
+            Outcome::Skipped(SkipReason::OwnerUnresponsive)
+        }
     }
 }
 
@@ -269,7 +280,7 @@ fn connect_serving(
 /// Ask the owner to raise its window: one try, one retry.
 fn forward(conn: &Connection, policy: ForwardPolicy) -> Outcome {
     let result = match activate_owner(conn) {
-        Ok(()) => Ok(()),
+        Ok(owner) => Ok(owner),
         Err(error) => {
             tracing::warn!(
                 %error,
@@ -280,28 +291,36 @@ fn forward(conn: &Connection, policy: ForwardPolicy) -> Outcome {
         }
     };
     match result {
-        Ok(()) => Outcome::Forwarded,
+        Ok(owner) => {
+            // The unique name of whoever answered, so a launch that exits without
+            // showing anything can be traced (`busctl` maps it to a PID). It comes
+            // from the reply itself: no extra bus call that could delay the result.
+            tracing::info!(?owner, "single instance: the running instance answered");
+            Outcome::Forwarded
+        }
         Err(error) => {
             tracing::error!(
                 %error,
                 "single instance: Snitchwatch is already running but did not answer; \
-                 starting a second instance"
+                 asking for the name once more, and running as a second instance if it \
+                 stays taken"
             );
             Outcome::Skipped(SkipReason::OwnerUnresponsive)
         }
     }
 }
 
-fn activate_owner(conn: &Connection) -> zbus::Result<()> {
+/// `Activate` on the owner; the unique bus name of its reply's sender.
+fn activate_owner(conn: &Connection) -> zbus::Result<Option<String>> {
     let platform_data: HashMap<&str, Value<'_>> = HashMap::new();
-    conn.call_method(
+    let reply = conn.call_method(
         Some(BUS_NAME),
         OBJECT_PATH,
         Some(APPLICATION_IFACE),
         "Activate",
         &(platform_data,),
-    )
-    .map(|_| ())
+    )?;
+    Ok(reply.header().sender().map(|name| name.to_string()))
 }
 
 fn log_outcome(outcome: &Outcome) {

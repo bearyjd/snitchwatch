@@ -172,10 +172,15 @@ impl qobject::NotificationController {
         crate::single_instance::raise_sink().register(move || {
             if !queued.swap(true, Ordering::AcqRel) {
                 let flag = queued.clone();
-                let _ = qt_thread.queue(move |qobject| {
+                let queue_failed = qt_thread.queue(move |qobject| {
                     flag.store(false, Ordering::Release);
                     qobject.raise_requested();
                 });
+                // Queuing fails only once the Qt object is gone (shutdown); clear
+                // the flag anyway so the feed is not stuck "queued" for good.
+                if queue_failed.is_err() {
+                    queued.store(false, Ordering::Release);
+                }
             }
         });
     }
