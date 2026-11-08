@@ -7,6 +7,8 @@ pub const RULES_PAGE: &str = concat!(
     include_str!("../../qml/RulesPage.qml"),
     "\n",
     include_str!("../../qml/RulesInspectorSheet.qml"),
+    "\n",
+    include_str!("../../qml/RuleRowNotes.qml"),
 );
 pub const SIMULATOR_SHEET: &str = include_str!("../../qml/RuleSimulatorSheet.qml");
 pub const IMPORT_SHEET: &str = include_str!("../../qml/RulesImportSheet.qml");
@@ -115,6 +117,10 @@ pub const ALL_QML: &[(&str, &str)] = &[
         include_str!("../../qml/SelectableText.qml"),
     ),
     ("RowCopyMenu.qml", include_str!("../../qml/RowCopyMenu.qml")),
+    (
+        "RuleRowNotes.qml",
+        include_str!("../../qml/RuleRowNotes.qml"),
+    ),
     (
         "SelectionRegistry.qml",
         include_str!("../../qml/SelectionRegistry.qml"),

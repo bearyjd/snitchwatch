@@ -511,6 +511,21 @@ impl qobject::RulesModel {
             return;
         };
         let qt_thread = self.qt_thread();
+        // A disconnect or new session sends no frame: re-read the runtime's
+        // policy on every link change so a gone daemon's notes don't stay.
+        let (link_thread, link_handles) = (qt_thread.clone(), handles.clone());
+        let mut link_rx = crate::bridge_runtime::link_wake::subscribe();
+        handles.runtime().spawn(async move {
+            while link_rx.changed().await.is_ok() {
+                let policy = link_handles.daemon_policy();
+                if link_thread
+                    .queue(move |qobject| qobject.set_daemon_policy(policy))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let session_handles = handles.clone();
         crate::bridge_dispatch::spawn_feed(
             &handles,
@@ -664,18 +679,10 @@ impl qobject::RulesModel {
     }
 
     pub fn apply_server_message(mut self: Pin<&mut Self>, msg: ServerMessage) {
-        // A new session starts from v1.8.0's rules; an older bridge sends no
-        // policy after it.
-        match &msg {
-            ServerMessage::Authenticated { .. } => {
-                return self.set_daemon_policy(PolicyContext::default());
-            }
-            ServerMessage::DaemonPolicy(policy) => {
-                return self.set_daemon_policy(PolicyContext {
-                    refuse_source_network: policy.refuse_source_network,
-                });
-            }
-            _ => {}
+        // The runtime's policy when it runs (a frame it dropped changes nothing).
+        let live = crate::bridge_runtime::handles().map(|h| h.daemon_policy());
+        if let Some(policy) = crate::rules::daemon_refusal::policy_after(&msg, live) {
+            return self.set_daemon_policy(policy);
         }
         if let ServerMessage::RuleCommandResult { .. } = msg {
             let finished = {

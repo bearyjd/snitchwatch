@@ -120,6 +120,7 @@ fn main() {
                 "qml/GlobalDrawer.qml",
                 "qml/SelectableText.qml",
                 "qml/RowCopyMenu.qml",
+                "qml/RuleRowNotes.qml",
                 "qml/GuardedMenuItem.qml",
             ]),
     )

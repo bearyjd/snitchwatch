@@ -6,6 +6,7 @@
 //! gets no note.
 
 use snitchwatch_bridge::rule_policy::PolicyContext;
+use snitchwatch_bridge::ws_messages::ServerMessage;
 
 use super::row_store::Rule;
 use super::simulator::operator::{parse, Kind, Operator};
@@ -20,6 +21,23 @@ pub fn not_loaded_reason(rule: &Rule, context: PolicyContext) -> Option<&'static
         && rule.enabled
         && uses_source_network(&parse(&rule.operator));
     refused.then_some(SOURCE_NETWORK_NOT_LOADED)
+}
+
+/// The policy to show after `msg`, or `None` if `msg` doesn't change it.
+/// `live` is the runtime's (`BridgeHandles::daemon_policy`), which is the
+/// truth when the runtime runs: it drops a frame from a bridge that didn't
+/// advertise `daemonPolicyV1`, and is the default while disconnected. Only
+/// without a runtime (messages fed straight to the model) is the frame's own
+/// payload used.
+pub fn policy_after(msg: &ServerMessage, live: Option<PolicyContext>) -> Option<PolicyContext> {
+    let from_frame = match msg {
+        ServerMessage::Authenticated { .. } => PolicyContext::default(),
+        ServerMessage::DaemonPolicy(policy) => PolicyContext {
+            refuse_source_network: policy.refuse_source_network,
+        },
+        _ => return None,
+    };
+    Some(live.unwrap_or(from_frame))
 }
 
 fn uses_source_network(op: &Operator) -> bool {
@@ -68,6 +86,30 @@ mod tests {
         assert_eq!(
             not_loaded_reason(&listed, NEWER),
             Some(SOURCE_NETWORK_NOT_LOADED)
+        );
+    }
+
+    #[test]
+    fn the_runtime_policy_wins_over_the_frame_when_it_runs() {
+        let refuses = ServerMessage::DaemonPolicy(snitchwatch_bridge::ws_messages::DaemonPolicy {
+            refuse_source_network: true,
+            daemon_version: Some("1.9".into()),
+        });
+        let authenticated = ServerMessage::Authenticated {
+            capabilities: Vec::new(),
+        };
+        // A frame the runtime dropped (capability not advertised, or the
+        // session is gone): the runtime's default is shown, not the frame.
+        let default = Some(PolicyContext::default());
+        assert_eq!(policy_after(&refuses, default), default);
+        assert_eq!(policy_after(&refuses, Some(NEWER)), Some(NEWER));
+        assert_eq!(policy_after(&authenticated, Some(NEWER)), Some(NEWER));
+        // No runtime: the frame itself.
+        assert_eq!(policy_after(&refuses, None), Some(NEWER));
+        assert_eq!(policy_after(&authenticated, None), default);
+        assert_eq!(
+            policy_after(&ServerMessage::ClearConnectionRows, Some(NEWER)),
+            None
         );
     }
 

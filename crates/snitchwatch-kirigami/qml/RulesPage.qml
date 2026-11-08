@@ -651,16 +651,7 @@ Kirigami.ScrollablePage {
                         }
                     }
                     // The connected daemon skips this rule (`rules::daemon_refusal`).
-                    Controls.Label {
-                        objectName: "notLoadedReason"
-                        visible: text.length > 0
-                        textFormat: Text.PlainText
-                        text: row.model.notLoadedReason
-                        wrapMode: Text.Wrap
-                        font: Kirigami.Theme.smallFont
-                        color: Kirigami.Theme.negativeTextColor
-                        Layout.fillWidth: true
-                    }
+                    RuleRowNotes { reason: row.model.notLoadedReason; Layout.fillWidth: true }
                     // Issue #44: what deleting this all-apps rule changes.
                     Controls.Label {
                         objectName: "allAppsHint"
