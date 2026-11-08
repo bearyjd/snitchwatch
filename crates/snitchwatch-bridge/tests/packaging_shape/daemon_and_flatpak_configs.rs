@@ -32,6 +32,26 @@ fn recipe_config_defaults_to_allow_on_the_per_user_tcp_bind() {
     assert_eq!(json["DefaultAction"], "allow");
 }
 
+/// eBPF groundwork (docs/superpowers/specs/2026-10-22-ebpf-groundwork.md):
+/// both shipped daemon configs pin the module directory the image installs
+/// to. `Ebpf.ModulesPath` is a real key (vendor/opensnitch
+/// daemon/procmon/ebpf/config.go:7); when set, `LoadEbpfModule` searches only
+/// that path (daemon/core/ebpf.go:25-27).
+#[test]
+fn both_daemon_configs_pin_the_ebpf_modules_path() {
+    for rel in [
+        "packaging/system/opensnitchd-default-config.json",
+        "packaging/bluebuild/files/system/etc/opensnitchd/default-config.json",
+    ] {
+        let json = daemon_config(rel);
+        assert_eq!(json["ProcMonitorMethod"], "ebpf", "{rel}");
+        assert_eq!(
+            json["Ebpf"]["ModulesPath"], "/usr/lib/opensnitchd/ebpf",
+            "{rel}"
+        );
+    }
+}
+
 /// The two daemon configs differ only in where the daemon dials: the
 /// overlay's must not drift from the recipe's on any other setting.
 #[test]

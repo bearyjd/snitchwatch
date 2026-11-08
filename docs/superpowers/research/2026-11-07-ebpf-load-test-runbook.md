@@ -87,14 +87,14 @@ a B always also looks like a D.
      `/usr/local/lib/opensnitchd/ebpf/` (writable on ostree; the daemon searches it
      first). Do not write to `/usr/lib` on an atomic image.
    - The daemon searches `/usr/local/lib/opensnitchd/ebpf`, then `/usr/lib/opensnitchd/ebpf`,
-     then the deprecated `/etc/opensnitchd` (`daemon/core/ebpf.go:14-19`), and a failed load
-     `continue`s to the next path (`ebpf.go:48,53`). **Check all three directories for
+     then the deprecated `/etc/opensnitchd` (`daemon/core/ebpf.go:14-18`), and a failed load
+     `continue`s to the next path (`daemon/core/ebpf.go:43,48,53`). **Check all three directories for
      stale `.o` files** (`ls -l` each), because a stale copy earlier in the order loads
      instead of the test copy and a later one can mask a failure. Leave `Ebpf.ModulesPath`
      unset (setting it restricts the search to that path).
 4. Config: **set `"ProcMonitorMethod": "ebpf"` explicitly and `"LogLevel": -1`** (TRACE; 0 is
-   DEBUG, 1 INFO, `log/log.go:36-46`) in the test config. The tower image overwrites `ebpf` to `proc` after `stage.sh`
-   (`docs/packaging/system-bridge-integration.md:102-105`), so a `proc` result from
+   DEBUG, 1 INFO, `log/log.go:36-46`) in the test config. If the image pins `proc` (the tower did; the shipped configs and `stage.sh` do not, `docs/packaging/system-bridge-integration.md:102-111`),
+   a `proc` result from
    `grep -E 'ProcMonitorMethod|LogLevel|DefaultAction' /etc/opensnitchd/default-config.json`
    means the test is not valid yet. The `module loaded` and `Process monitor method` lines are Info (level 1 or lower is enough); the `trying to load` lines need 0 or lower and section 4 needs -1. Both shipped configs set
    `"LogLevel": 2` (IMPORTANT, `log/log.go:38-42`), which drops the info-level lines this
@@ -116,7 +116,7 @@ a B always also looks like a D.
      compatible`, the string has a version in the middle), then `Process monitor method
      /proc` (`init.go:132`);
    - **loaded but did not attach (B):** `opening kprobe: ...` / `opening kretprobe: ...`
-     (`procmon/ebpf/ebpf.go:147-187`) and, for the procs module, `[eBPF events] sys_enter_execve:`
+     (`procmon/ebpf/ebpf.go:145-193`) and, for the procs module, `[eBPF events] sys_enter_execve:`
      (also `sys_exit_execve`, `sys_enter_execveat`, `sys_exit_execveat`, `sched_process_exit`) and
      `[eBPF events] Some tracepoints not loaded` (`events.go:113-146`). These are warnings, the
      daemon stays on ebpf; count them as failures even if `module loaded` printed, because exec
@@ -132,7 +132,7 @@ a B always also looks like a D.
      ebpf listener`); note it, it does not decide A/B.
    The verifier output is part of the `module collection error` text (cilium/ebpf returns it
    there). Full verifier logging is requested only when the level is **exactly 0** (DEBUG,
-   `if log.GetLogLevel() == log.DEBUG`, `ebpf.go:31-33`), so at the -1 used here the error text is
+   `if log.GetLogLevel() == log.DEBUG`, `daemon/core/ebpf.go:30-33`), so at the -1 used here the error text is
    shorter and **UNVERIFIED** as to how much verifier detail it carries. If the result is B,
    rerun once at `LogLevel: 0` to get the full verifier text; that error can be hundreds of
    lines, so keep the whole log as a file and quote at most the first and last lines. **UNVERIFIED** that `dmesg` shows anything useful; record
@@ -146,7 +146,7 @@ Non-CO-RE modules built against other headers can load yet read wrong offsets.
 
 1. The observable: with `DefaultAction: allow` and no UI connected, an unmatched connection
    takes `applyDefaultAction`, which logs `con.String()` **only at TRACE** (`main.go:431-432`;
-   `conman/connection.go:315-319` formats `path (pid) -> host:port (proto uid)`). So set
+   `conman/connection.go:310-318` formats `path (pid) -> host:port (proto uid)`). So set
    `"LogLevel": -1`; at 0 nothing attributed is printed. It gives path **and** pid; compare both
    with `ss -tnp` and `/proc/<pid>/exe` on your side. No bridge or GUI is needed.
    **UNVERIFIED** that this is readable at volume; if it is not, stop and report that instead of
@@ -164,7 +164,7 @@ Non-CO-RE modules built against other headers can load yet read wrong offsets.
    Record per case: expected path, `proc` result, `ebpf` result. Only a mismatch that appears
    under `ebpf` and not under `proc` is outcome C; a mismatch in both is daemon-wide behaviour
    to report separately. Also record connections attributed to an empty/unknown process under
-   `ebpf` that `proc` mode resolves. Unattributed shapes (`conman/connection.go:312-315`): process missing, `srcport:srcip (uid:N)
+   `ebpf` that `proc` mode resolves. Unattributed shapes (`conman/connection.go:311-317`): process missing, `srcport:srcip (uid:N)
    ->(proto)-> host:port`; entry missing, `srcport:srcip ->(proto)-> host:port` (no uid); a nil
    connection prints `Applying DefaultAction (...) on <nil>` (`main.go:431-432`), grep for that.
 

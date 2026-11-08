@@ -12,7 +12,7 @@ Items marked UNVERIFIED were not tested.
 - Search path: `/usr/local/lib/opensnitchd/ebpf`, then `/usr/lib/opensnitchd/ebpf`,
   then the deprecated `/etc/opensnitchd` (`daemon/core/ebpf.go:14-17`; a stale `.o`
   in `/etc/opensnitchd` could be picked up). If `Ebpf.ModulesPath` is set, only
-  that path is searched. Our shipped configs set no `ModulesPath`.
+  that path is searched. Our shipped configs set `ModulesPath` to `/usr/lib/opensnitchd/ebpf` (2026-11-08; pinned by a packaging-shape test).
 
 ## How they are built (upstream)
 - `ebpf_prog/Makefile`: clang -> LLVM IR -> `llc -march=bpf`; output `.o` files

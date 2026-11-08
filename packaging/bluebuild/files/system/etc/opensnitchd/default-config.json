@@ -33,6 +33,7 @@
         "EnableChecksums": false
     },
     "Ebpf": {
+        "ModulesPath": "/usr/lib/opensnitchd/ebpf",
         "EventsWorkers": 8,
         "QueueEventsSize": 0
     },
