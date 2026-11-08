@@ -97,7 +97,7 @@ Sorted keys, 2-space indent. Contents independent of the checkout path.
 | `build.rustc_vv`, `cargo_version`, `protoc_version`, `rpms{}` | Toolchain as built (exact Fedora NEVRAs for rust, cargo, gcc, glibc, glibc-devel, libgcc, binutils, llvm-libs, zlib-ng-compat, python3, protobuf-compiler) |
 | `build.rpm_qa`, `build.rpm_qa_sha256` | Every installed RPM (sorted NEVRAs) and its digest — the image digest pins only the base layer, `dnf` pulls live updates |
 | `build.command`, `rustflags`, `cargo_lock_sha256` | `cargo build --release --locked -p snitchwatch-bridge-cli --no-default-features`, the path-remap template, the lockfile hash |
-| `upstream.opensnitch_commit` / `opensnitch_tag` / `ui_proto_sha256` | The vendored OpenSnitch protocol the bridge speaks (v1.8.0) |
+| `upstream.opensnitch_commit` / `opensnitch_tag` / `ui_proto_sha256` | The vendored OpenSnitch protocol the bridge speaks (upstream master `a1353848`, tag label `master-a1353848`; `ui.proto` is unchanged from v1.8.0) |
 | `runtime.needed`, `runtime.glibc_min` | Dynamic dependencies (verified at build time) |
 | `install.*` | The install paths and unit name above |
 | `files[]` | `{path, mode, size, sha256}` for every file except `MANIFEST.json`/`SHA256SUMS` |
@@ -142,7 +142,9 @@ test "$(readlink /etc/systemd/user/default.target.wants/snitchwatch-bridge.servi
 test "$(jq -r .version /usr/share/snitchwatch-bridge/MANIFEST.json)" = "$SW_VERSION"
 test "$(jq -r .source.dirty /usr/share/snitchwatch-bridge/MANIFEST.json)" = false
 # protocol pairing: the bridge's vendored OpenSnitch == the installed daemon
-test "$(jq -r .upstream.opensnitch_tag /usr/share/snitchwatch-bridge/MANIFEST.json)" = v1.8.0
+# (the bluebuild image still installs the v1.8.0 RPM; ui.proto is identical
+# v1.8.0..a1353848, so a v1.8.0 daemon speaks the same protocol)
+test "$(jq -r .upstream.opensnitch_tag /usr/share/snitchwatch-bridge/MANIFEST.json)" = master-a1353848
 # ...and assert the daemon you pinned is that same version (however it was
 # installed — an extracted RPM may not be in the rpm database).
 ! ldd /usr/bin/snitchwatch-bridge-cli | grep -q 'not found'
