@@ -282,8 +282,8 @@ impl Departing {
         _platform_data: HashMap<String, OwnedValue>,
     ) {
         // The release reply arrives before the handler parks, so the name is
-        // free well inside the caller's `Activate` timeout. A second
-        // `Activate` (the retry, if it beat the release) only gets NotOwner.
+        // free well inside the caller's `Activate` timeout. The retry then finds
+        // no owner and fails at once, so `retake` can take the name.
         if conn.release_name(BUS_NAME).await.unwrap_or(false) {
             self.released.fetch_add(1, Ordering::SeqCst);
         }
@@ -319,10 +319,25 @@ fn an_owner_that_leaves_without_answering_hands_the_name_to_the_second_instance(
         ..FAST
     };
     let outcome = acquire_at(bus.address(), policy, Arc::new(RaiseSink::new()));
-    hold.notify_waiters();
+    // A permit, not `notify_waiters`: it also wakes a handler that has not yet
+    // polled `notified()`; the bus is torn down with the test either way.
+    hold.notify_one();
     assert_eq!(released.load(Ordering::SeqCst), 1, "the owner never let go");
     assert!(
         matches!(outcome, Outcome::Primary(_)),
         "a freed name was not retaken: {outcome:?}"
     );
+}
+
+#[test]
+fn a_forward_reports_the_unique_name_of_the_owner_that_answered() {
+    let Some(bus) = PrivateBus::start() else {
+        return;
+    };
+    let (sink, _raised) = counting_sink();
+    let _primary = acquire_at(bus.address(), ROOMY, sink);
+    let caller = connect_serving(bus.address(), ROOMY, Arc::new(RaiseSink::new())).unwrap();
+    let owner = activate_owner(&caller).unwrap();
+    let owner = owner.expect("the Activate reply names its sender");
+    assert!(owner.starts_with(':'), "not a unique bus name: {owner}");
 }

@@ -273,15 +273,12 @@ fn a_second_launch_raises_the_main_window() {
     let before = main
         .split("function onRaiseRequested()")
         .next()
-        .expect("main.qml: nothing before onRaiseRequested");
+        .unwrap_or_default();
     assert!(
         before.contains("Connections {"),
         "main.qml: onRaiseRequested is not inside any Connections block"
     );
-    let block = before
-        .rsplit("Connections {")
-        .next()
-        .expect("main.qml: no Connections block before onRaiseRequested");
+    let block = before.rsplit("Connections {").next().unwrap_or_default();
     assert!(
         block.contains("target: notificationController"),
         "onRaiseRequested is not under the notificationController Connections: {block}"

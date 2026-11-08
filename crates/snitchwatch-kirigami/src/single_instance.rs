@@ -34,10 +34,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use zbus::blocking::fdo::DBusProxy;
 use zbus::blocking::{connection, Connection};
 use zbus::fdo::{RequestNameFlags, RequestNameReply};
-use zbus::names::BusName;
 use zbus::zvariant::{OwnedValue, Value};
 
 /// The well-known name: the app id.
@@ -258,7 +256,9 @@ fn retake(conn: Connection) -> Outcome {
             tracing::info!("single instance: the previous owner is gone; this is the running one");
             Outcome::Primary(Guard { conn })
         }
-        Ok(_) => Outcome::Skipped(SkipReason::OwnerUnresponsive),
+        // zbus reports a name that is still taken as `Error::NameTaken`: the usual
+        // wedged-owner case, not worth a warning.
+        Err(zbus::Error::NameTaken) | Ok(_) => Outcome::Skipped(SkipReason::OwnerUnresponsive),
         Err(error) => {
             tracing::warn!(%error, "single instance: could not ask for the bus name again");
             Outcome::Skipped(SkipReason::OwnerUnresponsive)
@@ -280,7 +280,7 @@ fn connect_serving(
 /// Ask the owner to raise its window: one try, one retry.
 fn forward(conn: &Connection, policy: ForwardPolicy) -> Outcome {
     let result = match activate_owner(conn) {
-        Ok(()) => Ok(()),
+        Ok(owner) => Ok(owner),
         Err(error) => {
             tracing::warn!(
                 %error,
@@ -291,8 +291,11 @@ fn forward(conn: &Connection, policy: ForwardPolicy) -> Outcome {
         }
     };
     match result {
-        Ok(()) => {
-            log_owner(conn);
+        Ok(owner) => {
+            // The unique name of whoever answered, so a launch that exits without
+            // showing anything can be traced (`busctl` maps it to a PID). It comes
+            // from the reply itself: no extra bus call that could delay the result.
+            tracing::info!(?owner, "single instance: the running instance answered");
             Outcome::Forwarded
         }
         Err(error) => {
@@ -307,42 +310,17 @@ fn forward(conn: &Connection, policy: ForwardPolicy) -> Outcome {
     }
 }
 
-/// Log who answered `Activate` (unique name, and PID if the bus tells), so a
-/// launch that exits without showing anything can be traced to a process. Only
-/// logs: a failed lookup never changes the outcome. Each call is bounded by the
-/// connection's method timeout.
-fn log_owner(conn: &Connection) {
-    let lookup = DBusProxy::new(conn).and_then(|dbus| {
-        let owner = dbus.get_name_owner(BusName::try_from(BUS_NAME)?)?;
-        let pid = dbus.get_connection_unix_process_id(BusName::from(&owner));
-        Ok((owner, pid))
-    });
-    match lookup {
-        Ok((owner, Ok(pid))) => {
-            tracing::info!(%owner, pid, "single instance: the running instance answered")
-        }
-        Ok((owner, Err(error))) => tracing::info!(
-            %owner,
-            %error,
-            "single instance: the running instance answered; its PID is unknown"
-        ),
-        Err(error) => tracing::warn!(
-            %error,
-            "single instance: the running instance answered, but its owner lookup failed"
-        ),
-    }
-}
-
-fn activate_owner(conn: &Connection) -> zbus::Result<()> {
+/// `Activate` on the owner; the unique bus name of its reply's sender.
+fn activate_owner(conn: &Connection) -> zbus::Result<Option<String>> {
     let platform_data: HashMap<&str, Value<'_>> = HashMap::new();
-    conn.call_method(
+    let reply = conn.call_method(
         Some(BUS_NAME),
         OBJECT_PATH,
         Some(APPLICATION_IFACE),
         "Activate",
         &(platform_data,),
-    )
-    .map(|_| ())
+    )?;
+    Ok(reply.header().sender().map(|name| name.to_string()))
 }
 
 fn log_outcome(outcome: &Outcome) {
