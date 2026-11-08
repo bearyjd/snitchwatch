@@ -284,6 +284,7 @@ impl UiService {
 #[tonic::async_trait]
 impl Ui for UiService {
     async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingReply>, Status> {
+        let peer = request.remote_addr();
         let req = request.into_inner();
         let id = req.id;
 
@@ -304,9 +305,10 @@ impl Ui for UiService {
         if let Some(stats) = req.stats {
             // The only place the daemon reports its own version (Subscribe's
             // is the kernel's): a readable one replaces the stored one, and
-            // a change asks for every rule to be checked again.
+            // a change asks for every rule to be checked again. Only the
+            // peer holding the current Notifications stream may set it.
             let version = crate::daemon_config::DaemonVersion::parse(&stats.daemon_version);
-            if self.daemon_version.observe(version) {
+            if self.commands.observe_daemon_version(peer, version) {
                 self.daemon_version_changed
                     .send_modify(|generation| *generation += 1);
             }

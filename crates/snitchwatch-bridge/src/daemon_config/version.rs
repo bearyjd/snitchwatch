@@ -73,9 +73,12 @@ fn digits_end(bytes: &[u8], start: usize) -> usize {
 /// daemon could be sent a rule it won't compile in that window, and its own
 /// `CHANGE_RULE` ERROR is the backstop. A `subscribe` never writes it
 /// (`ClientConfig.version` is the kernel release), so a second or unrelated
-/// `subscribe` can't weaken a known 1.9. A daemon that restarts as another
-/// version keeps the old value until its next `ping`, which overwrites it;
-/// an unreadable `ping` value leaves it alone.
+/// `subscribe` can't weaken a known 1.9. Only a `ping` from the peer of the
+/// current `Notifications` stream (or one with no stream current) writes
+/// it, and it is forgotten when no stream is current any more
+/// (`DaemonCommands::observe_daemon_version`), so a daemon that restarts as
+/// another version is not judged by the old one; an unreadable `ping`
+/// value leaves it alone.
 #[derive(Debug, Clone, Default)]
 pub struct SharedDaemonVersion(Arc<Mutex<Option<DaemonVersion>>>);
 

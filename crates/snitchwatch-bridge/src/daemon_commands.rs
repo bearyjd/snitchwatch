@@ -679,6 +679,7 @@ impl DaemonCommands {
                 .filter_map(|(id, open)| open.hello.map(|hello| (hello, *id)))
                 .max()
                 .map(|(_, id)| id);
+            self.forget_version_without_current(&inner);
         }
         if inner.committed_by == Some(stream) {
             inner.committed_by = self.readopt_for_current(&inner);

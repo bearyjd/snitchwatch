@@ -5,8 +5,10 @@
 
 use snitchwatch_proto::protocol::{Action, Notification};
 
-use super::DaemonCommands;
-use crate::daemon_config::SharedDaemonVersion;
+use tracing::warn;
+
+use super::{lock, ConnKey, DaemonCommands, Inner};
+use crate::daemon_config::{DaemonVersion, SharedDaemonVersion};
 use crate::rule_policy::{validate_operator_in, PolicyContext};
 
 impl DaemonCommands {
@@ -20,6 +22,39 @@ impl DaemonCommands {
     /// The version this handle checks rules against.
     pub fn daemon_version(&self) -> SharedDaemonVersion {
         self.daemon_version.clone()
+    }
+
+    /// What a `ping` from `peer` reported, stored (see
+    /// [`SharedDaemonVersion::observe`], whose return this is) only when
+    /// `peer` is the connection of the current `Notifications` stream, or
+    /// when no stream is current. A second TCP peer pinging another version
+    /// therefore can't move a known one. On the Unix socket both keys are
+    /// `None` (every peer is root), so its pings are always taken. Checked
+    /// under the streams lock, so a stream can't become current in between.
+    pub fn observe_daemon_version(&self, peer: ConnKey, version: Option<DaemonVersion>) -> bool {
+        let inner = lock(&self.inner);
+        let holder = inner.current.and_then(|id| inner.streams.get(&id));
+        if let Some(holder) = holder.filter(|open| open.conn != peer) {
+            warn!(
+                ?peer,
+                holder = ?holder.conn,
+                "ignoring the daemon version in a ping from a peer that does not hold the stream"
+            );
+            return false;
+        }
+        self.daemon_version.observe(version)
+    }
+
+    /// Called by `close_stream` once the closed stream was current: with no
+    /// stream current any more, the version is forgotten, so a daemon that
+    /// comes back as another version isn't judged by the old one until its
+    /// first `ping` (unknown means v1.8.0's rules). Nothing is reported as
+    /// changed: the next readable `ping` is a change from unknown and
+    /// triggers the recheck then.
+    pub(super) fn forget_version_without_current(&self, inner: &Inner) {
+        if inner.current.is_none() {
+            self.daemon_version.set(None);
+        }
     }
 
     /// The checks for the daemon's version as last reported.
@@ -47,7 +82,6 @@ mod tests {
     use super::*;
     use crate::cache::rules::RulesSync;
     use crate::daemon_commands::{DaemonTransport, SendError};
-    use crate::daemon_config::DaemonVersion;
     use snitchwatch_proto::protocol::{Operator, Rule};
     use tokio::sync::broadcast;
 
