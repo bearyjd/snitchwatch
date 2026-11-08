@@ -26,7 +26,7 @@ Claims not read from a file are marked **UNVERIFIED**. Mapped read-only against 
 
 ## Decisions I am proposing (confirm or change)
 1. **Existing `source.network` rules stay editable and are not made read-only**; the bridge only WARNS about
-   them against a >= 1.9 daemon (it is **UNVERIFIED** how much the daemon drops vs keeps on load; the review
+   them against a >= 1.9 daemon (the warning moves to the GUI half, PR B: at Subscribe the rules are only staged, not yet in the cache) (it is **UNVERIFIED** how much the daemon drops vs keeps on load; the review
    says a stored rule is skipped at start). Refusal applies to NEW/changed rules and to import/profile apply.
 2. **Unknown version = today's 1.8.x behaviour** (accept). The daemon's own refusal is the backstop and the
    shipped daemon is 1.8.x.

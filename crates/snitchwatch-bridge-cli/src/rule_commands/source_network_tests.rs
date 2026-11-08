@@ -75,3 +75,38 @@ async fn an_edit_to_source_network_is_refused_for_1_9_and_sent_for_1_8() {
     assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
     assert_eq!(names(&seen), vec!["100-x".to_string()]);
 }
+
+#[tokio::test]
+async fn a_disabled_source_network_rule_is_accepted_by_1_9_and_enabling_it_is_refused() {
+    let mut daemon = daemon(vec![host_rule("100-x", "allow")]);
+    let commands = commands(&daemon);
+    let mut rx = daemon.broadcast.subscribe();
+    daemon
+        .commands
+        .daemon_version()
+        .set(DaemonVersion::parse("1.9.0"));
+    let (seen, _) = respond(&mut daemon, |_| Some((true, String::new())));
+
+    // The daemon does not compile a disabled rule, so adding or editing one
+    // is as safe on 1.9 as on 1.8.
+    let mut off = network_rule("100-lan", "source.network");
+    off["enabled"] = json!(false);
+    commands.try_route(add(off.clone(), Some("d1")));
+    assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
+    off["name"] = json!("100-x");
+    commands.try_route(update("100-x", off, Some("d2")));
+    assert_eq!(result(&mut rx).await, RuleCommandOutcome::Ok);
+    assert_eq!(names(&seen).len(), 2);
+
+    // Turning it on is the step the daemon would refuse.
+    commands.try_route(update(
+        "100-x",
+        network_rule("100-x", "source.network"),
+        Some("d3"),
+    ));
+    assert_eq!(
+        refused(&result(&mut rx).await),
+        vec![SOURCE_NETWORK_REFUSED.to_string()]
+    );
+    assert_eq!(names(&seen).len(), 2);
+}

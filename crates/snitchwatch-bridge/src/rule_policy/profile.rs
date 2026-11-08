@@ -96,7 +96,7 @@ pub fn validate_user_rule_in(
     let mut problems = Vec::new();
     match &rule.operator {
         None => problem(&mut problems, "operator", NO_CONDITIONS),
-        Some(op) => match super::validate_operator_in(op, context) {
+        Some(op) => match super::validate_operator_in(op, context.for_rule(rule.enabled)) {
             Err(reason) => problem(&mut problems, "operator", reason),
             Ok(()) => check_import_operator(op, profile, &mut problems),
         },

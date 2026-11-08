@@ -18,8 +18,8 @@ use crate::daemon_config::DaemonVersion;
 /// `dest.network`.
 pub const DEST_NETWORK_ONLY_SINCE: DaemonVersion = DaemonVersion::new(1, 9);
 
-pub const SOURCE_NETWORK_REFUSED: &str = "opensnitchd 1.9 and newer only accepts dest.network \
-     for a network condition; use dest.network instead.";
+pub const SOURCE_NETWORK_REFUSED: &str = "opensnitchd 1.9 and newer can't match a \
+     network condition on source.network; use dest.network instead.";
 
 /// Daemon-dependent checks. The default is v1.8.0's: nothing extra.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -29,6 +29,17 @@ pub struct PolicyContext {
 }
 
 impl PolicyContext {
+    /// The checks that apply to one rule: the daemon compiles only enabled
+    /// rules, so a disabled one gets what every daemon applies and nothing
+    /// that depends on the version.
+    pub fn for_rule(self, enabled: bool) -> Self {
+        if enabled {
+            self
+        } else {
+            Self::default()
+        }
+    }
+
     /// The checks for a daemon that reported `version` (`None`: unknown).
     pub fn for_daemon(version: Option<DaemonVersion>) -> Self {
         Self {
@@ -130,7 +141,7 @@ mod tests {
         assert_eq!(problems[0].reason, SOURCE_NETWORK_REFUSED);
         assert_eq!(
             SOURCE_NETWORK_REFUSED,
-            "opensnitchd 1.9 and newer only accepts dest.network for a network condition; use \
+            "opensnitchd 1.9 and newer can't match a network condition on source.network; use \
              dest.network instead."
         );
     }

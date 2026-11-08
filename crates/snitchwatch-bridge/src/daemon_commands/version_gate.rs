@@ -35,9 +35,9 @@ impl DaemonCommands {
         let context = self.policy_context();
         notification.r#type == Action::ChangeRule as i32
             && notification.rules.iter().any(|rule| {
-                rule.operator
-                    .as_ref()
-                    .is_none_or(|op| rule.enabled && validate_operator_in(op, context).is_err())
+                rule.operator.as_ref().is_none_or(|op| {
+                    validate_operator_in(op, context.for_rule(rule.enabled)).is_err()
+                })
             })
     }
 }
@@ -111,6 +111,24 @@ mod tests {
             commands.send(change("source.network", true)).err(),
             Some(SendError::RefusedOperator)
         );
+    }
+
+    #[test]
+    fn a_disabled_rule_still_gets_the_checks_every_daemon_applies() {
+        // A disabled rule is saved and can be turned on outside the bridge, so
+        // the pairings that crash every daemon stay refused for it.
+        let mut crashing = change("dest.network", false);
+        crashing.rules[0].operator.as_mut().unwrap().r#type = "regexp".into();
+        for version in [None, DaemonVersion::parse("1.9.0")] {
+            let shared = SharedDaemonVersion::default();
+            shared.set(version);
+            let commands = DaemonCommands::new(
+                DaemonTransport::Tcp,
+                RulesSync::new(broadcast::channel(8).0),
+            )
+            .with_daemon_version(shared);
+            assert!(commands.refuses_conditions(&crashing));
+        }
     }
 
     #[test]
