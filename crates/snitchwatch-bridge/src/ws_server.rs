@@ -24,7 +24,7 @@ use crate::blocklists::BlocklistsManager;
 use crate::profiles::ProfilesManager;
 #[cfg(feature = "web-ui")]
 use crate::web_assets::{serve_asset, serve_fallback, serve_index};
-use crate::ws_messages::{ClientMessage, ServerMessage};
+use crate::ws_messages::{ClientMessage, DaemonPolicy, ServerMessage};
 use anyhow::Context;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -38,7 +38,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::UnixListener;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 /// Channels the bridge core uses to talk to the WS server.
@@ -54,6 +54,9 @@ pub struct WsHandles {
     pub blocklists: Arc<BlocklistsManager>,
     /// Shared profiles manager — provides profile state to WS handlers.
     pub profiles: Arc<ProfilesManager>,
+    /// The connected daemon's version (the gRPC service's handle): each
+    /// connection sends its `DaemonPolicy` and re-sends it on a change.
+    pub daemon_version: crate::daemon_config::SharedDaemonVersion,
 }
 
 /// State handed to axum's router: the WS channels plus the handshake token
@@ -235,23 +238,75 @@ async fn handle_socket(socket: WebSocket, handles: WsHandles, token: Token, peer
     // server accepted it: the peer could close immediately after reading it.
     // Send an explicit, per-connection acknowledgement before subscribing to
     // broadcast traffic, making it the first server frame after a successful
-    // handshake.
-    let authenticated = match serde_json::to_string(&ServerMessage::Authenticated {
+    // handshake. The daemon's policy follows it (`DAEMON_POLICY_V1`):
+    // subscribed first, so a version change after this read is re-sent.
+    let authenticated = ServerMessage::Authenticated {
         capabilities: crate::bridge_capabilities::advertised(),
-    }) {
-        Ok(message) => message,
-        Err(error) => {
-            error!(error = %error, "failed to serialize authentication acknowledgement");
-            let _ = sender.send(Message::Close(None)).await;
-            return;
-        }
     };
-    if sender.send(Message::Text(authenticated)).await.is_err() {
-        debug!("WS client disconnected before authentication acknowledgement");
+    if !send_frame(
+        &mut sender,
+        &authenticated,
+        "authentication acknowledgement",
+    )
+    .await
+    {
+        return;
+    }
+    let mut version_rx = handles.daemon_version.subscribe();
+    let policy = DaemonPolicy::for_daemon(*version_rx.borrow_and_update());
+    if !send_frame(
+        &mut sender,
+        &ServerMessage::DaemonPolicy(policy),
+        "daemon policy",
+    )
+    .await
+    {
         return;
     }
 
-    pump_authenticated(sender, receiver, handles, peer_uid).await;
+    pump_authenticated(sender, receiver, handles, version_rx, peer_uid).await;
+}
+
+/// Send `message` as one text frame; `false` when the connection should end.
+/// `what` names the frame in the log.
+async fn send_frame<S>(sender: &mut S, message: &ServerMessage, what: &str) -> bool
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    use futures_util::SinkExt;
+    let text = match serde_json::to_string(message) {
+        Ok(text) => text,
+        Err(error) => {
+            error!(error = %error, what, "failed to serialize a server frame");
+            let _ = sender.send(Message::Close(None)).await;
+            return false;
+        }
+    };
+    if sender.send(Message::Text(text)).await.is_err() {
+        debug!(what, "WS client disconnected before a server frame");
+        return false;
+    }
+    true
+}
+
+/// Queue this connection a fresh `DaemonPolicy` on every change of the
+/// daemon's version. Never completes: a version that can no longer change
+/// (or a closed queue) must not end the connection.
+async fn resend_daemon_policy(
+    mut version_rx: watch::Receiver<Option<crate::daemon_config::DaemonVersion>>,
+    reply_tx: mpsc::Sender<ServerMessage>,
+) {
+    while version_rx.changed().await.is_ok() {
+        let policy = DaemonPolicy::for_daemon(*version_rx.borrow_and_update());
+        if reply_tx
+            .send(ServerMessage::DaemonPolicy(policy))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    std::future::pending::<()>().await;
 }
 
 /// Kept as sibling futures: failure of either direction releases the lease
@@ -260,6 +315,7 @@ async fn pump_authenticated<S, R>(
     sender: S,
     mut receiver: R,
     handles: WsHandles,
+    version_rx: watch::Receiver<Option<crate::daemon_config::DaemonVersion>>,
     peer_uid: Option<u32>,
 ) where
     S: futures_util::Sink<Message> + Unpin,
@@ -269,6 +325,7 @@ async fn pump_authenticated<S, R>(
     let broadcast_rx = handles.broadcast.subscribe();
     // Answers meant for this connection only (rule import/export, P2.7).
     let (reply_tx, reply_rx) = mpsc::channel::<ServerMessage>(REPLY_QUEUE);
+    let policy = resend_daemon_policy(version_rx, reply_tx.clone());
     let reply_to = crate::ws_messages::ReplyTo::new(reply_tx);
     let exports = crate::analysis_export::ExportSession::new();
     let export_outbound_guard = exports.drop_guard();
@@ -345,6 +402,7 @@ async fn pump_authenticated<S, R>(
     tokio::select! {
         _ = outbound => {},
         _ = inbound => {},
+        _ = policy => {},
     }
     debug!("WS client connection ended");
 }
@@ -529,6 +587,7 @@ pub async fn serve_with_blocklists(
         inbound: inbound_tx,
         blocklists: blocklists.clone(),
         profiles,
+        daemon_version: Default::default(),
     };
     let token = Token::generate();
     let server = WsServer::new(socket_path.clone(), token.clone(), handles);
@@ -554,3 +613,7 @@ pub async fn serve_with_blocklists(
 #[cfg(test)]
 #[path = "ws_server/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "ws_server/daemon_policy_tests.rs"]
+mod daemon_policy_tests;

@@ -47,3 +47,25 @@ pub struct StorageStatus {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unreadable: bool,
 }
+
+/// What the connected daemon refuses that another version accepts
+/// (`crate::rule_policy::PolicyContext`), so a GUI can refuse it first.
+/// `daemon_version` is the `major.minor` the bridge read (`None`: unknown,
+/// v1.8.0's rules apply).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonPolicy {
+    pub refuse_source_network: bool,
+    #[serde(default)]
+    pub daemon_version: Option<String>,
+}
+
+impl DaemonPolicy {
+    pub fn for_daemon(version: Option<crate::daemon_config::DaemonVersion>) -> Self {
+        Self {
+            refuse_source_network: crate::rule_policy::PolicyContext::for_daemon(version)
+                .refuse_source_network,
+            daemon_version: version.map(|v| v.to_string()),
+        }
+    }
+}

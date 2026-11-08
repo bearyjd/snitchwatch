@@ -149,3 +149,62 @@ async fn a_1_8_daemon_on_a_6_x_kernel_still_gets_its_source_network_rule() {
         "the same rule is what a 1.9 daemon refuses"
     );
 }
+
+/// The GUI learns the policy from the bridge's real wiring (the gRPC
+/// service's version handle): v1.8.0's rules until a daemon reports, then
+/// a fresh `daemonPolicy` once the stream holder's Ping carries 1.9 (its
+/// Subscribe's kernel release is not a version), and v1.8.0's rules again
+/// once that stream closes.
+#[tokio::test]
+async fn daemon_policy_follows_a_daemon_that_subscribes_after_the_gui() {
+    let socket_dir = tempfile::tempdir().unwrap();
+    let bridge = run(BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
+        cache_capacity: 64,
+    })
+    .await
+    .expect("bridge run failed");
+    let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
+    let ServerMessage::DaemonPolicy(before) = next_server_message(&mut ws).await else {
+        panic!("the daemon policy must follow the acknowledgement");
+    };
+    assert!(!before.refuse_source_network);
+    assert_eq!(before.daemon_version, None);
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap()
+        .with_version("1.9.0");
+    mock.subscribe_with_config(ClientConfig {
+        name: "mock".into(),
+        version: "6.11.0-fc44".into(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let (reply_tx, notifications) = mock.open_notifications().await.unwrap();
+    let mut ready = bridge.daemon_stream_ready();
+    tokio::time::timeout(Duration::from_secs(5), ready.wait_for(|g| *g >= 1))
+        .await
+        .unwrap()
+        .unwrap();
+    mock.ping_reporting_rules(1, 1, 1).await.unwrap();
+    // The first policy after the GUI's is the Ping's: a Subscribe that set
+    // the kernel release would have sent "6.11" first.
+    let after = loop {
+        if let ServerMessage::DaemonPolicy(policy) = next_server_message(&mut ws).await {
+            break policy;
+        }
+    };
+    assert!(after.refuse_source_network, "{after:?}");
+    assert_eq!(after.daemon_version.as_deref(), Some("1.9"));
+    drop((reply_tx, notifications));
+    let forgotten = loop {
+        if let ServerMessage::DaemonPolicy(policy) = next_server_message(&mut ws).await {
+            break policy;
+        }
+    };
+    assert!(!forgotten.refuse_source_network, "{forgotten:?}");
+    assert_eq!(forgotten.daemon_version, None);
+    bridge.shutdown();
+}
