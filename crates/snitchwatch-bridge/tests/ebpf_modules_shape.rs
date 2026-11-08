@@ -107,9 +107,14 @@ fn script_shape() {
         "mkdir -p --",
         "install -m 0644 --",
         "SW_OPENSNITCH_COMMIT",
-        "git -C \"$OS_DIR\" archive \"$SW_OPENSNITCH_COMMIT\" ebpf_prog",
-        "make -C \"$WORK\" clean",
-        "llc --version",
+        "git --no-replace-objects -C \"$OS_DIR\" archive \"$SW_OPENSNITCH_COMMIT\" ebpf_prog",
+        "git --no-replace-objects -C \"$OS_DIR\" archive",
+        "git --no-replace-objects -C \"$OS_DIR\" rev-parse",
+        "realpath -e --",
+        "CC=\"$CLANG_BIN\"",
+        "LLC=\"$LLC_BIN\"",
+        "env -u CC -u LLC",
+        "\"$LLC_BIN\" --version",
         "release pins not found",
     ] {
         assert!(s.contains(needle), "script lacks {needle:?}");
@@ -118,6 +123,7 @@ fn script_shape() {
         "sudo",
         "podman",
         "cp -R",
+        "make -C \"$WORK\" clean",
         "\n. \"$PINS_FILE\"",
         "make -C vendor",
         "git -C vendor/opensnitch checkout",
@@ -200,4 +206,70 @@ fn unknown_flag_fails() {
     let o = run(&["--bogus"], &[]);
     assert!(!o.status.success());
     assert!(text(&o).contains("unknown"), "{}", text(&o));
+}
+
+fn real_run_args<'a>(stage: &'a str, kdir: &'a str, kver: &'a str) -> Vec<&'a str> {
+    vec![
+        "--staging",
+        stage,
+        "--kernel-dir",
+        kdir,
+        "--kernel-headers",
+        kdir,
+        "--kernel-ver",
+        kver,
+    ]
+}
+
+#[test]
+fn make_expression_in_kernel_ver_is_rejected() {
+    let d = scratch("kver");
+    let (st, k) = (d.to_str().unwrap(), d.to_str().unwrap());
+    for bad in ["$(shell touch pwned)", "6.1;x", "6 1", "`id`"] {
+        let o = run(&real_run_args(st, k, bad), &[]);
+        assert!(!o.status.success(), "{bad}");
+        assert!(
+            text(&o).contains("invalid KERNEL_VER"),
+            "{bad}: {}",
+            text(&o)
+        );
+    }
+    assert!(!d.join("pwned").exists());
+}
+
+#[test]
+fn make_expression_in_kernel_paths_is_rejected() {
+    let d = scratch("kpath");
+    let evil = d.join("a$(shell touch pwned)");
+    std::fs::create_dir_all(&evil).unwrap();
+    let o = run(
+        &real_run_args(d.to_str().unwrap(), evil.to_str().unwrap(), "6.1"),
+        &[],
+    );
+    assert!(!o.status.success());
+    assert!(text(&o).contains("invalid KERNEL_DIR"), "{}", text(&o));
+    // Same through the environment variable.
+    let o = run(
+        &["--staging", d.to_str().unwrap()],
+        &[("KERNEL_DIR", evil.to_str().unwrap())],
+    );
+    assert!(!o.status.success());
+    assert!(text(&o).contains("invalid KERNEL_DIR"), "{}", text(&o));
+}
+
+#[test]
+fn relative_kernel_dir_is_canonicalised_not_rejected_as_relative() {
+    // A relative path that exists is made absolute first; a missing one fails
+    // with a clear message instead of reaching make.
+    let d = scratch("krel");
+    let o = run(
+        &real_run_args(d.to_str().unwrap(), "no/such/dir", "6.1"),
+        &[],
+    );
+    assert!(!o.status.success());
+    assert!(
+        text(&o).contains("KERNEL_DIR does not exist"),
+        "{}",
+        text(&o)
+    );
 }

@@ -84,15 +84,27 @@ release_commit="$(pin SW_OPENSNITCH_COMMIT "$RELEASE_PINS")"
 [[ -n "$STAGING" ]] || { usage >&2; die "--staging is required"; }
 [[ "$STAGING" != -* ]] || die "--staging must not start with '-': $STAGING"
 
+# Values reach make as VAR=value and make expands $(...), so they are checked
+# against strict patterns first.
+[[ "$KVER" =~ ^[0-9A-Za-z._+-]+$ ]] || die "invalid KERNEL_VER (allowed: [0-9A-Za-z._+-]): $KVER"
+safe_path() { # <label> <value>: absolute, only [A-Za-z0-9._/+-]
+    [[ "$2" =~ ^/[A-Za-z0-9._/+-]*$ ]] ||
+        die "invalid $1 (must be absolute, allowed chars [A-Za-z0-9._/+-]): $2"
+}
 if [[ $DRY_RUN -eq 0 ]]; then
     [[ -n "$KERNEL_DIR" ]] || die "KERNEL_DIR not set (use --kernel-dir or env KERNEL_DIR)"
     KERNEL_HEADERS="${KERNEL_HEADERS:-$KERNEL_DIR}"
+    # make runs in the scratch dir, so hand it canonical absolute paths.
+    KERNEL_DIR="$(realpath -e -- "$KERNEL_DIR")" || die "KERNEL_DIR does not exist: $KERNEL_DIR"
+    KERNEL_HEADERS="$(realpath -e -- "$KERNEL_HEADERS")" || die "KERNEL_HEADERS does not exist: $KERNEL_HEADERS"
+    safe_path KERNEL_DIR "$KERNEL_DIR"
+    safe_path KERNEL_HEADERS "$KERNEL_HEADERS"
 fi
 
 # The opensnitch checkout must be exactly the pinned commit (when it is a git
 # checkout; a missing submodule is tolerated only in --dry-run).
 if [[ -e "$OS_DIR/.git" ]]; then
-    actual="$(git -C "$OS_DIR" rev-parse HEAD)" || die "cannot read HEAD of $OS_DIR"
+    actual="$(git --no-replace-objects -C "$OS_DIR" rev-parse HEAD)" || die "cannot read HEAD of $OS_DIR"
     [[ "$actual" == "$SW_OPENSNITCH_COMMIT" ]] ||
         die "commit pin mismatch: $OS_DIR is at $actual, pin is $SW_OPENSNITCH_COMMIT"
 elif [[ $DRY_RUN -eq 1 ]]; then
@@ -102,7 +114,7 @@ else
 fi
 
 if [[ $DRY_RUN -eq 1 ]]; then
-    log "dry-run: would extract ebpf_prog of commit $SW_OPENSNITCH_COMMIT (git archive) to a scratch dir, run make clean"
+    log "dry-run: would extract ebpf_prog of commit $SW_OPENSNITCH_COMMIT (git archive) to a scratch dir"
     log "dry-run: would run make KERNEL_DIR=${KERNEL_DIR:-<unset>} KERNEL_HEADERS=${KERNEL_HEADERS:-${KERNEL_DIR:-<unset>}} KERNEL_VER=$KVER"
     log "dry-run: would require clang/llvm-strip/llc major $SW_EBPF_CLANG_MAJOR/$SW_EBPF_LLVM_MAJOR/$SW_EBPF_LLC_MAJOR, run llvm-strip -g"
     log "dry-run: would stage ${MODULES[*]} + SHA256SUMS under $STAGING/$DEST_REL/"
@@ -117,25 +129,37 @@ fi
 for tool in clang llc llvm-strip make; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool not found in PATH"
 done
-clang_major="$(clang --version | sed -n 's/.*clang version \([0-9]*\)\..*/\1/p' | head -n1)"
+# The tools checked below are the ones make must use (Makefile: CC = clang,
+# LLC ?= llc), so they are passed to make as absolute paths.
+CLANG_BIN="$(command -v clang)"
+LLC_BIN="$(command -v llc)"
+safe_path clang "$CLANG_BIN"
+safe_path llc "$LLC_BIN"
+clang_major="$("$CLANG_BIN" --version | sed -n 's/.*clang version \([0-9]*\)\..*/\1/p' | head -n1)"
 [[ "$clang_major" == "$SW_EBPF_CLANG_MAJOR" ]] ||
     die "clang major is '${clang_major:-unknown}', pin is $SW_EBPF_CLANG_MAJOR"
 strip_major="$(llvm-strip --version | sed -n 's/.*LLVM version \([0-9]*\)\..*/\1/p' | head -n1)"
 [[ "$strip_major" == "$SW_EBPF_LLVM_MAJOR" ]] ||
     die "llvm-strip major is '${strip_major:-unknown}', pin is $SW_EBPF_LLVM_MAJOR"
 
-llc_major="$(llc --version | sed -n 's/.*LLVM version \([0-9]*\)\..*/\1/p' | head -n1)"
+llc_major="$("$LLC_BIN" --version | sed -n 's/.*LLVM version \([0-9]*\)\..*/\1/p' | head -n1)"
 [[ "$llc_major" == "$SW_EBPF_LLC_MAJOR" ]] ||
     die "llc major is '${llc_major:-unknown}', pin is $SW_EBPF_LLC_MAJOR"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf -- "$WORK"' EXIT
 # Exactly the pinned tree, not the working tree.
-git -C "$OS_DIR" archive "$SW_OPENSNITCH_COMMIT" ebpf_prog | tar -x -C "$WORK" --strip-components=1
-make -C "$WORK" clean
+# --no-replace-objects: refs/replace must not alter the pinned tree. The tree
+# is a fresh archive with no build products, so no `make clean` (which would
+# also need the kernel arguments, as the Makefile evaluates them first).
+git --no-replace-objects -C "$OS_DIR" archive "$SW_OPENSNITCH_COMMIT" ebpf_prog |
+    tar -x -C "$WORK" --strip-components=1
 
 log "building modules (KERNEL_VER=$KVER)"
-make -C "$WORK" KERNEL_DIR="$KERNEL_DIR" KERNEL_HEADERS="$KERNEL_HEADERS" KERNEL_VER="$KVER"
+# Inherited make-level variables must not bypass the checked tools or flags.
+env -u CC -u LLC -u ARCH -u EXTRA_FLAGS -u MAKEFLAGS -u MAKEOVERRIDES -u MFLAGS \
+    make -C "$WORK" CC="$CLANG_BIN" LLC="$LLC_BIN" \
+    KERNEL_DIR="$KERNEL_DIR" KERNEL_HEADERS="$KERNEL_HEADERS" KERNEL_VER="$KVER"
 for m in "${MODULES[@]}"; do
     [[ -s "$WORK/$m" ]] || die "build did not produce $m"
 done
