@@ -257,3 +257,40 @@ async fn subscribe_echoes_config() {
     assert_eq!(echoed.name, cfg.name);
     assert_eq!(echoed.version, cfg.version);
 }
+
+/// A ping that changes the stored daemon version bumps the profile
+/// enforcer's recheck trigger once; one that repeats it, or carries no
+/// readable version, doesn't.
+#[tokio::test]
+async fn only_a_ping_that_changes_the_daemon_version_triggers_a_recheck() {
+    use snitchwatch_proto::protocol::Statistics;
+
+    let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+    let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+    let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+    let notice_bus = Arc::new(crate::notice::NoticeBus::new());
+    let filter_pause = Arc::new(FilterPause::new());
+    let service = UiService::new(cache, tx, tray_pub, notice_bus, filter_pause);
+    let mut changed = service.daemon_version_changed();
+    let ping = |daemon_version: &str| {
+        Request::new(PingRequest {
+            id: 1,
+            stats: Some(Statistics {
+                daemon_version: daemon_version.into(),
+                ..Default::default()
+            }),
+        })
+    };
+
+    service.ping(ping("1.9.0")).await.unwrap();
+    assert!(changed.has_changed().unwrap(), "unknown -> 1.9");
+    assert_eq!(*changed.borrow_and_update(), 1);
+
+    for same in ["1.9.0", "v1.9.1", "garbage", ""] {
+        service.ping(ping(same)).await.unwrap();
+        assert!(!changed.has_changed().unwrap(), "{same:?}");
+    }
+
+    service.ping(ping("1.8.0")).await.unwrap();
+    assert_eq!(*changed.borrow_and_update(), 2, "1.9 -> 1.8");
+}

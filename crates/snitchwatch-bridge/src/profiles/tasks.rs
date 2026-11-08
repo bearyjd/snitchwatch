@@ -56,17 +56,19 @@ impl ProfilesManager {
 
     /// Spawn the enforcement loop: one pass now, then one after every
     /// request ([`Self::request_enforcement`], coalesced) and after every
-    /// committed daemon rules snapshot (`rules_synced`, taken before the
-    /// gRPC server starts so none is missed).
+    /// bump of a `triggers` generation: a committed daemon rules snapshot
+    /// (`UiService::rules_synced`) or a changed daemon version
+    /// (`UiService::daemon_version_changed`), both taken before the gRPC
+    /// server starts so none is missed.
     pub fn spawn_enforcer(
         self: Arc<Self>,
-        rules_synced: Option<watch::Receiver<u64>>,
+        triggers: Vec<watch::Receiver<u64>>,
     ) -> Vec<JoinHandle<()>> {
         let mut handles = Vec::new();
-        if let Some(mut synced) = rules_synced {
+        for mut trigger in triggers {
             let manager = self.clone();
             handles.push(tokio::spawn(async move {
-                while synced.changed().await.is_ok() {
+                while trigger.changed().await.is_ok() {
                     manager.request_enforcement();
                 }
             }));

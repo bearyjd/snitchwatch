@@ -118,6 +118,8 @@ pub struct UiService {
     /// one (never `subscribe`: see `SharedDaemonVersion`); `commands` checks
     /// rules against it.
     daemon_version: crate::daemon_config::SharedDaemonVersion,
+    /// Generation bumped each time a `ping` changes [`Self::daemon_version`].
+    daemon_version_changed: Arc<tokio::sync::watch::Sender<u64>>,
     /// How long a prompt waits before the bridge answers it itself
     /// (`crate::deferred_answers`).
     answer_timeout: Duration,
@@ -154,6 +156,7 @@ impl UiService {
             commands: DaemonCommands::new(DaemonTransport::Tcp, rules.clone())
                 .with_daemon_version(daemon_version.clone()),
             daemon_version,
+            daemon_version_changed: Arc::new(tokio::sync::watch::channel(0).0),
             rules,
             prompt_slot,
             daemon_config: Default::default(),
@@ -231,6 +234,13 @@ impl UiService {
         self.rules.synced()
     }
 
+    /// Generation bumped each time a `ping` changes the stored daemon
+    /// version: the profile enforcer's recheck trigger, since a pass run
+    /// before the first `ping` checked rules against v1.8.0's policy.
+    pub fn daemon_version_changed(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.daemon_version_changed.subscribe()
+    }
+
     /// Convenience: wrap into a tonic `UiServer<UiService>` ready for
     /// `Server::builder().add_service(...)`.
     /// The decode limit is explicit: it bounds one `Subscribe` rule snapshot.
@@ -293,11 +303,13 @@ impl Ui for UiService {
         // prompted for.
         if let Some(stats) = req.stats {
             // The only place the daemon reports its own version (Subscribe's
-            // is the kernel's): a readable one replaces the stored one.
-            self.daemon_version
-                .observe(crate::daemon_config::DaemonVersion::parse(
-                    &stats.daemon_version,
-                ));
+            // is the kernel's): a readable one replaces the stored one, and
+            // a change asks for every rule to be checked again.
+            let version = crate::daemon_config::DaemonVersion::parse(&stats.daemon_version);
+            if self.daemon_version.observe(version) {
+                self.daemon_version_changed
+                    .send_modify(|generation| *generation += 1);
+            }
             self.prompt_slot.observe(
                 stats.rule_misses,
                 stats.uptime,

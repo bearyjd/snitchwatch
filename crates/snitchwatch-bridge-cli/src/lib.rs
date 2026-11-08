@@ -229,6 +229,7 @@ where
     // Taken before the gRPC server starts, so no rules snapshot is missed.
     let rules_synced = ui_service_inner.rules_synced();
     let profile_rules_synced = ui_service_inner.rules_synced();
+    let profile_version_changed = ui_service_inner.daemon_version_changed();
     let curated_synced = rules_synced.clone();
     // The recommended background-service rules (prompt-slot D).
     let curated = CuratedDefaults::new(
@@ -273,7 +274,7 @@ where
     )?;
     let mut profile_tasks = profiles_mgr
         .clone()
-        .spawn_enforcer(Some(profile_rules_synced));
+        .spawn_enforcer(vec![profile_rules_synced, profile_version_changed]);
 
     // Network-driven auto-activation. `connect_watcher` degrades to a no-op
     // watcher (manual-activation-only) if NetworkManager/D-Bus isn't

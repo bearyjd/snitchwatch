@@ -10,7 +10,9 @@ use tokio::sync::watch;
 
 use super::ProfileRuleSink;
 use crate::blocklists::Enforcement;
+use crate::daemon_config::SharedDaemonVersion;
 use crate::profiles::network_watcher::NetworkWatcher;
+use crate::rule_policy::PolicyContext;
 
 /// [`NetworkWatcher`] with a controllable `watch::Sender`, so the manager
 /// runs without D-Bus or NetworkManager.
@@ -37,10 +39,12 @@ impl NetworkWatcher for FakeNetworkWatcher {
     }
 }
 
-/// Records each pass's wanted rule names and reports them installed.
+/// Records each pass's wanted rule names and reports them installed;
+/// checks rules for the daemon `version` holds (v1.8.0's when unset).
 #[derive(Default)]
 pub struct CapturingRuleSink {
     pub calls: StdMutex<Vec<Vec<String>>>,
+    pub version: SharedDaemonVersion,
 }
 
 #[async_trait]
@@ -49,6 +53,10 @@ impl ProfileRuleSink for CapturingRuleSink {
         let names = wanted.iter().map(|r| r.name.clone()).collect();
         self.calls.lock().unwrap().push(names);
         vec![Enforcement::RuleInstalled { at: Utc::now() }; wanted.len()]
+    }
+
+    fn policy_context(&self) -> PolicyContext {
+        PolicyContext::for_daemon(self.version.get())
     }
 }
 

@@ -110,10 +110,12 @@ const KNOWN_OPERANDS: &[&str] = &[
 /// (operator.go `Match`: `OpDstNetwork`, `OpSrcNetwork`, `OpNetLists`).
 const IP_OPERANDS: &[&str] = &["dest.network", "source.network", "lists.nets"];
 
-/// `lists.ips` is a string in v1.8.0's `Match` (`con.DstIP.String()`) and
-/// panics upstream master outside the `lists` type: only `lists` compiles
-/// it either way. Not an [`IP_OPERANDS`] member, which would let the
-/// `network` type (`cmpNetwork`'s `value.(net.IP)`) take it.
+/// `lists.ips` outside the `lists` type: v1.8.0 compiles it (its `Match`
+/// compares `con.DstIP.String()`, a string), and only upstream master's
+/// `cbGeneric` path panics on it. The mock refuses it at every version on
+/// purpose, so the bridge never relies on either. Not an [`IP_OPERANDS`]
+/// member, which would let the `network` type (`cmpNetwork`'s
+/// `value.(net.IP)`) take it.
 const LISTS_ONLY_OPERANDS: &[&str] = &["lists.ips"];
 
 fn is_known_operand(operand: &str) -> bool {
@@ -196,7 +198,7 @@ fn validate_operator_compiles(
     }
     if LISTS_ONLY_OPERANDS.contains(&op.operand.as_str()) && op.r#type != "lists" {
         return Err(MockError::InvalidRule(
-            "a lists.ips operand without the lists type would panic the daemon or never match"
+            "a lists.ips operand without the lists type panics upstream master (refused at every version)"
                 .to_string(),
         ));
     }

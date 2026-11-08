@@ -86,11 +86,17 @@ impl SharedDaemonVersion {
     }
 
     /// What a `ping` reported: replaces the version when readable, leaves
-    /// it alone when not.
-    pub fn observe(&self, version: Option<DaemonVersion>) {
-        if version.is_some() {
-            self.set(version);
-        }
+    /// it alone when not. True when the stored value changed (a first
+    /// readable version counts), so the caller can recheck what was sent
+    /// under the old one.
+    pub fn observe(&self, version: Option<DaemonVersion>) -> bool {
+        let Some(version) = version else {
+            return false;
+        };
+        let mut stored = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = *stored != Some(version);
+        *stored = Some(version);
+        changed
     }
 
     pub fn get(&self) -> Option<DaemonVersion> {
@@ -141,13 +147,17 @@ mod tests {
     fn a_ping_overwrites_when_readable_and_is_ignored_when_not() {
         let shared = SharedDaemonVersion::default();
         assert_eq!(shared.get(), None);
-        shared.observe(DaemonVersion::parse("garbage"));
+        assert!(!shared.observe(DaemonVersion::parse("garbage")));
         assert_eq!(shared.get(), None);
-        shared.observe(DaemonVersion::parse("1.9.0"));
+        assert!(shared.observe(DaemonVersion::parse("1.9.0")));
         assert_eq!(shared.get(), Some(DaemonVersion::new(1, 9)));
-        shared.observe(DaemonVersion::parse(""));
+        assert!(
+            !shared.observe(DaemonVersion::parse("v1.9.2")),
+            "same major.minor"
+        );
+        assert!(!shared.observe(DaemonVersion::parse("")));
         assert_eq!(shared.clone().get(), Some(DaemonVersion::new(1, 9)));
-        shared.observe(DaemonVersion::parse("1.8.0"));
+        assert!(shared.observe(DaemonVersion::parse("1.8.0")));
         assert_eq!(shared.get(), Some(DaemonVersion::new(1, 8)));
         shared.set(None);
         assert_eq!(shared.get(), None);
