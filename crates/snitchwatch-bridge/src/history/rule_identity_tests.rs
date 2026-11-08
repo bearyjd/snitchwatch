@@ -439,7 +439,10 @@ fn the_network_type_operand_rule_matches_the_vendored_daemon() {
         .nth(1)
         .and_then(|rest| rest.split("\n}\n").next())
         .expect("operator.go has a compileNetwork method");
-    assert!(compile_network.contains("net.ParseCIDR"), "{compile_network}");
+    assert!(
+        compile_network.contains("net.ParseCIDR"),
+        "{compile_network}"
+    );
     assert!(
         go.contains("type opCallback func(value string) bool"),
         "1.9's string callbacks are what panic on a network operand"
@@ -450,7 +453,10 @@ fn the_network_type_operand_rule_matches_the_vendored_daemon() {
     assert!(newer.refuse_source_network);
     let validate = |o: &Operator| crate::rule_policy::validate_operator_in(o, newer);
     assert!(validate(&op("network", "source.network", "10.0.0.0/8")).is_err());
-    assert_eq!(validate(&op("network", "dest.network", "10.0.0.0/8")), Ok(()));
+    assert_eq!(
+        validate(&op("network", "dest.network", "10.0.0.0/8")),
+        Ok(())
+    );
     for kind in ["simple", "regexp", "range"] {
         for operand in ["dest.network", "source.network"] {
             assert!(
