@@ -104,7 +104,7 @@ configured in the repo (no match in `justfile` or `ci.yml`).
 
 ## CI jobs (`.github/workflows/ci.yml`)
 
-Runs on push to `main` and `r16.1-candidate`, and on every pull request.
+Runs on push to `main` and `r16.2-candidate`, and on every pull request.
 
 | Job | What it gates |
 |---|---|

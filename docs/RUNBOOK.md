@@ -5,8 +5,8 @@ text says "Not defined in the repo". Variables: `docs/ENV.md`. Contributor
 workflow: `docs/CONTRIBUTING.md`.
 
 **Hard rule: releases (tags, r*-candidate, promotion) are the owner's/tower session's decision.**
-Do not push a `v*` tag, push or move `r16.1-candidate` (the published `r16-candidate` is never replaced), set
-`R16_1_CANDIDATE_REVIEWED_SHA`, publish a draft release, or pin a new release in
+Do not push a `v*` tag, push or move `r16.2-candidate` (the published `r16-candidate` and `r16.1-candidate` are never replaced), set
+`R16_2_CANDIDATE_REVIEWED_SHA`, publish a draft release, or pin a new release in
 an image on your own initiative. (The repo-side mechanics of that gate are
 under "Release flow". Source: `HANDOFF.md:12`, "final r16 needs a separate owner go given to the bazzite-tower session".)
 
@@ -59,10 +59,10 @@ decision (hard rule above).
 | `release.yml` runs on `v*` tags: rebuild, reproducibility check, install check, RustSec gate, then (environment `release`) refuse if the tag moved or a release exists, attest, create a **draft** release only | `.github/workflows/release.yml` header; `bridge-release-artifact.md` "Cutting a release" 3 |
 | `workflow_dispatch` of `Release` builds and verifies without publishing | `release.yml:6-9`; `bridge-release-artifact.md` |
 | Maintainer compares the draft's sha256 with the local build, runs the attestation check, publishes the draft, pins the sha256 in the image | `bridge-release-artifact.md` "Cutting a release" 4 |
-| Candidate GUI: `candidate-gui.yml` triggers only on a push to `r16.1-candidate`. Build runs only if repo variable `R16_1_CANDIDATE_REVIEWED_SHA` equals the pushed SHA, else a `register` job holds. Publisher needs green exact-head `ci.yml`, validates the packet, creates the lightweight tag `r16.1-candidate` if missing and a draft, uploads assets, and then **automatically makes the prerelease public** (`draft: false, prerelease: true, make_latest: 'false'`), so after the owner sets the variable, the push itself publishes with no further workflow step; it never overwrites assets and never becomes "latest" | `.github/workflows/candidate-gui.yml:4-30,245,259-260`; `docs/packaging/r13-candidate-gui-ci.md` |
+| Candidate GUI: `candidate-gui.yml` triggers only on a push to `r16.2-candidate`. Build runs only if repo variable `R16_2_CANDIDATE_REVIEWED_SHA` equals the pushed SHA, else a `register` job holds. Publisher needs green exact-head `ci.yml`, validates the packet, creates the lightweight tag `r16.2-candidate` if missing and a draft, uploads assets, and then **automatically makes the prerelease public** (`draft: false, prerelease: true, make_latest: 'false'`), so after the owner sets the variable, the push itself publishes with no further workflow step; it never overwrites assets and never becomes "latest" | `.github/workflows/candidate-gui.yml:4-30,245,259-260`; `docs/packaging/r13-candidate-gui-ci.md` |
 | The workflow refuses an existing release or mismatched tag and does not overwrite assets; a failure after draft creation (`candidate-gui.yml:247`) leaves a draft and HOLD, earlier failures leave nothing; a full rerun builds a new candidate needing fresh acceptance | `r13-candidate-gui-ci.md` |
 
-The file `docs/packaging/r13-candidate-gui-ci.md` is titled "r16.1 system GUI
+The file `docs/packaging/r13-candidate-gui-ci.md` is titled "r16.2 system GUI
 candidate CI"; the filename is historical.
 
 ## Health checks that exist
