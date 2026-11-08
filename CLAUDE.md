@@ -21,7 +21,8 @@ master `a1353848` (2026-07-26, v1.8.0 + 224 commits; owner decision
 `snitchwatch/stable` (identical to upstream master; that branch is an unprotected convenience ref: builds are pinned by the gitlink SHA, which `packaging/release/pins.env` and `build-bridge.sh` enforce, never by the branch) — upstream reference for
 `ui.proto` (unchanged from v1.8.0), default config shape, etc. — never edit
 files under it. The bluebuild image still installs the released v1.8.0 RPM;
-building the daemon from the pin needs Go >= 1.25. If `git status` shows it as dirty with only an untracked
+building the daemon from the pin needs Go >= 1.25. If `git status` shows it
+as dirty with only an untracked
 `.omc/` (or similar tooling-artifact) path inside it, that's tooling noise,
 not a real change; don't commit a submodule pointer bump for it.
 

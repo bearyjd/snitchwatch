@@ -195,15 +195,34 @@ Use this instead of section 3's RPM when testing the pinned master (it carries `
 kernel 6.19 build fix). Daemon and `.o` files must come from the **same** commit.
 1. Scratch clone, never the submodule: `git clone https://github.com/bearyjd/opensnitch.git -b
    snitchwatch/stable os-pin && git -C os-pin checkout a1353848ba1b660320e90cefea782c3fba272c00`
-   (or `git -C vendor/opensnitch archive a1353848 | tar -x -C os-pin`). Then require `test "$(git -C os-pin rev-parse HEAD)" = a1353848ba1b660320e90cefea782c3fba272c00` (stop if it differs); the archive variant never touches the fork.
-2. Daemon: Go **>= 1.25** (`daemon/go.mod:3` says `go 1.25.0`; **UNVERIFIED** that the tower's
-   builder has it). `cd os-pin/daemon && go build -o opensnitchd .` (the Makefile's `go get` step
-   needs network; **UNVERIFIED** offline). `./opensnitchd -version` must print `1.9.0`
-   (`daemon/core/version.go:6`).
+   (or `mkdir -p os-pin && git -C vendor/opensnitch archive a1353848 | tar -x -C os-pin`). Then require `test "$(git -C os-pin rev-parse HEAD)" = a1353848ba1b660320e90cefea782c3fba272c00` (stop if it differs); the archive variant never touches the fork.
+2. Daemon build prerequisites and steps (a fresh clone cannot `go build` directly:
+   `daemon/ui/protocol/` holds only `.gitkeep`, the Go bindings are generated, not committed).
+   1. Go **>= 1.25** (`daemon/go.mod:3` says `go 1.25.0`; **UNVERIFIED** that the tower's builder has it).
+   2. gcc plus the libnetfilter_queue and libnfnetlink devel packages: `daemon/netfilter/queue.go:4`
+      uses cgo with `#cgo pkg-config: libnetfilter_queue` (Fedora package names **UNVERIFIED**;
+      upstream's CI installs `libnetfilter-queue-dev libmnl-dev libpcap-dev protobuf-compiler`,
+      `.github/workflows/go.yml`).
+   3. `protoc` plus `protoc-gen-go` and `protoc-gen-go-grpc` on `PATH`. Upstream CI installs
+      `google.golang.org/protobuf/cmd/protoc-gen-go@v1.34.1` and
+      `google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.3.0`; whether those versions suit this
+      commit and `protoc` itself are **UNVERIFIED**.
+   4. Generate the bindings: `make -C os-pin protocol` (root `Makefile` `protocol` target, which runs
+      `proto/Makefile`; its `ui.pb.go` rule runs `protoc ... --go_out --go-grpc_out` into
+      `daemon/ui/protocol/`). The same Makefile also has a python rule (`ui_pb2.py`,
+      needs `grpc_tools`); if plain `make -C os-pin/proto` stops there, run only
+      `make -C os-pin/proto ../daemon/ui/protocol/ui.pb.go` (**UNVERIFIED** either way).
+   5. Module download needs network or a warm `GOMODCACHE`: `go build` fetches modules as well as
+      the Makefile's `go get` (**UNVERIFIED** offline).
+   6. `cd os-pin/daemon && go build -o opensnitchd .` (or `make -C os-pin/daemon`, which runs
+      `go get` first). `./opensnitchd -version` must print `1.9.0` (`daemon/core/version.go:6`).
 3. Modules: as section 5 steps 1-3 in `os-pin/ebpf_prog`, adding `KERNEL_VER=$(uname -r)`: the
    pinned Makefile adds the 6.19 flags only when `KERNEL_VER >= 6.19` (`ebpf_prog/Makefile:17,57-59`).
-4. Install the daemon binary where the image expects it and the three `.o` under
-   `/usr/local/lib/opensnitchd/ebpf/`, record both sha256s with the commit, then run sections 3
+4. Install the daemon binary and the three `.o` under
+   `/usr/local/lib/opensnitchd/ebpf/`. `/usr/bin` is read-only on ostree, so put the daemon at
+   `/usr/local/bin/opensnitchd` and point the unit at it with a drop-in `ExecStart=` (empty
+   `ExecStart=` line first, then the new path; **UNVERIFIED** against the image's unit). Record both
+   sha256s with the commit, then run sections 3
    (steps 4-6) and 4. Tower work only: nothing in this repo builds either artefact.
 
 ## 6. If it passes: what flips together (do not do it from this runbook)

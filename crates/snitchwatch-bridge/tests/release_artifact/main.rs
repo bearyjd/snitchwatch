@@ -174,6 +174,7 @@ fn meta_json() -> serde_json::Value {
             "rpm_qa_sha256": RPM_QA_SHA256,
             "cargo_lock_sha256": "1".repeat(64)
         },
+        // fixture values, independent of the real pin
         "upstream": {
             "opensnitch_commit": "b404c4c6316760fa7bc415509d3f8d747f7dc9cc",
             "opensnitch_tag": "v1.8.0",

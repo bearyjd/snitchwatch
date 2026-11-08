@@ -10,7 +10,7 @@ is silent the text says "Not defined in the repo".
 |---|---|---|
 | Rust | README declares no minimum version; no `rust-version`, `rust-toolchain.toml` or clippy/rustfmt override exists; CI uses `dtolnay/rust-toolchain@stable`; release builds pin 1.99.1 | `README.md` "Building"; `Cargo.toml:38-42`; `ci.yml`; `packaging/release/pins.env:2` |
 | `protoc` | `snitchwatch-proto/build.rs` compiles `vendor/opensnitch/proto/ui.proto`; `snitchwatch-bridge` and `-bridge-cli` depend on it, so the default build needs it | `CLAUDE.md` (build commands); `ci.yml` (`protobuf-compiler`) |
-| Submodule | `git submodule update --init --recursive`; `vendor/opensnitch` is read-only, pinned `v1.8.0` | `README.md` "Building"; `CLAUDE.md`; `.gitmodules` |
+| Submodule | `git submodule update --init --recursive`; `vendor/opensnitch` is read-only, pinned at upstream master `a1353848` (2026-11-08; `ui.proto` unchanged from v1.8.0) | `README.md` "Building"; `CLAUDE.md`; `.gitmodules` |
 | `just` | All commands below | `justfile` |
 | Tauri build deps | `snitchwatch-tauri` is a default member; its build links webkit2gtk even for `cargo check` | `ci.yml` (`libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`, ...) |
 | Qt6 + KDE Frameworks 6 (Kirigami) dev packages | Needed for `kirigami-spike` and `snitchwatch-kirigami`, which are excluded from `default-members`; plain `cargo build`/`cargo check`/`cargo test` (what CI runs) skip them, but `just build`, `just check` and `just test` use `--workspace` (`justfile:24-25,27-28,33-35`) and DO compile them, so they need Qt6/KF6. Without Qt, run the plain cargo commands. Build Kirigami explicitly with `cargo build -p snitchwatch-kirigami` | `CLAUDE.md`; `Cargo.toml:24-36`; `justfile` `kirigami-dev` |

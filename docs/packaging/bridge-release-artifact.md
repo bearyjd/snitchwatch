@@ -141,12 +141,13 @@ test "$(readlink /etc/systemd/user/default.target.wants/snitchwatch-bridge.servi
 (cd / && sha256sum -c --quiet /usr/share/snitchwatch-bridge/SHA256SUMS)
 test "$(jq -r .version /usr/share/snitchwatch-bridge/MANIFEST.json)" = "$SW_VERSION"
 test "$(jq -r .source.dirty /usr/share/snitchwatch-bridge/MANIFEST.json)" = false
-# protocol pairing: the bridge's vendored OpenSnitch == the installed daemon
+# protocol pairing: the bridge's protocol source (vendored pin) vs the installed daemon
 # (the bluebuild image still installs the v1.8.0 RPM; ui.proto is identical
 # v1.8.0..a1353848, so a v1.8.0 daemon speaks the same protocol)
 test "$(jq -r .upstream.opensnitch_tag /usr/share/snitchwatch-bridge/MANIFEST.json)" = master-a1353848
-# ...and assert the daemon you pinned is that same version (however it was
-# installed — an extracted RPM may not be in the rpm database).
+# ...and assert the installed daemon is the v1.8.0 RPM, whose ui.proto is
+# identical to the pin's (however it was installed — an extracted RPM may not
+# be in the rpm database).
 ! ldd /usr/bin/snitchwatch-bridge-cli | grep -q 'not found'
 test "$(/usr/bin/snitchwatch-bridge-cli --version)" = "snitchwatch-bridge-cli $SW_VERSION"   # flag only, never bare
 XDG_RUNTIME_DIR="$(mktemp -d)" systemd-analyze verify --user \

@@ -1,8 +1,8 @@
 # Agent-Native Roadmap — Snitchwatch
 
 Audit date: 2026-07-07. This repo is **original work**, not a vendored
-upstream clone: `vendor/opensnitch` is a pinned git submodule (v1.8.0,
-read-only reference for protocol/config shape) and `Cargo.toml` shows the
+upstream clone: `vendor/opensnitch` is a pinned git submodule (v1.8.0 at
+audit time; upstream master `a1353848` since 2026-11-08, read-only reference for protocol/config shape) and `Cargo.toml` shows the
 actual product is a 10-crate Rust workspace ("Snitchwatch") that bridges
 opensnitchd's gRPC protocol to a Little-Snitch-style WebSocket UI, plus two
 unrelated scanner crates (`scanner-core`, `scanner-privileged`) for a
