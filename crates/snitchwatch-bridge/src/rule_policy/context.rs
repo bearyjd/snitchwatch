@@ -6,7 +6,10 @@
 //! v1.8.0, the shipped daemon, also takes `source.network`. A rule the
 //! daemon won't compile is skipped when it loads its rules and answers
 //! `CHANGE_RULE` with ERROR, so the bridge refuses to send one to a daemon
-//! that reports 1.9 or newer. An unknown version keeps v1.8.0's rules: the
+//! that reports 1.9 or newer. The version is the one the daemon's `ping`
+//! reports (`Statistics.daemon_version`); `subscribe`'s `ClientConfig.version`
+//! is the host's kernel release and is never used. Until the first `ping`
+//! the version is unknown, and an unknown version keeps v1.8.0's rules: the
 //! daemon's own refusal stays the backstop.
 //!
 //! Only rules being sent are checked: a rule the daemon already holds stays
@@ -40,7 +43,8 @@ impl PolicyContext {
         }
     }
 
-    /// The checks for a daemon that reported `version` (`None`: unknown).
+    /// The checks for a daemon that reported `version` (`None`: unknown, as
+    /// before its first `ping`; v1.8.0's checks).
     pub fn for_daemon(version: Option<DaemonVersion>) -> Self {
         Self {
             refuse_source_network: version.is_some_and(|v| v >= DEST_NETWORK_ONLY_SINCE),

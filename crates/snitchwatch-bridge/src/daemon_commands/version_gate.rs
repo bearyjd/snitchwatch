@@ -1,6 +1,6 @@
 //! The daemon version a [`DaemonCommands`] checks rules against before it
 //! sends them (`crate::rule_policy::PolicyContext`): the version the gRPC
-//! service's `subscribe` last stored. Every path that sends a rule holds a
+//! service last stored from a `ping` (`SharedDaemonVersion`). Every path that sends a rule holds a
 //! `DaemonCommands`, so each reads the same version at the moment it checks.
 
 use snitchwatch_proto::protocol::{Action, Notification};

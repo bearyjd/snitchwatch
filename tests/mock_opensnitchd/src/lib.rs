@@ -101,10 +101,19 @@ pub enum MockError {
 #[derive(Clone)]
 pub struct MockOpensnitchd {
     client: UiClient<Channel>,
-    /// What this daemon reports in `Subscribe` and `Ping`, and the rules it
-    /// compiles ([`validate_rule_shape_for`]).
+    /// What this daemon reports as `Statistics.daemon_version` in a `Ping`,
+    /// and the rules it compiles ([`validate_rule_shape_for`]). `Subscribe`
+    /// reports [`MOCK_KERNEL_RELEASE`] instead, as the real daemon does.
     version: String,
 }
+
+/// What this mock reports as `ClientConfig.version` at `Subscribe`. The real
+/// daemon sends the host's kernel release there (`core.GetKernelVersion()`,
+/// `vendor/opensnitch/daemon/ui/notifications.go`), not its own version,
+/// which only arrives in a `Ping`'s `Statistics.daemon_version`. It reads as
+/// 6.7, so a bridge that took it for the daemon's version would treat the
+/// default 1.8 mock as 1.9 or newer.
+pub const MOCK_KERNEL_RELEASE: &str = "6.7.4-mock";
 
 // Same `MockError::Rpc(tonic::Status)` large variant as `validate_rule_shape`
 // below. Older clippy exempted these public methods (avoid-breaking-exported-
@@ -121,8 +130,8 @@ impl MockOpensnitchd {
         }
     }
 
-    /// Report `version` (default [`DEFAULT_VERSION`]) and compile rules as
-    /// that daemon does.
+    /// Report `version` (default [`DEFAULT_VERSION`]) in `Ping` statistics
+    /// and compile rules as that daemon does.
     pub fn with_version(mut self, version: &str) -> Self {
         self.version = version.to_string();
         self
@@ -130,11 +139,6 @@ impl MockOpensnitchd {
 
     pub fn version(&self) -> &str {
         &self.version
-    }
-
-    /// The version string as this mock reports it.
-    fn reported_version(&self) -> String {
-        format!("mock-{}", self.version)
     }
 
     /// Dial the bridge at `addr`. Caller is responsible for ensuring the
@@ -189,6 +193,8 @@ impl MockOpensnitchd {
     /// (`vendor/opensnitch/daemon/statistics/stats.go` `Serialize`): `rules`
     /// is its loader's `NumRules()`, every rule in memory, enabled or not
     /// ([`loader::LoaderModel::num_rules`]), and `uptime` is in seconds.
+    /// It carries this mock's version as `daemon_version`, the only place
+    /// the bridge learns it.
     pub async fn ping_reporting_rules(
         &mut self,
         id: u64,
@@ -200,7 +206,7 @@ impl MockOpensnitchd {
             snitchwatch_proto::protocol::Statistics {
                 rules,
                 uptime,
-                daemon_version: self.reported_version(),
+                daemon_version: self.version.clone(),
                 ..Default::default()
             },
         )
@@ -211,7 +217,7 @@ impl MockOpensnitchd {
         let cfg = ClientConfig {
             id: 1,
             name: name.to_string(),
-            version: self.reported_version(),
+            version: MOCK_KERNEL_RELEASE.to_string(),
             ..Default::default()
         };
         let echoed = self.client.subscribe(cfg).await?.into_inner();
@@ -221,13 +227,13 @@ impl MockOpensnitchd {
     /// Like [`Self::subscribe`], but takes a full `ClientConfig` the
     /// caller controls — used by tests that need to drive a specific
     /// `is_firewall_running`/`config` value through the bridge. An empty
-    /// `version` is filled in with this mock's.
+    /// `version` is filled in with [`MOCK_KERNEL_RELEASE`].
     pub async fn subscribe_with_config(
         &mut self,
         mut cfg: ClientConfig,
     ) -> Result<ClientConfig, MockError> {
         if cfg.version.is_empty() {
-            cfg.version = self.reported_version();
+            cfg.version = MOCK_KERNEL_RELEASE.to_string();
         }
         let echoed = self.client.subscribe(cfg).await?.into_inner();
         Ok(echoed)

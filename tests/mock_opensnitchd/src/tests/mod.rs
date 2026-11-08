@@ -54,38 +54,43 @@ async fn mock_can_subscribe_to_bridge() {
     assert_eq!(echoed.name, "opensnitchd-mock");
 }
 
+/// The real daemon's Subscribe carries the kernel release, its Ping the
+/// daemon version: the bridge reads only the Ping's, and a later Subscribe
+/// (even an unreadable one) leaves it alone.
 #[tokio::test]
-async fn the_bridge_reads_the_version_the_mock_reports() {
+async fn the_bridge_reads_the_version_from_ping_not_subscribe() {
     use snitchwatch_bridge::daemon_config::DaemonVersion;
     let (addr, version) = spawn_bridge_grpc_with_version().await;
     let mut mock = MockOpensnitchd::connect(addr).await.unwrap();
     assert_eq!(mock.version(), DEFAULT_VERSION);
     mock.subscribe("opensnitchd-mock").await.unwrap();
+    assert_eq!(
+        version.get(),
+        None,
+        "{MOCK_KERNEL_RELEASE} is not a daemon version"
+    );
+    mock.ping_reporting_rules(1, 0, 5).await.unwrap();
     assert_eq!(version.get(), Some(DaemonVersion::new(1, 8)));
+
     let mut newer = MockOpensnitchd::connect(addr)
         .await
         .unwrap()
         .with_version("1.9.0");
-    newer
-        .subscribe_with_config(ClientConfig {
-            name: "opensnitchd-mock".into(),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+    newer.ping_reporting_rules(2, 0, 6).await.unwrap();
     assert_eq!(version.get(), Some(DaemonVersion::new(1, 9)));
-    // A Subscribe with no readable version clears it; a Ping fills it in.
     mock.subscribe_with_config(ClientConfig {
-        version: "unknown".into(),
+        version: "garbage".into(),
         ..Default::default()
     })
     .await
     .unwrap();
-    assert_eq!(version.get(), None);
-    newer.ping_reporting_rules(1, 0, 5).await.unwrap();
-    assert_eq!(version.get(), Some(DaemonVersion::new(1, 9)));
-    mock.ping_reporting_rules(2, 0, 5).await.unwrap();
-    assert_eq!(version.get(), Some(DaemonVersion::new(1, 9)));
+    assert_eq!(
+        version.get(),
+        Some(DaemonVersion::new(1, 9)),
+        "a second Subscribe must not weaken a known 1.9"
+    );
+    mock.ping_reporting_rules(3, 0, 7).await.unwrap();
+    assert_eq!(version.get(), Some(DaemonVersion::new(1, 8)));
 }
 
 #[test]

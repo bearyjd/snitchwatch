@@ -114,8 +114,9 @@ pub struct UiService {
     /// The daemon's own settings from its latest `subscribe`
     /// (`crate::daemon_config`).
     daemon_config: crate::daemon_config::SharedDaemonConfig,
-    /// The daemon's version from its latest `subscribe` (or a `ping`, when
-    /// that gave none); `commands` checks rules against it.
+    /// The daemon's version from its latest `ping` that reported a readable
+    /// one (never `subscribe`: see `SharedDaemonVersion`); `commands` checks
+    /// rules against it.
     daemon_version: crate::daemon_config::SharedDaemonVersion,
     /// How long a prompt waits before the bridge answers it itself
     /// (`crate::deferred_answers`).
@@ -179,7 +180,7 @@ impl UiService {
         self.daemon_config.clone()
     }
 
-    /// The daemon's version from its latest `subscribe`.
+    /// The daemon's version from its latest readable `ping`.
     pub fn daemon_version_handle(&self) -> crate::daemon_config::SharedDaemonVersion {
         self.daemon_version.clone()
     }
@@ -291,9 +292,10 @@ impl Ui for UiService {
         // diagnostics cover every connection, not just the ones the user was
         // prompted for.
         if let Some(stats) = req.stats {
-            // Subscribe's version wins; this only fills in a missing one.
+            // The only place the daemon reports its own version (Subscribe's
+            // is the kernel's): a readable one replaces the stored one.
             self.daemon_version
-                .set_if_unknown(crate::daemon_config::DaemonVersion::parse(
+                .observe(crate::daemon_config::DaemonVersion::parse(
                     &stats.daemon_version,
                 ));
             self.prompt_slot.observe(
@@ -517,13 +519,13 @@ impl Ui for UiService {
         self.liveness.touch();
         let conn = request.remote_addr();
         let cfg = request.into_inner();
-        info!(client = %cfg.name, version = %cfg.version, "client subscribed");
+        // `cfg.version` is the daemon host's kernel release
+        // (`core.GetKernelVersion()`, `daemon/ui/notifications.go`), not
+        // opensnitchd's: logged only, never stored as the daemon version.
+        info!(client = %cfg.name, kernel = %cfg.version, "client subscribed");
         // Never log `cfg.config` itself: see `daemon_config`.
         self.daemon_config
             .set(crate::daemon_config::DaemonConfigView::parse(&cfg.config));
-        // Last write wins: unreadable clears it, so a `ping` may fill it in.
-        self.daemon_version
-            .set(crate::daemon_config::DaemonVersion::parse(&cfg.version));
         if let Some(lookup) = &self.account_lookup {
             self.rules.learn_account_names(lookup, &cfg.rules).await;
         }

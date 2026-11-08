@@ -6,9 +6,12 @@ use snitchwatch_proto::protocol::{
 };
 
 /// What turning on a disabled `network` + `source.network` rule did
-/// against a daemon reporting `version`: the GUI's result, and the command
-/// the daemon got, if any.
+/// against a daemon whose Subscribe reports kernel release `kernel` (what
+/// the real daemon puts in `ClientConfig.version`) and whose Ping reports
+/// daemon version `version`: the GUI's result, and the command the daemon
+/// got, if any.
 async fn turn_on_source_network_rule(
+    kernel: &str,
     version: &str,
 ) -> (
     RuleCommandOutcome,
@@ -27,9 +30,9 @@ async fn turn_on_source_network_rule(
         .await
         .unwrap()
         .with_version(version);
-    // Subscribe reports the mock's version (`mock-<version>`).
     mock.subscribe_with_config(ClientConfig {
         name: "mock".into(),
+        version: kernel.into(),
         rules: vec![Rule {
             created: 1_800_000_000,
             name: "lan-in".into(),
@@ -61,6 +64,9 @@ async fn turn_on_source_network_rule(
         .await
         .unwrap()
         .unwrap();
+    // The daemon's version arrives only in a Ping's statistics; the reply
+    // comes after the bridge stored it.
+    mock.ping_reporting_rules(1, 1, 1).await.unwrap();
     let listed = rules[0].clone();
     assert!(
         listed["readOnlyReason"].is_null(),
@@ -108,11 +114,11 @@ async fn turn_on_source_network_rule(
 
 /// opensnitchd 1.9 compiles a `network` condition only with `dest.network`
 /// (upstream master `operator.go`): the bridge refuses to turn such a rule
-/// on for a daemon that reports 1.9, with words saying what to use instead,
-/// and sends nothing.
+/// on for a daemon whose Ping reports 1.9, with words saying what to use
+/// instead, and sends nothing.
 #[tokio::test]
 async fn a_1_9_daemon_gets_no_source_network_rule() {
-    let (outcome, sent) = turn_on_source_network_rule("1.9.0").await;
+    let (outcome, sent) = turn_on_source_network_rule("6.7.4", "1.9.0").await;
     let RuleCommandOutcome::Refused { problems } = outcome else {
         panic!("expected a refusal, got {outcome:?}");
     };
@@ -122,10 +128,12 @@ async fn a_1_9_daemon_gets_no_source_network_rule() {
 }
 
 /// The shipped daemon is v1.8.0, which compiles it: the same command goes
-/// through as before, and the mock at 1.8 accepts what arrives.
+/// through as before, and the mock at 1.8 accepts what arrives. Its
+/// Subscribe reports kernel 6.7.4, which must not be read as the daemon
+/// version (it would be ">= 1.9").
 #[tokio::test]
-async fn a_1_8_daemon_still_gets_its_source_network_rule() {
-    let (outcome, sent) = turn_on_source_network_rule("1.8.0").await;
+async fn a_1_8_daemon_on_a_6_x_kernel_still_gets_its_source_network_rule() {
+    let (outcome, sent) = turn_on_source_network_rule("6.7.4", "1.8.0").await;
     assert_eq!(outcome, RuleCommandOutcome::Ok);
     let change = sent.expect("the CHANGE_RULE never reached the daemon");
     assert_eq!(change.r#type, Action::ChangeRule as i32);

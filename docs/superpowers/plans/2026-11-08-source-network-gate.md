@@ -13,8 +13,11 @@ Claims not read from a file are marked **UNVERIFIED**. Mapped read-only against 
   works there, so it must keep working. Only a >= 1.9 daemon refuses it.
 - The bridge never stores the daemon version. It arrives as strings in `ClientConfig.version`
   (Subscribe; `grpc_server.rs:503` logs and drops it) and `Statistics.daemon_version` (Ping; sanitized to
-  32 chars and broadcast, `grpc_server.rs:335`, not stored). Subscribe is the reliable one (Ping is skipped
-  when idle). Mock/test values are not semver: `"mock-1.8.0"`, `"mock-1.6.0"`, `"1.8.0"`.
+  32 chars and broadcast, `grpc_server.rs:335`, not stored). **Correction (review): only Ping's is the
+  daemon version.** `ClientConfig.version` is the host's kernel release (`core.GetKernelVersion()`,
+  `daemon/ui/notifications.go:38,54`, v1.8.0 and master; the tower logs `version=6.19.11-...`, HANDOFF.md),
+  while `Statistics.daemon_version` is `core.Version` (`statistics/stats.go:271`). Ping is skipped when idle,
+  so the version can stay unknown for a while. Mock/test values are not semver: `"mock-1.8.0"`, `"1.8.0"`.
 - Validation is context-free: `rule_policy.rs:129` `NETWORK_OPERANDS`, `validate_leaf :270-303`,
   `validate_operator :176`; callers `rule_wire.rs:109` (GUI create/edit), `daemon_commands.rs:541`
   (`send`, defence in depth), `rule_io.rs:236,266` + `rule_io/preview.rs:159` (import),
@@ -36,16 +39,18 @@ Claims not read from a file are marked **UNVERIFIED**. Mapped read-only against 
 
 ## PR A (bridge + mock)
 1. `daemon_config.rs`: `DaemonVersion { major, minor }` with a lenient parser (first `\d+\.\d+`; handles
-   `"mock-1.8.0"`, `"v1.9.0-rc1"`, empty => None). A `SharedDaemonVersion` handle set at Subscribe
-   (`grpc_server.rs:505` from `cfg.version`) and refreshed from stats (`:335`) if Subscribe gave none; global,
-   last write wins (self-corrects on the next Subscribe).
+   `"mock-1.8.0"`, `"v1.9.0-rc1"`, empty => None; an oversized pair is skipped, not the end of the scan). A `SharedDaemonVersion` handle set
+   only from Ping stats (`daemon_version`), overwritten whenever it parses, left alone when it doesn't; global
+   (self-corrects on the next Ping after a daemon upgrade). Subscribe logs `cfg.version` as the kernel and never
+   writes the handle, so a second Subscribe can't weaken a known 1.9. Unknown until the first Ping = 1.8 rules.
 2. `rule_policy.rs`: a `PolicyContext { refuse_source_network: bool }` threaded through `validate_leaf`,
    `validate_operator`, `validate_user_rule`, `check_wire_rule`, with a no-context wrapper meaning 1.8
    behaviour so untouched call sites and tests keep compiling. Message: "opensnitchd 1.9 and newer only
    accepts dest.network for a network condition; use dest.network instead." Fix nothing else.
 3. Pass the context from `rule_wire` (edit path), `daemon_commands::send`, `rule_io` import check/preview/apply
    (apply re-checks: preview and apply may see different versions), and the profile materializer/activation.
-4. Mock daemon: a configurable `version` (default `"1.8.0"`), `rule_validation.rs` refuses `source.network`
+4. Mock daemon: a configurable `version` (default `"1.8.0"`, reported in Ping stats; Subscribe reports a
+   kernel-like `"6.7.4-mock"` as the real daemon does), `rule_validation.rs` refuses `source.network`
    for >= 1.9, and `lists.ips` added to `IP_OPERANDS` (the review: otherwise the mock accepts simple +
    `lists.ips`, which panics master).
 5. Tests (failing-first): parser table; policy with/without context; mock at 1.8 vs 1.9; a protocol test
@@ -57,7 +62,7 @@ Claims not read from a file are marked **UNVERIFIED**. Mapped read-only against 
 
 ## PR B (GUI, after A)
 A bridge capability/message (`daemonRefusesSourceNetwork`, only when the version is known and >= 1.9;
-`bridge_capabilities::advertised()` is static today so it needs a dynamic hook or a post-Subscribe message);
+`bridge_capabilities::advertised()` is static today so it needs a dynamic hook or a message sent once a Ping reports the version);
 Kirigami `editor::operands(hide_source_network)` and `editor::check` read it (`editor.rs:94,166-172,199,431`);
 the simulator keeps evaluating `source.network` so existing rules still simulate (`operator.rs:348`) but
 flags `network` + `source.network` as "daemon 1.9 refuses to load" and regexp + network operands as
@@ -65,8 +70,8 @@ flags `network` + `source.network` as "daemon 1.9 refuses to load" and regexp + 
 `source.network` (validity depends on the daemon; only the bridge can judge).
 
 ## Risks / races
-Validated before the first Subscribe (None => 1.8 behaviour, a 1.9 daemon could briefly be sent it; the daemon
-refusal is the backstop); daemon upgrade mid-session (self-corrects); a proxy/fork can report any version
+Validated before the first Ping with stats (None => 1.8 behaviour, a 1.9 daemon could be sent it until it
+pings; the daemon refusal is the backstop); daemon upgrade mid-session (self-corrects at its next Ping); a proxy/fork can report any version
 string; the GUI flag arrives asynchronously so an open draft must tolerate it flipping.
 
 ## Process
