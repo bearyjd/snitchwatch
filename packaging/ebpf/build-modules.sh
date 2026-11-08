@@ -63,21 +63,26 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -f "$PINS_FILE" ]] || die "pins file not found: $PINS_FILE"
-# shellcheck source=/dev/null # plain KEY=value lines (SW_*)
-. "$PINS_FILE"
-for v in SW_OPENSNITCH_COMMIT SW_EBPF_CLANG_MAJOR SW_EBPF_LLVM_MAJOR SW_EBPF_KERNEL_DEVEL_VERSION; do
+# Pins files are parsed, never sourced: only plain KEY=value lines count.
+pin() { sed -n "s/^$1=//p" "$2" | head -n1; }
+SW_OPENSNITCH_COMMIT="$(pin SW_OPENSNITCH_COMMIT "$PINS_FILE")"
+SW_EBPF_CLANG_MAJOR="$(pin SW_EBPF_CLANG_MAJOR "$PINS_FILE")"
+SW_EBPF_LLVM_MAJOR="$(pin SW_EBPF_LLVM_MAJOR "$PINS_FILE")"
+SW_EBPF_LLC_MAJOR="$(pin SW_EBPF_LLC_MAJOR "$PINS_FILE")"
+SW_EBPF_KERNEL_DEVEL_VERSION="$(pin SW_EBPF_KERNEL_DEVEL_VERSION "$PINS_FILE")"
+for v in SW_OPENSNITCH_COMMIT SW_EBPF_CLANG_MAJOR SW_EBPF_LLVM_MAJOR SW_EBPF_LLC_MAJOR SW_EBPF_KERNEL_DEVEL_VERSION; do
     [[ -n "${!v:-}" ]] || die "$v not set in $PINS_FILE"
 done
 KVER="${KVER:-$SW_EBPF_KERNEL_DEVEL_VERSION}"
 
 # The release pins are the source of truth for the daemon commit.
-if [[ -f "$RELEASE_PINS" ]]; then
-    release_commit="$(sed -n 's/^SW_OPENSNITCH_COMMIT=//p' "$RELEASE_PINS")"
-    [[ "$release_commit" == "$SW_OPENSNITCH_COMMIT" ]] ||
-        die "commit pin mismatch: $PINS_FILE has $SW_OPENSNITCH_COMMIT, $RELEASE_PINS has $release_commit"
-fi
+[[ -f "$RELEASE_PINS" ]] || die "release pins not found: $RELEASE_PINS"
+release_commit="$(pin SW_OPENSNITCH_COMMIT "$RELEASE_PINS")"
+[[ "$release_commit" == "$SW_OPENSNITCH_COMMIT" ]] ||
+    die "commit pin mismatch: $PINS_FILE has $SW_OPENSNITCH_COMMIT, $RELEASE_PINS has $release_commit"
 
 [[ -n "$STAGING" ]] || { usage >&2; die "--staging is required"; }
+[[ "$STAGING" != -* ]] || die "--staging must not start with '-': $STAGING"
 
 if [[ $DRY_RUN -eq 0 ]]; then
     [[ -n "$KERNEL_DIR" ]] || die "KERNEL_DIR not set (use --kernel-dir or env KERNEL_DIR)"
@@ -97,9 +102,9 @@ else
 fi
 
 if [[ $DRY_RUN -eq 1 ]]; then
-    log "dry-run: would copy $OS_DIR/ebpf_prog to a scratch dir"
+    log "dry-run: would extract ebpf_prog of commit $SW_OPENSNITCH_COMMIT (git archive) to a scratch dir, run make clean"
     log "dry-run: would run make KERNEL_DIR=${KERNEL_DIR:-<unset>} KERNEL_HEADERS=${KERNEL_HEADERS:-${KERNEL_DIR:-<unset>}} KERNEL_VER=$KVER"
-    log "dry-run: would require clang/llvm major $SW_EBPF_CLANG_MAJOR/$SW_EBPF_LLVM_MAJOR, run llvm-strip -g"
+    log "dry-run: would require clang/llvm-strip/llc major $SW_EBPF_CLANG_MAJOR/$SW_EBPF_LLVM_MAJOR/$SW_EBPF_LLC_MAJOR, run llvm-strip -g"
     log "dry-run: would stage ${MODULES[*]} + SHA256SUMS under $STAGING/$DEST_REL/"
     exit 0
 fi
@@ -119,9 +124,15 @@ strip_major="$(llvm-strip --version | sed -n 's/.*LLVM version \([0-9]*\)\..*/\1
 [[ "$strip_major" == "$SW_EBPF_LLVM_MAJOR" ]] ||
     die "llvm-strip major is '${strip_major:-unknown}', pin is $SW_EBPF_LLVM_MAJOR"
 
+llc_major="$(llc --version | sed -n 's/.*LLVM version \([0-9]*\)\..*/\1/p' | head -n1)"
+[[ "$llc_major" == "$SW_EBPF_LLC_MAJOR" ]] ||
+    die "llc major is '${llc_major:-unknown}', pin is $SW_EBPF_LLC_MAJOR"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf -- "$WORK"' EXIT
-cp -R "$OS_DIR/ebpf_prog/." "$WORK/"
+# Exactly the pinned tree, not the working tree.
+git -C "$OS_DIR" archive "$SW_OPENSNITCH_COMMIT" ebpf_prog | tar -x -C "$WORK" --strip-components=1
+make -C "$WORK" clean
 
 log "building modules (KERNEL_VER=$KVER)"
 make -C "$WORK" KERNEL_DIR="$KERNEL_DIR" KERNEL_HEADERS="$KERNEL_HEADERS" KERNEL_VER="$KVER"
@@ -131,8 +142,8 @@ done
 (cd "$WORK" && llvm-strip -g "${MODULES[@]}")
 
 DEST="$STAGING/$DEST_REL"
-mkdir -p "$DEST"
-for m in "${MODULES[@]}"; do install -m 0644 "$WORK/$m" "$DEST/$m"; done
+mkdir -p -- "$DEST"
+for m in "${MODULES[@]}"; do install -m 0644 -- "$WORK/$m" "$DEST/$m"; done
 (cd "$DEST" && sha256sum "${MODULES[@]}" >SHA256SUMS)
 log "staged ${MODULES[*]} in $DEST"
 cat "$DEST/SHA256SUMS"

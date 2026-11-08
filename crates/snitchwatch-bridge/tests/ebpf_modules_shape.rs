@@ -13,7 +13,9 @@ const PINS: &str = "packaging/ebpf/pins.env";
 const RELEASE_PINS: &str = "packaging/release/pins.env";
 
 fn workspace_file(rel: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(rel)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
 }
 
 fn read(rel: &str) -> String {
@@ -59,17 +61,29 @@ fn scratch(name: &str) -> PathBuf {
 fn opensnitch_commit_pin_equals_release_pin() {
     let ebpf = parse_env(&read(PINS));
     let release = parse_env(&read(RELEASE_PINS));
-    let pin = ebpf.get("SW_OPENSNITCH_COMMIT").expect("SW_OPENSNITCH_COMMIT");
+    let pin = ebpf
+        .get("SW_OPENSNITCH_COMMIT")
+        .expect("SW_OPENSNITCH_COMMIT");
     assert_eq!(pin.len(), 40);
-    assert!(pin.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    assert!(pin
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
     assert_eq!(Some(pin), release.get("SW_OPENSNITCH_COMMIT"));
 }
 
 #[test]
 fn toolchain_pins_present() {
     let ebpf = parse_env(&read(PINS));
-    for k in ["SW_EBPF_CLANG_MAJOR", "SW_EBPF_LLVM_MAJOR", "SW_EBPF_KERNEL_DEVEL_VERSION"] {
-        assert!(ebpf.get(k).is_some_and(|v| !v.is_empty()), "{k} missing in {PINS}");
+    for k in [
+        "SW_EBPF_CLANG_MAJOR",
+        "SW_EBPF_LLVM_MAJOR",
+        "SW_EBPF_LLC_MAJOR",
+        "SW_EBPF_KERNEL_DEVEL_VERSION",
+    ] {
+        assert!(
+            ebpf.get(k).is_some_and(|v| !v.is_empty()),
+            "{k} missing in {PINS}"
+        );
     }
 }
 
@@ -90,11 +104,24 @@ fn script_shape() {
         "opensnitch-procs.o",
         "opensnitch-dns.o",
         "mktemp -d",
+        "mkdir -p --",
+        "install -m 0644 --",
         "SW_OPENSNITCH_COMMIT",
+        "git -C \"$OS_DIR\" archive \"$SW_OPENSNITCH_COMMIT\" ebpf_prog",
+        "make -C \"$WORK\" clean",
+        "llc --version",
+        "release pins not found",
     ] {
         assert!(s.contains(needle), "script lacks {needle:?}");
     }
-    for banned in ["sudo", "podman", "make -C vendor", "git -C vendor/opensnitch checkout"] {
+    for banned in [
+        "sudo",
+        "podman",
+        "cp -R",
+        "\n. \"$PINS_FILE\"",
+        "make -C vendor",
+        "git -C vendor/opensnitch checkout",
+    ] {
         assert!(!s.contains(banned), "script must not contain {banned:?}");
     }
 }
@@ -113,14 +140,26 @@ fn dry_run_needs_no_toolchain_and_writes_nothing() {
     let stage_s = stage.to_str().unwrap();
     // Empty PATH dir: no clang/llvm-strip/make visible.
     let o = run(
-        &["--dry-run", "--staging", stage_s, "--kernel-dir", "/nonexistent", "--kernel-headers", "/nonexistent"],
+        &[
+            "--dry-run",
+            "--staging",
+            stage_s,
+            "--kernel-dir",
+            "/nonexistent",
+            "--kernel-headers",
+            "/nonexistent",
+        ],
         &[],
     );
     let t = text(&o);
     assert!(o.status.success(), "{t}");
     assert!(t.contains("dry-run"), "{t}");
     assert!(t.contains("usr/lib/opensnitchd/ebpf"), "{t}");
-    assert_eq!(std::fs::read_dir(&stage).unwrap().count(), 0, "dry-run wrote into staging");
+    assert_eq!(
+        std::fs::read_dir(&stage).unwrap().count(),
+        0,
+        "dry-run wrote into staging"
+    );
 }
 
 #[test]
