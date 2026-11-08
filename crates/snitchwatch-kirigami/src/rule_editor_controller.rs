@@ -193,7 +193,7 @@ impl qobject::RuleEditorController {
         let result = if profile.is_empty() {
             editor::check_in(draft, self.old.as_ref(), policy)
         } else {
-            editor_profile::check_profile(draft, &profile)
+            editor_profile::check_profile_in(draft, &profile, policy)
         };
         let json = serde_json::to_string(&result).unwrap_or_default();
         self.as_mut().set_check_json(QString::from(&json));
