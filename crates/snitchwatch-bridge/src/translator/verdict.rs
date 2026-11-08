@@ -26,9 +26,9 @@
 //!     anywhere in `vendor/opensnitch/daemon/rule/*.go` (an empty name would
 //!     just yield a rule file literally named `.json`). What *does* matter:
 //!     the daemon uses `Rule.name` verbatim as a filename
-//!     (`vendor/opensnitch/daemon/rule/loader.go:162`,
+//!     (`vendor/opensnitch/daemon/rule/loader.go:181`,
 //!     `filepath.Join(l.Path, fmt.Sprintf("%s.json", rule.Name))`, written
-//!     root-owned 0600; `deleteRuleFromDisk` at loader.go:294 is worse — bare
+//!     root-owned 0600; `deleteRuleFromDisk` at loader.go:313 is worse — bare
 //!     string concatenation, no `filepath.Join` at all). Since the name is
 //!     built from `dst_host` (attacker-controlled — see module doc above),
 //!     [`rule_name_for`] sanitizes it before it ever reaches a filename; see
@@ -66,8 +66,8 @@ pub fn verdict_action_str(verdict: Verdict) -> &'static str {
 /// `host` here is `conn.dst_host`/`conn.dst_ip` (see module doc: hostile
 /// input). The daemon writes `Rule.name` verbatim to
 /// `<rules-dir>/<name>.json` with no validation of its own
-/// (`vendor/opensnitch/daemon/rule/loader.go:162`, `deleteRuleFromDisk` at
-/// loader.go:294 is worse — no `filepath.Join` at all, pure string
+/// (`vendor/opensnitch/daemon/rule/loader.go:181`, `deleteRuleFromDisk` at
+/// loader.go:313 is worse — no `filepath.Join` at all, pure string
 /// concatenation), running as root. An attacker who controls what a local
 /// process resolves (`getaddrinfo`) can make `dst_host` literally
 /// `"../../../../etc/cron.d/x"`; if the user clicks Allow/Forever on that
@@ -444,7 +444,7 @@ fn any_host_on_domain_operator_checked(conn: &Connection) -> (Operator, Option<S
     // passing the gate this function exists to enforce and producing
     // `^(?:[^.]+\.)*github\.io$` for a Deny that was supposed to stay
     // scoped to `user.github.io`. The daemon then lowercases both the
-    // pattern (operator.go:146-148) and the value it matches against (same
+    // pattern (operator.go:175-177) and the value it matches against (same
     // lines) at rule-compile/match time — so in production this pattern
     // would have matched every GitHub Pages site. Any local process can
     // trigger this via `getaddrinfo("USER.GITHUB.IO")` (DNS's 0x20
@@ -454,7 +454,7 @@ fn any_host_on_domain_operator_checked(conn: &Connection) -> (Operator, Option<S
     // Simple `dest.host`/`dest.ip` operators ([`this_host_operator`],
     // used both as this function's own fallback and directly for
     // `ThisHost` scope) are NOT affected by this class of bug: the daemon
-    // compares them case-insensitively (`operator.go:225-226`,
+    // compares them case-insensitively (`operator.go:287-288`,
     // `strings.EqualFold`) regardless of what case we send, so they're
     // left using `conn.dst_host`'s original case rather than this
     // lowercased copy.

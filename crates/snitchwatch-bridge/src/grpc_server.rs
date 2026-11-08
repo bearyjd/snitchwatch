@@ -651,7 +651,7 @@ impl Ui for UiService {
         // NEVER yield `Notification::default()`. Its `type` is `Action::None`
         // (0), and the daemon treats `ntf.Type <= Action_NONE` as "server
         // ordered to close notifications" and tears the stream down
-        // (`vendor/opensnitch/daemon/ui/notifications.go:405-408`). The
+        // (`vendor/opensnitch/daemon/ui/notifications.go:409-412`). The
         // placeholder this replaced would have done exactly that. Producers go
         // through `daemon_commands()`, and `Action::None` is filtered here
         // as a second line of defence. Ends when the stream is closed.

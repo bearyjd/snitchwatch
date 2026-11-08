@@ -834,7 +834,7 @@ Important current findings:
   - **Never send a `NONE`-typed notification.** The daemon reads
     `ntf.Type <= Action_NONE` as "server ordered to close notifications" and
     tears the stream down
-    (`vendor/opensnitch/daemon/ui/notifications.go:405-408`). The relay loop
+    (`vendor/opensnitch/daemon/ui/notifications.go:405-408` at v1.8.0, `:409-412` at the a1353848 pin). The relay loop
     filters it as a second line of defence.
   - **A malformed rule fails silently on a real daemon**, which is what issue
     #14 was: `rule.Deserialize` plus `Operator.Compile()` reject it and the

@@ -81,7 +81,7 @@ pub(crate) fn operator_to_wire(
 /// runs every notified rule through `rule.Deserialize`
 /// (`vendor/opensnitch/daemon/rule/rule.go:85-89`, which hard-rejects a null
 /// operator) and then `Operator.Compile()`
-/// (`vendor/opensnitch/daemon/rule/operator.go:109-214`, which rejects unknown
+/// (`vendor/opensnitch/daemon/rule/operator.go:133-220`, which rejects unknown
 /// operator types and uncompilable regexps). A rejected rule doesn't error
 /// visibly — the daemon just falls back to its default action. That silent
 /// failure is exactly what issue #14 was, so malformed input dies here instead.

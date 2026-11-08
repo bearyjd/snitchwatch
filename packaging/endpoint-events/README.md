@@ -94,7 +94,7 @@ Events are **"reported by this host"**, nothing more:
   - `process_path` is an absolute path (at most 768 bytes), empty, the daemon's
     `Kernel connection` marker, or the process name (`comm`, up to 15 bytes, or 45 once Go has replaced invalid UTF-8 bytes with U+FFFD) it
     reports when the executable can't be resolved
-    (`vendor/opensnitch/daemon/procmon/details.go:258-275`). A value without a
+    (`vendor/opensnitch/daemon/procmon/details.go:269-286`). A value without a
     leading `/` is therefore a marker or a process name, never a path;
   - `action` is `allow`, `deny`, `reject` or `<nil>`;
   - `rule` is at most 128 bytes.
@@ -168,7 +168,7 @@ None of this is guaranteed delivery, and Vigie must treat gaps as "likely",
 never as proof:
 
 - The daemon drops an event if its logger queue stays full for 1 ms, and only
-  writes while it's connected to rsyslog (`log/loggers/logger.go:167-199`,
+  writes while it's connected to rsyslog (`log/loggers/logger.go:166-194`,
   `remote.go:200-206`).
 - rsyslog keeps up to 10,000 events in memory while Vigie is unreachable and
   drops new ones once that's full; it never blocks the listener.

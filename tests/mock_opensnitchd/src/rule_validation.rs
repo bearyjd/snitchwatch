@@ -1,6 +1,10 @@
 use crate::MockError;
 use snitchwatch_proto::protocol::Rule;
 
+// Line cites into `vendor/opensnitch` in this file and `tests/rule_shape.rs`
+// are v1.8.0's numbering (the daemon this mock models); the submodule is at
+// master a1353848, where `operator.go`/`loader.go` lines have moved.
+
 /// Reject the class of malformed `Rule` a real daemon rejects — mirroring
 /// its ACTUAL acceptance path, not just `rule.Deserialize`. Two prior
 /// versions of this function only checked `Deserialize`
