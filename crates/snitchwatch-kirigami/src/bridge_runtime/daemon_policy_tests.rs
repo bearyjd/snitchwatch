@@ -96,3 +96,18 @@ async fn a_reconnect_or_disconnect_never_inherits_the_policy() {
     disconnect_and_discard(&connection, &mut inbound_rx);
     assert_eq!(handles.daemon_policy(), PolicyContext::default());
 }
+
+/// A replaced daemon sends no link change of its own: a changed policy wakes
+/// `link_wake`, so an open rule editor re-reads it (PR #342 review). Other
+/// tests may bump too, so only the wake itself is asserted.
+#[tokio::test]
+async fn a_changed_policy_wakes_link_watchers() {
+    let (handles, connection) = handles_and_state();
+    let session = mark_connected(&connection, true);
+    daemon_policy::mark_advertised(&connection, session, true);
+    let mut wake = link_wake::subscribe();
+    wake.borrow_and_update();
+    daemon_policy::observe(&connection, session, &policy(true));
+    assert!(wake.has_changed().expect("the sender lives forever"));
+    assert_eq!(handles.daemon_policy(), REFUSES);
+}

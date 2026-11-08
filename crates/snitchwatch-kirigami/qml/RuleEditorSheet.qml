@@ -175,6 +175,11 @@ SizedOverlaySheet {
             sheet.closingSaved = true;
             sheet.close();
         }
+        // The daemon's policy changed while open: re-check the draft so its
+        // problems (and Save) follow; the operand pickers re-bind on their own.
+        function onRefuseSourceNetworkChanged() {
+            if (sheet.visible) sheet.controller.check(JSON.stringify(sheet.draft));
+        }
     }
 
     onClosed: {

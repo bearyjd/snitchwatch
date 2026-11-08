@@ -54,7 +54,8 @@ pub mod qobject {
         /// The live bridge said its daemon refuses `network` +
         /// `source.network` (`DaemonPolicy`): drafts are checked for it and
         /// the sheet hides that operand. Refreshed from the bridge runtime
-        /// on every check; headless, what a probe sets.
+        /// on every check and every link or policy change
+        /// (`rule_editor_policy_follow`); headless, what a probe sets.
         #[qproperty(bool, refuse_source_network, cxx_name = "refuseSourceNetwork")]
         type RuleEditorController = super::RuleEditorControllerRust;
 
@@ -344,7 +345,20 @@ impl qobject::RuleEditorController {
         }
     }
 
+    /// The runtime's policy changed (or may have): keep `refuseSourceNetwork`
+    /// current. The sheet re-checks its draft on the change.
+    fn follow_policy(mut self: Pin<&mut Self>, live: PolicyContext) {
+        if live.refuse_source_network != self.refuse_source_network {
+            self.as_mut()
+                .set_refuse_source_network(live.refuse_source_network);
+        }
+    }
+
     fn start_bridge_feed(self: Pin<&mut Self>) {
+        crate::rule_editor_policy_follow::spawn_policy_follow(
+            self.qt_thread(),
+            Self::follow_policy,
+        );
         crate::result_feed::spawn_result_feed(
             self.qt_thread(),
             "RuleEditorController",

@@ -65,6 +65,7 @@ pub(crate) mod prompt_slot_text;
 pub mod result_feed;
 pub mod rule_commands;
 pub mod rule_editor_controller;
+pub mod rule_editor_policy_follow;
 pub mod rules;
 pub mod rules_io_controller;
 pub mod rules_model;
