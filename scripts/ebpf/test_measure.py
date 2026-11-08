@@ -392,5 +392,83 @@ class UnknownRate(unittest.TestCase):
         self.assertEqual((r["total"], r["unknown"]), (3, 1))
 
 
+class Compare(unittest.TestCase):
+    def make_run(self, root, label, cpus, rss, unknown=10, dur=86400, workload="w1"):
+        root = Path(root)
+        with open(root / f"{label}.csv", "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(measure.COLUMNS)
+            for i, (c, r) in enumerate(zip(cpus, rss)):
+                w.writerow([i * 60, "x", "d", 1, c, r, 4, "", ""])
+        doc = lambda n, flt: {"format": measure.EXPORT_FORMAT, "schemaVersion": 1,  # noqa: E731
+                              "filterKinds": {"application": flt},
+                              "requestedWindow": {"a": 1},
+                              "coverage": {"rowOmissions": {}, "unexaminedRetained": 0,
+                                           "groupOmissions": {k: {"groups": 0, "observations": 0}
+                                                              for k in measure.GROUP_LIMITS}},
+                              "groups": [{"count": n}]}
+        (root / f"{label}-t.json").write_text(json.dumps(doc(100, False)))
+        (root / f"{label}-m.json").write_text(json.dumps(doc(unknown, True)))
+        man = root / f"{label}.json"
+        man.write_text(json.dumps({
+            "format": measure.RUN_FORMAT, "schemaVersion": 1, "label": label,
+            "durationS": dur, "workload": workload, "samplesCsv": f"{label}.csv",
+            "unknownTotal": f"{label}-t.json", "unknownMissing": f"{label}-m.json"}))
+        return man
+
+    def test_compare_reports_both_runs_and_deltas(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0, 3.0], [102400, 204800], 20)
+            b = self.make_run(d, "ebpf", [0.5, 1.5], [102400, 153600], 10)
+            r = measure.compare(a, b)
+        self.assertAlmostEqual(r["proc"]["cpu_mean"], 2.0)
+        self.assertAlmostEqual(r["ebpf"]["cpu_mean"], 1.0)
+        self.assertEqual((r["proc"]["rss_start_mib"], r["proc"]["rss_end_mib"]), (100.0, 200.0))
+        self.assertAlmostEqual(r["proc"]["unknown_rate"], 0.2)
+        self.assertAlmostEqual(r["delta"]["cpu_mean"], -1.0)
+        self.assertAlmostEqual(r["delta"]["rss_end_mib"], -50.0)
+        self.assertAlmostEqual(r["delta"]["unknown_rate"], -0.1)
+        self.assertIn("cpu_p95", r["delta"])
+
+    def test_mismatched_duration_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0], [1024])
+            b = self.make_run(d, "ebpf", [1.0], [1024], dur=43200)
+            with self.assertRaisesRegex(ValueError, "duration"):
+                measure.compare(a, b)
+
+    def test_mismatched_workload_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0], [1024])
+            b = self.make_run(d, "ebpf", [1.0], [1024], workload="w2")
+            with self.assertRaisesRegex(ValueError, "workload"):
+                measure.compare(a, b)
+
+    def test_missing_metadata_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0], [1024])
+            b = self.make_run(d, "ebpf", [1.0], [1024])
+            doc = json.loads(b.read_text())
+            del doc["workload"]
+            b.write_text(json.dumps(doc))
+            with self.assertRaisesRegex(ValueError, "workload"):
+                measure.compare(a, b)
+
+    def test_wrong_format_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0], [1024])
+            b = Path(d) / "bad.json"
+            b.write_text("{}")
+            with self.assertRaisesRegex(ValueError, "not a"):
+                measure.compare(a, b)
+
+    def test_cli_error_exit_code_on_mismatch(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0], [1024])
+            b = self.make_run(d, "ebpf", [1.0], [1024], workload="w2")
+            self.assertEqual(measure.main(["compare", str(a), str(b)]), 1)
+            self.assertEqual(measure.main(["compare", str(a), str(a)]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

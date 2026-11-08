@@ -5,6 +5,7 @@ Subcommands (stdlib only, no root needed, nothing outside --out is written):
   sample        sample CPU/RSS/threads of a named process from /proc into a CSV
   summarize     mean/median/p95 CPU and RSS slope from a sample CSV
   unknown-rate  unknown-process rate from two cache-summary exports
+  compare       proc-run vs ebpf-run manifests: CPU/RSS/unknown-rate + deltas
 
 Plan: docs/superpowers/plans/2026-10-29-ebpf-q05-q06.md
 """
@@ -23,6 +24,8 @@ COLUMNS = ["t_s", "iso_utc", "name", "pid", "cpu_pct", "rss_kib", "threads",
            "load1", "forks_per_s"]
 COMM_LEN = 15  # kernel truncates /proc/<pid>/comm to 15 chars
 EXPORT_FORMAT = "snitchwatch-cache-summary"
+RUN_FORMAT = "snitchwatch-measure-run"
+DURATION_TOLERANCE = 0.01  # runs may differ by 1% in declared duration
 
 
 def read_process(proc, pid):
@@ -281,6 +284,51 @@ def unknown_rate(total_doc, missing_doc):
             "truncated": bool(warnings), "warnings": warnings}
 
 
+def _load_run(path, label):
+    """Summarize one run manifest (paths inside it resolve next to it)."""
+    doc = _load(path)
+    if not isinstance(doc, dict) or doc.get("format") != RUN_FORMAT:
+        raise ValueError(f"{label}: not a {RUN_FORMAT} document")
+    if doc.get("schemaVersion") != 1:
+        raise ValueError(f"{label}: unsupported schemaVersion {doc.get('schemaVersion')!r}")
+    dur = doc.get("durationS")
+    if isinstance(dur, bool) or not isinstance(dur, (int, float)) or dur <= 0:
+        raise ValueError(f"{label}: durationS missing or not a positive number")
+    workload = doc.get("workload")
+    if not isinstance(workload, str) or not workload:
+        raise ValueError(f"{label}: workload missing")
+    base = Path(path).parent
+    for key in ("samplesCsv", "unknownTotal", "unknownMissing"):
+        if not isinstance(doc.get(key), str) or not doc[key]:
+            raise ValueError(f"{label}: {key} missing")
+    stats = summarize(list(csv.DictReader(io.StringIO(read_regular_text(base / doc["samplesCsv"])))))
+    unk = unknown_rate(_load(base / doc["unknownTotal"]), _load(base / doc["unknownMissing"]))
+    return {"duration_s": dur, "workload": workload, "cpu_mean": stats["cpu_mean"],
+            "cpu_p95": stats["cpu_p95"], "rss_start_mib": stats["rss_start_mib"],
+            "rss_end_mib": stats["rss_end_mib"], "unknown_rate": unk["rate"],
+            "warnings": unk["warnings"]}
+
+
+DELTA_KEYS = ("cpu_mean", "cpu_p95", "rss_start_mib", "rss_end_mib", "unknown_rate")
+
+
+def compare(proc_manifest, ebpf_manifest):
+    """Side-by-side stats for two runs and ebpf-minus-proc deltas.
+
+    Refuses runs whose declared duration (within 1%) or workload differ: such
+    a comparison would measure the load, not the collector.
+    """
+    runs = {"proc": _load_run(proc_manifest, "proc"), "ebpf": _load_run(ebpf_manifest, "ebpf")}
+    p, e = runs["proc"], runs["ebpf"]
+    if abs(p["duration_s"] - e["duration_s"]) > DURATION_TOLERANCE * max(p["duration_s"], e["duration_s"]):
+        raise ValueError(f"mismatched duration: proc {p['duration_s']}s vs ebpf {e['duration_s']}s")
+    if p["workload"] != e["workload"]:
+        raise ValueError(f"mismatched workload: proc {p['workload']!r} vs ebpf {e['workload']!r}")
+    runs["delta"] = {k: None if p[k] is None or e[k] is None else e[k] - p[k]
+                     for k in DELTA_KEYS}
+    return runs
+
+
 def _load(path):
     return json.loads(read_regular_text(path))
 
@@ -301,6 +349,9 @@ def main(argv=None):
     u = sub.add_parser("unknown-rate")
     u.add_argument("--total", required=True)
     u.add_argument("--missing-path", required=True)
+    c = sub.add_parser("compare")
+    c.add_argument("proc", type=Path, help="run manifest of the /proc run")
+    c.add_argument("ebpf", type=Path, help="run manifest of the eBPF run")
     a = ap.parse_args(argv)
     if a.cmd == "sample":
         if a.interval <= 0 or a.duration < 0:
@@ -320,6 +371,12 @@ def main(argv=None):
             print(f"error: {e}", file=sys.stderr)
             return 1
         print(json.dumps(summarize(rows), indent=2))
+    elif a.cmd == "compare":
+        try:
+            print(json.dumps(compare(a.proc, a.ebpf), indent=2))
+        except (ValueError, OSError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
     else:
         try:
             print(json.dumps(unknown_rate(_load(a.total), _load(a.missing_path)), indent=2))
