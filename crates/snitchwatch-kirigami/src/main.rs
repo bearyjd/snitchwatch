@@ -17,6 +17,7 @@ use snitchwatch_kirigami::bridge_bindings as _;
 use cxx_qt_lib::{QQmlApplicationEngine, QString, QUrl};
 use snitchwatch_kirigami::{
     app_icons, application, bridge_runtime, demo, logging, notification_signals, panic_hook, paths,
+    single_instance,
 };
 
 fn main() {
@@ -32,6 +33,16 @@ fn main() {
 
     // The Diagnostics page reads this file; nothing wrote it until now.
     panic_hook::install(paths::crash_log_path());
+
+    // One GUI per session: a second launch raises the running window and
+    // exits here, before the icon indexer, the bridge client or Qt start. Skipped
+    // in demo mode, with SNITCHWATCH_ALLOW_MULTIPLE=1, or without a session
+    // bus; any failure runs this process as an ordinary instance. Bound to a
+    // name (never `_`) so the bus name is held until shutdown starts.
+    let instance = single_instance::acquire();
+    if matches!(instance, single_instance::Outcome::Forwarded) {
+        std::process::exit(0);
+    }
 
     // Index the host's `.desktop` files off the UI thread, so it is ready by
     // the time rows ask for icons.
@@ -80,6 +91,10 @@ fn main() {
 
     if let Some(app) = app.as_mut() {
         let code = app.exec();
+        // Release the bus name first: a launch from here on starts afresh
+        // instead of asking this exiting process to raise its window.
+        // `process::exit` below runs no destructors, so this is the release.
+        drop(instance);
         // What learning mode saw in the last moments is still in memory (a
         // burst is saved a couple of seconds after it starts).
         snitchwatch_kirigami::learned::flush_and_wait(std::time::Duration::from_secs(3));

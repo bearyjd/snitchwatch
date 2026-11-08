@@ -36,7 +36,7 @@ dial-in, closed-window fail-open, tray states, Daemon Health) are in
 | Unit | `snitchwatch-bridge.service` (`systemctl --user`) | `snitchwatch-system-bridge.service` + `-grpc.socket` + `-gui.socket` | `packaging/systemd/`, `packaging/system/` |
 | State | `$STATE_DIRECTORY` or `SNITCHWATCH_STATE_DIR`; `blocklists.sqlite3`, `profiles.sqlite3` (0600); none set means in-memory only | `/var/lib/snitchwatch` only | `README.md` "M4"; `cli.rs:71-75` |
 | GUI access (system) | `usermod -aG snitchwatch-ui <user>`, then a new login session | same | `system-bridge-integration.md:18-22` |
-| Crash log (Tauri and Kirigami shells) | `$XDG_STATE_HOME/snitchwatch/crash.log` (default `~/.local/state/snitchwatch/crash.log`) | n/a | `README.md` "Crash log"; Kirigami: `src/main.rs:34`, `src/paths.rs:57-59` |
+| Crash log (Tauri and Kirigami shells) | `$XDG_STATE_HOME/snitchwatch/crash.log` (default `~/.local/state/snitchwatch/crash.log`) | n/a | `README.md` "Crash log"; Kirigami: `src/main.rs:35`, `src/paths.rs:57-59` |
 | GUI log (Kirigami) | `gui.log` in the state dir, only when `SNITCHWATCH_LOG` is set; previous run kept as `gui.log.1` | n/a | `crates/snitchwatch-kirigami/src/logging.rs:21-28` |
 
 `DefaultAction` is `allow` as shipped (owner decision 2026-10-25), in both the
@@ -99,6 +99,7 @@ Items below are the ones the repo documents.
 | Several users: only the first user's bridge binds `127.0.0.1:50051`; any local process can bind it first | Not deny-safe (#35); use the system flavour | `bridge-release-artifact.md` "Known limitations" |
 | Rootless daemon fails with a misleading "kernel might not be compatible" | Shipped config uses `ProcMonitorMethod: ebpf`, which loads under a root daemon; a rootless run fails with that message (issue #6) | `phase2-manual-verification-runbook.md:150-152` |
 | Playwright "missing browser" | Run `just web-smoke-install` / `just tauri-smoke-install`; not a code regression | `README.md` |
+| Launching Snitchwatch only brings the existing window to the front, no second window | Intended: one GUI per session (D-Bus name `org.snitchwatch.Snitchwatch`). If the running copy is wedged, a launch waits about 4.5 s and then starts a second copy (logged as an error). `SNITCHWATCH_ALLOW_MULTIPLE=1` skips the check | `crates/snitchwatch-kirigami/src/single_instance.rs` |
 | Reboot into a new image | Read "Before rebooting into the image: the /etc merge" | `system-bridge-integration.md:212` |
 | Known flaky tests | #259 open; seven Timer-driven probes lack the re-entrancy guard (#279) | `HANDOFF.md:29` |
 

@@ -55,8 +55,9 @@ Variables fixed by the shipped units (not read from your shell):
 | `XDG_CONFIG_HOME` | `.../paths.rs:27,31,39,44,50` | no | Config dir (settings, autostart file, learned data). |
 | `XDG_DATA_DIRS` | `.../app_icons.rs:418` | no | `.desktop` search dirs; default `/usr/local/share:/usr/share`. |
 | `XDG_RUNTIME_DIR` | `crates/snitchwatch-bridge/src/auth.rs:90` via `.../bridge_runtime.rs:270` | no | Base of the GUI's default socket path (`<dir>/snitchwatch/bridge.sock`). |
-| `QT_QPA_PLATFORM` | `.../main.rs:46` | no | Only compared with `offscreen` to decide whether to default `QT_QUICK_CONTROLS_STYLE`. |
-| `QT_QUICK_CONTROLS_STYLE` | `.../main.rs:45` | no | Defaulted to `Basic` only when `QT_QPA_PLATFORM=offscreen` and it is unset (`main.rs:45-48`). |
+| `DBUS_SESSION_BUS_ADDRESS` | `.../single_instance.rs` (`session_bus_address`) | no | Session bus for the single-instance name; if unset, `$XDG_RUNTIME_DIR/bus` when that is a socket; with neither, the check is skipped and the GUI starts normally. |
+| `QT_QPA_PLATFORM` | `.../main.rs:57` | no | Only compared with `offscreen` to decide whether to default `QT_QUICK_CONTROLS_STYLE`. |
+| `QT_QUICK_CONTROLS_STYLE` | `.../main.rs:56` | no | Defaulted to `Basic` only when `QT_QPA_PLATFORM=offscreen` and it is unset (`main.rs:56-59`). |
 <!-- /AUTO-GENERATED -->
 
 ## Debug flags (GUI)
@@ -64,6 +65,7 @@ Variables fixed by the shipped units (not read from your shell):
 | Variable | Read at | Rule |
 |---|---|---|
 | `SNITCHWATCH_DEMO` | `crates/snitchwatch-kirigami/src/demo.rs:24` | Exactly `1` enables demo mode (fake rows, bridge never started); anything else, including `true`, is off (`demo.rs:18-20`). |
+| `SNITCHWATCH_ALLOW_MULTIPLE` | `.../single_instance.rs` (`EnvSnapshot::from_process`) | Exactly `1` skips the single-instance check, so a second GUI starts beside a running one (for running two builds); anything else, or unset, keeps one GUI per session. `SNITCHWATCH_DEMO=1` skips it too. |
 | `SNITCHWATCH_SCREENSHOT_DIR` | `.../demo.rs:33` | Honoured only with `SNITCHWATCH_DEMO=1` and a non-empty value (`demo.rs:27-29`). |
 | `SNITCHWATCH_TEXT_TRACE` | `.../bridge_bindings.rs:61` | Exactly `1` turns the on-screen text change log on; `""`, `0`, `true`, `yes` are off (test at `bridge_bindings.rs:71-76`). |
 
@@ -109,7 +111,7 @@ lines, sourced by the justfile and scripts).
 
 | Variable | Read / set at | Purpose |
 |---|---|---|
-| `QT_QPA_PLATFORM=offscreen`, `QT_QUICK_CONTROLS_STYLE=Basic` | `crates/snitchwatch-kirigami/tests/smoke.rs:28-32` (set if unset); `.github/workflows/ci.yml` kirigami job; justfile `qml-test` | Headless Qt. Default Kirigami style hangs offscreen (`main.rs:40-44` comment). |
+| `QT_QPA_PLATFORM=offscreen`, `QT_QUICK_CONTROLS_STYLE=Basic` | `crates/snitchwatch-kirigami/tests/smoke.rs:28-32` (set if unset); `.github/workflows/ci.yml` kirigami job; justfile `qml-test` | Headless Qt. Default Kirigami style hangs offscreen (`main.rs:51-55` comment). |
 | `QT_FORCE_STDERR_LOGGING=1` | justfile `qml-test`; `ci.yml` qmltestrunner step | QML test output to stderr. |
 | `QT_QUICK_BACKEND=software` | justfile `kirigami-screenshots`; `crates/snitchwatch-kirigami/tests/native-tray/run.sh:46,57` | Software Qt Quick renderer for the screenshot recipe and the native tray fixture. |
 | `QT_LOGGING_RULES`, `QML_XHR_ALLOW_FILE_READ/WRITE` | `crates/snitchwatch-kirigami/tests/geo_qml.rs:29`, `crates/snitchwatch-kirigami/tests/status_pages_keyboard_qml.rs:219`, `crates/snitchwatch-kirigami/tests/level_rule_unavailable_once_qml.rs:33` | Set inside individual probes. |

@@ -74,6 +74,7 @@ pub mod settings;
 pub mod settings_controller;
 pub mod settings_learning;
 pub(crate) mod silent_mode;
+pub mod single_instance;
 pub mod traffic;
 pub mod traffic_model;
 pub mod tray;

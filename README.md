@@ -167,6 +167,12 @@ Snitchwatch can launch at login automatically. Toggle from
 **Settings → Start with system**, which writes
 `~/.config/autostart/snitchwatch.desktop`. Disabling removes the file.
 
+Only one Snitchwatch window runs per session: launching it again while it is
+already running (for example, from the menu after autostart, with the
+window closed to the tray) brings the running window to the front instead
+of starting a second copy. If the running copy does not answer within a few
+seconds, the new launch starts normally rather than doing nothing.
+
 ### Crash log
 
 Panics are written to `$XDG_STATE_HOME/snitchwatch/crash.log` (default
@@ -202,6 +208,15 @@ why `kirigami-spike`/`snitchwatch-kirigami` are excluded from the workspace
 ```bash
 just kirigami-dev
 ```
+
+The shell is single-instance per session: it owns the D-Bus name
+`org.snitchwatch.Snitchwatch` (both Flatpak flavours share that app id) and
+serves `org.freedesktop.Application` at `/org/snitchwatch/Snitchwatch`; a
+second launch calls `Activate` on it, which only raises the window, and
+exits. It fails open: no session bus, a bus error or an owner that does not
+answer (2 s, one retry) means the new process runs as an ordinary instance.
+`SNITCHWATCH_DEMO=1` and `SNITCHWATCH_ALLOW_MULTIPLE=1` skip the check, e.g.
+to run two builds side by side (`crates/snitchwatch-kirigami/src/single_instance.rs`).
 
 To review the look without a bridge or daemon, `SNITCHWATCH_DEMO=1` fills the
 Connections list with fake rows (the bridge is never started), and
