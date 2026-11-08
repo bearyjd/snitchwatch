@@ -203,7 +203,10 @@ mod tests {
         shared.set(None);
         assert!(!rx.has_changed().unwrap(), "None -> None is no change");
         assert!(!shared.observe(DaemonVersion::parse("garbage")));
-        assert!(!rx.has_changed().unwrap(), "an unreadable ping is no change");
+        assert!(
+            !rx.has_changed().unwrap(),
+            "an unreadable ping is no change"
+        );
         assert!(shared.observe(DaemonVersion::parse("1.8.0")));
         assert!(rx.has_changed().unwrap());
         assert_eq!(*rx.borrow_and_update(), Some(DaemonVersion::new(1, 8)));
@@ -213,7 +216,10 @@ mod tests {
         assert!(rx.has_changed().unwrap());
         assert_eq!(*rx.borrow_and_update(), Some(DaemonVersion::new(1, 9)));
         shared.set(None);
-        assert!(rx.has_changed().unwrap(), "forgetting the version is a change");
+        assert!(
+            rx.has_changed().unwrap(),
+            "forgetting the version is a change"
+        );
         assert_eq!(*rx.borrow_and_update(), None);
     }
 
