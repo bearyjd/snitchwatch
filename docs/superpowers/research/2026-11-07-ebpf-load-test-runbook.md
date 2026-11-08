@@ -195,7 +195,7 @@ Use this instead of section 3's RPM when testing the pinned master (it carries `
 kernel 6.19 build fix). Daemon and `.o` files must come from the **same** commit.
 1. Scratch clone, never the submodule: `git clone https://github.com/bearyjd/opensnitch.git -b
    snitchwatch/stable os-pin && git -C os-pin checkout a1353848ba1b660320e90cefea782c3fba272c00`
-   (or `git -C vendor/opensnitch archive a1353848 | tar -x -C os-pin`). Record `git -C os-pin rev-parse HEAD`.
+   (or `git -C vendor/opensnitch archive a1353848 | tar -x -C os-pin`). Then require `test "$(git -C os-pin rev-parse HEAD)" = a1353848ba1b660320e90cefea782c3fba272c00` (stop if it differs); the archive variant never touches the fork.
 2. Daemon: Go **>= 1.25** (`daemon/go.mod:3` says `go 1.25.0`; **UNVERIFIED** that the tower's
    builder has it). `cd os-pin/daemon && go build -o opensnitchd .` (the Makefile's `go get` step
    needs network; **UNVERIFIED** offline). `./opensnitchd -version` must print `1.9.0`
