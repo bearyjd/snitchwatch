@@ -12,8 +12,8 @@
 //! impossible to start; the whole guard is bounded ([`ForwardPolicy::bound`]),
 //! so even a bus that never completes its handshake cannot hold the start-up.
 //! Known gap: a primary whose window never loads (`main.qml` failed) still
-//! answers `Activate`, so later launches exit 0 and show nothing. Demo mode and `SNITCHWATCH_ALLOW_MULTIPLE=1` skip
-//! the guard entirely.
+//! answers `Activate`, so later launches exit 0 and show nothing. Demo mode and
+//! `SNITCHWATCH_ALLOW_MULTIPLE=1` skip the guard entirely.
 //!
 //! **What the bus can do to us.** Any client of the same session bus may
 //! call the three methods; each one only raises the window. Their arguments
@@ -34,8 +34,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use zbus::blocking::fdo::DBusProxy;
 use zbus::blocking::{connection, Connection};
 use zbus::fdo::{RequestNameFlags, RequestNameReply};
+use zbus::names::BusName;
 use zbus::zvariant::{OwnedValue, Value};
 
 /// The well-known name: the app id.
@@ -62,7 +64,7 @@ impl ForwardPolicy {
     pub const DEFAULT: Self = Self {
         timeout: Duration::from_secs(2),
         retry_delay: Duration::from_millis(500),
-        bound: Duration::from_secs(5),
+        bound: Duration::from_secs(6),
     };
 }
 
@@ -187,6 +189,11 @@ pub fn acquire_with(env: &EnvSnapshot, policy: ForwardPolicy, sink: Arc<RaiseSin
 /// [`acquire_at`] on its own thread, abandoned after `policy.bound`. A late
 /// result is dropped on that thread, so a `Guard` that arrives too late releases
 /// the name instead of holding it for a process that did not wait.
+///
+/// Worst case is `bound` plus one `method_timeout`, not `bound`: when the send
+/// races the timeout, the late `Guard` lands in the channel and is dropped here,
+/// on the calling thread, with `rx`; its `release_name` blocks up to the method
+/// timeout.
 fn acquire_bounded(address: String, policy: ForwardPolicy, sink: Arc<RaiseSink>) -> Outcome {
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
@@ -251,7 +258,11 @@ fn retake(conn: Connection) -> Outcome {
             tracing::info!("single instance: the previous owner is gone; this is the running one");
             Outcome::Primary(Guard { conn })
         }
-        _ => Outcome::Skipped(SkipReason::OwnerUnresponsive),
+        Ok(_) => Outcome::Skipped(SkipReason::OwnerUnresponsive),
+        Err(error) => {
+            tracing::warn!(%error, "single instance: could not ask for the bus name again");
+            Outcome::Skipped(SkipReason::OwnerUnresponsive)
+        }
     }
 }
 
@@ -280,15 +291,45 @@ fn forward(conn: &Connection, policy: ForwardPolicy) -> Outcome {
         }
     };
     match result {
-        Ok(()) => Outcome::Forwarded,
+        Ok(()) => {
+            log_owner(conn);
+            Outcome::Forwarded
+        }
         Err(error) => {
             tracing::error!(
                 %error,
                 "single instance: Snitchwatch is already running but did not answer; \
-                 starting a second instance"
+                 asking for the name once more, and running as a second instance if it \
+                 stays taken"
             );
             Outcome::Skipped(SkipReason::OwnerUnresponsive)
         }
+    }
+}
+
+/// Log who answered `Activate` (unique name, and PID if the bus tells), so a
+/// launch that exits without showing anything can be traced to a process. Only
+/// logs: a failed lookup never changes the outcome. Each call is bounded by the
+/// connection's method timeout.
+fn log_owner(conn: &Connection) {
+    let lookup = DBusProxy::new(conn).and_then(|dbus| {
+        let owner = dbus.get_name_owner(BusName::try_from(BUS_NAME)?)?;
+        let pid = dbus.get_connection_unix_process_id(BusName::from(&owner));
+        Ok((owner, pid))
+    });
+    match lookup {
+        Ok((owner, Ok(pid))) => {
+            tracing::info!(%owner, pid, "single instance: the running instance answered")
+        }
+        Ok((owner, Err(error))) => tracing::info!(
+            %owner,
+            %error,
+            "single instance: the running instance answered; its PID is unknown"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            "single instance: the running instance answered, but its owner lookup failed"
+        ),
     }
 }
 

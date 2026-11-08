@@ -48,7 +48,7 @@ fn env(demo: bool, allow_multiple: bool, bus_address: Option<&str>) -> EnvSnapsh
 #[test]
 fn the_production_policy_waits_two_seconds_then_retries_once_after_half_a_second() {
     assert_eq!(ForwardPolicy::DEFAULT.timeout, Duration::from_secs(2));
-    assert_eq!(ForwardPolicy::DEFAULT.bound, Duration::from_secs(5));
+    assert_eq!(ForwardPolicy::DEFAULT.bound, Duration::from_secs(6));
     assert_eq!(
         ForwardPolicy::DEFAULT.retry_delay,
         Duration::from_millis(500)
@@ -265,4 +265,64 @@ fn an_owner_that_never_answers_times_out_and_the_second_instance_runs() {
     // Two timeouts and the retry delay, with room for a loaded machine.
     assert!(took >= FAST.timeout * 2, "gave up too early: {took:?}");
     assert!(took < Duration::from_secs(10), "not bounded: {took:?}");
+}
+
+/// Holds the name, and on `Activate` gives it up (as an exiting instance
+/// would) without ever answering.
+struct Departing {
+    released: Arc<AtomicU32>,
+    hold: Arc<tokio::sync::Notify>,
+}
+
+#[zbus::interface(name = "org.freedesktop.Application")]
+impl Departing {
+    async fn activate(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        _platform_data: HashMap<String, OwnedValue>,
+    ) {
+        // The release reply arrives before the handler parks, so the name is
+        // free well inside the caller's `Activate` timeout. A second
+        // `Activate` (the retry, if it beat the release) only gets NotOwner.
+        if conn.release_name(BUS_NAME).await.unwrap_or(false) {
+            self.released.fetch_add(1, Ordering::SeqCst);
+        }
+        self.hold.notified().await;
+    }
+}
+
+#[test]
+fn an_owner_that_leaves_without_answering_hands_the_name_to_the_second_instance() {
+    let Some(bus) = PrivateBus::start() else {
+        return;
+    };
+    let released = Arc::new(AtomicU32::new(0));
+    let hold = Arc::new(tokio::sync::Notify::new());
+    let departing = Departing {
+        released: released.clone(),
+        hold: hold.clone(),
+    };
+    let owner = connection::Builder::address(bus.address())
+        .unwrap()
+        .serve_at(OBJECT_PATH, departing)
+        .unwrap()
+        .build()
+        .unwrap();
+    let reply = owner
+        .request_name_with_flags(BUS_NAME, RequestNameFlags::DoNotQueue.into())
+        .unwrap();
+    assert_eq!(reply, RequestNameReply::PrimaryOwner);
+
+    // A timeout roomy enough for the owner's release to land inside it.
+    let policy = ForwardPolicy {
+        timeout: Duration::from_secs(2),
+        ..FAST
+    };
+    let outcome = acquire_at(bus.address(), policy, Arc::new(RaiseSink::new()));
+    hold.notify_waiters();
+    assert_eq!(released.load(Ordering::SeqCst), 1, "the owner never let go");
+    assert!(
+        matches!(outcome, Outcome::Primary(_)),
+        "a freed name was not retaken: {outcome:?}"
+    );
 }
