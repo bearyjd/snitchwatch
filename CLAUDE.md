@@ -18,7 +18,10 @@ Pre-alpha Rust workspace. Two independent products live in this one repo:
 `vendor/opensnitch` is a **read-only git submodule** pinned at upstream
 master `a1353848` (2026-07-26, v1.8.0 + 224 commits; owner decision
 2026-11-08), fetched from the fork `bearyjd/opensnitch` branch
-`snitchwatch/stable` (identical to upstream master; that branch is an unprotected convenience ref: builds are pinned by the gitlink SHA, which `packaging/release/pins.env` and `build-bridge.sh` enforce, never by the branch) — upstream reference for
+`snitchwatch/stable` (identical to upstream master; that branch is an unprotected
+convenience ref: builds are pinned by the gitlink SHA, which
+`packaging/release/pins.env` and `build-bridge.sh` enforce, never by the branch) —
+upstream reference for
 `ui.proto` (unchanged from v1.8.0), default config shape, etc. — never edit
 files under it. The bluebuild image still installs the released v1.8.0 RPM;
 building the daemon from the pin needs Go >= 1.25. If `git status` shows it
