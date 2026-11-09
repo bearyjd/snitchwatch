@@ -440,6 +440,9 @@ fn kernel_tree_must_be_the_pinned_kernel_under_usr_src_kernels() {
             "/usr/src/kernels/7.2.150-1.fc45.x86_64",
             "does not match KERNEL_VER",
         ),
+        ("/usr/src/kernels/7.2.15.1", "does not match KERNEL_VER"),
+        ("/usr/src/kernels/7.2.15rc1", "does not match KERNEL_VER"),
+        ("/usr/src/kernels/7.2.15-", "does not match KERNEL_VER"),
     ];
     for (kdir, msg) in cases {
         let args = vec![
@@ -454,15 +457,58 @@ fn kernel_tree_must_be_the_pinned_kernel_under_usr_src_kernels() {
         fails_with(&run(&args, &[]), msg);
     }
     let o = run(&with(dry_args(st, &os), &["--kernel-headers", "/tmp"]), &[]);
-    fails_with(&o, "KERNEL_HEADERS must be /usr/src/kernels/");
+    fails_with(&o, "KERNEL_HEADERS must equal KERNEL_DIR");
+    // Same version, different release/flavour: still refused.
+    let o = run(
+        &with(
+            dry_args(st, &os),
+            &[
+                "--kernel-headers",
+                "/usr/src/kernels/7.2.15-200.fc45.x86_64+debug",
+            ],
+        ),
+        &[],
+    );
+    fails_with(&o, "KERNEL_HEADERS must equal KERNEL_DIR");
     assert!(!d.join("pwned").exists());
+}
+
+#[test]
+fn pinned_kernel_release_shapes_are_accepted() {
+    let d = scratch("kshape");
+    let os = vendor();
+    let st = d.to_str().unwrap();
+    for kdir in [
+        "/usr/src/kernels/7.2.15",
+        "/usr/src/kernels/7.2.15-300.fc45.x86_64",
+        "/usr/src/kernels/7.2.15-ogc1.1.fc45.x86_64",
+    ] {
+        let args = [
+            "--dry-run",
+            "--staging",
+            st,
+            "--kernel-dir",
+            kdir,
+            "--opensnitch-dir",
+            &os,
+        ];
+        let o = run(&args, &[]);
+        assert!(o.status.success(), "{kdir}: {}", text(&o));
+    }
 }
 
 #[test]
 fn real_run_needs_existing_kernel_tree() {
     let d = scratch("krel");
+    // A path inside a fresh scratch dir cannot exist on any host.
+    let missing = d.join("no-such-kernel");
     let o = run(
-        &["--staging", d.to_str().unwrap(), "--kernel-dir", DRY_KDIR],
+        &[
+            "--staging",
+            d.to_str().unwrap(),
+            "--kernel-dir",
+            missing.to_str().unwrap(),
+        ],
         &[],
     );
     fails_with(&o, "KERNEL_DIR does not exist");

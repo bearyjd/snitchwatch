@@ -70,7 +70,7 @@ Options:
   --staging DIR          absolute output root, absent or empty; modules land in
                          DIR/usr/lib/opensnitchd/ebpf/
   --kernel-dir DIR       kernel-devel tree, /usr/src/kernels/<release> (required)
-  --kernel-headers DIR   kernel headers tree, same rules (default: --kernel-dir)
+  --kernel-headers DIR   kernel headers tree; must resolve to --kernel-dir (default)
   --kernel-ver VER       Makefile KERNEL_VER; must equal SW_EBPF_KERNEL_DEVEL_VERSION
                          in pins.env (the default) unless --allow-kernel-mismatch
   --allow-kernel-mismatch  accept a --kernel-ver other than the pin (loud warning;
@@ -175,8 +175,9 @@ safe_path() { # <label> <value>: absolute, only [A-Za-z0-9._/+-]
     [[ "$2" =~ ^/[A-Za-z0-9._/+-]*$ ]] ||
         die "invalid $1 (must be absolute, allowed chars [A-Za-z0-9._/+-]): $2"
 }
-kver_match() { # <release>: exactly KERNEL_VER, or KERNEL_VER followed by a non-digit
-    [[ "$1" == "$KVER" ]] || { [[ "$1" == "$KVER"* ]] && [[ "${1:${#KVER}:1}" != [0-9] ]]; }
+kver_match() { # <release>: exactly KERNEL_VER, or KERNEL_VER-<suffix> (7.2.15-300.fc45.x86_64);
+    # never KERNEL_VER followed by a digit, '.' or letter (7.2.150, 7.2.15.1, 7.2.15rc1)
+    [[ "$1" == "$KVER" || "$1" == "$KVER"-?* ]]
 }
 
 # ---- kernel trees ----------------------------------------------------------
@@ -211,6 +212,10 @@ check_kernel_tree() { # <label> <canonical path>
 KERNEL_HEADERS="${KERNEL_HEADERS:-$KERNEL_DIR}"
 KERNEL_DIR="$(canon KERNEL_DIR "$KERNEL_DIR")"
 KERNEL_HEADERS="$(canon KERNEL_HEADERS "$KERNEL_HEADERS")"
+# The Makefile mixes include paths from both trees, so they must be one tree
+# (Fedora kernel-devel ships headers and kconfig.h together).
+[[ "$KERNEL_HEADERS" == "$KERNEL_DIR" ]] ||
+    die "KERNEL_HEADERS must equal KERNEL_DIR (got $KERNEL_HEADERS vs $KERNEL_DIR)"
 check_kernel_tree KERNEL_DIR "$KERNEL_DIR"
 check_kernel_tree KERNEL_HEADERS "$KERNEL_HEADERS"
 if [[ $DRY_RUN -eq 0 ]]; then
