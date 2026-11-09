@@ -76,6 +76,9 @@ after the daemon's first connection, queue overflow, `RecheckDiagnostics`). So:
   other eBPF alerts, as before).
 - `RecheckDiagnostics` clears it like every alert (unchanged re-baseline semantics; the daemon re-alerts on its
   next start if still true). Subscribe does not clear it (the race in `daemon_alerts.rs` module doc).
+- Review fix (2026-11-09): `process_monitor()` is `None` while liveness says the daemon is down, and the
+  watchdog clears the fallback slot on the down transition, so an alert from a daemon process that went away
+  never describes the next one. The GUI health page resets its line when no bridge session is live.
 
 ### Wire (additive; older GUIs ignore it)
 ```rust
@@ -93,7 +96,9 @@ JSON: `"processMonitor": {"fallback": "ebpf_did_not_start", "reportedSecsAgo": 1
 ### GUI text (tray tooltip + Daemon Health monitor line)
 - none: `Process monitor: not reported by opensnitchd`
 - `ebpf_did_not_start`: `Process monitor: /proc (opensnitchd reported at HH:MM that eBPF did not start)`
-- `ebpf_events_did_not_start`: `Process monitor: /proc (opensnitchd reported at HH:MM that eBPF process events did not start)`
+- `ebpf_events_did_not_start`: `Process monitor: eBPF process events did not start; opensnitchd reported it at HH:MM`
+  (weaker on purpose: `/proc` is certain only at startup; a live reload rolls back to the old method, which may be
+  eBPF, `init.go:61-66,102-108`).
 
 `HH:MM` is GUI local time minus `reportedSecsAgo`. The Daemon Health page is not marked as a problem by it.
 
@@ -105,6 +110,10 @@ JSON: `"processMonitor": {"fallback": "ebpf_did_not_start", "reportedSecsAgo": 1
 - `tray_health` unit: the three lines; the existing "never names a mode" guard narrowed to the no-report case.
 
 ## Unverified / open
+- A daemon restart faster than `DAEMON_DOWN_TIMEOUT` with the Notifications stream reopened is not seen as
+  down, so its predecessor's fallback alert can survive until the new process re-alerts or Recheck. Subscribe
+  still does not clear it (queued-alert race above).
+- The health page's disconnect reset has no automated test (needs a live bridge link in a QML test).
 - Real fallback alert text on a host (needs a forced fallback on the VM, never on the production host).
 - Kirigami tests segfault in this sandbox; CI's `kirigami` job is the evidence for the GUI part.
 - Upstream "active method" field (Q04 option C) would replace this text matching; not requested here.

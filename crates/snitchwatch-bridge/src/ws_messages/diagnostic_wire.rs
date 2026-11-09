@@ -32,14 +32,16 @@ pub struct DiagnosticCheck {
 
 /// Why opensnitchd says it is not using its eBPF process monitor (E3,
 /// `docs/superpowers/plans/2026-11-09-ebpf-honest-health.md`). Both mean the
-/// daemon attributes connections via `/proc` after the reported failure.
+/// daemon attributes connections via `/proc` after a startup failure; see
+/// [`MonitorFallback::EbpfEventsDidNotStart`] for a live reload.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MonitorFallback {
     /// `opensnitch.o` did not load: the daemon stopped eBPF and uses `/proc`.
     EbpfDidNotStart,
     /// `opensnitch-procs.o` (or tracefs) did not load: the daemon starts its
-    /// `/proc` monitors and rolls its method back to `/proc`.
+    /// `/proc` monitors and rolls its method back: to `/proc` at startup, but
+    /// to the old method (possibly eBPF) on a live config reload.
     EbpfEventsDidNotStart,
 }
 

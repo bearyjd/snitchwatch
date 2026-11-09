@@ -74,3 +74,34 @@ fn recheck_clears_the_fallback() {
     ctx.clear_alerts();
     assert_eq!(ctx.process_monitor(), None);
 }
+
+#[test]
+fn no_fallback_is_reported_while_the_daemon_is_down() {
+    let store = Arc::new(DaemonAlertStore::new());
+    store.record(
+        alert::What::Generic,
+        alert::Type::Warning as i32,
+        MAIN_MODULE_FALLBACK.to_string(),
+    );
+    let ctx = DiagnosticsCtx::new(
+        DaemonLiveness::new_stale_for_test(
+            std::time::Instant::now(),
+            crate::daemon_watchdog::DAEMON_DOWN_TIMEOUT + std::time::Duration::from_secs(1),
+        ),
+        Arc::new(StdMutex::new(None)),
+        Arc::new(FakeKernelProbe::all_ok()),
+        store,
+    );
+    assert_eq!(ctx.process_monitor(), None);
+}
+
+#[test]
+fn clearing_the_fallback_keeps_other_alerts() {
+    let ctx = ctx_with(&[
+        "Unable to set process monitor method via parameter: x",
+        MAIN_MODULE_FALLBACK,
+    ]);
+    ctx.clear_monitor_fallback();
+    assert_eq!(ctx.process_monitor(), None);
+    assert!(matches!(ebpf_status(&ctx), CheckStatus::Failed { .. }));
+}

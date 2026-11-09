@@ -376,22 +376,35 @@ async fn ebpf_fallback_alert_is_reported_as_process_monitor_not_a_failure() {
         .await
         .expect("post_alert failed");
 
-    // Each alert pushes a report; once the fallback shows, every later report
-    // (including the one after the DNS alert) must keep it.
-    let mut seen = 0;
-    while seen < 2 {
+    // A third, firewall alert: the first report with a failed firewall check
+    // was built after the DNS alert was stored, so it proves the post-DNS
+    // state.
+    mock.post_alert_text(Type::Error, What::Generic, "Error creating queue #0: busy")
+        .await
+        .expect("post_alert failed");
+    let report = loop {
         let report = next_diagnostics_report(&mut ws).await;
-        let ebpf = ebpf_check(&report);
-        assert_ne!(ebpf["status"]["status"], "failed", "{report}");
-        match report.get("processMonitor") {
-            Some(pm) => {
-                assert_eq!(pm["fallback"], "ebpf_did_not_start", "{report}");
-                assert_eq!(pm["daemonText"], FALLBACK);
-                seen += 1;
-            }
-            None => assert_eq!(seen, 0, "fallback dropped by a later alert: {report}"),
+        let firewall = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["kind"] == "firewall_running")
+            .expect("no firewall_running check")
+            .clone();
+        if firewall["status"]["status"] == "failed" {
+            break report;
         }
-    }
+    };
+    assert_ne!(
+        ebpf_check(&report)["status"]["status"],
+        "failed",
+        "{report}"
+    );
+    let pm = report
+        .get("processMonitor")
+        .expect("fallback dropped by a later alert");
+    assert_eq!(pm["fallback"], "ebpf_did_not_start", "{report}");
+    assert_eq!(pm["daemonText"], FALLBACK);
 
     ws.send(Message::Text(
         json!({ "action": "recheckDiagnostics" }).to_string(),

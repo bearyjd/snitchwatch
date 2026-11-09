@@ -207,6 +207,14 @@ impl DaemonAlertStore {
             .cloned()
     }
 
+    /// Drops the stored `GENERIC` alert about `topic` only.
+    pub fn clear_generic(&self, topic: GenericTopic) {
+        self.generic_by_topic
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&topic);
+    }
+
     /// Drops every stored alert. Called by `ClientMessage::RecheckDiagnostics`
     /// (via `DiagnosticsCtx::clear_alerts`) — see this module's doc comment
     /// for why `subscribe()` deliberately does NOT call this.
@@ -409,6 +417,9 @@ pub(crate) mod tests {
             (PROCS_MODULE_FALLBACK, fallback, Some(EbpfEventsDidNotStart)),
             ("exit status 32\nUnable to access debugfs filesystem, needed for eBPF to work, likely caused by a hardened or customized kernel.", fallback, Some(EbpfEventsDidNotStart)),
             (DNS_MODULE_ALERT, GenericTopic::EbpfDns, None),
+            // `daemon/main.go:645` prints the `*monitor.Error` with %v
+            // (`EbpfErr` is 3, `monitor/init.go:20-26`).
+            ("Unable to set process monitor method via parameter: &{3 [eBPF] Error loading opensnitch.o: \nunable to load eBPF module (opensnitch.o).}", fallback, Some(EbpfDidNotStart)),
             ("Unable to set process monitor method via parameter: exec format error", GenericTopic::ProcessMonitor, None),
             ("Error creating queue #0: busy", GenericTopic::Firewall, None),
             ("ringbuf: not supported", GenericTopic::Unclassified, None),

@@ -214,6 +214,29 @@ impl qobject::DaemonHealthModel {
                 });
             },
         );
+        // E3 review: a reported /proc fallback belongs to the bridge session
+        // that sent it. Once no session is live, show the unreported line
+        // again; the next session's snapshot re-sets it. `live_session` is
+        // read on the Qt thread, so a reset queued during a disconnect never
+        // wipes a line the next session already sent.
+        let link_thread = self.qt_thread();
+        let link_handles = handles.clone();
+        let mut link_rx = crate::bridge_runtime::link_wake::subscribe();
+        handles.runtime().spawn(async move {
+            while link_rx.changed().await.is_ok() {
+                let handles = link_handles.clone();
+                let queued = link_thread.queue(move |mut qobject| {
+                    if handles.live_session().is_none() {
+                        qobject.as_mut().set_monitor_status(QString::from(
+                            crate::tray_health::MONITOR_NOT_REPORTED,
+                        ));
+                    }
+                });
+                if queued.is_err() {
+                    break;
+                }
+            }
+        });
         // The current report arrives in the snapshot `spawn_feed` requests.
         // No automatic `RecheckDiagnostics`: the bridge clears its stored
         // daemon alerts before answering one, so opening the GUI would erase

@@ -57,6 +57,9 @@ pub async fn run(
             // clear it so `report()` doesn't claim the firewall is still
             // running while the daemon is down.
             diagnostics_ctx.reset_firewall_status_unknown();
+            // Same for a reported eBPF-to-/proc fallback (E3): the next
+            // daemon start re-alerts if it is still true.
+            diagnostics_ctx.clear_monitor_fallback();
             let _ = broadcast_tx.send(crate::ws_messages::ServerMessage::DiagnosticsReport {
                 checks: diagnostics_ctx.report(),
                 process_monitor: diagnostics_ctx.process_monitor(),
@@ -125,6 +128,64 @@ mod tests {
         rx.changed().await.unwrap();
         assert_eq!(*rx.borrow(), TrayState::Idle);
 
+        watchdog.abort();
+    }
+
+    /// E3 review: a fallback reported by the daemon before it went down is
+    /// forgotten, so a restarted daemon is never described by the old alert.
+    #[tokio::test(start_paused = true)]
+    async fn daemon_down_forgets_the_monitor_fallback() {
+        let liveness = DaemonLiveness::new();
+        let tray_pub = Arc::new(TrayStatePublisher::new());
+        let cache = Arc::new(TokioMutex::new(ConnectionCache::with_tray_publisher(
+            64,
+            tray_pub.clone(),
+        )));
+        let (broadcast_tx, mut reports) = tokio::sync::broadcast::channel(16);
+        let store = Arc::new(crate::daemon_alerts::DaemonAlertStore::new());
+        store.record(
+            snitchwatch_proto::protocol::alert::What::Generic,
+            snitchwatch_proto::protocol::alert::Type::Warning as i32,
+            "[eBPF] Error loading opensnitch.o: x".to_string(),
+        );
+        let diagnostics_ctx = Arc::new(crate::diagnostics::DiagnosticsCtx::new(
+            liveness.clone(),
+            Arc::new(StdMutex::new(None)),
+            Arc::new(crate::diagnostics::kernel_probe::testing::FakeKernelProbe::all_ok()),
+            store,
+        ));
+        assert!(diagnostics_ctx.process_monitor().is_some());
+        let watchdog = tokio::spawn(run(
+            liveness.clone(),
+            tray_pub,
+            cache,
+            diagnostics_ctx.clone(),
+            broadcast_tx,
+        ));
+
+        tokio::time::advance(DAEMON_DOWN_TIMEOUT + Duration::from_secs(1)).await;
+        let down = reports.recv().await.unwrap();
+        let crate::ws_messages::ServerMessage::DiagnosticsReport {
+            process_monitor, ..
+        } = down
+        else {
+            panic!("expected DiagnosticsReport");
+        };
+        assert_eq!(process_monitor, None);
+
+        liveness.touch();
+        tokio::time::advance(WATCHDOG_TICK * 2).await;
+        let up = reports.recv().await.unwrap();
+        let crate::ws_messages::ServerMessage::DiagnosticsReport {
+            process_monitor, ..
+        } = up
+        else {
+            panic!("expected DiagnosticsReport");
+        };
+        assert_eq!(
+            process_monitor, None,
+            "the old fallback came back after recovery"
+        );
         watchdog.abort();
     }
 

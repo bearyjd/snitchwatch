@@ -30,14 +30,17 @@ pub fn monitor_line(
     let Some(report) = report else {
         return MONITOR_NOT_REPORTED.to_string();
     };
-    let what = match report.fallback {
-        MonitorFallback::EbpfDidNotStart => "eBPF",
-        MonitorFallback::EbpfEventsDidNotStart => "eBPF process events",
-    };
-    format!(
-        "Process monitor: /proc (opensnitchd reported at {} that {what} did not start)",
-        reported_at(report.reported_secs_ago)
-    )
+    let at = reported_at(report.reported_secs_ago);
+    match report.fallback {
+        MonitorFallback::EbpfDidNotStart => {
+            format!("Process monitor: /proc (opensnitchd reported at {at} that eBPF did not start)")
+        }
+        // Only certain at daemon startup: a live reload rolls back to the old
+        // method, which may be eBPF (`monitor/init.go:61-66,102-108`).
+        MonitorFallback::EbpfEventsDidNotStart => format!(
+            "Process monitor: eBPF process events did not start; opensnitchd reported it at {at}"
+        ),
+    }
 }
 
 /// What the latest report says about the daemon's firewall.
@@ -306,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn the_monitor_line_names_proc_only_from_a_reported_fallback() {
+    fn the_monitor_line_names_proc_only_from_a_reported_main_module_fallback() {
         assert_eq!(
             monitor_line(None, |_| panic!("no report, no clock")),
             MONITOR_NOT_REPORTED
@@ -321,7 +324,7 @@ mod tests {
         );
         assert_eq!(
             monitor_line(Some(&fallback(MonitorFallback::EbpfEventsDidNotStart)), at),
-            "Process monitor: /proc (opensnitchd reported at 14:30 that eBPF process events did not start)"
+            "Process monitor: eBPF process events did not start; opensnitchd reported it at 14:30"
         );
     }
 

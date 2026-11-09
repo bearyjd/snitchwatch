@@ -105,6 +105,14 @@ impl DiagnosticsCtx {
         *guard = None;
     }
 
+    /// Forgets the monitor-fallback alert, called when the daemon goes
+    /// down. Subscribe never calls it: a queued alert can arrive before the
+    /// subscribe (`daemon_alerts` module doc).
+    pub fn clear_monitor_fallback(&self) {
+        self.alert_store
+            .clear_generic(GenericTopic::MonitorFallback);
+    }
+
     /// Drops every stored daemon alert. Called by
     /// `ClientMessage::RecheckDiagnostics` — the user-driven "re-baseline"
     /// that replaces the old (and wrong — see `daemon_alerts`'s module doc)
@@ -127,7 +135,15 @@ impl DiagnosticsCtx {
 
     /// The daemon's latest "eBPF fell back to `/proc`" alert, if any (E3).
     /// Positive evidence only: `None` means not reported, never "eBPF".
+    /// `None` while the daemon is down: the alert described the daemon
+    /// process that went away, not whichever one starts next.
     pub fn process_monitor(&self) -> Option<ProcessMonitorReport> {
+        if self
+            .liveness
+            .is_down(Instant::now(), crate::daemon_watchdog::DAEMON_DOWN_TIMEOUT)
+        {
+            return None;
+        }
         let alert = self.alert_store.generic(GenericTopic::MonitorFallback)?;
         Some(ProcessMonitorReport {
             fallback: monitor_fallback(&alert.text)?,
