@@ -7,6 +7,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -392,19 +393,32 @@ class UnknownRate(unittest.TestCase):
         self.assertEqual((r["total"], r["unknown"]), (3, 1))
 
 
+START_MS = 1_700_000_000_000  # export window start; CSV iso_utc derives from it
+
+
 class Compare(unittest.TestCase):
     def make_run(self, root, label, cpus, rss, unknown=10, dur=86400, workload="w1",
-                 truncated=False, span=None, ts=None, filters=None, win_s=None):
+                 truncated=False, span=None, ts=None, filters=None, win_s=None,
+                 name="d", pids=None, iso_shift=0, iso=None):
         root = Path(root)
         with open(root / f"{label}.csv", "w", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(measure.COLUMNS)
             span = dur if span is None else span
             for i, (c, r) in enumerate(zip(cpus, rss)):
-                w.writerow([span * i / max(1, len(cpus) - 1) if ts is None else ts[i], "x", "d", 1, c, r, 4, "", ""])
+                t = span * i / max(1, len(cpus) - 1) if ts is None else ts[i]
+                try:
+                    wall = START_MS / 1000 + float(t) + iso_shift
+                    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(wall))
+                except (ValueError, OverflowError):
+                    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(START_MS / 1000))
+                stamp = stamp if iso is None else iso[i]
+                nm = name[i] if isinstance(name, list) else name
+                w.writerow([t, stamp, nm, 1 if pids is None else pids[i], c, r, 4, "", ""])
         doc = lambda n, flt: {"format": measure.EXPORT_FORMAT, "schemaVersion": 1,  # noqa: E731
                               "filterKinds": {"application": flt, **(filters or {})},
-                              "requestedWindow": ({"fromMs": 5, "toMs": 5 + int((dur if win_s is None else win_s) * 1000)}
+                              "requestedWindow": ({"fromMs": START_MS,
+                                                 "toMs": START_MS + int((dur if win_s is None else win_s) * 1000)}
                                                 if win_s != "none" else {"a": 1}),
                               "coverage": {"rowOmissions": {}, "unexaminedRetained": 0,
                                            "groupOmissions": {k: {"groups": 0, "observations": 0}
@@ -665,6 +679,110 @@ class Compare(unittest.TestCase):
             a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
             b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
             self.edit(b, samplesCsv="./proc.csv")
+            with self.assertRaisesRegex(ValueError, "same"):
+                measure.compare(a, b)
+
+    # --- issue #350 ---
+    def test_symlinked_artifact_inside_manifest_dir_refused(self):
+        # No symlink is followed at all (per-component O_NOFOLLOW), so there is
+        # no window between a containment check and the open.
+        for rel in ("sub/ebpf.csv", "alias.csv"):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
+                (Path(d) / "real").mkdir()
+                os.replace(Path(d) / "ebpf.csv", Path(d) / "real" / "ebpf.csv")
+                os.symlink("real", Path(d) / "sub")
+                os.symlink("real/ebpf.csv", Path(d) / "alias.csv")
+                self.edit(b, samplesCsv=rel)
+                with self.assertRaisesRegex(ValueError, "samplesCsv"):
+                    measure.compare(a, b)
+
+    def test_swapped_component_after_resolve_is_not_followed(self):
+        # Even if path resolution is fooled (dir swapped for a symlink after any
+        # check), the open itself refuses the symlink.
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as out:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
+            (Path(out) / "ebpf.csv").write_text((Path(d) / "ebpf.csv").read_text())
+            os.symlink(out, Path(d) / "link")
+            self.edit(b, samplesCsv="link/ebpf.csv")
+            orig = Path.resolve
+            Path.resolve = lambda self, strict=False: Path(os.path.abspath(self))
+            try:
+                with self.assertRaisesRegex(ValueError, "samplesCsv"):
+                    measure.compare(a, b)
+            finally:
+                Path.resolve = orig
+
+    def test_process_name_required_and_consistent(self):
+        for name in ("", ["d", "d", "e"]):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, name=name)
+                with self.assertRaisesRegex(ValueError, "name"):
+                    measure.compare(a, b)
+
+    def test_process_name_must_match_across_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3, name="opensnitchd")
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, name="other")
+            with self.assertRaisesRegex(ValueError, "name"):
+                measure.compare(a, b)
+
+    def test_simultaneous_pids_summed_per_timestamp(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0, 2.0] * 3, [1024, 2048] * 3,
+                              ts=[0, 0, 43200, 43200, 86400, 86400], pids=[1, 2] * 3)
+            b = self.make_run(d, "ebpf", [3.0] * 3, [3072] * 3)
+            r = measure.compare(a, b)
+        self.assertAlmostEqual(r["proc"]["cpu_mean"], 3.0)
+        self.assertAlmostEqual(r["proc"]["rss_start_mib"], 3.0)
+        self.assertAlmostEqual(r["proc"]["rss_end_mib"], 3.0)
+        self.assertAlmostEqual(r["delta"]["cpu_mean"], 0.0)
+
+    def test_timestamp_with_incomplete_process_set_not_counted(self):
+        # pid 2 has no cpu yet at t=0: neither CPU nor RSS is taken from t=0,
+        # so RSS start comes from the same process set as the CPU values.
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0, "", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+                              [1024, 99999, 1024, 1024, 1024, 1024, 1024, 1024],
+                              ts=[0, 0, 28800, 28800, 57600, 57600, 86400, 86400],
+                              pids=[1, 2] * 4)
+            b = self.make_run(d, "ebpf", [2.0] * 3, [2048] * 3)
+            r = measure.compare(a, b)
+        self.assertAlmostEqual(r["proc"]["cpu_mean"], 2.0)
+        self.assertAlmostEqual(r["proc"]["rss_start_mib"], 2.0)
+
+    def test_duplicate_timestamps_count_once_toward_min_samples(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 4, [1024] * 4,
+                              ts=[0, 0, 43200, 43200], pids=[1, 2, 1, 2])
+            with self.assertRaisesRegex(ValueError, "samples"):
+                measure.compare(a, b)
+
+    def test_export_window_must_agree_with_csv_wall_clock(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, iso_shift=3600)
+            with self.assertRaisesRegex(ValueError, "wall-clock"):
+                measure.compare(a, b)
+
+    def test_missing_or_bad_iso_utc_refused(self):
+        for iso in (["", "", ""], ["x", "x", "x"]):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, iso=iso)
+                with self.assertRaisesRegex(ValueError, "iso_utc"):
+                    measure.compare(a, b)
+
+    def test_hard_linked_shared_artifact_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
+            os.unlink(Path(d) / "ebpf-t.json")
+            os.link(Path(d) / "proc-t.json", Path(d) / "ebpf-t.json")
             with self.assertRaisesRegex(ValueError, "same"):
                 measure.compare(a, b)
 
