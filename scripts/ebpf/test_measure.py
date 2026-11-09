@@ -786,6 +786,32 @@ class Compare(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "same"):
                 measure.compare(a, b)
 
+    def test_duplicate_pid_at_one_timestamp_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 4, [1024] * 4,
+                              ts=[0, 0, 43200, 86400], pids=[1, 1, 1, 1])
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                measure.compare(a, b)
+
+    def test_absurd_cpu_or_rss_refused_before_summing(self):
+        for cpus, rss, col in (([1e308] * 6, [1024] * 6, "cpu_pct"),
+                               ([1.0] * 6, [2 ** 41] * 6, "rss_kib")):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", cpus, rss, ts=[0, 0, 43200, 43200, 86400, 86400],
+                                  pids=[1, 2] * 3)
+                with self.assertRaisesRegex(ValueError, col):
+                    measure.compare(a, b)
+
+    def test_compare_output_json_is_always_finite(self):
+        orig = measure.compare
+        measure.compare = lambda *a: {"x": float("inf")}
+        try:
+            self.assertEqual(measure.main(["compare", "a", "b"]), 1)
+        finally:
+            measure.compare = orig
+
 
 if __name__ == "__main__":
     unittest.main()

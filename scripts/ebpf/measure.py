@@ -41,6 +41,10 @@ MAX_DURATION_S = 366 * 86400.0  # one year; larger is a typo or hostile
 # start. Every row's estimate must lie within this many seconds of the export
 # window's fromMs (at least WALL_MIN_SLACK_S, for the 1 s stamp resolution).
 WALL_MIN_SLACK_S = 2.0
+# Per-sample sanity bounds (well above any real host: 10000 cores, 1 PiB RSS),
+# so per-timestamp sums of a bounded number of rows stay finite.
+MAX_CPU_PCT = 1e6
+MAX_RSS_KIB = 2 ** 40
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -388,21 +392,33 @@ def _check_rows(rows, label, dur):
     whose cpu_pct and rss_kib are the SUMS over its rows, and only if every row
     at that timestamp has both values (CPU and RSS then come from the same
     process set). Only such points count toward sample count, span and gaps,
-    so duplicate timestamps count once. Returns (points, per-row t_s).
+    so duplicate timestamps count once. A pid may appear at most once per
+    timestamp (a repeated (t_s, pid) row would double the totals), and each
+    cpu_pct/rss_kib must not exceed MAX_CPU_PCT/MAX_RSS_KIB; sums must be
+    finite. Returns (points, per-row t_s).
     """
     ts = [_finite(r.get("t_s"), "t_s", label) for r in rows]
     if any(t > dur * (1 + DURATION_TOLERANCE) for t in ts):
         raise ValueError(f"{label}: t_s beyond durationS {dur:g}s")
     if any(b < a for a, b in zip(ts, ts[1:])):
         raise ValueError(f"{label}: t_s rows out of order")
-    groups = {}
+    groups, seen = {}, set()
     for t, r in zip(ts, rows):
-        vals = [r.get(c) for c in ("cpu_pct", "rss_kib")]
-        nums = [None if v in (None, "") else _finite(v, col, label)
-                for col, v in zip(("cpu_pct", "rss_kib"), vals)]
+        if (t, r.get("pid")) in seen:
+            raise ValueError(f"{label}: duplicate pid {r.get('pid')!r} at t_s {t:g}")
+        seen.add((t, r.get("pid")))
+        nums = []
+        for col, limit in (("cpu_pct", MAX_CPU_PCT), ("rss_kib", MAX_RSS_KIB)):
+            v = r.get(col)
+            n = None if v in (None, "") else _finite(v, col, label)
+            if n is not None and n > limit:
+                raise ValueError(f"{label}: {col} {v} exceeds the sanity bound {limit:g}")
+            nums.append(n)
         groups.setdefault(t, []).append(nums)
     points = [{"t_s": t, "cpu_pct": sum(n[0] for n in g), "rss_kib": sum(n[1] for n in g)}
               for t, g in groups.items() if all(None not in n for n in g)]
+    if not all(math.isfinite(p["cpu_pct"]) and math.isfinite(p["rss_kib"]) for p in points):
+        raise ValueError(f"{label}: per-timestamp cpu_pct/rss_kib sum is not finite")
     counted = [p["t_s"] for p in points]
     if len(counted) < MIN_SAMPLES:
         raise ValueError(f"{label}: only {len(counted)} distinct timestamps with cpu and rss "
@@ -542,7 +558,7 @@ def main(argv=None):
         print(json.dumps(summarize(rows), indent=2))
     elif a.cmd == "compare":
         try:
-            print(json.dumps(compare(a.proc, a.ebpf), indent=2))
+            print(json.dumps(compare(a.proc, a.ebpf), indent=2, allow_nan=False))
         except (ValueError, OSError, csv.Error, TypeError, KeyError,
                 OverflowError, AttributeError) as e:
             print(f"error: {e}", file=sys.stderr)
