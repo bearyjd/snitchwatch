@@ -10,11 +10,13 @@ Subcommands (stdlib only, no root needed, nothing outside --out is written):
 Plan: docs/superpowers/plans/2026-10-29-ebpf-q05-q06.md
 """
 import argparse
+import calendar
 import csv
 import io
 import json
 import math
 import os
+import re
 import stat
 import statistics
 import sys
@@ -35,6 +37,27 @@ MIN_SPAN_FRACTION = 0.5
 MAX_GAP_FRACTION = 0.5
 MIN_SAMPLES = 3
 MAX_DURATION_S = 366 * 86400.0  # one year; larger is a typo or hostile
+# The sampler stamps each row with iso_utc (UTC, whole seconds) taken right
+# after the monotonic t_s, so iso_utc - t_s estimates the run's wall-clock
+# start. Every row's estimate must lie within this many seconds of the export
+# window's fromMs (at least WALL_MIN_SLACK_S, for the 1 s stamp resolution).
+WALL_MIN_SLACK_S = 2.0
+# Per-sample sanity bounds (well above any real host: 10000 cores, 1 PiB RSS),
+# so per-timestamp sums of a bounded number of rows stay finite.
+MAX_CPU_PCT = 1e6
+MAX_RSS_KIB = 2 ** 40
+PID_RE = re.compile(r"[1-9][0-9]*")
+# Byte cap on any file read (manifest, CSV, export): far above a year of
+# samples or a full cache export, and bounds memory on hostile input.
+MAX_INPUT_BYTES = 256 * 1024 * 1024
+
+
+def _read_capped(fh, path):
+    data = fh.read(MAX_INPUT_BYTES + 1)
+    if len(data) > MAX_INPUT_BYTES:
+        raise ValueError(f"{path}: larger than {MAX_INPUT_BYTES} bytes; refusing")
+    return data.decode("utf-8")
+ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def read_process(proc, pid):
@@ -93,10 +116,11 @@ def _fmt(v):
     return "" if v is None else repr(round(v, 3)) if isinstance(v, float) else str(v)
 
 
-def _open_regular(path, flags, mode=0o600):
+def _open_regular(path, flags, mode=0o600, dir_fd=None):
     """os.open that never blocks on a FIFO, never follows a symlink, and
     returns (fd, st) only for a regular file; otherwise closes and raises."""
-    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, mode)
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, mode,
+                 dir_fd=dir_fd)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
@@ -136,8 +160,27 @@ def open_private(out, force=False):
 def read_regular_text(path):
     """Read a user-supplied file as UTF-8 text; regular files only (no FIFO hang)."""
     fd, _ = _open_regular(path, os.O_RDONLY)
-    with os.fdopen(fd, encoding="utf-8", newline="") as fh:
-        return fh.read()
+    with os.fdopen(fd, "rb") as fh:
+        return _read_capped(fh, path)
+
+
+def _read_inside(root, rel):
+    """Read root/rel as text, opening each component relative to its parent
+    directory fd with O_NOFOLLOW: no symlink anywhere below root is followed,
+    so the file read is the one inside root (no check-then-open window).
+    Returns (text, (st_dev, st_ino))."""
+    dfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in rel.parts[:-1]:
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                          | os.O_CLOEXEC, dir_fd=dfd)
+            os.close(dfd)
+            dfd = nfd
+        fd, st = _open_regular(rel.parts[-1], os.O_RDONLY, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    with os.fdopen(fd, "rb") as fh:
+        return _read_capped(fh, rel), (st.st_dev, st.st_ino)
 
 
 def run(name, interval, duration, out, proc, clk_tck, sleep=time.sleep,
@@ -308,36 +351,38 @@ def _load_run(path, label):
     workload = doc.get("workload")
     if not isinstance(workload, str) or not workload:
         raise ValueError(f"{label}: workload missing")
-    base = Path(path).parent
-    root = base.resolve()
-    files = {}
+    root = Path(path).parent
+    texts, ids = {}, set()
     for key in ("samplesCsv", "unknownTotal", "unknownMissing"):
         if not isinstance(doc.get(key), str) or not doc[key]:
             raise ValueError(f"{label}: {key} missing")
         rel = Path(doc[key])
-        # Lexical check, then resolve (follows intermediate symlinks) and require
-        # containment; read_regular_text additionally refuses a final symlink.
-        if rel.is_absolute() or ".." in rel.parts \
-                or not (root / rel).resolve().is_relative_to(root):
+        if rel.is_absolute() or ".." in rel.parts or not rel.parts:
             raise ValueError(f"{label}: {key} must be a relative path inside the manifest directory")
-        files[key] = base / rel
-    rows = list(csv.DictReader(io.StringIO(read_regular_text(files["samplesCsv"]))))
-    _check_rows(rows, label, dur)
-    stats = summarize(rows)
+        try:
+            texts[key], ident = _read_inside(root, rel)
+        except OSError as e:
+            raise ValueError(f"{label}: {key} must be a regular file inside the manifest "
+                             f"directory reached without symlinks: {e}") from None
+        ids.add(ident)
+    rows = list(csv.DictReader(io.StringIO(texts["samplesCsv"])))
+    points, ts = _check_rows(rows, label, dur)
+    name = _run_name(rows, label)
+    stats = summarize(points)
     if not stats["cpu_samples"]:
         raise ValueError(f"{label}: no cpu samples in {doc['samplesCsv']}")
-    total_doc, missing_doc = _load(files["unknownTotal"]), _load(files["unknownMissing"])
+    total_doc = json.loads(texts["unknownTotal"])
+    missing_doc = json.loads(texts["unknownMissing"])
     _check_window(total_doc, f"{label} total", dur)
     _check_window(missing_doc, f"{label} missing-path", dur)
+    _check_wall_clock(rows, ts, total_doc, label, dur)
     filters = {"total": _filters(total_doc, f"{label} total"),
                "missing": _filters(missing_doc, f"{label} missing-path")}
     unk = unknown_rate(total_doc, missing_doc)
-    return {"duration_s": dur, "workload": workload, "cpu_mean": stats["cpu_mean"],
+    return {"duration_s": dur, "workload": workload, "name": name, "cpu_mean": stats["cpu_mean"],
             "cpu_p95": stats["cpu_p95"], "rss_start_mib": stats["rss_start_mib"],
             "rss_end_mib": stats["rss_end_mib"], "unknown_rate": unk["rate"],
-            "filters": filters, "files": {str((root / f).resolve()) for f in
-                                          (doc["samplesCsv"], doc["unknownTotal"], doc["unknownMissing"])},
-            "warnings": unk["warnings"]}
+            "filters": filters, "files": ids, "warnings": unk["warnings"]}
 
 
 def _finite(value, what, label, nonneg=True):
@@ -351,28 +396,54 @@ def _finite(value, what, label, nonneg=True):
 
 
 def _check_rows(rows, label, dur):
-    """Validate sample values and that the timestamps actually cover the run.
+    """Validate sample values, aggregate per timestamp, check coverage.
 
-    Every t_s must be finite, in order (summarize takes RSS start/end in file
-    order) and within [0, durationS * (1 + tolerance)]. Only rows with BOTH a
-    cpu and an rss value count toward sample count, span and gaps.
+    Every t_s must be finite, in order and within [0, durationS * (1 +
+    tolerance)]. The sampler writes one row per matching PID at each tick, all
+    with the same t_s, so rows are grouped by t_s: a timestamp yields one point
+    whose cpu_pct and rss_kib are the SUMS over its rows, and only if every row
+    at that timestamp has both values (CPU and RSS then come from the same
+    process set). Only such points count toward sample count, span and gaps,
+    so duplicate timestamps count once. A pid may appear at most once per
+    timestamp (a repeated (t_s, pid) row would double the totals); pid must be
+    a canonical positive integer ([1-9][0-9]*, so "01"/"+1"/" 1" cannot alias
+    "1"), or empty only on the sampler's no-process row (cpu_pct, rss_kib and
+    threads all empty too). Each
+    cpu_pct/rss_kib must not exceed MAX_CPU_PCT/MAX_RSS_KIB; sums must be
+    finite. Returns (points, per-row t_s).
     """
     ts = [_finite(r.get("t_s"), "t_s", label) for r in rows]
     if any(t > dur * (1 + DURATION_TOLERANCE) for t in ts):
         raise ValueError(f"{label}: t_s beyond durationS {dur:g}s")
     if any(b < a for a, b in zip(ts, ts[1:])):
         raise ValueError(f"{label}: t_s rows out of order")
-    counted = []
+    groups, seen = {}, set()
     for t, r in zip(ts, rows):
-        vals = [r.get(c) for c in ("cpu_pct", "rss_kib")]
-        for col, v in zip(("cpu_pct", "rss_kib"), vals):
-            if v not in (None, ""):
-                _finite(v, col, label)
-        if all(v not in (None, "") for v in vals):
-            counted.append(t)
+        raw = r.get("pid")
+        if raw not in (None, "") and not PID_RE.fullmatch(raw):
+            raise ValueError(f"{label}: pid {raw!r} is not a canonical positive integer")
+        if not raw and any(r.get(c) not in (None, "") for c in ("cpu_pct", "rss_kib", "threads")):
+            raise ValueError(f"{label}: row at t_s {t:g} has values but no pid")
+        pid = int(raw) if raw else None
+        if (t, pid) in seen:
+            raise ValueError(f"{label}: duplicate pid {raw!r} at t_s {t:g}")
+        seen.add((t, pid))
+        nums = []
+        for col, limit in (("cpu_pct", MAX_CPU_PCT), ("rss_kib", MAX_RSS_KIB)):
+            v = r.get(col)
+            n = None if v in (None, "") else _finite(v, col, label)
+            if n is not None and n > limit:
+                raise ValueError(f"{label}: {col} {v} exceeds the sanity bound {limit:g}")
+            nums.append(n)
+        groups.setdefault(t, []).append(nums)
+    points = [{"t_s": t, "cpu_pct": sum(n[0] for n in g), "rss_kib": sum(n[1] for n in g)}
+              for t, g in groups.items() if all(None not in n for n in g)]
+    if not all(math.isfinite(p["cpu_pct"]) and math.isfinite(p["rss_kib"]) for p in points):
+        raise ValueError(f"{label}: per-timestamp cpu_pct/rss_kib sum is not finite")
+    counted = [p["t_s"] for p in points]
     if len(counted) < MIN_SAMPLES:
-        raise ValueError(f"{label}: only {len(counted)} samples with cpu and rss; "
-                         f"need >= {MIN_SAMPLES}")
+        raise ValueError(f"{label}: only {len(counted)} distinct timestamps with cpu and rss "
+                         f"for every process; need >= {MIN_SAMPLES} samples")
     if counted[-1] - counted[0] < MIN_SPAN_FRACTION * dur:
         raise ValueError(f"{label}: sample span {counted[-1] - counted[0]:g}s is below "
                          f"{MIN_SPAN_FRACTION:.0%} of durationS {dur:g}s")
@@ -380,6 +451,33 @@ def _check_rows(rows, label, dur):
     if gap > MAX_GAP_FRACTION * dur:
         raise ValueError(f"{label}: sample gap {gap:g}s exceeds "
                          f"{MAX_GAP_FRACTION:.0%} of durationS {dur:g}s")
+    return points, ts
+
+
+def _run_name(rows, label):
+    """The sampled process name: present on every row and the same throughout."""
+    names = {r.get("name") for r in rows}
+    if None in names or "" in names:
+        raise ValueError(f"{label}: sample process name missing")
+    if len(names) != 1:
+        raise ValueError(f"{label}: sample process names differ within the run: {sorted(names)}")
+    return names.pop()
+
+
+def _check_wall_clock(rows, ts, doc, label, dur):
+    """The CSV's wall clock (iso_utc - t_s per row) must agree with the export
+    window start; window presence/length is checked by _check_window."""
+    start = _finite(doc["requestedWindow"]["fromMs"], "window fromMs", label) / 1000.0
+    slack = max(WALL_MIN_SLACK_S, DURATION_TOLERANCE * dur)
+    for t, r in zip(ts, rows):
+        try:
+            wall = calendar.timegm(time.strptime(r.get("iso_utc") or "", ISO_FORMAT))
+        except ValueError:
+            raise ValueError(f"{label}: iso_utc missing or not {ISO_FORMAT}: "
+                             f"{r.get('iso_utc')!r}") from None
+        if abs(wall - t - start) > slack:
+            raise ValueError(f"{label}: CSV wall-clock start {wall - t:.0f} disagrees with "
+                             f"export window fromMs {start:.0f}s by more than {slack:g}s")
 
 
 def _check_window(doc, label, dur):
@@ -408,8 +506,9 @@ DELTA_KEYS = ("cpu_mean", "cpu_p95", "rss_start_mib", "rss_end_mib", "unknown_ra
 def compare(proc_manifest, ebpf_manifest):
     """Side-by-side stats for two runs and ebpf-minus-proc deltas.
 
-    Refuses runs whose declared duration (within 1%) or workload differ: such
-    a comparison would measure the load, not the collector.
+    Refuses runs whose declared duration (within 1%), workload or sampled
+    process name differ: such a comparison would measure the load, not the
+    collector. CPU per timestamp is summed over all PIDs sampled then.
     """
     if Path(proc_manifest).resolve() == Path(ebpf_manifest).resolve():
         raise ValueError("cannot compare a manifest with itself")
@@ -419,9 +518,12 @@ def compare(proc_manifest, ebpf_manifest):
         raise ValueError(f"mismatched duration: proc {p['duration_s']}s vs ebpf {e['duration_s']}s")
     if p["workload"] != e["workload"]:
         raise ValueError(f"mismatched workload: proc {p['workload']!r} vs ebpf {e['workload']!r}")
+    if p["name"] != e["name"]:
+        raise ValueError(f"mismatched sample process name: proc {p['name']!r} vs ebpf {e['name']!r}")
     # Exports with different filters/scope are different populations: refuse.
     if p["filters"] != e["filters"]:
         raise ValueError(f"mismatched export filters: proc {p['filters']} vs ebpf {e['filters']}")
+    # Identity is (st_dev, st_ino) of the opened file, so hard links alias too.
     if p["files"] & e["files"]:
         raise ValueError("proc and ebpf manifests reference the same artifact file(s)")
     for r in (p, e):
@@ -477,15 +579,15 @@ def main(argv=None):
         print(json.dumps(summarize(rows), indent=2))
     elif a.cmd == "compare":
         try:
-            print(json.dumps(compare(a.proc, a.ebpf), indent=2))
+            print(json.dumps(compare(a.proc, a.ebpf), indent=2, allow_nan=False))
         except (ValueError, OSError, csv.Error, TypeError, KeyError,
-                OverflowError, AttributeError) as e:
+                OverflowError, AttributeError, RecursionError, MemoryError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
     else:
         try:
             print(json.dumps(unknown_rate(_load(a.total), _load(a.missing_path)), indent=2))
-        except (ValueError, OSError) as e:
+        except (ValueError, OSError, RecursionError, MemoryError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
     return 0
