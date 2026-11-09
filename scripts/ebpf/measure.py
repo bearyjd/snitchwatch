@@ -397,7 +397,8 @@ def _check_rows(rows, label, dur):
     so duplicate timestamps count once. A pid may appear at most once per
     timestamp (a repeated (t_s, pid) row would double the totals); pid must be
     a canonical positive integer ([1-9][0-9]*, so "01"/"+1"/" 1" cannot alias
-    "1"), or empty for the sampler's no-process row. Each
+    "1"), or empty only on the sampler's no-process row (cpu_pct, rss_kib and
+    threads all empty too). Each
     cpu_pct/rss_kib must not exceed MAX_CPU_PCT/MAX_RSS_KIB; sums must be
     finite. Returns (points, per-row t_s).
     """
@@ -411,6 +412,8 @@ def _check_rows(rows, label, dur):
         raw = r.get("pid")
         if raw not in (None, "") and not PID_RE.fullmatch(raw):
             raise ValueError(f"{label}: pid {raw!r} is not a canonical positive integer")
+        if not raw and any(r.get(c) not in (None, "") for c in ("cpu_pct", "rss_kib", "threads")):
+            raise ValueError(f"{label}: row at t_s {t:g} has values but no pid")
         pid = int(raw) if raw else None
         if (t, pid) in seen:
             raise ValueError(f"{label}: duplicate pid {raw!r} at t_s {t:g}")

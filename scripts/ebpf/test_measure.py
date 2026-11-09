@@ -414,7 +414,8 @@ class Compare(unittest.TestCase):
                     stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(START_MS / 1000))
                 stamp = stamp if iso is None else iso[i]
                 nm = name[i] if isinstance(name, list) else name
-                w.writerow([t, stamp, nm, 1 if pids is None else pids[i], c, r, 4, "", ""])
+                pid = 1 if pids is None else pids[i]
+                w.writerow([t, stamp, nm, pid, c, r, "" if pid == "" else 4, "", ""])
         doc = lambda n, flt: {"format": measure.EXPORT_FORMAT, "schemaVersion": 1,  # noqa: E731
                               "filterKinds": {"application": flt, **(filters or {})},
                               "requestedWindow": ({"fromMs": START_MS,
@@ -820,6 +821,21 @@ class Compare(unittest.TestCase):
                                   ts=[0, 0, 43200, 86400], pids=[1, alias, 1, 1])
                 with self.assertRaisesRegex(ValueError, "pid"):
                     measure.compare(a, b)
+
+    def test_empty_pid_only_for_no_process_row(self):
+        for cpus, rss in (([1.0] * 3, [1024] * 3), ([1.0, "", ""], ["", 1024, ""])):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", cpus, rss, pids=["", "", ""])
+                with self.assertRaisesRegex(ValueError, "pid"):
+                    measure.compare(a, b)
+
+    def test_sampler_no_process_row_still_accepted(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", ["", 1.0, 1.0, 1.0], ["", 1024, 1024, 1024],
+                              ts=[0, 28800, 57600, 86400], pids=["", 1, 1, 1])
+            self.assertIn("delta", measure.compare(a, b))
 
 
 if __name__ == "__main__":
