@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 PINS_FILE="${SW_EBPF_PINS_FILE:-$SCRIPT_DIR/pins.env}"
 RELEASE_PINS="$REPO_ROOT/packaging/release/pins.env"
+SAFE_PATH=/usr/bin:/bin
 MODULES=(opensnitch.o opensnitch-procs.o opensnitch-dns.o)
 DEST_REL="usr/lib/opensnitchd/ebpf"
 
@@ -86,6 +87,8 @@ release_commit="$(pin SW_OPENSNITCH_COMMIT "$RELEASE_PINS")"
 
 # Values reach make as VAR=value and make expands $(...), so they are checked
 # against strict patterns first.
+KARCH="${KERNEL_ARCH:-$(uname -m)}"
+[[ "$KARCH" =~ ^[A-Za-z0-9_]+$ ]] || die "invalid KERNEL_ARCH (allowed: [A-Za-z0-9_]): $KARCH"
 [[ "$KVER" =~ ^[0-9A-Za-z._+-]+$ ]] || die "invalid KERNEL_VER (allowed: [0-9A-Za-z._+-]): $KVER"
 safe_path() { # <label> <value>: absolute, only [A-Za-z0-9._/+-]
     [[ "$2" =~ ^/[A-Za-z0-9._/+-]*$ ]] ||
@@ -131,6 +134,8 @@ for tool in clang llc llvm-strip make; do
 done
 # The tools checked below are the ones make must use (Makefile: CC = clang,
 # LLC ?= llc), so they are passed to make as absolute paths.
+MAKE_BIN="$(command -v make)"
+safe_path make "$MAKE_BIN"
 CLANG_BIN="$(command -v clang)"
 LLC_BIN="$(command -v llc)"
 safe_path clang "$CLANG_BIN"
@@ -156,10 +161,12 @@ git --no-replace-objects -C "$OS_DIR" archive "$SW_OPENSNITCH_COMMIT" ebpf_prog 
     tar -x -C "$WORK" --strip-components=1
 
 log "building modules (KERNEL_VER=$KVER)"
-# Inherited make-level variables must not bypass the checked tools or flags.
-env -u CC -u LLC -u ARCH -u EXTRA_FLAGS -u MAKEFLAGS -u MAKEOVERRIDES -u MFLAGS \
-    make -C "$WORK" CC="$CLANG_BIN" LLC="$LLC_BIN" \
-    KERNEL_DIR="$KERNEL_DIR" KERNEL_HEADERS="$KERNEL_HEADERS" KERNEL_VER="$KVER"
+# make runs with an empty environment (nothing inherited can reach the
+# Makefile: MAKEFILES, GNUMAKEFLAGS, ARCH, ...), -R/-r drop built-in variables
+# and rules, and every value comes from an explicit, validated assignment.
+env -i PATH="$SAFE_PATH" HOME=/nonexistent LC_ALL=C \
+    "$MAKE_BIN" -R -r -C "$WORK" CC="$CLANG_BIN" LLC="$LLC_BIN" \
+    KERNEL_ARCH="$KARCH" KERNEL_DIR="$KERNEL_DIR" KERNEL_HEADERS="$KERNEL_HEADERS" KERNEL_VER="$KVER"
 for m in "${MODULES[@]}"; do
     [[ -s "$WORK/$m" ]] || die "build did not produce $m"
 done

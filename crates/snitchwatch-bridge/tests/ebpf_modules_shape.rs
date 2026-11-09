@@ -113,7 +113,10 @@ fn script_shape() {
         "realpath -e --",
         "CC=\"$CLANG_BIN\"",
         "LLC=\"$LLC_BIN\"",
-        "env -u CC -u LLC",
+        "env -i PATH=\"$SAFE_PATH\" HOME=/nonexistent LC_ALL=C",
+        "-R -r -C",
+        "KERNEL_ARCH=\"$KARCH\"",
+        "invalid KERNEL_ARCH",
         "\"$LLC_BIN\" --version",
         "release pins not found",
     ] {
@@ -123,6 +126,7 @@ fn script_shape() {
         "sudo",
         "podman",
         "cp -R",
+        "env -u",
         "make -C \"$WORK\" clean",
         "\n. \"$PINS_FILE\"",
         "make -C vendor",
@@ -272,4 +276,23 @@ fn relative_kernel_dir_is_canonicalised_not_rejected_as_relative() {
         "{}",
         text(&o)
     );
+}
+
+#[test]
+fn make_expression_in_kernel_arch_is_rejected() {
+    let d = scratch("karch");
+    let k = d.to_str().unwrap();
+    for bad in ["$(shell touch pwned)", "x86;y", "a b"] {
+        let o = run(
+            &["--staging", k, "--kernel-dir", k],
+            &[("KERNEL_ARCH", bad)],
+        );
+        assert!(!o.status.success(), "{bad}");
+        assert!(
+            text(&o).contains("invalid KERNEL_ARCH"),
+            "{bad}: {}",
+            text(&o)
+        );
+    }
+    assert!(!d.join("pwned").exists());
 }
