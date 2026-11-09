@@ -247,7 +247,8 @@ fn script_shape() {
         "/usr/src/kernels/",
         "kernel.release",
         "rpm -qf",
-        "CC=\"$CLANG_BIN\"",
+        "CC=\"$CLANG_BIN -DCC_USING_FENTRY\"",
+        "--allow-kernel-mismatch",
         "LLC=\"$LLC_BIN\"",
         "-i PATH=\"$SAFE_PATH\" HOME=/nonexistent LC_ALL=C",
         "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null",
@@ -694,4 +695,38 @@ fn missing_blob_is_refused_without_fetching() {
         &run_repo(&d, &r, &head, &"0".repeat(64)),
         "object not present locally",
     );
+}
+
+#[test]
+fn kernel_ver_is_tied_to_the_pin() {
+    let d = scratch("kpin");
+    let os = vendor();
+    let st = d.to_str().unwrap();
+    let kdir = "/usr/src/kernels/7.2.8-100.fc43.x86_64";
+    let args = |extra: &[&'static str]| {
+        let mut a = vec![
+            "--dry-run",
+            "--staging",
+            st,
+            "--kernel-dir",
+            kdir,
+            "--opensnitch-dir",
+            &os,
+            "--kernel-ver",
+            "7.2.8",
+        ];
+        a.extend_from_slice(extra);
+        a
+    };
+    fails_with(&run(&args(&[]), &[]), "does not match the pin");
+    let o = run(&args(&["--allow-kernel-mismatch"]), &[]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(
+        text(&o).contains("WARNING: --allow-kernel-mismatch"),
+        "{}",
+        text(&o)
+    );
+    // The pinned value itself needs no override.
+    let o = run(&with(dry_args(st, &os), &["--kernel-ver", "7.2.15"]), &[]);
+    assert!(o.status.success(), "{}", text(&o));
 }

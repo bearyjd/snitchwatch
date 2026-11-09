@@ -71,7 +71,10 @@ Options:
                          DIR/usr/lib/opensnitchd/ebpf/
   --kernel-dir DIR       kernel-devel tree, /usr/src/kernels/<release> (required)
   --kernel-headers DIR   kernel headers tree, same rules (default: --kernel-dir)
-  --kernel-ver VER       Makefile KERNEL_VER (default: SW_EBPF_KERNEL_DEVEL_VERSION in pins.env)
+  --kernel-ver VER       Makefile KERNEL_VER; must equal SW_EBPF_KERNEL_DEVEL_VERSION
+                         in pins.env (the default) unless --allow-kernel-mismatch
+  --allow-kernel-mismatch  accept a --kernel-ver other than the pin (loud warning;
+                         the modules are then NOT built against the pinned kernel)
   --kernel-arch ARCH     Makefile KERNEL_ARCH (default: uname -m; only x86_64)
   --opensnitch-dir DIR   opensnitch git checkout (default: vendor/opensnitch; never modified)
   --dry-run              run every pin/argument/source check (including the
@@ -88,12 +91,13 @@ SW_EBPF_PROG_TREE_SHA256.
 USAGE
 }
 
-STAGING="" DRY_RUN=0 KVER="" KARCH="" OS_DIR="$REPO_ROOT/vendor/opensnitch"
+STAGING="" DRY_RUN=0 ALLOW_KMISMATCH=0 KVER="" KARCH="" OS_DIR="$REPO_ROOT/vendor/opensnitch"
 KERNEL_DIR="" KERNEL_HEADERS=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --help | -h) usage; exit 0 ;;
     --dry-run) DRY_RUN=1 ;;
+    --allow-kernel-mismatch) ALLOW_KMISMATCH=1 ;;
     --staging | --kernel-dir | --kernel-headers | --kernel-ver | --kernel-arch | --opensnitch-dir)
         [[ $# -ge 2 ]] || die "$1 needs a value"
         case "$1" in
@@ -160,6 +164,13 @@ KARCH="${KARCH:-$(clean uname -m)}"
 [[ "$KARCH" == x86_64 ]] || die "unsupported KERNEL_ARCH '$KARCH': only x86_64 is supported"
 [[ "$(clean uname -m)" == x86_64 ]] || die "host is not x86_64; cross builds are unsupported"
 [[ "$KVER" =~ $KVER_RE ]] || die "invalid KERNEL_VER (must match $KVER_RE): $KVER"
+# The kernel trees below are checked against KVER, so KVER itself is tied to
+# the pin; leaving it is an explicit, loudly reported operator decision.
+if [[ "$KVER" != "$SW_EBPF_KERNEL_DEVEL_VERSION" ]]; then
+    [[ $ALLOW_KMISMATCH -eq 1 ]] ||
+        die "--kernel-ver $KVER does not match the pin SW_EBPF_KERNEL_DEVEL_VERSION=$SW_EBPF_KERNEL_DEVEL_VERSION (use --allow-kernel-mismatch to override)"
+    log "WARNING: --allow-kernel-mismatch: building for KERNEL_VER $KVER, NOT the pinned $SW_EBPF_KERNEL_DEVEL_VERSION"
+fi
 safe_path() { # <label> <value>: absolute, only [A-Za-z0-9._/+-]
     [[ "$2" =~ ^/[A-Za-z0-9._/+-]*$ ]] ||
         die "invalid $1 (must be absolute, allowed chars [A-Za-z0-9._/+-]): $2"
@@ -278,7 +289,7 @@ tree_sha="${tree_sha%% *}"
 log "ebpf_prog tree hash ok ($tree_sha)"
 
 if [[ $DRY_RUN -eq 1 ]]; then
-    log "dry-run: would run make -B KERNEL_DIR=$KERNEL_DIR KERNEL_HEADERS=$KERNEL_HEADERS KERNEL_VER=$KVER KERNEL_ARCH=$KARCH"
+    log "dry-run: would run make -B CC='clang -DCC_USING_FENTRY' KERNEL_DIR=$KERNEL_DIR KERNEL_HEADERS=$KERNEL_HEADERS KERNEL_VER=$KVER KERNEL_ARCH=$KARCH"
     log "dry-run: would require clang/llvm-strip/llc major $SW_EBPF_CLANG_MAJOR/$SW_EBPF_LLVM_MAJOR/$SW_EBPF_LLC_MAJOR, run llvm-strip -g"
     log "dry-run: would stage ${MODULES[*]} + SHA256SUMS under $DEST/"
     exit 0
@@ -289,7 +300,11 @@ for tool in clang llc llvm-strip make; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool not found in PATH"
 done
 # The tools checked below are the ones make must use (Makefile: CC = clang,
-# LLC ?= llc), so they are passed to make as absolute paths.
+# LLC ?= llc), so they are passed to make as absolute paths. CC also carries
+# -DCC_USING_FENTRY: x86 kernel headers with CONFIG_FUNCTION_TRACER=y (Fedora)
+# #error without it (asm/ftrace.h), and the Makefile never defines it. It goes
+# through CC, not EXTRA_FLAGS, because a command-line EXTRA_FLAGS would replace
+# the Makefile's own EXTRA_FLAGS (fortify, -fcf-protection, 6.19+ flags).
 # Limit: only the reported major version is checked, not which package
 # provides the binary (no `rpm -qf`/`rpm -V`); the toolchain is trusted to be
 # the system one under /usr/bin.
@@ -317,7 +332,7 @@ log "building modules (KERNEL_VER=$KVER)"
 # Makefile: MAKEFILES, GNUMAKEFLAGS, ARCH, ...), -R/-r drop built-in variables
 # and rules, -B rebuilds every target regardless of timestamps, and every
 # value comes from an explicit, validated assignment.
-clean "$MAKE_BIN" -B -R -r -C "$SRC" CC="$CLANG_BIN" LLC="$LLC_BIN" \
+clean "$MAKE_BIN" -B -R -r -C "$SRC" CC="$CLANG_BIN -DCC_USING_FENTRY" LLC="$LLC_BIN" \
     KERNEL_ARCH="$KARCH" KERNEL_DIR="$KERNEL_DIR" KERNEL_HEADERS="$KERNEL_HEADERS" KERNEL_VER="$KVER"
 for m in "${MODULES[@]}"; do
     [[ -f "$SRC/$m" && ! -L "$SRC/$m" && -s "$SRC/$m" ]] || die "build did not produce a regular file $m"
