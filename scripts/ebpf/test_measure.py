@@ -394,7 +394,7 @@ class UnknownRate(unittest.TestCase):
 
 class Compare(unittest.TestCase):
     def make_run(self, root, label, cpus, rss, unknown=10, dur=86400, workload="w1",
-                 truncated=False, span=None, ts=None, filters=None):
+                 truncated=False, span=None, ts=None, filters=None, win_s=None):
         root = Path(root)
         with open(root / f"{label}.csv", "w", newline="") as fh:
             w = csv.writer(fh)
@@ -404,7 +404,8 @@ class Compare(unittest.TestCase):
                 w.writerow([span * i / max(1, len(cpus) - 1) if ts is None else ts[i], "x", "d", 1, c, r, 4, "", ""])
         doc = lambda n, flt: {"format": measure.EXPORT_FORMAT, "schemaVersion": 1,  # noqa: E731
                               "filterKinds": {"application": flt, **(filters or {})},
-                              "requestedWindow": {"a": 1},
+                              "requestedWindow": ({"fromMs": 5, "toMs": 5 + int((dur if win_s is None else win_s) * 1000)}
+                                                if win_s != "none" else {"a": 1}),
                               "coverage": {"rowOmissions": {}, "unexaminedRetained": 0,
                                            "groupOmissions": {k: {"groups": 0, "observations": 0}
                                                               for k in measure.GROUP_LIMITS}},
@@ -503,7 +504,7 @@ class Compare(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
             b = self.make_run(d, "ebpf", [""] * 3, [1024] * 3)
-            with self.assertRaisesRegex(ValueError, "cpu samples"):
+            with self.assertRaisesRegex(ValueError, "samples"):
                 measure.compare(a, b)
 
     def test_short_sample_span_refused(self):
@@ -621,6 +622,51 @@ class Compare(unittest.TestCase):
                 self.assertEqual(measure.main(["compare", "a", "b"]), 1)
             finally:
                 measure.compare = orig
+
+    def test_export_window_must_match_duration(self):
+        for win in (43200, "none"):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, win_s=win)
+                with self.assertRaisesRegex(ValueError, "window"):
+                    measure.compare(a, b)
+
+    def test_out_of_order_timestamps_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, ts=[0, 86400, 43200])
+            with self.assertRaisesRegex(ValueError, "order"):
+                measure.compare(a, b)
+
+    def test_blank_rows_do_not_count_toward_coverage(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", ["", "", 1.0], [1024, "", 1024],
+                              ts=[0, 43200, 86400])
+            with self.assertRaisesRegex(ValueError, "samples"):
+                measure.compare(a, b)
+
+    def test_leading_blank_cpu_row_is_tolerated(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", ["", 1.0, 1.0, 1.0], [1024] * 4,
+                              ts=[0, 28800, 57600, 86400])
+            self.assertIn("delta", measure.compare(a, b))
+
+    def test_timestamps_outside_run_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3, ts=[0, 43200, 90000])
+            with self.assertRaisesRegex(ValueError, "t_s"):
+                measure.compare(a, b)
+
+    def test_shared_artifact_files_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
+            self.edit(b, samplesCsv="./proc.csv")
+            with self.assertRaisesRegex(ValueError, "same"):
+                measure.compare(a, b)
 
 
 if __name__ == "__main__":

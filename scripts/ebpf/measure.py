@@ -327,13 +327,17 @@ def _load_run(path, label):
     if not stats["cpu_samples"]:
         raise ValueError(f"{label}: no cpu samples in {doc['samplesCsv']}")
     total_doc, missing_doc = _load(files["unknownTotal"]), _load(files["unknownMissing"])
+    _check_window(total_doc, f"{label} total", dur)
+    _check_window(missing_doc, f"{label} missing-path", dur)
     filters = {"total": _filters(total_doc, f"{label} total"),
                "missing": _filters(missing_doc, f"{label} missing-path")}
     unk = unknown_rate(total_doc, missing_doc)
     return {"duration_s": dur, "workload": workload, "cpu_mean": stats["cpu_mean"],
             "cpu_p95": stats["cpu_p95"], "rss_start_mib": stats["rss_start_mib"],
             "rss_end_mib": stats["rss_end_mib"], "unknown_rate": unk["rate"],
-            "filters": filters, "warnings": unk["warnings"]}
+            "filters": filters, "files": {str((root / f).resolve()) for f in
+                                          (doc["samplesCsv"], doc["unknownTotal"], doc["unknownMissing"])},
+            "warnings": unk["warnings"]}
 
 
 def _finite(value, what, label, nonneg=True):
@@ -347,21 +351,46 @@ def _finite(value, what, label, nonneg=True):
 
 
 def _check_rows(rows, label, dur):
-    """Validate sample values and that the timestamps actually cover the run."""
-    ts = sorted(_finite(r.get("t_s"), "t_s", label) for r in rows)
-    for r in rows:
-        for col in ("cpu_pct", "rss_kib"):
-            if r.get(col) not in (None, ""):
-                _finite(r[col], col, label)
-    if len(ts) < MIN_SAMPLES:
-        raise ValueError(f"{label}: only {len(ts)} samples; need >= {MIN_SAMPLES}")
-    if ts[-1] - ts[0] < MIN_SPAN_FRACTION * dur:
-        raise ValueError(f"{label}: sample span {ts[-1] - ts[0]:g}s is below "
+    """Validate sample values and that the timestamps actually cover the run.
+
+    Every t_s must be finite, in order (summarize takes RSS start/end in file
+    order) and within [0, durationS * (1 + tolerance)]. Only rows with BOTH a
+    cpu and an rss value count toward sample count, span and gaps.
+    """
+    ts = [_finite(r.get("t_s"), "t_s", label) for r in rows]
+    if any(t > dur * (1 + DURATION_TOLERANCE) for t in ts):
+        raise ValueError(f"{label}: t_s beyond durationS {dur:g}s")
+    if any(b < a for a, b in zip(ts, ts[1:])):
+        raise ValueError(f"{label}: t_s rows out of order")
+    counted = []
+    for t, r in zip(ts, rows):
+        vals = [r.get(c) for c in ("cpu_pct", "rss_kib")]
+        for col, v in zip(("cpu_pct", "rss_kib"), vals):
+            if v not in (None, ""):
+                _finite(v, col, label)
+        if all(v not in (None, "") for v in vals):
+            counted.append(t)
+    if len(counted) < MIN_SAMPLES:
+        raise ValueError(f"{label}: only {len(counted)} samples with cpu and rss; "
+                         f"need >= {MIN_SAMPLES}")
+    if counted[-1] - counted[0] < MIN_SPAN_FRACTION * dur:
+        raise ValueError(f"{label}: sample span {counted[-1] - counted[0]:g}s is below "
                          f"{MIN_SPAN_FRACTION:.0%} of durationS {dur:g}s")
-    gap = max(b - a for a, b in zip(ts, ts[1:]))
+    gap = max(b - a for a, b in zip(counted, counted[1:]))
     if gap > MAX_GAP_FRACTION * dur:
         raise ValueError(f"{label}: sample gap {gap:g}s exceeds "
                          f"{MAX_GAP_FRACTION:.0%} of durationS {dur:g}s")
+
+
+def _check_window(doc, label, dur):
+    """The export's requestedWindow [fromMs,toMs) must be durationS long (+-1%)."""
+    w = doc.get("requestedWindow") if isinstance(doc, dict) else None
+    if not isinstance(w, dict) or "fromMs" not in w or "toMs" not in w:
+        raise ValueError(f"{label}: requestedWindow.fromMs/toMs missing; cannot check window")
+    length = (_finite(w["toMs"], "window toMs", label)
+              - _finite(w["fromMs"], "window fromMs", label)) / 1000.0
+    if abs(length - dur) > DURATION_TOLERANCE * dur:
+        raise ValueError(f"{label}: export window {length:g}s does not match durationS {dur:g}s")
 
 
 def _filters(doc, label):
@@ -393,6 +422,10 @@ def compare(proc_manifest, ebpf_manifest):
     # Exports with different filters/scope are different populations: refuse.
     if p["filters"] != e["filters"]:
         raise ValueError(f"mismatched export filters: proc {p['filters']} vs ebpf {e['filters']}")
+    if p["files"] & e["files"]:
+        raise ValueError("proc and ebpf manifests reference the same artifact file(s)")
+    for r in (p, e):
+        del r["files"]
     runs["biased"] = bool(p["warnings"] or e["warnings"])
     runs["delta"] = {k: None if p[k] is None or e[k] is None
                      or (k == "unknown_rate" and runs["biased"]) else e[k] - p[k]
