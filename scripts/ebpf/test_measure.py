@@ -812,6 +812,15 @@ class Compare(unittest.TestCase):
         finally:
             measure.compare = orig
 
+    def test_non_canonical_pid_refused(self):
+        for alias in ("01", "+1", " 1", "1 ", "0", "-1", "1.0", "x"):
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", [1.0] * 4, [1024] * 4,
+                                  ts=[0, 0, 43200, 86400], pids=[1, alias, 1, 1])
+                with self.assertRaisesRegex(ValueError, "pid"):
+                    measure.compare(a, b)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ import io
 import json
 import math
 import os
+import re
 import stat
 import statistics
 import sys
@@ -45,6 +46,7 @@ WALL_MIN_SLACK_S = 2.0
 # so per-timestamp sums of a bounded number of rows stay finite.
 MAX_CPU_PCT = 1e6
 MAX_RSS_KIB = 2 ** 40
+PID_RE = re.compile(r"[1-9][0-9]*")
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -393,7 +395,9 @@ def _check_rows(rows, label, dur):
     at that timestamp has both values (CPU and RSS then come from the same
     process set). Only such points count toward sample count, span and gaps,
     so duplicate timestamps count once. A pid may appear at most once per
-    timestamp (a repeated (t_s, pid) row would double the totals), and each
+    timestamp (a repeated (t_s, pid) row would double the totals); pid must be
+    a canonical positive integer ([1-9][0-9]*, so "01"/"+1"/" 1" cannot alias
+    "1"), or empty for the sampler's no-process row. Each
     cpu_pct/rss_kib must not exceed MAX_CPU_PCT/MAX_RSS_KIB; sums must be
     finite. Returns (points, per-row t_s).
     """
@@ -404,9 +408,13 @@ def _check_rows(rows, label, dur):
         raise ValueError(f"{label}: t_s rows out of order")
     groups, seen = {}, set()
     for t, r in zip(ts, rows):
-        if (t, r.get("pid")) in seen:
-            raise ValueError(f"{label}: duplicate pid {r.get('pid')!r} at t_s {t:g}")
-        seen.add((t, r.get("pid")))
+        raw = r.get("pid")
+        if raw not in (None, "") and not PID_RE.fullmatch(raw):
+            raise ValueError(f"{label}: pid {raw!r} is not a canonical positive integer")
+        pid = int(raw) if raw else None
+        if (t, pid) in seen:
+            raise ValueError(f"{label}: duplicate pid {raw!r} at t_s {t:g}")
+        seen.add((t, pid))
         nums = []
         for col, limit in (("cpu_pct", MAX_CPU_PCT), ("rss_kib", MAX_RSS_KIB)):
             v = r.get(col)
