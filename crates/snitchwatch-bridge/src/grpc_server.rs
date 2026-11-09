@@ -565,7 +565,7 @@ impl Ui for UiService {
 
         // An unrecognized `What` value used to be coerced to `Generic` —
         // now that `Generic` is a meaningful bucket the diagnostics overlay
-        // text-classifies (see `diagnostics::classify_generic_alert_text`),
+        // text-classifies (see `daemon_alerts::GenericTopic::classify`),
         // silently relabeling a genuinely-unknown value as `Generic` would
         // feed the classifier data that was never actually reported as
         // GENERIC. Skip recording instead.

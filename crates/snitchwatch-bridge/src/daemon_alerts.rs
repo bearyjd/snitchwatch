@@ -41,7 +41,8 @@
 //! essentially every real alert this store ever receives is `GENERIC` plus
 //! free text, and `DiagnosticsCtx::report()`'s overlay text-classifies that
 //! free text to figure out which check it's actually about — see
-//! `classify_generic_alert_text` in `diagnostics/mod.rs`. The `What`-keyed
+//! `GenericTopic::classify` below (stored per topic, so one topic's
+//! alert never evicts another's). The `What`-keyed
 //! structure here is kept as forward-compat for a future daemon version
 //! that tags alerts properly, not because it's what v1.8.0 actually sends.
 //!

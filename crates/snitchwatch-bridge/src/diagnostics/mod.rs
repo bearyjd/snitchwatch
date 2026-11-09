@@ -213,21 +213,6 @@ impl DiagnosticsCtx {
     }
 }
 
-/// The check a `GENERIC` alert's free text overlays, if any. opensnitchd
-/// v1.8.0 never tags PROC_MONITOR/FIREWALL for an issue-#6 alert (see
-/// `daemon_alerts`'s module doc), so the text decides
-/// ([`GenericTopic::classify`]). A monitor fallback to `/proc` and the
-/// `EBPF-DNS` module alert overlay no check: `/proc` is a supported monitor,
-/// and the DNS module is not the process monitor.
-#[cfg(test)]
-fn classify_generic_alert_text(text: &str) -> Option<CheckKind> {
-    match GenericTopic::classify(text) {
-        GenericTopic::ProcessMonitor => Some(CheckKind::EbpfSupport),
-        GenericTopic::Firewall => Some(CheckKind::FirewallRunning),
-        GenericTopic::MonitorFallback | GenericTopic::EbpfDns | GenericTopic::Unclassified => None,
-    }
-}
-
 /// Appends a stored alert's severity, age, and text onto a base
 /// troubleshooting string.
 fn append_daemon_alert(base: &str, alert: &StoredAlert) -> String {
@@ -671,19 +656,6 @@ mod tests {
             .unwrap();
         // Clearing a reported alert does not prove an active monitor method.
         assert_eq!(ebpf_after.status, CheckStatus::Unknown);
-    }
-
-    #[test]
-    fn classify_generic_alert_text_is_case_insensitive() {
-        assert_eq!(
-            classify_generic_alert_text("EBPF init failed"),
-            Some(CheckKind::EbpfSupport)
-        );
-        assert_eq!(
-            classify_generic_alert_text("NFTables rule load error"),
-            Some(CheckKind::FirewallRunning)
-        );
-        assert_eq!(classify_generic_alert_text("unrelated message"), None);
     }
 }
 
