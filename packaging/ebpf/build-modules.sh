@@ -13,6 +13,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 PINS_FILE="${SW_EBPF_PINS_FILE:-$SCRIPT_DIR/pins.env}"
 RELEASE_PINS="$REPO_ROOT/packaging/release/pins.env"
 SAFE_PATH=/usr/bin:/bin
+# Every external tool runs through clean(): an empty environment (no
+# TAR_OPTIONS, GIT_*, MAKEFILES, TMPDIR, LD_PRELOAD, ...), a fixed PATH and no
+# user/system git config. Tools outside SAFE_PATH are resolved to absolute
+# paths first.
+clean() {
+    env -i PATH="$SAFE_PATH" HOME=/nonexistent LC_ALL=C \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "$@"
+}
 MODULES=(opensnitch.o opensnitch-procs.o opensnitch-dns.o)
 DEST_REL="usr/lib/opensnitchd/ebpf"
 
@@ -65,7 +73,7 @@ done
 
 [[ -f "$PINS_FILE" ]] || die "pins file not found: $PINS_FILE"
 # Pins files are parsed, never sourced: only plain KEY=value lines count.
-pin() { sed -n "s/^$1=//p" "$2" | head -n1; }
+pin() { clean sed -n "s/^$1=//p" "$2" | clean head -n1; }
 SW_OPENSNITCH_COMMIT="$(pin SW_OPENSNITCH_COMMIT "$PINS_FILE")"
 SW_EBPF_CLANG_MAJOR="$(pin SW_EBPF_CLANG_MAJOR "$PINS_FILE")"
 SW_EBPF_LLVM_MAJOR="$(pin SW_EBPF_LLVM_MAJOR "$PINS_FILE")"
@@ -87,7 +95,7 @@ release_commit="$(pin SW_OPENSNITCH_COMMIT "$RELEASE_PINS")"
 
 # Values reach make as VAR=value and make expands $(...), so they are checked
 # against strict patterns first.
-KARCH="${KERNEL_ARCH:-$(uname -m)}"
+KARCH="${KERNEL_ARCH:-$(clean uname -m)}"
 [[ "$KARCH" =~ ^[A-Za-z0-9_]+$ ]] || die "invalid KERNEL_ARCH (allowed: [A-Za-z0-9_]): $KARCH"
 [[ "$KVER" =~ ^[0-9A-Za-z._+-]+$ ]] || die "invalid KERNEL_VER (allowed: [0-9A-Za-z._+-]): $KVER"
 safe_path() { # <label> <value>: absolute, only [A-Za-z0-9._/+-]
@@ -98,8 +106,8 @@ if [[ $DRY_RUN -eq 0 ]]; then
     [[ -n "$KERNEL_DIR" ]] || die "KERNEL_DIR not set (use --kernel-dir or env KERNEL_DIR)"
     KERNEL_HEADERS="${KERNEL_HEADERS:-$KERNEL_DIR}"
     # make runs in the scratch dir, so hand it canonical absolute paths.
-    KERNEL_DIR="$(realpath -e -- "$KERNEL_DIR")" || die "KERNEL_DIR does not exist: $KERNEL_DIR"
-    KERNEL_HEADERS="$(realpath -e -- "$KERNEL_HEADERS")" || die "KERNEL_HEADERS does not exist: $KERNEL_HEADERS"
+    KERNEL_DIR="$(clean realpath -e -- "$KERNEL_DIR")" || die "KERNEL_DIR does not exist: $KERNEL_DIR"
+    KERNEL_HEADERS="$(clean realpath -e -- "$KERNEL_HEADERS")" || die "KERNEL_HEADERS does not exist: $KERNEL_HEADERS"
     safe_path KERNEL_DIR "$KERNEL_DIR"
     safe_path KERNEL_HEADERS "$KERNEL_HEADERS"
 fi
@@ -107,7 +115,7 @@ fi
 # The opensnitch checkout must be exactly the pinned commit (when it is a git
 # checkout; a missing submodule is tolerated only in --dry-run).
 if [[ -e "$OS_DIR/.git" ]]; then
-    actual="$(git --no-replace-objects -C "$OS_DIR" rev-parse HEAD)" || die "cannot read HEAD of $OS_DIR"
+    actual="$(clean git --no-replace-objects -C "$OS_DIR" rev-parse HEAD)" || die "cannot read HEAD of $OS_DIR"
     [[ "$actual" == "$SW_OPENSNITCH_COMMIT" ]] ||
         die "commit pin mismatch: $OS_DIR is at $actual, pin is $SW_OPENSNITCH_COMMIT"
 elif [[ $DRY_RUN -eq 1 ]]; then
@@ -140,41 +148,42 @@ CLANG_BIN="$(command -v clang)"
 LLC_BIN="$(command -v llc)"
 safe_path clang "$CLANG_BIN"
 safe_path llc "$LLC_BIN"
-clang_major="$("$CLANG_BIN" --version | sed -n 's/.*clang version \([0-9]*\)\..*/\1/p' | head -n1)"
+STRIP_BIN="$(command -v llvm-strip)"
+safe_path llvm-strip "$STRIP_BIN"
+clang_major="$(clean "$CLANG_BIN" --version | clean sed -n 's/.*clang version \([0-9]*\)\..*/\1/p' | clean head -n1)"
 [[ "$clang_major" == "$SW_EBPF_CLANG_MAJOR" ]] ||
     die "clang major is '${clang_major:-unknown}', pin is $SW_EBPF_CLANG_MAJOR"
-strip_major="$(llvm-strip --version | sed -n 's/.*LLVM version \([0-9]*\)\..*/\1/p' | head -n1)"
+strip_major="$(clean "$STRIP_BIN" --version | sed -n 's/.*LLVM version \([0-9]*\)\..*/\1/p' | clean head -n1)"
 [[ "$strip_major" == "$SW_EBPF_LLVM_MAJOR" ]] ||
     die "llvm-strip major is '${strip_major:-unknown}', pin is $SW_EBPF_LLVM_MAJOR"
 
-llc_major="$("$LLC_BIN" --version | sed -n 's/.*LLVM version \([0-9]*\)\..*/\1/p' | head -n1)"
+llc_major="$(clean "$LLC_BIN" --version | clean sed -n 's/.*LLVM version \([0-9]*\)\..*/\1/p' | clean head -n1)"
 [[ "$llc_major" == "$SW_EBPF_LLC_MAJOR" ]] ||
     die "llc major is '${llc_major:-unknown}', pin is $SW_EBPF_LLC_MAJOR"
 
-WORK="$(mktemp -d)"
-trap 'rm -rf -- "$WORK"' EXIT
+WORK="$(clean mktemp -d)"
+trap 'clean rm -rf -- "$WORK"' EXIT
 # Exactly the pinned tree, not the working tree.
 # --no-replace-objects: refs/replace must not alter the pinned tree. The tree
 # is a fresh archive with no build products, so no `make clean` (which would
 # also need the kernel arguments, as the Makefile evaluates them first).
-git --no-replace-objects -C "$OS_DIR" archive "$SW_OPENSNITCH_COMMIT" ebpf_prog |
-    tar -x -C "$WORK" --strip-components=1
+clean git --no-replace-objects -C "$OS_DIR" archive "$SW_OPENSNITCH_COMMIT" ebpf_prog |
+    clean tar -x --no-same-owner --no-same-permissions -C "$WORK" --strip-components=1
 
 log "building modules (KERNEL_VER=$KVER)"
 # make runs with an empty environment (nothing inherited can reach the
 # Makefile: MAKEFILES, GNUMAKEFLAGS, ARCH, ...), -R/-r drop built-in variables
 # and rules, and every value comes from an explicit, validated assignment.
-env -i PATH="$SAFE_PATH" HOME=/nonexistent LC_ALL=C \
-    "$MAKE_BIN" -R -r -C "$WORK" CC="$CLANG_BIN" LLC="$LLC_BIN" \
+clean "$MAKE_BIN" -R -r -C "$WORK" CC="$CLANG_BIN" LLC="$LLC_BIN" \
     KERNEL_ARCH="$KARCH" KERNEL_DIR="$KERNEL_DIR" KERNEL_HEADERS="$KERNEL_HEADERS" KERNEL_VER="$KVER"
 for m in "${MODULES[@]}"; do
     [[ -s "$WORK/$m" ]] || die "build did not produce $m"
 done
-(cd "$WORK" && llvm-strip -g "${MODULES[@]}")
+(cd "$WORK" && clean "$STRIP_BIN" -g "${MODULES[@]}")
 
 DEST="$STAGING/$DEST_REL"
-mkdir -p -- "$DEST"
-for m in "${MODULES[@]}"; do install -m 0644 -- "$WORK/$m" "$DEST/$m"; done
-(cd "$DEST" && sha256sum "${MODULES[@]}" >SHA256SUMS)
+clean mkdir -p -- "$DEST"
+for m in "${MODULES[@]}"; do clean install -m 0644 -- "$WORK/$m" "$DEST/$m"; done
+(cd "$DEST" && clean sha256sum "${MODULES[@]}" >SHA256SUMS)
 log "staged ${MODULES[*]} in $DEST"
-cat "$DEST/SHA256SUMS"
+clean cat "$DEST/SHA256SUMS"
