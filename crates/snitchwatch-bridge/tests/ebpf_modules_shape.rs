@@ -113,7 +113,7 @@ fn script_shape() {
         "realpath -e --",
         "CC=\"$CLANG_BIN\"",
         "LLC=\"$LLC_BIN\"",
-        "env -i PATH=\"$SAFE_PATH\" HOME=/nonexistent LC_ALL=C",
+        "-i PATH=\"$SAFE_PATH\" HOME=/nonexistent LC_ALL=C",
         "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null",
         "clean tar -x --no-same-owner --no-same-permissions",
         "clean git --no-replace-objects -C \"$OS_DIR\" archive",
@@ -121,6 +121,10 @@ fn script_shape() {
         "clean install",
         "clean mktemp",
         "clean realpath",
+        "export PATH=/usr/bin:/bin",
+        "ENV_BIN=/usr/bin/env",
+        "\"$ENV_BIN\" -i PATH=",
+        "only x86_64 is supported",
         "clean \"$STRIP_BIN\" -g",
         "-R -r -C",
         "KERNEL_ARCH=\"$KARCH\"",
@@ -303,4 +307,20 @@ fn make_expression_in_kernel_arch_is_rejected() {
         );
     }
     assert!(!d.join("pwned").exists());
+}
+
+#[test]
+fn non_x86_64_kernel_arch_is_rejected() {
+    let d = scratch("aarch64");
+    let k = d.to_str().unwrap();
+    let o = run(
+        &["--staging", k, "--kernel-dir", k],
+        &[("KERNEL_ARCH", "aarch64")],
+    );
+    assert!(!o.status.success());
+    assert!(
+        text(&o).contains("only x86_64 is supported"),
+        "{}",
+        text(&o)
+    );
 }

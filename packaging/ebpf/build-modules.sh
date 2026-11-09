@@ -7,6 +7,9 @@
 # section 5a. vendor/opensnitch is read-only: its ebpf_prog directory is copied
 # to a scratch dir and built there.
 set -euo pipefail
+# Fixed PATH before anything is resolved: a hostile inherited PATH must not
+# substitute any tool (clang/llc/llvm-strip/make come from this PATH too).
+export PATH=/usr/bin:/bin
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
@@ -17,9 +20,16 @@ SAFE_PATH=/usr/bin:/bin
 # TAR_OPTIONS, GIT_*, MAKEFILES, TMPDIR, LD_PRELOAD, ...), a fixed PATH and no
 # user/system git config. Tools outside SAFE_PATH are resolved to absolute
 # paths first.
+ENV_BIN=/usr/bin/env
 clean() {
-    env -i PATH="$SAFE_PATH" HOME=/nonexistent LC_ALL=C \
-        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "$@"
+    local cmd="$1"
+    shift
+    if [[ "$cmd" != /* ]]; then # bare name: absolute trusted path, never a PATH lookup
+        if [[ -x "/usr/bin/$cmd" ]]; then cmd="/usr/bin/$cmd"; else cmd="/bin/$cmd"; fi
+    fi
+    [[ -x "$cmd" ]] || die "tool not found: $cmd"
+    "$ENV_BIN" -i PATH="$SAFE_PATH" HOME=/nonexistent LC_ALL=C \
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "$cmd" "$@"
 }
 MODULES=(opensnitch.o opensnitch-procs.o opensnitch-dns.o)
 DEST_REL="usr/lib/opensnitchd/ebpf"
@@ -48,6 +58,7 @@ die() {
     echo "build-modules: ERROR: $*" >&2
     exit 1
 }
+[[ -x "$ENV_BIN" ]] || die "$ENV_BIN not executable"
 
 STAGING="" DRY_RUN=0 KVER="" OS_DIR="$REPO_ROOT/vendor/opensnitch"
 KERNEL_DIR="${KERNEL_DIR:-}" KERNEL_HEADERS="${KERNEL_HEADERS:-}"
@@ -97,6 +108,10 @@ release_commit="$(pin SW_OPENSNITCH_COMMIT "$RELEASE_PINS")"
 # against strict patterns first.
 KARCH="${KERNEL_ARCH:-$(clean uname -m)}"
 [[ "$KARCH" =~ ^[A-Za-z0-9_]+$ ]] || die "invalid KERNEL_ARCH (allowed: [A-Za-z0-9_]): $KARCH"
+# The Makefile derives its own ARCH (and the include paths) from `uname -m`, so
+# an override cannot be made consistent: only the native x86_64 build is allowed.
+[[ "$KARCH" == x86_64 ]] || die "unsupported KERNEL_ARCH '$KARCH': only x86_64 is supported"
+[[ "$(clean uname -m)" == x86_64 ]] || die "host is not x86_64; cross builds are unsupported"
 [[ "$KVER" =~ ^[0-9A-Za-z._+-]+$ ]] || die "invalid KERNEL_VER (allowed: [0-9A-Za-z._+-]): $KVER"
 safe_path() { # <label> <value>: absolute, only [A-Za-z0-9._/+-]
     [[ "$2" =~ ^/[A-Za-z0-9._/+-]*$ ]] ||
