@@ -6,9 +6,11 @@
 
 pub mod kernel_probe;
 
-use crate::daemon_alerts::{AlertSeverity, DaemonAlertStore, StoredAlert};
+use crate::daemon_alerts::{
+    monitor_fallback, AlertSeverity, DaemonAlertStore, GenericTopic, StoredAlert,
+};
 use crate::daemon_liveness::DaemonLiveness;
-use crate::ws_messages::{CheckKind, CheckStatus, DiagnosticCheck};
+use crate::ws_messages::{CheckKind, CheckStatus, DiagnosticCheck, ProcessMonitorReport};
 use kernel_probe::KernelProbe;
 use snitchwatch_proto::protocol::alert;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -120,22 +122,27 @@ impl DiagnosticsCtx {
         self.alert_store
             .get(alert::What::ProcMonitor)
             .or_else(|| self.alert_store.get(alert::What::KernelEvent))
-            .or_else(|| {
-                self.alert_store.get(alert::What::Generic).filter(|a| {
-                    classify_generic_alert_text(&a.text) == Some(CheckKind::EbpfSupport)
-                })
-            })
+            .or_else(|| self.alert_store.generic(GenericTopic::ProcessMonitor))
+    }
+
+    /// The daemon's latest "eBPF fell back to `/proc`" alert, if any (E3).
+    /// Positive evidence only: `None` means not reported, never "eBPF".
+    pub fn process_monitor(&self) -> Option<ProcessMonitorReport> {
+        let alert = self.alert_store.generic(GenericTopic::MonitorFallback)?;
+        Some(ProcessMonitorReport {
+            fallback: monitor_fallback(&alert.text)?,
+            reported_secs_ago: alert.recorded_at.elapsed().as_secs(),
+            daemon_text: alert.text,
+        })
     }
 
     /// Whichever ERROR/WARNING alert is relevant to `FirewallRunning`, if
     /// any. Same tagged-then-classified-Generic preference as
     /// [`Self::ebpf_alert`].
     fn firewall_alert(&self) -> Option<StoredAlert> {
-        self.alert_store.get(alert::What::Firewall).or_else(|| {
-            self.alert_store.get(alert::What::Generic).filter(|a| {
-                classify_generic_alert_text(&a.text) == Some(CheckKind::FirewallRunning)
-            })
-        })
+        self.alert_store
+            .get(alert::What::Firewall)
+            .or_else(|| self.alert_store.generic(GenericTopic::Firewall))
     }
 
     pub fn report(&self) -> Vec<DiagnosticCheck> {
@@ -206,27 +213,18 @@ impl DiagnosticsCtx {
     }
 }
 
-/// Classifies a `GENERIC`-`What` alert's free text into the check it's
-/// actually about. opensnitchd v1.8.0 never tags PROC_MONITOR/FIREWALL
-/// specifically for any issue-#6-relevant alert — see `daemon_alerts`'s
-/// module doc — so a real daemon's eBPF and firewall/queue failures both
-/// arrive as `Alert_GENERIC` and have to be told apart by message text
-/// instead. Matches on substrings seen in the actual v1.8.0 source
-/// (`daemon/main.go:176,187,645`, `daemon/ui/config_utils.go:82`); text
-/// matching neither pattern is left unmapped (recorded in the store, but
-/// not overlaid onto any check).
+/// The check a `GENERIC` alert's free text overlays, if any. opensnitchd
+/// v1.8.0 never tags PROC_MONITOR/FIREWALL for an issue-#6 alert (see
+/// `daemon_alerts`'s module doc), so the text decides
+/// ([`GenericTopic::classify`]). A monitor fallback to `/proc` and the
+/// `EBPF-DNS` module alert overlay no check: `/proc` is a supported monitor,
+/// and the DNS module is not the process monitor.
+#[cfg(test)]
 fn classify_generic_alert_text(text: &str) -> Option<CheckKind> {
-    let lower = text.to_lowercase();
-    if lower.contains("process monitor") || lower.contains("ebpf") {
-        Some(CheckKind::EbpfSupport)
-    } else if lower.contains("queue #")
-        || lower.contains("nfqueue")
-        || lower.contains("nftables")
-        || lower.contains("firewall")
-    {
-        Some(CheckKind::FirewallRunning)
-    } else {
-        None
+    match GenericTopic::classify(text) {
+        GenericTopic::ProcessMonitor => Some(CheckKind::EbpfSupport),
+        GenericTopic::Firewall => Some(CheckKind::FirewallRunning),
+        GenericTopic::MonitorFallback | GenericTopic::EbpfDns | GenericTopic::Unclassified => None,
     }
 }
 
@@ -688,3 +686,6 @@ mod tests {
         assert_eq!(classify_generic_alert_text("unrelated message"), None);
     }
 }
+
+#[cfg(test)]
+mod monitor_fallback_tests;

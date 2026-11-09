@@ -600,6 +600,7 @@ impl Ui for UiService {
                 if self.broadcast.receiver_count() > 0 {
                     let msg = ServerMessage::DiagnosticsReport {
                         checks: ctx.report(),
+                        process_monitor: ctx.process_monitor(),
                     };
                     if let Err(e) = self.broadcast.send(msg) {
                         warn!(error = %e, "post_alert: broadcast send failed");

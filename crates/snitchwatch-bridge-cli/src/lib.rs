@@ -564,6 +564,7 @@ where
                 diagnostics_ctx_for_pump.clear_alerts();
                 let _ = snapshot_tx.send(ServerMessage::DiagnosticsReport {
                     checks: diagnostics_ctx_for_pump.report(),
+                    process_monitor: diagnostics_ctx_for_pump.process_monitor(),
                 });
                 continue;
             }
@@ -607,6 +608,7 @@ where
                     publish_rules(&rules_for_pump, &snapshot_tx);
                     let _ = snapshot_tx.send(ServerMessage::DiagnosticsReport {
                         checks: diagnostics_ctx_for_pump.report(),
+                        process_monitor: diagnostics_ctx_for_pump.process_monitor(),
                     });
                     let _ = snapshot_tx.send(ServerMessage::TrayState {
                         state: tray_pub_for_snapshot.subscribe().borrow().clone(),

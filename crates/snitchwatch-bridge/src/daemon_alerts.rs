@@ -48,6 +48,7 @@
 //! INFO alerts are ignored — only ERROR/WARNING carry troubleshooting
 //! weight worth surfacing on the diagnostics page.
 
+use crate::ws_messages::MonitorFallback;
 use snitchwatch_proto::protocol::alert;
 use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
@@ -94,6 +95,67 @@ pub struct StoredAlert {
 #[derive(Default)]
 pub struct DaemonAlertStore {
     by_what: StdMutex<HashMap<alert::What, StoredAlert>>,
+    /// `GENERIC` alerts again, one per [`GenericTopic`], so a later alert
+    /// about something else (the `EBPF-DNS` one usually follows the
+    /// process-monitor one) can't evict it.
+    generic_by_topic: StdMutex<HashMap<GenericTopic, StoredAlert>>,
+}
+
+/// What a `GENERIC` alert's free text is about. v1.8.0 tags none of its
+/// issue-#6 alerts (module doc), so the text is all there is. Matches the
+/// strings in the v1.8.0 source; see
+/// `docs/superpowers/plans/2026-11-09-ebpf-honest-health.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GenericTopic {
+    /// eBPF did not start and the daemon fell back to `/proc`
+    /// ([`monitor_fallback`] says which part failed).
+    MonitorFallback,
+    /// Some other process-monitor or eBPF problem.
+    ProcessMonitor,
+    /// The DNS eBPF module (`daemon/main.go:650-660`): not the process monitor.
+    EbpfDns,
+    Firewall,
+    Unclassified,
+}
+
+impl GenericTopic {
+    pub fn classify(text: &str) -> Self {
+        let lower = text.to_lowercase();
+        if lower.starts_with("ebpf-dns:") {
+            Self::EbpfDns
+        } else if monitor_fallback(text).is_some() {
+            Self::MonitorFallback
+        } else if lower.contains("process monitor") || lower.contains("ebpf") {
+            Self::ProcessMonitor
+        } else if lower.contains("queue #")
+            || lower.contains("nfqueue")
+            || lower.contains("nftables")
+            || lower.contains("firewall")
+        {
+            Self::Firewall
+        } else {
+            Self::Unclassified
+        }
+    }
+}
+
+/// Which v1.8.0 monitor-fallback alert `text` is, if any:
+/// `procmon/ebpf/ebpf.go:134,141` (`opensnitch.o`; `monitor/init.go:112-131`
+/// then runs `/proc`), or `procmon/ebpf/events.go:96-98` and `utils.go:35-37`
+/// (procs module or tracefs; `init.go:102-108` starts the `/proc` monitors and
+/// `init.go:61-66` rolls the method back). Other `EbpfEventsErr` causes carry
+/// bare library text and are not recognised.
+pub fn monitor_fallback(text: &str) -> Option<MonitorFallback> {
+    let lower = text.to_lowercase();
+    if lower.contains("[ebpf] error loading opensnitch.o") {
+        Some(MonitorFallback::EbpfDidNotStart)
+    } else if lower.contains("unable to load ebpf module (opensnitch-procs.o)")
+        || lower.contains("unable to access debugfs filesystem, needed for ebpf")
+    {
+        Some(MonitorFallback::EbpfEventsDidNotStart)
+    } else {
+        None
+    }
 }
 
 impl DaemonAlertStore {
@@ -109,15 +171,30 @@ impl DaemonAlertStore {
             return;
         };
         let text = truncate_alert_text(text);
-        let mut guard = self.by_what.lock().unwrap_or_else(|e| e.into_inner());
-        guard.insert(
-            what,
-            StoredAlert {
-                severity,
-                text,
-                recorded_at: Instant::now(),
-            },
-        );
+        let stored = StoredAlert {
+            severity,
+            text,
+            recorded_at: Instant::now(),
+        };
+        if what == alert::What::Generic {
+            self.generic_by_topic
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(GenericTopic::classify(&stored.text), stored.clone());
+        }
+        self.by_what
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(what, stored);
+    }
+
+    /// The most recently stored `GENERIC` alert about `topic`, if any.
+    pub fn generic(&self, topic: GenericTopic) -> Option<StoredAlert> {
+        self.generic_by_topic
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&topic)
+            .cloned()
     }
 
     /// The most recently stored alert for `what`, if any.
@@ -134,6 +211,10 @@ impl DaemonAlertStore {
     /// for why `subscribe()` deliberately does NOT call this.
     pub fn clear(&self) {
         self.by_what
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.generic_by_topic
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -164,7 +245,7 @@ fn truncate_alert_text(text: String) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -305,5 +386,59 @@ mod tests {
 
         let stored = store.get(alert::What::Generic).unwrap();
         assert_eq!(stored.text, "short message");
+    }
+
+    /// The v1.8.0 startup alert when `opensnitch.o` does not load
+    /// (`procmon/ebpf/ebpf.go:134` wrapping `core/ebpf.go:69-71`), verbatim.
+    pub(crate) const MAIN_MODULE_FALLBACK: &str = "[eBPF] Error loading opensnitch.o: \nunable to load eBPF module (opensnitch.o). Your kernel version (7.2.15-ogc1.1.fc45.x86_64) might not be compatible.\nIf this error persists, change process monitor method to 'proc'";
+    /// The v1.8.0 startup alert when `opensnitch-procs.o` does not load
+    /// (`procmon/ebpf/events.go:96-98`), verbatim.
+    pub(crate) const PROCS_MODULE_FALLBACK: &str = "\nunable to load eBPF module (opensnitch-procs.o). Your kernel version (7.2.15-ogc1.1.fc45.x86_64) might not be compatible.\nIf this error persists, change process monitor method to 'proc'";
+    /// `daemon/main.go:650-660`: the DNS module, not the process monitor.
+    pub(crate) const DNS_MODULE_ALERT: &str =
+        "EBPF-DNS: Unable to attach ebpf listener: unable to load eBPF module (opensnitch-dns.o)";
+
+    #[test]
+    fn classifies_every_known_generic_text() {
+        use crate::ws_messages::MonitorFallback::*;
+        let fallback = GenericTopic::MonitorFallback;
+        let cases = [
+            (MAIN_MODULE_FALLBACK, fallback, Some(EbpfDidNotStart)),
+            ("[eBPF] Error loading opensnitch.o (collection): bad map", fallback, Some(EbpfDidNotStart)),
+            (PROCS_MODULE_FALLBACK, fallback, Some(EbpfEventsDidNotStart)),
+            ("exit status 32\nUnable to access debugfs filesystem, needed for eBPF to work, likely caused by a hardened or customized kernel.", fallback, Some(EbpfEventsDidNotStart)),
+            (DNS_MODULE_ALERT, GenericTopic::EbpfDns, None),
+            ("Unable to set process monitor method via parameter: exec format error", GenericTopic::ProcessMonitor, None),
+            ("Error creating queue #0: busy", GenericTopic::Firewall, None),
+            ("ringbuf: not supported", GenericTopic::Unclassified, None),
+        ];
+        for (text, topic, cause) in cases {
+            assert_eq!(GenericTopic::classify(text), topic, "{text}");
+            assert_eq!(monitor_fallback(text), cause, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_later_generic_alert_of_another_topic_keeps_the_fallback() {
+        let store = DaemonAlertStore::new();
+        store.record(
+            alert::What::Generic,
+            alert::Type::Warning as i32,
+            MAIN_MODULE_FALLBACK.to_string(),
+        );
+        store.record(
+            alert::What::Generic,
+            alert::Type::Error as i32,
+            DNS_MODULE_ALERT.to_string(),
+        );
+
+        let fallback = store.generic(GenericTopic::MonitorFallback).unwrap();
+        assert_eq!(fallback.text, MAIN_MODULE_FALLBACK);
+        assert_eq!(
+            store.get(alert::What::Generic).unwrap().text,
+            DNS_MODULE_ALERT
+        );
+        store.clear();
+        assert!(store.generic(GenericTopic::MonitorFallback).is_none());
     }
 }

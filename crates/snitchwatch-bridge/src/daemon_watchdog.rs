@@ -59,6 +59,7 @@ pub async fn run(
             diagnostics_ctx.reset_firewall_status_unknown();
             let _ = broadcast_tx.send(crate::ws_messages::ServerMessage::DiagnosticsReport {
                 checks: diagnostics_ctx.report(),
+                process_monitor: diagnostics_ctx.process_monitor(),
             });
         } else if !down_now && was_down {
             // Recovered — show what the cache actually holds, not a
@@ -71,6 +72,7 @@ pub async fn run(
             }
             let _ = broadcast_tx.send(crate::ws_messages::ServerMessage::DiagnosticsReport {
                 checks: diagnostics_ctx.report(),
+                process_monitor: diagnostics_ctx.process_monitor(),
             });
         }
         was_down = down_now;
@@ -365,7 +367,7 @@ mod tests {
             .await
             .expect("timed out waiting for DiagnosticsReport")
             .unwrap();
-        let crate::ws_messages::ServerMessage::DiagnosticsReport { checks } = msg else {
+        let crate::ws_messages::ServerMessage::DiagnosticsReport { checks, .. } = msg else {
             panic!("expected DiagnosticsReport");
         };
         let firewall = checks
