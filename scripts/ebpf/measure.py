@@ -5,6 +5,7 @@ Subcommands (stdlib only, no root needed, nothing outside --out is written):
   sample        sample CPU/RSS/threads of a named process from /proc into a CSV
   summarize     mean/median/p95 CPU and RSS slope from a sample CSV
   unknown-rate  unknown-process rate from two cache-summary exports
+  compare       proc-run vs ebpf-run manifests: CPU/RSS/unknown-rate + deltas
 
 Plan: docs/superpowers/plans/2026-10-29-ebpf-q05-q06.md
 """
@@ -12,6 +13,7 @@ import argparse
 import csv
 import io
 import json
+import math
 import os
 import stat
 import statistics
@@ -23,6 +25,16 @@ COLUMNS = ["t_s", "iso_utc", "name", "pid", "cpu_pct", "rss_kib", "threads",
            "load1", "forks_per_s"]
 COMM_LEN = 15  # kernel truncates /proc/<pid>/comm to 15 chars
 EXPORT_FORMAT = "snitchwatch-cache-summary"
+RUN_FORMAT = "snitchwatch-measure-run"
+DURATION_TOLERANCE = 0.01  # runs may differ by 1% in declared duration
+# Coverage is judged on the sample distribution, not on max(t_s) alone: the
+# timestamps must span (max - min) >= 50% of durationS, number >= 3, and have no
+# gap wider than 50% of durationS. A lone late sample, or just the two
+# endpoints, therefore cannot stand in for a run.
+MIN_SPAN_FRACTION = 0.5
+MAX_GAP_FRACTION = 0.5
+MIN_SAMPLES = 3
+MAX_DURATION_S = 366 * 86400.0  # one year; larger is a typo or hostile
 
 
 def read_process(proc, pid):
@@ -183,6 +195,7 @@ def summarize(rows):
     if cpu:
         out["cpu_mean"] = statistics.fmean(cpu)
         out["cpu_median"] = statistics.median(cpu)
+        # p95 = upper nearest-rank: index int(0.95*n), clamped to the last sample.
         out["cpu_p95"] = cpu[min(len(cpu) - 1, int(0.95 * len(cpu)))]
     if pts:
         out["rss_start_mib"], out["rss_end_mib"] = pts[0][1], pts[-1][1]
@@ -281,6 +294,145 @@ def unknown_rate(total_doc, missing_doc):
             "truncated": bool(warnings), "warnings": warnings}
 
 
+def _load_run(path, label):
+    """Summarize one run manifest (paths inside it resolve next to it)."""
+    doc = _load(path)
+    if not isinstance(doc, dict) or doc.get("format") != RUN_FORMAT:
+        raise ValueError(f"{label}: not a {RUN_FORMAT} document")
+    if doc.get("schemaVersion") != 1:
+        raise ValueError(f"{label}: unsupported schemaVersion {doc.get('schemaVersion')!r}")
+    dur = doc.get("durationS")
+    if isinstance(dur, bool) or not isinstance(dur, (int, float)) \
+            or not math.isfinite(dur) or not 0 < dur <= MAX_DURATION_S:
+        raise ValueError(f"{label}: durationS missing or not a finite positive number <= one year")
+    workload = doc.get("workload")
+    if not isinstance(workload, str) or not workload:
+        raise ValueError(f"{label}: workload missing")
+    base = Path(path).parent
+    root = base.resolve()
+    files = {}
+    for key in ("samplesCsv", "unknownTotal", "unknownMissing"):
+        if not isinstance(doc.get(key), str) or not doc[key]:
+            raise ValueError(f"{label}: {key} missing")
+        rel = Path(doc[key])
+        # Lexical check, then resolve (follows intermediate symlinks) and require
+        # containment; read_regular_text additionally refuses a final symlink.
+        if rel.is_absolute() or ".." in rel.parts \
+                or not (root / rel).resolve().is_relative_to(root):
+            raise ValueError(f"{label}: {key} must be a relative path inside the manifest directory")
+        files[key] = base / rel
+    rows = list(csv.DictReader(io.StringIO(read_regular_text(files["samplesCsv"]))))
+    _check_rows(rows, label, dur)
+    stats = summarize(rows)
+    if not stats["cpu_samples"]:
+        raise ValueError(f"{label}: no cpu samples in {doc['samplesCsv']}")
+    total_doc, missing_doc = _load(files["unknownTotal"]), _load(files["unknownMissing"])
+    _check_window(total_doc, f"{label} total", dur)
+    _check_window(missing_doc, f"{label} missing-path", dur)
+    filters = {"total": _filters(total_doc, f"{label} total"),
+               "missing": _filters(missing_doc, f"{label} missing-path")}
+    unk = unknown_rate(total_doc, missing_doc)
+    return {"duration_s": dur, "workload": workload, "cpu_mean": stats["cpu_mean"],
+            "cpu_p95": stats["cpu_p95"], "rss_start_mib": stats["rss_start_mib"],
+            "rss_end_mib": stats["rss_end_mib"], "unknown_rate": unk["rate"],
+            "filters": filters, "files": {str((root / f).resolve()) for f in
+                                          (doc["samplesCsv"], doc["unknownTotal"], doc["unknownMissing"])},
+            "warnings": unk["warnings"]}
+
+
+def _finite(value, what, label, nonneg=True):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label}: {what} is not a number: {value!r}") from None
+    if not math.isfinite(v) or (nonneg and v < 0):
+        raise ValueError(f"{label}: {what} must be finite and non-negative: {value!r}")
+    return v
+
+
+def _check_rows(rows, label, dur):
+    """Validate sample values and that the timestamps actually cover the run.
+
+    Every t_s must be finite, in order (summarize takes RSS start/end in file
+    order) and within [0, durationS * (1 + tolerance)]. Only rows with BOTH a
+    cpu and an rss value count toward sample count, span and gaps.
+    """
+    ts = [_finite(r.get("t_s"), "t_s", label) for r in rows]
+    if any(t > dur * (1 + DURATION_TOLERANCE) for t in ts):
+        raise ValueError(f"{label}: t_s beyond durationS {dur:g}s")
+    if any(b < a for a, b in zip(ts, ts[1:])):
+        raise ValueError(f"{label}: t_s rows out of order")
+    counted = []
+    for t, r in zip(ts, rows):
+        vals = [r.get(c) for c in ("cpu_pct", "rss_kib")]
+        for col, v in zip(("cpu_pct", "rss_kib"), vals):
+            if v not in (None, ""):
+                _finite(v, col, label)
+        if all(v not in (None, "") for v in vals):
+            counted.append(t)
+    if len(counted) < MIN_SAMPLES:
+        raise ValueError(f"{label}: only {len(counted)} samples with cpu and rss; "
+                         f"need >= {MIN_SAMPLES}")
+    if counted[-1] - counted[0] < MIN_SPAN_FRACTION * dur:
+        raise ValueError(f"{label}: sample span {counted[-1] - counted[0]:g}s is below "
+                         f"{MIN_SPAN_FRACTION:.0%} of durationS {dur:g}s")
+    gap = max(b - a for a, b in zip(counted, counted[1:]))
+    if gap > MAX_GAP_FRACTION * dur:
+        raise ValueError(f"{label}: sample gap {gap:g}s exceeds "
+                         f"{MAX_GAP_FRACTION:.0%} of durationS {dur:g}s")
+
+
+def _check_window(doc, label, dur):
+    """The export's requestedWindow [fromMs,toMs) must be durationS long (+-1%)."""
+    w = doc.get("requestedWindow") if isinstance(doc, dict) else None
+    if not isinstance(w, dict) or "fromMs" not in w or "toMs" not in w:
+        raise ValueError(f"{label}: requestedWindow.fromMs/toMs missing; cannot check window")
+    length = (_finite(w["toMs"], "window toMs", label)
+              - _finite(w["fromMs"], "window fromMs", label)) / 1000.0
+    if abs(length - dur) > DURATION_TOLERANCE * dur:
+        raise ValueError(f"{label}: export window {length:g}s does not match durationS {dur:g}s")
+
+
+def _filters(doc, label):
+    f = doc.get("filterKinds") if isinstance(doc, dict) else None
+    if f is None:
+        return {}
+    if not isinstance(f, dict) or not all(isinstance(k, str) for k in f):
+        raise ValueError(f"{label}: filterKinds must be an object keyed by strings")
+    return f
+
+
+DELTA_KEYS = ("cpu_mean", "cpu_p95", "rss_start_mib", "rss_end_mib", "unknown_rate")
+
+
+def compare(proc_manifest, ebpf_manifest):
+    """Side-by-side stats for two runs and ebpf-minus-proc deltas.
+
+    Refuses runs whose declared duration (within 1%) or workload differ: such
+    a comparison would measure the load, not the collector.
+    """
+    if Path(proc_manifest).resolve() == Path(ebpf_manifest).resolve():
+        raise ValueError("cannot compare a manifest with itself")
+    runs = {"proc": _load_run(proc_manifest, "proc"), "ebpf": _load_run(ebpf_manifest, "ebpf")}
+    p, e = runs["proc"], runs["ebpf"]
+    if abs(p["duration_s"] - e["duration_s"]) > DURATION_TOLERANCE * max(p["duration_s"], e["duration_s"]):
+        raise ValueError(f"mismatched duration: proc {p['duration_s']}s vs ebpf {e['duration_s']}s")
+    if p["workload"] != e["workload"]:
+        raise ValueError(f"mismatched workload: proc {p['workload']!r} vs ebpf {e['workload']!r}")
+    # Exports with different filters/scope are different populations: refuse.
+    if p["filters"] != e["filters"]:
+        raise ValueError(f"mismatched export filters: proc {p['filters']} vs ebpf {e['filters']}")
+    if p["files"] & e["files"]:
+        raise ValueError("proc and ebpf manifests reference the same artifact file(s)")
+    for r in (p, e):
+        del r["files"]
+    runs["biased"] = bool(p["warnings"] or e["warnings"])
+    runs["delta"] = {k: None if p[k] is None or e[k] is None
+                     or (k == "unknown_rate" and runs["biased"]) else e[k] - p[k]
+                     for k in DELTA_KEYS}
+    return runs
+
+
 def _load(path):
     return json.loads(read_regular_text(path))
 
@@ -301,6 +453,9 @@ def main(argv=None):
     u = sub.add_parser("unknown-rate")
     u.add_argument("--total", required=True)
     u.add_argument("--missing-path", required=True)
+    c = sub.add_parser("compare")
+    c.add_argument("proc", type=Path, help="run manifest of the /proc run")
+    c.add_argument("ebpf", type=Path, help="run manifest of the eBPF run")
     a = ap.parse_args(argv)
     if a.cmd == "sample":
         if a.interval <= 0 or a.duration < 0:
@@ -320,6 +475,13 @@ def main(argv=None):
             print(f"error: {e}", file=sys.stderr)
             return 1
         print(json.dumps(summarize(rows), indent=2))
+    elif a.cmd == "compare":
+        try:
+            print(json.dumps(compare(a.proc, a.ebpf), indent=2))
+        except (ValueError, OSError, csv.Error, TypeError, KeyError,
+                OverflowError, AttributeError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
     else:
         try:
             print(json.dumps(unknown_rate(_load(a.total), _load(a.missing_path)), indent=2))
