@@ -181,7 +181,10 @@ mod tests {
             .with_tray(1, TrayState::Pending(2))
             .with_pause(1, PAUSED)
             .with_firewall(firewall_off(1))
-            .with_monitor(1, "Process monitor: /proc (reported)".to_string())
+            .with_monitor(
+                1,
+                "Process monitor: eBPF did not start; reported".to_string(),
+            )
     }
 
     #[test]
@@ -230,7 +233,10 @@ mod tests {
             .with_tray(2, TrayState::Idle)
             .with_pause(2, PAUSED)
             .with_firewall(firewall_off(2))
-            .with_monitor(2, "Process monitor: /proc (reported)".to_string());
+            .with_monitor(
+                2,
+                "Process monitor: eBPF did not start; reported".to_string(),
+            );
         assert_eq!(job(&with_b), with_b);
     }
 

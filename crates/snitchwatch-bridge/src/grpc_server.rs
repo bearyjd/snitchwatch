@@ -554,7 +554,11 @@ impl Ui for UiService {
         }
         // Deliberately does NOT clear `alert_store` — see that field's doc
         // comment and `daemon_alerts`'s module doc for why a fresh
-        // `subscribe()` is the wrong trigger for that.
+        // `subscribe()` is the wrong trigger for that. The one exception is
+        // the eBPF-to-/proc fallback (E3): it describes a daemon session, so
+        // an old one goes, short of the startup race grace.
+        self.alert_store
+            .on_daemon_subscribe(std::time::Instant::now());
         Ok(Response::new(cfg))
     }
 

@@ -85,14 +85,14 @@ Window {
         checkMonitor("after an eBPF-capable report and About info");
         report({ status: "failed", detail: "ebpf modules failed, fallback to proc" }, { status: "ok" });
         checkMonitor("after a monitor warning");
-        // E3: opensnitchd's own fallback alert names /proc, and is no problem.
+        // E3: opensnitchd's own fallback alert is shown, names no mode, and is no problem.
         model.applyServerMessageJson(JSON.stringify({ action: "diagnosticsReport", checks: [
             { kind: "daemon_reachable", status: { status: "ok" } },
             { kind: "firewall_running", status: { status: "ok" } },
             { kind: "nftables_support", status: { status: "ok" } },
             { kind: "ebpf_support", status: { status: "unknown" } }
         ], processMonitor: { fallback: "ebpf_did_not_start", reportedSecsAgo: 5, daemonText: "x" } }));
-        check(model.monitorStatus.indexOf("Process monitor: /proc (opensnitchd reported at ") === 0
+        check(model.monitorStatus.indexOf("Process monitor: eBPF did not start; opensnitchd reported it at ") === 0
               && monitorLine.text === model.monitorStatus, "reported fallback not shown");
         check(!model.hasProblem, "a /proc fallback treated as a problem");
         report({ status: "unknown" }, { status: "ok" });

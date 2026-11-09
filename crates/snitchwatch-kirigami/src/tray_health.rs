@@ -19,10 +19,9 @@ use snitchwatch_bridge::ws_messages::{
 /// reported a fallback, whatever any About info or daemon config says.
 pub const MONITOR_NOT_REPORTED: &str = "Process monitor: not reported by opensnitchd";
 
-/// The monitor line for a report's `process_monitor`. Names `/proc` only on
-/// the daemon's own fallback alert, with the local time it was reported
-/// (`reported_at` turns "seconds ago" into "HH:MM"); never names eBPF as
-/// running.
+/// The monitor line for a report's `process_monitor`: the daemon's own
+/// "eBPF did not start" alert with the local time it was reported
+/// (`reported_at` turns "seconds ago" into "HH:MM"). Never names a mode.
 pub fn monitor_line(
     report: Option<&ProcessMonitorReport>,
     reported_at: impl FnOnce(u64) -> String,
@@ -32,11 +31,12 @@ pub fn monitor_line(
     };
     let at = reported_at(report.reported_secs_ago);
     match report.fallback {
+        // Neither names `/proc`: that is certain only at daemon startup, and
+        // the alert text can't tell startup from a live reload, which rolls
+        // back to the old method, eBPF or audit (`monitor/init.go:53-67`).
         MonitorFallback::EbpfDidNotStart => {
-            format!("Process monitor: /proc (opensnitchd reported at {at} that eBPF did not start)")
+            format!("Process monitor: eBPF did not start; opensnitchd reported it at {at}")
         }
-        // Only certain at daemon startup: a live reload rolls back to the old
-        // method, which may be eBPF (`monitor/init.go:61-66,102-108`).
         MonitorFallback::EbpfEventsDidNotStart => format!(
             "Process monitor: eBPF process events did not start; opensnitchd reported it at {at}"
         ),
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn the_monitor_line_names_proc_only_from_a_reported_main_module_fallback() {
+    fn the_monitor_line_never_names_a_mode_even_on_a_reported_fallback() {
         assert_eq!(
             monitor_line(None, |_| panic!("no report, no clock")),
             MONITOR_NOT_REPORTED
@@ -320,12 +320,19 @@ mod tests {
         };
         assert_eq!(
             monitor_line(Some(&fallback(MonitorFallback::EbpfDidNotStart)), at),
-            "Process monitor: /proc (opensnitchd reported at 14:30 that eBPF did not start)"
+            "Process monitor: eBPF did not start; opensnitchd reported it at 14:30"
         );
         assert_eq!(
             monitor_line(Some(&fallback(MonitorFallback::EbpfEventsDidNotStart)), at),
             "Process monitor: eBPF process events did not start; opensnitchd reported it at 14:30"
         );
+        for fallback_kind in [
+            MonitorFallback::EbpfDidNotStart,
+            MonitorFallback::EbpfEventsDidNotStart,
+        ] {
+            let line = monitor_line(Some(&fallback(fallback_kind)), at);
+            assert!(!line.contains("/proc"), "{line}");
+        }
     }
 
     #[test]

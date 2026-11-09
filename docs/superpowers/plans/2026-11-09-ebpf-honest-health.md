@@ -95,10 +95,11 @@ JSON: `"processMonitor": {"fallback": "ebpf_did_not_start", "reportedSecsAgo": 1
 
 ### GUI text (tray tooltip + Daemon Health monitor line)
 - none: `Process monitor: not reported by opensnitchd`
-- `ebpf_did_not_start`: `Process monitor: /proc (opensnitchd reported at HH:MM that eBPF did not start)`
+- `ebpf_did_not_start`: `Process monitor: eBPF did not start; opensnitchd reported it at HH:MM`
 - `ebpf_events_did_not_start`: `Process monitor: eBPF process events did not start; opensnitchd reported it at HH:MM`
-  (weaker on purpose: `/proc` is certain only at startup; a live reload rolls back to the old method, which may be
-  eBPF, `init.go:61-66,102-108`).
+  Neither line names `/proc` (codex review): it is certain only at daemon startup, and the alert text can't tell
+  startup from a live config reload, where `ReconfigureMonitorMethod` rolls back to the old method, eBPF or audit
+  (`init.go:53-67,102-108`). The plan's "/proc" wording above is the startup behaviour, not GUI text.
 
 `HH:MM` is GUI local time minus `reportedSecsAgo`. The Daemon Health page is not marked as a problem by it.
 
@@ -110,9 +111,13 @@ JSON: `"processMonitor": {"fallback": "ebpf_did_not_start", "reportedSecsAgo": 1
 - `tray_health` unit: the three lines; the existing "never names a mode" guard narrowed to the no-report case.
 
 ## Unverified / open
-- A daemon restart faster than `DAEMON_DOWN_TIMEOUT` with the Notifications stream reopened is not seen as
-  down, so its predecessor's fallback alert can survive until the new process re-alerts or Recheck. Subscribe
-  still does not clear it (queued-alert race above).
+- Daemon restarts (codex review): `onStatusChange` fires `go c.Subscribe()` and the queued-alert flush from
+  two goroutines on the same connect (`ui/client.go:235-247`, `ui/alerts.go:96-108`), so a new process's
+  startup alert lands just before or after its Subscribe; a plain reconnect never re-sends it. So every
+  Subscribe drops a stored fallback older than `FALLBACK_SUBSCRIBE_GRACE` (3 s) and keeps a newer one or any
+  alert after it (`DaemonAlertStore::on_daemon_subscribe`). Residual: a daemon that alerts, then is replaced by
+  one that reconnects within 3 s and starts eBPF fine, keeps the old line; a reconnect of the same process
+  drops a still-true fallback (shows "not reported", the weaker claim). Other alerts still survive Subscribe.
 - The health page's disconnect reset has no automated test (needs a live bridge link in a QML test).
 - Real fallback alert text on a host (needs a forced fallback on the VM, never on the production host).
 - Kirigami tests segfault in this sandbox; CI's `kirigami` job is the evidence for the GUI part.

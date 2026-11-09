@@ -55,6 +55,13 @@ use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 
+/// How long before a daemon Subscribe a monitor-fallback alert still counts
+/// as that daemon session's. opensnitchd fires `Subscribe` and its queued
+/// startup alerts from two goroutines on the same connect
+/// (`daemon/ui/client.go:235-247`, `ui/alerts.go:96-108`), so the alert can
+/// land just before the Subscribe; it is never re-sent on a later reconnect.
+pub const FALLBACK_SUBSCRIBE_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Stored alert text is truncated to this many bytes (on a char boundary,
 /// with a trailing "…") to bound the diagnostics page's memory/rendering
 /// cost against an oversized payload from a misbehaving daemon.
@@ -205,6 +212,22 @@ impl DaemonAlertStore {
             .unwrap_or_else(|e| e.into_inner())
             .get(&what)
             .cloned()
+    }
+
+    /// A new daemon session (Subscribe): drops the monitor-fallback alert
+    /// unless it arrived within [`FALLBACK_SUBSCRIBE_GRACE`] of `now`. Other
+    /// alerts are kept (module doc: a reconnect fixes nothing for them).
+    pub fn on_daemon_subscribe(&self, now: Instant) {
+        let mut guard = self
+            .generic_by_topic
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let stale = guard.get(&GenericTopic::MonitorFallback).is_some_and(|a| {
+            now.saturating_duration_since(a.recorded_at) > FALLBACK_SUBSCRIBE_GRACE
+        });
+        if stale {
+            guard.remove(&GenericTopic::MonitorFallback);
+        }
     }
 
     /// Drops the stored `GENERIC` alert about `topic` only.
