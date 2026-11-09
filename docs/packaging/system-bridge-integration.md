@@ -99,14 +99,17 @@ packaging/system/stage.sh /path/to/image-root \
 The staged overlay supplies sysusers, tmpfiles, one system service, two
 socket units, and the one packaged opensnitchd rule.
 
-Both shipped opensnitchd configs set `"ProcMonitorMethod": "ebpf"`. The
-bazzite-tower image overwrites it to `"proc"` after `stage.sh` runs: eBPF
-failed to load on the owner's laptop kernel before (snitchwatch#6), so it
-stays off until there is evidence it loads on kernel 7.2. (Correction,
-2026-10-22: the #6 failure was later shown to be a rootless-container
-permission artifact, see `packaging/bluebuild/recipe.yml`; and the tower image
-installs no eBPF module files, so ebpf could not load there anyway. See
-`docs/superpowers/specs/2026-10-22-ebpf-groundwork.md`.) The BTF
+Both shipped opensnitchd configs set `"ProcMonitorMethod": "ebpf"` and
+`"Ebpf": {"ModulesPath": "/usr/lib/opensnitchd/ebpf"}`, and stage.sh does not
+change either. (Superseded, 2026-11-08: an earlier version of this paragraph
+said the bazzite-tower image overwrites the method to `"proc"` because eBPF
+failed to load on the owner's laptop kernel, snitchwatch#6. That failure was
+later shown to be a rootless-container permission artifact; the baked daemon
+runs as root and ebpf loads, see `packaging/bluebuild/recipe.yml` and
+`docs/superpowers/specs/2026-10-22-ebpf-groundwork.md`. Because `ModulesPath` is pinned, modules added under `/usr/local/lib/opensnitchd/ebpf`
+need a config edit to be found. Whether a given image
+actually has the module files installed is a separate question; the load-test
+runbook is `docs/superpowers/research/2026-11-07-ebpf-load-test-runbook.md`.) The BTF
 requirement is explained in
 `docs/superpowers/specs/2026-07-14-daemon-kernel-diagnostics-design.md`; the
 modules are not CO-RE, so matching kernel headers matter more than BTF.
