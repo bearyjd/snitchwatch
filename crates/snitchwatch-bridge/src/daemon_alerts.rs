@@ -217,7 +217,8 @@ impl DaemonAlertStore {
     /// A new daemon session (Subscribe): drops the monitor-fallback alert
     /// unless it arrived within [`FALLBACK_SUBSCRIBE_GRACE`] of `now`. Other
     /// alerts are kept (module doc: a reconnect fixes nothing for them).
-    pub fn on_daemon_subscribe(&self, now: Instant) {
+    /// True if it dropped one.
+    pub fn on_daemon_subscribe(&self, now: Instant) -> bool {
         let mut guard = self
             .generic_by_topic
             .lock()
@@ -228,6 +229,7 @@ impl DaemonAlertStore {
         if stale {
             guard.remove(&GenericTopic::MonitorFallback);
         }
+        stale
     }
 
     /// Drops the stored `GENERIC` alert about `topic` only.

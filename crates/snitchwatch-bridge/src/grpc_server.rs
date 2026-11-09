@@ -557,8 +557,22 @@ impl Ui for UiService {
         // `subscribe()` is the wrong trigger for that. The one exception is
         // the eBPF-to-/proc fallback (E3): it describes a daemon session, so
         // an old one goes, short of the startup race grace.
-        self.alert_store
-            .on_daemon_subscribe(std::time::Instant::now());
+        if self
+            .alert_store
+            .on_daemon_subscribe(std::time::Instant::now())
+        {
+            // No watchdog transition reports a fast daemon restart: push the
+            // report without the old fallback, as `post_alert` does.
+            if let Some(ctx) = self.diagnostics_ctx.get() {
+                let msg = ServerMessage::DiagnosticsReport {
+                    checks: ctx.report(),
+                    process_monitor: ctx.process_monitor(),
+                };
+                if let Err(e) = self.broadcast.send(msg) {
+                    debug!(error = %e, "subscribe: no GUI to receive the diagnostics report");
+                }
+            }
+        }
         Ok(Response::new(cfg))
     }
 

@@ -450,3 +450,49 @@ fn ebpf_check(report: &serde_json::Value) -> serde_json::Value {
         .expect("no ebpf_support check in report")
         .clone()
 }
+
+/// E3 (codex): a daemon re-Subscribe more than `FALLBACK_SUBSCRIBE_GRACE`
+/// after the fallback alert, with no new alert, pushes a report without
+/// `processMonitor` to connected GUIs (no watchdog transition does it on a
+/// fast restart).
+#[tokio::test]
+async fn resubscribe_without_a_new_alert_pushes_a_report_without_the_fallback() {
+    use snitchwatch_proto::protocol::alert::{Type, What};
+    let socket_dir = tempfile::tempdir().unwrap();
+    let cfg = BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
+        cache_capacity: 1024,
+    };
+    let bridge = run(cfg).await.expect("bridge run failed");
+    let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
+
+    mock.post_alert_text(
+        Type::Warning,
+        What::Generic,
+        "[eBPF] Error loading opensnitch.o: x",
+    )
+    .await
+    .expect("post_alert failed");
+    while next_diagnostics_report(&mut ws)
+        .await
+        .get("processMonitor")
+        .is_none()
+    {}
+
+    tokio::time::sleep(
+        snitchwatch_bridge::daemon_alerts::FALLBACK_SUBSCRIBE_GRACE + Duration::from_millis(300),
+    )
+    .await;
+    mock.subscribe("opensnitchd-restarted").await.unwrap();
+    while next_diagnostics_report(&mut ws)
+        .await
+        .get("processMonitor")
+        .is_some()
+    {}
+
+    bridge.shutdown();
+}
