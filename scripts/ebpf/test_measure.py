@@ -837,6 +837,27 @@ class Compare(unittest.TestCase):
                               ts=[0, 28800, 57600, 86400], pids=["", 1, 1, 1])
             self.assertIn("delta", measure.compare(a, b))
 
+    def test_deeply_nested_export_exits_1(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+            b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
+            (Path(d) / "ebpf-t.json").write_text("[" * 100000 + "]" * 100000)
+            self.assertEqual(measure.main(["compare", str(a), str(b)]), 1)
+            self.assertEqual(measure.main(["unknown-rate", "--total", str(Path(d) / "ebpf-t.json"),
+                                           "--missing-path", str(Path(d) / "ebpf-m.json")]), 1)
+
+    def test_oversized_input_refused(self):
+        orig = measure.MAX_INPUT_BYTES
+        measure.MAX_INPUT_BYTES = 100
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                a = self.make_run(d, "proc", [1.0] * 3, [1024] * 3)
+                b = self.make_run(d, "ebpf", [1.0] * 3, [1024] * 3)
+                with self.assertRaisesRegex(ValueError, "bytes"):
+                    measure.compare(a, b)
+        finally:
+            measure.MAX_INPUT_BYTES = orig
+
 
 if __name__ == "__main__":
     unittest.main()

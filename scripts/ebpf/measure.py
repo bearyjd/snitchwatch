@@ -47,6 +47,16 @@ WALL_MIN_SLACK_S = 2.0
 MAX_CPU_PCT = 1e6
 MAX_RSS_KIB = 2 ** 40
 PID_RE = re.compile(r"[1-9][0-9]*")
+# Byte cap on any file read (manifest, CSV, export): far above a year of
+# samples or a full cache export, and bounds memory on hostile input.
+MAX_INPUT_BYTES = 256 * 1024 * 1024
+
+
+def _read_capped(fh, path):
+    data = fh.read(MAX_INPUT_BYTES + 1)
+    if len(data) > MAX_INPUT_BYTES:
+        raise ValueError(f"{path}: larger than {MAX_INPUT_BYTES} bytes; refusing")
+    return data.decode("utf-8")
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -150,8 +160,8 @@ def open_private(out, force=False):
 def read_regular_text(path):
     """Read a user-supplied file as UTF-8 text; regular files only (no FIFO hang)."""
     fd, _ = _open_regular(path, os.O_RDONLY)
-    with os.fdopen(fd, encoding="utf-8", newline="") as fh:
-        return fh.read()
+    with os.fdopen(fd, "rb") as fh:
+        return _read_capped(fh, path)
 
 
 def _read_inside(root, rel):
@@ -169,8 +179,8 @@ def _read_inside(root, rel):
         fd, st = _open_regular(rel.parts[-1], os.O_RDONLY, dir_fd=dfd)
     finally:
         os.close(dfd)
-    with os.fdopen(fd, encoding="utf-8", newline="") as fh:
-        return fh.read(), (st.st_dev, st.st_ino)
+    with os.fdopen(fd, "rb") as fh:
+        return _read_capped(fh, rel), (st.st_dev, st.st_ino)
 
 
 def run(name, interval, duration, out, proc, clk_tck, sleep=time.sleep,
@@ -571,13 +581,13 @@ def main(argv=None):
         try:
             print(json.dumps(compare(a.proc, a.ebpf), indent=2, allow_nan=False))
         except (ValueError, OSError, csv.Error, TypeError, KeyError,
-                OverflowError, AttributeError) as e:
+                OverflowError, AttributeError, RecursionError, MemoryError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
     else:
         try:
             print(json.dumps(unknown_rate(_load(a.total), _load(a.missing_path)), indent=2))
-        except (ValueError, OSError) as e:
+        except (ValueError, OSError, RecursionError, MemoryError) as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
     return 0
