@@ -2,18 +2,43 @@
 //! (`docs/superpowers/plans/2026-10-27-q04-honest-tray-health.md`).
 //!
 //! opensnitchd v1.8.0 never reports which process monitor is running, so the
-//! monitor line is fixed text. The firewall line comes from the bridge's
+//! monitor line is fixed text, except while the bridge holds a daemon alert
+//! saying eBPF fell back to `/proc` (E3,
+//! `docs/superpowers/plans/2026-11-09-ebpf-honest-health.md`). The firewall line comes from the bridge's
 //! `FirewallRunning` check, a value stored when the daemon subscribed and
 //! re-sent unchanged in every later report: it is labelled as of the daemon's
 //! last connection, with the time the GUI noticed it, never the time a report
 //! arrived.
 
 use snitchwatch_bridge::diagnostics::FIREWALL_NOT_RUNNING_TROUBLESHOOTING;
-use snitchwatch_bridge::ws_messages::{CheckKind, CheckStatus, DiagnosticCheck};
+use snitchwatch_bridge::ws_messages::{
+    CheckKind, CheckStatus, DiagnosticCheck, MonitorFallback, ProcessMonitorReport,
+};
 
-/// The tray's and Daemon Health page's monitor line, whatever any report,
-/// About info or daemon config says.
+/// The tray's and Daemon Health page's monitor line unless opensnitchd
+/// reported a fallback, whatever any About info or daemon config says.
 pub const MONITOR_NOT_REPORTED: &str = "Process monitor: not reported by opensnitchd";
+
+/// The monitor line for a report's `process_monitor`. Names `/proc` only on
+/// the daemon's own fallback alert, with the local time it was reported
+/// (`reported_at` turns "seconds ago" into "HH:MM"); never names eBPF as
+/// running.
+pub fn monitor_line(
+    report: Option<&ProcessMonitorReport>,
+    reported_at: impl FnOnce(u64) -> String,
+) -> String {
+    let Some(report) = report else {
+        return MONITOR_NOT_REPORTED.to_string();
+    };
+    let what = match report.fallback {
+        MonitorFallback::EbpfDidNotStart => "eBPF",
+        MonitorFallback::EbpfEventsDidNotStart => "eBPF process events",
+    };
+    format!(
+        "Process monitor: /proc (opensnitchd reported at {} that {what} did not start)",
+        reported_at(report.reported_secs_ago)
+    )
+}
 
 /// What the latest report says about the daemon's firewall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,9 +144,9 @@ impl FirewallSeen {
 /// `base` (the tray-state sentence), then the firewall line if any, then the
 /// monitor line, as sentences. Appended after `base` so they never hide an
 /// outage, a pause or pending decisions.
-pub fn compose_tooltip(base: &str, firewall: Option<&str>) -> String {
+pub fn compose_tooltip(base: &str, firewall: Option<&str>, monitor: &str) -> String {
     let mut tooltip = base.to_string();
-    for part in firewall.into_iter().chain([MONITOR_NOT_REPORTED]) {
+    for part in firewall.into_iter().chain([monitor]) {
         tooltip.push_str(if tooltip.ends_with('.') { " " } else { ". " });
         tooltip.push_str(part);
     }
@@ -254,22 +279,54 @@ mod tests {
     #[test]
     fn the_tooltip_appends_firewall_then_monitor_after_the_state() {
         assert_eq!(
-            compose_tooltip("Snitchwatch — connected, prompts not paused", None),
+            compose_tooltip("Snitchwatch — connected, prompts not paused", None, MONITOR_NOT_REPORTED),
             "Snitchwatch — connected, prompts not paused. Process monitor: not reported by opensnitchd"
         );
         assert_eq!(
-            compose_tooltip("3 pending decisions", Some("Firewall issue")),
+            compose_tooltip(
+                "3 pending decisions",
+                Some("Firewall issue"),
+                MONITOR_NOT_REPORTED
+            ),
             "3 pending decisions. Firewall issue. Process monitor: not reported by opensnitchd"
         );
         // A base that already ends a sentence isn't given a second stop.
         assert_eq!(
-            compose_tooltip("Paused. Waiting.", None),
+            compose_tooltip("Paused. Waiting.", None, MONITOR_NOT_REPORTED),
             "Paused. Waiting. Process monitor: not reported by opensnitchd"
         );
     }
 
+    fn fallback(fallback: MonitorFallback) -> ProcessMonitorReport {
+        ProcessMonitorReport {
+            fallback,
+            reported_secs_ago: 90,
+            daemon_text: "daemon text".to_string(),
+        }
+    }
+
     #[test]
-    fn the_monitor_line_never_names_a_mode() {
+    fn the_monitor_line_names_proc_only_from_a_reported_fallback() {
+        assert_eq!(
+            monitor_line(None, |_| panic!("no report, no clock")),
+            MONITOR_NOT_REPORTED
+        );
+        let at = |secs: u64| {
+            assert_eq!(secs, 90);
+            "14:30".to_string()
+        };
+        assert_eq!(
+            monitor_line(Some(&fallback(MonitorFallback::EbpfDidNotStart)), at),
+            "Process monitor: /proc (opensnitchd reported at 14:30 that eBPF did not start)"
+        );
+        assert_eq!(
+            monitor_line(Some(&fallback(MonitorFallback::EbpfEventsDidNotStart)), at),
+            "Process monitor: /proc (opensnitchd reported at 14:30 that eBPF process events did not start)"
+        );
+    }
+
+    #[test]
+    fn the_unreported_monitor_line_never_names_a_mode() {
         let lower = MONITOR_NOT_REPORTED.to_lowercase();
         assert!(lower.contains("not reported by opensnitchd"));
         for word in ["/proc", "ebpf", "audit", "active", "running", "fallback"] {

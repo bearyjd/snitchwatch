@@ -102,8 +102,9 @@ pub mod qobject {
         /// Joined troubleshooting detail for every failed check, empty when
         /// healthy.
         #[qproperty(QString, troubleshooting_text, cxx_name = "troubleshootingText")]
-        /// Q04: always `tray_health::MONITOR_NOT_REPORTED`. opensnitchd
-        /// never reports the running process monitor, so no report sets it.
+        /// Q04: `tray_health::MONITOR_NOT_REPORTED`, unless the report
+        /// carries opensnitchd's own fallback-to-/proc alert (E3,
+        /// `tray_health::monitor_line`).
         #[qproperty(QString, monitor_status, cxx_name = "monitorStatus")]
         type DaemonHealthModel = super::DaemonHealthModelRust;
 
@@ -152,8 +153,10 @@ impl Default for DaemonHealthModelRust {
 impl qobject::DaemonHealthModel {
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
         let text = json.to_string();
-        let Ok(ServerMessage::DiagnosticsReport { checks }) =
-            serde_json::from_str::<ServerMessage>(&text)
+        let Ok(ServerMessage::DiagnosticsReport {
+            checks,
+            process_monitor,
+        }) = serde_json::from_str::<ServerMessage>(&text)
         else {
             return;
         };
@@ -183,6 +186,11 @@ impl qobject::DaemonHealthModel {
         this.as_mut().set_status_summary(QString::from(&summary));
         this.as_mut()
             .set_troubleshooting_text(QString::from(&troubleshooting_text(&checks)));
+        let monitor = crate::tray_health::monitor_line(
+            process_monitor.as_ref(),
+            crate::tray_controller::local_hh_mm_secs_ago,
+        );
+        this.as_mut().set_monitor_status(QString::from(&monitor));
     }
 
     fn start_bridge_feed(self: Pin<&mut Self>) {
