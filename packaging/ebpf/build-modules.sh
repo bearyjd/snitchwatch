@@ -45,7 +45,8 @@ clean() {
     fi
     [[ -x "$cmd" ]] || die "tool not found: $cmd"
     "$ENV_BIN" -i PATH="$SAFE_PATH" HOME=/nonexistent LC_ALL=C \
-        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 "$cmd" "$@"
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 \
+        GIT_NO_LAZY_FETCH=1 GIT_ALLOW_PROTOCOL=none "$cmd" "$@"
 }
 log() { echo "build-modules: $*" >&2; }
 die() {
@@ -211,8 +212,20 @@ fi
 # The checkout must be a git checkout at exactly the pinned commit (dry-run too).
 OS_DIR="$(clean realpath -e -- "$OS_DIR")" || die "opensnitch dir not found: $OS_DIR"
 [[ -e "$OS_DIR/.git" ]] || die "$OS_DIR is not a git checkout; cannot verify the commit pin"
-# --no-replace-objects: refs/replace must not alter the pinned tree.
-GIT=(git --no-pager --no-replace-objects -c core.fsmonitor=false -C "$OS_DIR")
+# --no-replace-objects: refs/replace must not alter the pinned tree. Lazy
+# fetching and every transport are disabled, so a missing object can never make
+# git contact a (promisor) remote or run a configured ssh/upload-pack command.
+GIT=(git --no-pager --no-replace-objects -c protocol.allow=never -c core.sshCommand=/bin/false
+    -c core.gitProxy= -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$OS_DIR")
+# Repository-local config is still read by git, so any key that can run a
+# command, fetch, or change object lookup is refused outright (includes too,
+# since their target cannot be vetted here).
+deny_re='^(include\.|includeif\.|extensions\.|uploadpack\.|protocol\.|fetch\.|http\.|transfer\.|remote\..*\.(promisor|uploadpack|receivepack|vcs|proxy|partialclonefilter)$|core\.(sshcommand|gitproxy|fsmonitor|hookspath|alternaterefscommand|askpass|pager)$)'
+local_keys="$(clean "${GIT[@]}" config --local --includes --list --name-only)" ||
+    die "cannot read the git config of $OS_DIR"
+while IFS= read -r key; do
+    [[ ! "${key,,}" =~ $deny_re ]] || die "refusing $OS_DIR: repository-local git config sets $key"
+done <<<"$local_keys"
 actual="$(clean "${GIT[@]}" rev-parse --verify HEAD)" || die "cannot read HEAD of $OS_DIR"
 [[ "$actual" == "$SW_OPENSNITCH_COMMIT" ]] ||
     die "commit pin mismatch: $OS_DIR is at $actual, pin is $SW_OPENSNITCH_COMMIT"
@@ -241,6 +254,13 @@ while IFS= read -r -d '' entry; do
     shas+=("$sha") rels+=("$rel")
 done <"$WORK/tree.lst"
 [[ ${#rels[@]} -gt 0 ]] || die "ebpf_prog is missing or empty at $SW_OPENSNITCH_COMMIT"
+# Every blob must already be present locally (no lazy fetch) before any is read.
+printf '%s\n' "${shas[@]}" >"$WORK/blobs.lst"
+clean "${GIT[@]}" cat-file --batch-check='%(objectname) %(objecttype)' <"$WORK/blobs.lst" >"$WORK/blobs.chk" ||
+    die "cannot check the objects of ebpf_prog"
+missing="$(clean grep -v -m1 '^[0-9a-f]\{40\} blob$' "$WORK/blobs.chk")" || [[ $? -eq 1 ]] ||
+    die "cannot read the object check"
+[[ -z "$missing" ]] || die "object not present locally (refusing to fetch): $missing"
 clean mkdir -- "$SRC"
 for i in "${!rels[@]}"; do
     rel="${rels[i]}"

@@ -645,3 +645,53 @@ fn prebuilt_objects_and_symlinks_in_source_are_refused() {
         "not a regular file",
     );
 }
+
+fn drop_blob(r: &Path, rel: &str) {
+    let sha = git(r, &["rev-parse", &format!("HEAD:ebpf_prog/{rel}")]);
+    std::fs::remove_file(r.join(".git/objects").join(&sha[..2]).join(&sha[2..])).unwrap();
+}
+
+#[test]
+fn command_running_local_git_config_is_refused_before_any_fetch() {
+    let d = scratch("promisor");
+    let marker = d.join("pwned");
+    let touch = format!("touch {}; false", marker.display());
+    let inc = d.join("inc.cfg");
+    std::fs::write(&inc, format!("[core]\n\tsshCommand = {touch}\n")).unwrap();
+    let inc = inc.to_str().unwrap().to_string();
+    let cases: &[&[(&str, &str)]] = &[
+        &[
+            ("core.repositoryformatversion", "1"),
+            ("extensions.partialClone", "origin"),
+            ("remote.origin.url", "ssh://example.invalid/x"),
+            ("remote.origin.promisor", "true"),
+            ("remote.origin.uploadpack", &touch),
+            ("core.sshCommand", &touch),
+        ],
+        &[("core.sshCommand", &touch)],
+        &[("remote.origin.promisor", "true")],
+        &[("include.path", &inc)],
+    ];
+    for (i, cfg) in cases.iter().enumerate() {
+        let d = scratch(&format!("promisor{i}"));
+        let (r, head) = repo(&d, SRC, &[]);
+        drop_blob(&r, "bpf_headers/a.h");
+        for (k, v) in cfg.iter() {
+            git(&r, &["config", k, v]);
+        }
+        let o = run_repo(&d, &r, &head, &"0".repeat(64));
+        fails_with(&o, "repository-local git config");
+        assert!(!marker.exists(), "{cfg:?} ran a command");
+    }
+}
+
+#[test]
+fn missing_blob_is_refused_without_fetching() {
+    let d = scratch("missing");
+    let (r, head) = repo(&d, SRC, &[]);
+    drop_blob(&r, "bpf_headers/a.h");
+    fails_with(
+        &run_repo(&d, &r, &head, &"0".repeat(64)),
+        "object not present locally",
+    );
+}
