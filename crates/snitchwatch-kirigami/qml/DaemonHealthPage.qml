@@ -56,8 +56,9 @@ Kirigami.ScrollablePage {
             wrapMode: Text.WordWrap
             objectName: "processMonitorSupport"
             text: "The GUI supports both /proc and eBPF process monitoring. \
-                   opensnitchd does not report the active method to the GUI; \
-                   check the daemon log to confirm which method is running."
+                   opensnitchd does not report the active method to the GUI, \
+                   only a failure to start eBPF; check the daemon log to \
+                   confirm which method is running."
         }
 
         RoundedButton {

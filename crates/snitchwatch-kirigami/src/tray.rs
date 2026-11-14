@@ -26,7 +26,11 @@ fn is_paused(state: &TrayState, pause: &PauseState) -> bool {
 /// The tooltip before the bridge's first state arrives (Q04): it claims
 /// nothing about prompting yet.
 pub fn startup_tooltip() -> String {
-    crate::tray_health::compose_tooltip("Snitchwatch — waiting for the bridge", None)
+    crate::tray_health::compose_tooltip(
+        "Snitchwatch — waiting for the bridge",
+        None,
+        crate::tray_health::MONITOR_NOT_REPORTED,
+    )
 }
 
 /// A pause only auto-answers prompts: rules keep applying, so the tooltip

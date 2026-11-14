@@ -24,7 +24,7 @@ use crate::tray::{
     build_set_filtering_paused_json, derive_menu_label, derive_tooltip_with_slot,
     live_slot_holders, menu_label_token, startup_tooltip,
 };
-use crate::tray_health::{compose_tooltip, firewall_report};
+use crate::tray_health::{compose_tooltip, firewall_report, monitor_line, MONITOR_NOT_REPORTED};
 use crate::tray_session::{cleanup_job, link_key, watch_sessions_woken, TraySession};
 use snitchwatch_bridge::ws_messages::ServerMessage;
 
@@ -255,10 +255,15 @@ fn spawn_diagnostics_feed(handles: &BridgeHandles, qt_thread: TrayThread) {
         "TrayController",
         crate::bridge_dispatch::interests_diagnostics,
         move |connection_id, msg, _json| {
-            let ServerMessage::DiagnosticsReport { checks } = msg else {
+            let ServerMessage::DiagnosticsReport {
+                checks,
+                process_monitor,
+            } = msg
+            else {
                 return;
             };
             let report = firewall_report(checks);
+            let monitor = monitor_line(process_monitor.as_ref(), local_hh_mm_secs_ago);
             let session_handles = session_handles.clone();
             let _ = qt_thread.queue(move |mut qobject| {
                 if !session_handles.is_current_session(connection_id) {
@@ -268,7 +273,9 @@ fn spawn_diagnostics_feed(handles: &BridgeHandles, qt_thread: TrayThread) {
                 let seen = session
                     .firewall
                     .observe(connection_id, report, local_now_hh_mm);
-                let next = session.with_firewall(seen);
+                let next = session
+                    .with_firewall(seen)
+                    .with_monitor(connection_id, monitor);
                 qobject.as_mut().rust_mut().session = next;
                 qobject.refresh();
             });
@@ -363,7 +370,11 @@ impl qobject::TrayController {
         let firewall = live(Some(session.firewall.session()))
             .then(|| session.firewall.line())
             .flatten();
-        let tooltip = compose_tooltip(&state_text, firewall.as_deref());
+        let monitor = session
+            .monitor
+            .filter(|m| live(Some(m.session)))
+            .map_or_else(|| MONITOR_NOT_REPORTED.to_string(), |m| m.value);
+        let tooltip = compose_tooltip(&state_text, firewall.as_deref(), &monitor);
         let label = derive_menu_label(&tray.value, &pause);
         self.as_mut().set_tooltip(QString::from(&tooltip));
         self.as_mut()
@@ -381,6 +392,14 @@ fn local_hh_mm(unix_ms: u64) -> String {
     let mut local = QDateTime::current_date_time();
     local.set_msecs_since_epoch(i64::try_from(unix_ms).unwrap_or(i64::MAX));
     local.time().format(&QString::from("HH:mm")).to_string()
+}
+
+/// `secs` seconds ago, as a local "HH:MM" time.
+pub(crate) fn local_hh_mm_secs_ago(secs: u64) -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    local_hh_mm(now_ms.saturating_sub(secs.saturating_mul(1000)))
 }
 
 /// Now, as a local "HH:MM" time.

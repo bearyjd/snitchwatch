@@ -6,9 +6,11 @@
 
 pub mod kernel_probe;
 
-use crate::daemon_alerts::{AlertSeverity, DaemonAlertStore, StoredAlert};
+use crate::daemon_alerts::{
+    monitor_fallback, AlertSeverity, DaemonAlertStore, GenericTopic, StoredAlert,
+};
 use crate::daemon_liveness::DaemonLiveness;
-use crate::ws_messages::{CheckKind, CheckStatus, DiagnosticCheck};
+use crate::ws_messages::{CheckKind, CheckStatus, DiagnosticCheck, ProcessMonitorReport};
 use kernel_probe::KernelProbe;
 use snitchwatch_proto::protocol::alert;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -72,6 +74,9 @@ pub struct DiagnosticsCtx {
     firewall_status: Arc<StdMutex<Option<bool>>>,
     probe: Arc<dyn kernel_probe::KernelProbe>,
     alert_store: Arc<DaemonAlertStore>,
+    /// Held across snapshot + send in [`Self::publish`], so publishes reach
+    /// the broadcast in the order their snapshots were taken.
+    publish_lock: StdMutex<()>,
 }
 
 impl DiagnosticsCtx {
@@ -86,7 +91,29 @@ impl DiagnosticsCtx {
             firewall_status,
             probe,
             alert_store,
+            publish_lock: StdMutex::new(()),
         }
+    }
+
+    /// Snapshots the report and broadcasts it atomically with respect to
+    /// every other `publish`. Callers mutate state first, then publish, so
+    /// the last broadcast always reflects the latest state.
+    pub fn publish(
+        &self,
+        broadcast: &tokio::sync::broadcast::Sender<crate::ws_messages::ServerMessage>,
+    ) -> Result<usize, String> {
+        let _guard = self.publish_lock.lock().unwrap_or_else(|e| e.into_inner());
+        broadcast
+            .send(crate::ws_messages::ServerMessage::DiagnosticsReport {
+                checks: self.report(),
+                process_monitor: self.process_monitor(),
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(test)]
+    fn lock_publish_for_test(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.publish_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Resets the stored firewall status back to `Unknown`. Called when the
@@ -101,6 +128,22 @@ impl DiagnosticsCtx {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         *guard = None;
+    }
+
+    /// Forgets the monitor-fallback alert, called when the daemon goes
+    /// down. Subscribe never calls it: a queued alert can arrive before the
+    /// subscribe (`daemon_alerts` module doc).
+    pub fn clear_monitor_fallback(&self) {
+        self.alert_store
+            .clear_generic(GenericTopic::MonitorFallback);
+    }
+
+    /// As [`Self::clear_monitor_fallback`], but only for an alert recorded at
+    /// or before `sampled_at` (when the caller observed the outage): a
+    /// replacement daemon's fresh one survives.
+    pub fn clear_monitor_fallback_recorded_before(&self, sampled_at: Instant) {
+        self.alert_store
+            .clear_monitor_fallback_recorded_before(sampled_at);
     }
 
     /// Drops every stored daemon alert. Called by
@@ -120,22 +163,35 @@ impl DiagnosticsCtx {
         self.alert_store
             .get(alert::What::ProcMonitor)
             .or_else(|| self.alert_store.get(alert::What::KernelEvent))
-            .or_else(|| {
-                self.alert_store.get(alert::What::Generic).filter(|a| {
-                    classify_generic_alert_text(&a.text) == Some(CheckKind::EbpfSupport)
-                })
-            })
+            .or_else(|| self.alert_store.generic(GenericTopic::ProcessMonitor))
+    }
+
+    /// The daemon's latest "eBPF fell back to `/proc`" alert, if any (E3).
+    /// Positive evidence only: `None` means not reported, never "eBPF".
+    /// `None` while the daemon is down: the alert described the daemon
+    /// process that went away, not whichever one starts next.
+    pub fn process_monitor(&self) -> Option<ProcessMonitorReport> {
+        if self
+            .liveness
+            .is_down(Instant::now(), crate::daemon_watchdog::DAEMON_DOWN_TIMEOUT)
+        {
+            return None;
+        }
+        let alert = self.alert_store.generic(GenericTopic::MonitorFallback)?;
+        Some(ProcessMonitorReport {
+            fallback: monitor_fallback(&alert.text)?,
+            reported_secs_ago: alert.recorded_at.elapsed().as_secs(),
+            daemon_text: alert.text,
+        })
     }
 
     /// Whichever ERROR/WARNING alert is relevant to `FirewallRunning`, if
     /// any. Same tagged-then-classified-Generic preference as
     /// [`Self::ebpf_alert`].
     fn firewall_alert(&self) -> Option<StoredAlert> {
-        self.alert_store.get(alert::What::Firewall).or_else(|| {
-            self.alert_store.get(alert::What::Generic).filter(|a| {
-                classify_generic_alert_text(&a.text) == Some(CheckKind::FirewallRunning)
-            })
-        })
+        self.alert_store
+            .get(alert::What::Firewall)
+            .or_else(|| self.alert_store.generic(GenericTopic::Firewall))
     }
 
     pub fn report(&self) -> Vec<DiagnosticCheck> {
@@ -203,30 +259,6 @@ impl DiagnosticsCtx {
         }
 
         checks
-    }
-}
-
-/// Classifies a `GENERIC`-`What` alert's free text into the check it's
-/// actually about. opensnitchd v1.8.0 never tags PROC_MONITOR/FIREWALL
-/// specifically for any issue-#6-relevant alert — see `daemon_alerts`'s
-/// module doc — so a real daemon's eBPF and firewall/queue failures both
-/// arrive as `Alert_GENERIC` and have to be told apart by message text
-/// instead. Matches on substrings seen in the actual v1.8.0 source
-/// (`daemon/main.go:176,187,645`, `daemon/ui/config_utils.go:82`); text
-/// matching neither pattern is left unmapped (recorded in the store, but
-/// not overlaid onto any check).
-fn classify_generic_alert_text(text: &str) -> Option<CheckKind> {
-    let lower = text.to_lowercase();
-    if lower.contains("process monitor") || lower.contains("ebpf") {
-        Some(CheckKind::EbpfSupport)
-    } else if lower.contains("queue #")
-        || lower.contains("nfqueue")
-        || lower.contains("nftables")
-        || lower.contains("firewall")
-    {
-        Some(CheckKind::FirewallRunning)
-    } else {
-        None
     }
 }
 
@@ -674,17 +706,7 @@ mod tests {
         // Clearing a reported alert does not prove an active monitor method.
         assert_eq!(ebpf_after.status, CheckStatus::Unknown);
     }
-
-    #[test]
-    fn classify_generic_alert_text_is_case_insensitive() {
-        assert_eq!(
-            classify_generic_alert_text("EBPF init failed"),
-            Some(CheckKind::EbpfSupport)
-        );
-        assert_eq!(
-            classify_generic_alert_text("NFTables rule load error"),
-            Some(CheckKind::FirewallRunning)
-        );
-        assert_eq!(classify_generic_alert_text("unrelated message"), None);
-    }
 }
+
+#[cfg(test)]
+mod monitor_fallback_tests;
