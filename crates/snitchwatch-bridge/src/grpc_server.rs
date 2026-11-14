@@ -554,7 +554,21 @@ impl Ui for UiService {
         }
         // Deliberately does NOT clear `alert_store` — see that field's doc
         // comment and `daemon_alerts`'s module doc for why a fresh
-        // `subscribe()` is the wrong trigger for that.
+        // `subscribe()` is the wrong trigger for that. The one exception is
+        // the eBPF-to-/proc fallback (E3): it describes a daemon session, so
+        // an old one goes, short of the startup race grace.
+        if self
+            .alert_store
+            .on_daemon_subscribe(std::time::Instant::now())
+        {
+            // No watchdog transition reports a fast daemon restart: push the
+            // report without the old fallback, as `post_alert` does.
+            if let Some(ctx) = self.diagnostics_ctx.get() {
+                if let Err(e) = ctx.publish(&self.broadcast) {
+                    debug!(error = %e, "subscribe: no GUI to receive the diagnostics report");
+                }
+            }
+        }
         Ok(Response::new(cfg))
     }
 
@@ -565,7 +579,7 @@ impl Ui for UiService {
 
         // An unrecognized `What` value used to be coerced to `Generic` —
         // now that `Generic` is a meaningful bucket the diagnostics overlay
-        // text-classifies (see `diagnostics::classify_generic_alert_text`),
+        // text-classifies (see `daemon_alerts::GenericTopic::classify`),
         // silently relabeling a genuinely-unknown value as `Generic` would
         // feed the classifier data that was never actually reported as
         // GENERIC. Skip recording instead.
@@ -598,10 +612,7 @@ impl Ui for UiService {
                 // either way — a client that subscribes later still gets it
                 // via the next `report()`.
                 if self.broadcast.receiver_count() > 0 {
-                    let msg = ServerMessage::DiagnosticsReport {
-                        checks: ctx.report(),
-                    };
-                    if let Err(e) = self.broadcast.send(msg) {
+                    if let Err(e) = ctx.publish(&self.broadcast) {
                         warn!(error = %e, "post_alert: broadcast send failed");
                     }
                 }

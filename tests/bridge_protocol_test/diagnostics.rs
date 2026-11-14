@@ -343,3 +343,156 @@ async fn wait_for_ebpf_status(ws: &mut WebSocketStream<UnixStream>) -> serde_jso
     .await
     .expect("timed out waiting for a diagnosticsReport")
 }
+
+/// E3: opensnitchd v1.8.0's startup alert when `opensnitch.o` does not load
+/// (`procmon/ebpf/ebpf.go:134` + `core/ebpf.go:69-71`, verbatim), then the
+/// `EBPF-DNS` alert it sends right after (`main.go:650-660`). The bridge
+/// reports the fallback to `/proc` as the process monitor's state, keeps it
+/// past the DNS alert, never fails `ebpf_support` for either, and drops it on
+/// recheck.
+#[tokio::test]
+async fn ebpf_fallback_alert_is_reported_as_process_monitor_not_a_failure() {
+    const FALLBACK: &str = "[eBPF] Error loading opensnitch.o: \nunable to load eBPF module (opensnitch.o). Your kernel version (7.2.15-ogc1.1.fc45.x86_64) might not be compatible.\nIf this error persists, change process monitor method to 'proc'";
+    const DNS: &str =
+        "EBPF-DNS: Unable to attach ebpf listener: unable to load eBPF module (opensnitch-dns.o)";
+    use snitchwatch_proto::protocol::alert::{Type, What};
+
+    let socket_dir = tempfile::tempdir().unwrap();
+    let cfg = BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
+        cache_capacity: 1024,
+    };
+    let bridge = run(cfg).await.expect("bridge run failed");
+    let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
+
+    mock.post_alert_text(Type::Warning, What::Generic, FALLBACK)
+        .await
+        .expect("post_alert failed");
+    mock.post_alert_text(Type::Error, What::Generic, DNS)
+        .await
+        .expect("post_alert failed");
+
+    // A third, firewall alert: the first report with a failed firewall check
+    // was built after the DNS alert was stored, so it proves the post-DNS
+    // state.
+    mock.post_alert_text(Type::Error, What::Generic, "Error creating queue #0: busy")
+        .await
+        .expect("post_alert failed");
+    let report = loop {
+        let report = next_diagnostics_report(&mut ws).await;
+        let firewall = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["kind"] == "firewall_running")
+            .expect("no firewall_running check")
+            .clone();
+        if firewall["status"]["status"] == "failed" {
+            break report;
+        }
+    };
+    assert_ne!(
+        ebpf_check(&report)["status"]["status"],
+        "failed",
+        "{report}"
+    );
+    let pm = report
+        .get("processMonitor")
+        .expect("fallback dropped by a later alert");
+    assert_eq!(pm["fallback"], "ebpf_did_not_start", "{report}");
+    assert_eq!(pm["daemonText"], FALLBACK);
+
+    ws.send(Message::Text(
+        json!({ "action": "recheckDiagnostics" }).to_string(),
+    ))
+    .await
+    .expect("send recheckDiagnostics failed");
+    loop {
+        let report = next_diagnostics_report(&mut ws).await;
+        if report.get("processMonitor").is_none() {
+            break;
+        }
+    }
+
+    bridge.shutdown();
+}
+
+async fn next_diagnostics_report(ws: &mut WebSocketStream<UnixStream>) -> serde_json::Value {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                    if v.get("action").and_then(|a| a.as_str()) == Some("diagnosticsReport") {
+                        return v;
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => panic!("ws recv error: {e}"),
+                None => panic!("ws stream ended early"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for a diagnosticsReport")
+}
+
+fn ebpf_check(report: &serde_json::Value) -> serde_json::Value {
+    report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["kind"] == "ebpf_support")
+        .expect("no ebpf_support check in report")
+        .clone()
+}
+
+/// E3 (codex): a daemon re-Subscribe more than `FALLBACK_SUBSCRIBE_GRACE`
+/// after the fallback alert, with no new alert, pushes a report without
+/// `processMonitor` to connected GUIs (no watchdog transition does it on a
+/// fast restart).
+#[tokio::test]
+async fn resubscribe_without_a_new_alert_pushes_a_report_without_the_fallback() {
+    use snitchwatch_proto::protocol::alert::{Type, What};
+    let socket_dir = tempfile::tempdir().unwrap();
+    let cfg = BridgeConfig {
+        grpc_bind: "127.0.0.1:0".parse().unwrap(),
+        ws_socket_path: socket_dir.path().join("bridge.sock"),
+        cache_capacity: 1024,
+    };
+    let bridge = run(cfg).await.expect("bridge run failed");
+    let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
+    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        .await
+        .unwrap();
+
+    mock.post_alert_text(
+        Type::Warning,
+        What::Generic,
+        "[eBPF] Error loading opensnitch.o: x",
+    )
+    .await
+    .expect("post_alert failed");
+    while next_diagnostics_report(&mut ws)
+        .await
+        .get("processMonitor")
+        .is_none()
+    {}
+
+    tokio::time::sleep(
+        snitchwatch_bridge::daemon_alerts::FALLBACK_SUBSCRIBE_GRACE + Duration::from_millis(300),
+    )
+    .await;
+    mock.subscribe("opensnitchd-restarted").await.unwrap();
+    while next_diagnostics_report(&mut ws)
+        .await
+        .get("processMonitor")
+        .is_some()
+    {}
+
+    bridge.shutdown();
+}

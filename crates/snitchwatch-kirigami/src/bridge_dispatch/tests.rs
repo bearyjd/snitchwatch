@@ -240,7 +240,10 @@ fn legacy_uplot_traffic_blobs_are_not_routed_to_traffic() {
 
 #[test]
 fn diagnostics_route_only_to_diagnostics_report() {
-    let diagnostics_msg = ServerMessage::DiagnosticsReport { checks: vec![] };
+    let diagnostics_msg = ServerMessage::DiagnosticsReport {
+        checks: vec![],
+        process_monitor: None,
+    };
     assert!(interests_diagnostics(&diagnostics_msg));
 
     let other_msg = ServerMessage::ClearConnectionRows;

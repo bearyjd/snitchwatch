@@ -177,11 +177,32 @@ fn diagnostics_report_round_trips() {
                 status: CheckStatus::Unknown,
             },
         ],
+        process_monitor: Some(crate::ws_messages::ProcessMonitorReport {
+            fallback: crate::ws_messages::MonitorFallback::EbpfEventsDidNotStart,
+            reported_secs_ago: 7,
+            daemon_text: "unable to load eBPF module (opensnitch-procs.o)".to_string(),
+        }),
     };
     let json = serde_json::to_string(&msg).unwrap();
     assert!(json.contains("\"action\":\"diagnosticsReport\""));
+    assert!(json.contains(
+        "\"processMonitor\":{\"fallback\":\"ebpf_events_did_not_start\",\"reportedSecsAgo\":7,"
+    ));
     let round_tripped: ServerMessage = serde_json::from_str(&json).unwrap();
     assert_eq!(round_tripped, msg);
+}
+
+#[test]
+fn diagnostics_report_without_a_fallback_omits_the_field_both_ways() {
+    let msg = ServerMessage::DiagnosticsReport {
+        checks: vec![],
+        process_monitor: None,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    assert!(!json.contains("processMonitor"), "{json}");
+    let older: ServerMessage =
+        serde_json::from_str(r#"{"action":"diagnosticsReport","checks":[]}"#).unwrap();
+    assert_eq!(older, msg);
 }
 
 #[test]

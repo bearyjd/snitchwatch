@@ -369,8 +369,10 @@ Two independent ways to force it:
   `Alert_GENERIC` + free text — see `daemon_alerts`'s module doc for why
   it's never a tagged `PROC_MONITOR` alert on a real daemon), which the
   bridge text-classifies and overlays onto `EbpfSupport`
-  (`DaemonAlertStore` + `DiagnosticsCtx::report()`'s
-  `classify_generic_alert_text` in `diagnostics/mod.rs`).
+  (`DaemonAlertStore` + `GenericTopic::classify` in `daemon_alerts.rs`).
+  A recognised startup fallback alert (`[eBPF] Error loading opensnitch.o`,
+  procs module) is not overlaid: it sets the monitor line to `/proc` instead
+  (E3, `docs/superpowers/plans/2026-11-09-ebpf-honest-health.md`).
 
   **Correction (2026-07-31, issue #6 post-close comment):** an earlier
   version of this step claimed the v1.8.0 module fails to load on kernels

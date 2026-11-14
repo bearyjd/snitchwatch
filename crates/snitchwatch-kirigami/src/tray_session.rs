@@ -27,6 +27,8 @@ pub struct TraySession {
     pub tray: Option<Tagged<TrayState>>,
     pub pause: Option<Tagged<PauseState>>,
     pub firewall: FirewallSeen,
+    /// The monitor line from the session's latest report (E3).
+    pub monitor: Option<Tagged<String>>,
 }
 
 impl TraySession {
@@ -51,6 +53,16 @@ impl TraySession {
         }
     }
 
+    pub fn with_monitor(&self, session: u64, line: String) -> Self {
+        Self {
+            monitor: Some(Tagged {
+                session,
+                value: line,
+            }),
+            ..self.clone()
+        }
+    }
+
     /// Only what `live` sent; everything from any other session is dropped.
     pub fn reconcile(&self, live: Option<u64>) -> Self {
         let is_live = |session: u64| live == Some(session);
@@ -62,6 +74,7 @@ impl TraySession {
             } else {
                 FirewallSeen::default()
             },
+            monitor: self.monitor.clone().filter(|m| is_live(m.session)),
         }
     }
 }
@@ -168,10 +181,14 @@ mod tests {
             .with_tray(1, TrayState::Pending(2))
             .with_pause(1, PAUSED)
             .with_firewall(firewall_off(1))
+            .with_monitor(
+                1,
+                "Process monitor: eBPF did not start; reported".to_string(),
+            )
     }
 
     #[test]
-    fn a_disconnect_forgets_the_tray_pause_and_firewall() {
+    fn a_disconnect_forgets_the_tray_pause_firewall_and_monitor() {
         assert_eq!(session_a().reconcile(None), TraySession::default());
     }
 
@@ -202,6 +219,7 @@ mod tests {
         );
         assert_eq!(kept.pause, None);
         assert_eq!(kept.firewall, FirewallSeen::default());
+        assert_eq!(kept.monitor, None);
     }
 
     /// The watcher saw a disconnect (None) and queued a cleanup; B connected
@@ -214,7 +232,11 @@ mod tests {
         let with_b = session_a()
             .with_tray(2, TrayState::Idle)
             .with_pause(2, PAUSED)
-            .with_firewall(firewall_off(2));
+            .with_firewall(firewall_off(2))
+            .with_monitor(
+                2,
+                "Process monitor: eBPF did not start; reported".to_string(),
+            );
         assert_eq!(job(&with_b), with_b);
     }
 

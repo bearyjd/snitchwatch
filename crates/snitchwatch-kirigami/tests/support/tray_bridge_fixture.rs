@@ -28,6 +28,7 @@ pub fn report(firewall: CheckStatus) -> String {
                 status: firewall,
             },
         ],
+        process_monitor: None,
     })
     .unwrap()
 }

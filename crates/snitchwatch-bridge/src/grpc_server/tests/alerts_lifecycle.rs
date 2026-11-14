@@ -356,3 +356,50 @@ async fn tonic_request_deadline_cleans_pending_with_silent_authenticated_gui() {
     );
     server.abort();
 }
+
+/// E3 (codex): a new daemon Subscribe is a new daemon session. A fallback
+/// alert from before it is dropped unless it arrived within
+/// `FALLBACK_SUBSCRIBE_GRACE` of the Subscribe (the daemon's startup alert and
+/// its Subscribe race, `daemon/ui/client.go:235-247`); one after it is kept.
+#[tokio::test]
+async fn subscribe_drops_an_old_monitor_fallback_but_keeps_a_fresh_one() {
+    use crate::daemon_alerts::{GenericTopic, FALLBACK_SUBSCRIBE_GRACE};
+    use snitchwatch_proto::protocol::alert;
+    const FALLBACK: &str = "[eBPF] Error loading opensnitch.o: x";
+
+    let cache = Arc::new(Mutex::new(ConnectionCache::new(64)));
+    let (tx, _rx) = broadcast::channel::<ServerMessage>(16);
+    let svc = UiService::new(
+        cache,
+        tx,
+        Arc::new(crate::tray_state::TrayStatePublisher::new()),
+        Arc::new(crate::notice::NoticeBus::new()),
+        Arc::new(FilterPause::new()),
+    );
+    let fallback = || text_alert(alert::What::Generic, alert::Type::Warning, FALLBACK);
+    let stored = |svc: &UiService| {
+        svc.alert_store_handle()
+            .generic(GenericTopic::MonitorFallback)
+    };
+
+    // Startup race: alert just before the Subscribe of the same daemon.
+    svc.post_alert(Request::new(fallback())).await.unwrap();
+    svc.subscribe(Request::new(ClientConfig::default()))
+        .await
+        .unwrap();
+    assert!(stored(&svc).is_some(), "a same-startup alert was dropped");
+
+    // A reconnect with no new alert: the old evidence goes.
+    tokio::time::sleep(FALLBACK_SUBSCRIBE_GRACE + std::time::Duration::from_millis(200)).await;
+    svc.subscribe(Request::new(ClientConfig::default()))
+        .await
+        .unwrap();
+    assert!(
+        stored(&svc).is_none(),
+        "an old fallback outlived a new daemon session"
+    );
+
+    // A reconnect followed by a new alert keeps it.
+    svc.post_alert(Request::new(fallback())).await.unwrap();
+    assert!(stored(&svc).is_some());
+}

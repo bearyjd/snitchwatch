@@ -25,7 +25,9 @@ pub use curated_wire::{
     IntentDecodeError,
 };
 
-pub use diagnostic_wire::{CheckKind, CheckStatus, DiagnosticCheck};
+pub use diagnostic_wire::{
+    CheckKind, CheckStatus, DiagnosticCheck, MonitorFallback, ProcessMonitorReport,
+};
 pub use profile_wire::{ProfileRuleWire, ProfileSummary};
 pub use reply_to::ReplyTo;
 pub use rule_wire::{RuleCommandOutcome, RuleHitWire};
@@ -236,6 +238,10 @@ pub enum ServerMessage {
     },
     DiagnosticsReport {
         checks: Vec<DiagnosticCheck>,
+        /// Set only while a daemon alert says the process monitor fell back
+        /// to `/proc` (E3). Left out otherwise, and by an older bridge.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        process_monitor: Option<ProcessMonitorReport>,
     },
     SetUndoStack {
         stack: Vec<serde_json::Value>,
