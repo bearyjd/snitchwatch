@@ -150,6 +150,17 @@ impl Default for DaemonHealthModelRust {
     }
 }
 
+/// Whether the monitor line shown came from a bridge session other than the
+/// live one (or none is live): then it must not outlive the switch, even if a
+/// new session connected before the queued reset ran.
+fn monitor_line_is_stale(live_session: Option<u64>, shown_from: Option<u64>) -> bool {
+    match (live_session, shown_from) {
+        (None, _) => true,
+        (Some(live), Some(shown)) => live != shown,
+        (Some(_), None) => false,
+    }
+}
+
 impl qobject::DaemonHealthModel {
     fn apply_server_message_json(self: Pin<&mut Self>, json: &QString) {
         let text = json.to_string();
@@ -200,16 +211,21 @@ impl qobject::DaemonHealthModel {
         };
         let qt_thread = self.qt_thread();
         let session_handles = handles.clone();
+        // Which bridge session supplied the monitor line now shown.
+        let shown_from: std::sync::Arc<std::sync::Mutex<Option<u64>>> = Default::default();
+        let feed_shown_from = shown_from.clone();
         crate::bridge_dispatch::spawn_feed(
             &handles,
             "DaemonHealthModel",
             crate::bridge_dispatch::interests_diagnostics,
             move |connection_id, _msg, json| {
                 let session_handles = session_handles.clone();
+                let shown_from = feed_shown_from.clone();
                 let _ = qt_thread.queue(move |qobject| {
                     if !session_handles.is_current_session(connection_id) {
                         return;
                     }
+                    *shown_from.lock().unwrap_or_else(|p| p.into_inner()) = Some(connection_id);
                     qobject.apply_server_message_json(&QString::from(&json));
                 });
             },
@@ -225,8 +241,11 @@ impl qobject::DaemonHealthModel {
         handles.runtime().spawn(async move {
             while link_rx.changed().await.is_ok() {
                 let handles = link_handles.clone();
+                let shown_from = shown_from.clone();
                 let queued = link_thread.queue(move |mut qobject| {
-                    if handles.live_session().is_none() {
+                    let mut shown = shown_from.lock().unwrap_or_else(|p| p.into_inner());
+                    if monitor_line_is_stale(handles.live_session(), *shown) {
+                        *shown = None;
                         qobject.as_mut().set_monitor_status(QString::from(
                             crate::tray_health::MONITOR_NOT_REPORTED,
                         ));
@@ -259,6 +278,18 @@ impl qobject::DaemonHealthModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_monitor_line_from_a_past_session_is_stale() {
+        // Not connected: always reset.
+        assert!(monitor_line_is_stale(None, Some(1)));
+        assert!(monitor_line_is_stale(None, None));
+        // A rapid reconnect: session 2 is live but the line came from 1.
+        assert!(monitor_line_is_stale(Some(2), Some(1)));
+        // The live session supplied the line, or nothing was shown yet.
+        assert!(!monitor_line_is_stale(Some(2), Some(2)));
+        assert!(!monitor_line_is_stale(Some(2), None));
+    }
 
     fn reachable_check(status: CheckStatus) -> DiagnosticCheck {
         DiagnosticCheck {
