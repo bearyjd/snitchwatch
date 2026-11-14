@@ -74,6 +74,9 @@ pub struct DiagnosticsCtx {
     firewall_status: Arc<StdMutex<Option<bool>>>,
     probe: Arc<dyn kernel_probe::KernelProbe>,
     alert_store: Arc<DaemonAlertStore>,
+    /// Held across snapshot + send in [`Self::publish`], so publishes reach
+    /// the broadcast in the order their snapshots were taken.
+    publish_lock: StdMutex<()>,
 }
 
 impl DiagnosticsCtx {
@@ -88,7 +91,29 @@ impl DiagnosticsCtx {
             firewall_status,
             probe,
             alert_store,
+            publish_lock: StdMutex::new(()),
         }
+    }
+
+    /// Snapshots the report and broadcasts it atomically with respect to
+    /// every other `publish`. Callers mutate state first, then publish, so
+    /// the last broadcast always reflects the latest state.
+    pub fn publish(
+        &self,
+        broadcast: &tokio::sync::broadcast::Sender<crate::ws_messages::ServerMessage>,
+    ) -> Result<usize, String> {
+        let _guard = self.publish_lock.lock().unwrap_or_else(|e| e.into_inner());
+        broadcast
+            .send(crate::ws_messages::ServerMessage::DiagnosticsReport {
+                checks: self.report(),
+                process_monitor: self.process_monitor(),
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(test)]
+    fn lock_publish_for_test(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.publish_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Resets the stored firewall status back to `Unknown`. Called when the
@@ -111,6 +136,14 @@ impl DiagnosticsCtx {
     pub fn clear_monitor_fallback(&self) {
         self.alert_store
             .clear_generic(GenericTopic::MonitorFallback);
+    }
+
+    /// As [`Self::clear_monitor_fallback`], but only for an alert recorded at
+    /// or before `sampled_at` (when the caller observed the outage): a
+    /// replacement daemon's fresh one survives.
+    pub fn clear_monitor_fallback_recorded_before(&self, sampled_at: Instant) {
+        self.alert_store
+            .clear_monitor_fallback_recorded_before(sampled_at);
     }
 
     /// Drops every stored daemon alert. Called by

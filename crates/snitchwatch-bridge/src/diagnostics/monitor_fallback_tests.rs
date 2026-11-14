@@ -105,3 +105,46 @@ fn clearing_the_fallback_keeps_other_alerts() {
     assert_eq!(ctx.process_monitor(), None);
     assert!(matches!(ebpf_status(&ctx), CheckStatus::Failed { .. }));
 }
+
+/// E3 round 4: a clear scoped to an outage sampled earlier must not drop a
+/// fallback a replacement daemon reported afterwards.
+#[test]
+fn a_scoped_clear_keeps_a_fallback_recorded_after_the_sample() {
+    let sampled_at = Instant::now();
+    let ctx = ctx_with(&[MAIN_MODULE_FALLBACK]);
+    ctx.clear_monitor_fallback_recorded_before(sampled_at);
+    assert!(ctx.process_monitor().is_some());
+}
+
+#[test]
+fn a_scoped_clear_drops_a_fallback_recorded_before_the_sample() {
+    let ctx = ctx_with(&[MAIN_MODULE_FALLBACK]);
+    ctx.clear_monitor_fallback_recorded_before(Instant::now());
+    assert_eq!(ctx.process_monitor(), None);
+}
+
+/// E3 round 4: the snapshot is taken under the publish lock, so a publish
+/// that was waiting while another site cleared the fallback sends the
+/// post-clear state, never a stale one.
+#[test]
+fn a_publish_blocked_behind_a_clear_sends_the_post_clear_state() {
+    let ctx = Arc::new(ctx_with(&[MAIN_MODULE_FALLBACK]));
+    let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+    let guard = ctx.lock_publish_for_test();
+    let publisher = {
+        let ctx = ctx.clone();
+        std::thread::spawn(move || ctx.publish(&tx))
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(rx.try_recv().is_err(), "publish ran without the lock");
+    ctx.clear_monitor_fallback();
+    drop(guard);
+    publisher.join().unwrap().unwrap();
+    let crate::ws_messages::ServerMessage::DiagnosticsReport {
+        process_monitor, ..
+    } = rx.try_recv().unwrap()
+    else {
+        panic!("expected DiagnosticsReport");
+    };
+    assert_eq!(process_monitor, None);
+}

@@ -564,11 +564,7 @@ impl Ui for UiService {
             // No watchdog transition reports a fast daemon restart: push the
             // report without the old fallback, as `post_alert` does.
             if let Some(ctx) = self.diagnostics_ctx.get() {
-                let msg = ServerMessage::DiagnosticsReport {
-                    checks: ctx.report(),
-                    process_monitor: ctx.process_monitor(),
-                };
-                if let Err(e) = self.broadcast.send(msg) {
+                if let Err(e) = ctx.publish(&self.broadcast) {
                     debug!(error = %e, "subscribe: no GUI to receive the diagnostics report");
                 }
             }
@@ -616,11 +612,7 @@ impl Ui for UiService {
                 // either way — a client that subscribes later still gets it
                 // via the next `report()`.
                 if self.broadcast.receiver_count() > 0 {
-                    let msg = ServerMessage::DiagnosticsReport {
-                        checks: ctx.report(),
-                        process_monitor: ctx.process_monitor(),
-                    };
-                    if let Err(e) = self.broadcast.send(msg) {
+                    if let Err(e) = ctx.publish(&self.broadcast) {
                         warn!(error = %e, "post_alert: broadcast send failed");
                     }
                 }

@@ -44,7 +44,8 @@ pub async fn run(
     loop {
         interval.tick().await;
 
-        let down_now = liveness.is_down(Instant::now(), DAEMON_DOWN_TIMEOUT);
+        let sampled_at = Instant::now();
+        let down_now = liveness.is_down(sampled_at, DAEMON_DOWN_TIMEOUT);
 
         if down_now && !was_down {
             {
@@ -58,12 +59,11 @@ pub async fn run(
             // running while the daemon is down.
             diagnostics_ctx.reset_firewall_status_unknown();
             // Same for a reported eBPF-to-/proc fallback (E3): the next
-            // daemon start re-alerts if it is still true.
-            diagnostics_ctx.clear_monitor_fallback();
-            let _ = broadcast_tx.send(crate::ws_messages::ServerMessage::DiagnosticsReport {
-                checks: diagnostics_ctx.report(),
-                process_monitor: diagnostics_ctx.process_monitor(),
-            });
+            // daemon start re-alerts if it is still true. Scoped to the
+            // sampled outage: a replacement daemon's alert that landed while
+            // this task awaited the cache lock is kept.
+            diagnostics_ctx.clear_monitor_fallback_recorded_before(sampled_at);
+            let _ = diagnostics_ctx.publish(&broadcast_tx);
         } else if !down_now && was_down {
             // Recovered — show what the cache actually holds, not a
             // hardcoded Idle (there may be pending rows queued up from
@@ -73,10 +73,7 @@ pub async fn run(
                 cache.set_daemon_down(false);
                 tray_pub.set(cache.tray_state());
             }
-            let _ = broadcast_tx.send(crate::ws_messages::ServerMessage::DiagnosticsReport {
-                checks: diagnostics_ctx.report(),
-                process_monitor: diagnostics_ctx.process_monitor(),
-            });
+            let _ = diagnostics_ctx.publish(&broadcast_tx);
         }
         was_down = down_now;
     }
@@ -186,6 +183,50 @@ mod tests {
             process_monitor, None,
             "the old fallback came back after recovery"
         );
+        watchdog.abort();
+    }
+
+    /// E3 round 4: the watchdog samples the outage, then awaits the cache
+    /// lock; a fallback a replacement daemon records in that gap survives.
+    #[tokio::test]
+    async fn down_transition_keeps_a_fallback_recorded_after_the_sample() {
+        let liveness = DaemonLiveness::new_stale_for_test(
+            Instant::now(),
+            DAEMON_DOWN_TIMEOUT + Duration::from_secs(1),
+        );
+        let tray_pub = Arc::new(TrayStatePublisher::new());
+        let cache = Arc::new(TokioMutex::new(ConnectionCache::new(64)));
+        let (broadcast_tx, mut reports) = tokio::sync::broadcast::channel(16);
+        let store = Arc::new(crate::daemon_alerts::DaemonAlertStore::new());
+        let diagnostics_ctx = Arc::new(crate::diagnostics::DiagnosticsCtx::new(
+            liveness.clone(),
+            Arc::new(StdMutex::new(None)),
+            Arc::new(crate::diagnostics::kernel_probe::testing::FakeKernelProbe::all_ok()),
+            store.clone(),
+        ));
+        let guard = cache.lock().await;
+        let watchdog = tokio::spawn(run(
+            liveness,
+            tray_pub,
+            cache.clone(),
+            diagnostics_ctx,
+            broadcast_tx,
+        ));
+        // The watchdog has sampled `down_now` and is parked on the cache lock.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        store.record(
+            snitchwatch_proto::protocol::alert::What::Generic,
+            snitchwatch_proto::protocol::alert::Type::Warning as i32,
+            "[eBPF] Error loading opensnitch.o: x".to_string(),
+        );
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(3), reports.recv())
+            .await
+            .expect("timed out waiting for DiagnosticsReport")
+            .unwrap();
+        assert!(store
+            .generic(crate::daemon_alerts::GenericTopic::MonitorFallback)
+            .is_some());
         watchdog.abort();
     }
 

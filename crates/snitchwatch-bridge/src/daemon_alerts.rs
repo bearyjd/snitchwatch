@@ -218,6 +218,14 @@ impl DaemonAlertStore {
     /// unless it arrived within [`FALLBACK_SUBSCRIBE_GRACE`] of `now`. Other
     /// alerts are kept (module doc: a reconnect fixes nothing for them).
     /// True if it dropped one.
+    ///
+    /// Known limitation (E3 review round 4): alert age is only a proxy for
+    /// daemon-session identity. opensnitchd's `ClientConfig.id` is
+    /// `ts.UnixNano()` per Subscribe, not per process
+    /// (`daemon/ui/notifications.go:52`), and nothing else in Subscribe
+    /// identifies a process, so a transport reconnect of the same daemon and
+    /// a replacement daemon look identical here. The grace window is kept
+    /// as is; a stable session id would have to come from an upstream field.
     pub fn on_daemon_subscribe(&self, now: Instant) -> bool {
         let mut guard = self
             .generic_by_topic
@@ -230,6 +238,23 @@ impl DaemonAlertStore {
             guard.remove(&GenericTopic::MonitorFallback);
         }
         stale
+    }
+
+    /// Drops the monitor-fallback alert only if it was recorded at or before
+    /// `sampled_at`, so one recorded after that instant (a replacement
+    /// daemon's) survives. True if it dropped one.
+    pub fn clear_monitor_fallback_recorded_before(&self, sampled_at: Instant) -> bool {
+        let mut guard = self
+            .generic_by_topic
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let older = guard
+            .get(&GenericTopic::MonitorFallback)
+            .is_some_and(|a| a.recorded_at <= sampled_at);
+        if older {
+            guard.remove(&GenericTopic::MonitorFallback);
+        }
+        older
     }
 
     /// Drops the stored `GENERIC` alert about `topic` only.
