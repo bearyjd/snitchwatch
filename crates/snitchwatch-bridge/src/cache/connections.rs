@@ -205,12 +205,7 @@ impl ConnectionCache {
             duration,
             scope,
         };
-        let settle = || {
-            if entry.sender.send(resolution).is_err() {
-                return false;
-            }
-            true
-        };
+        let settle = || entry.sender.send(resolution).is_ok();
         let delivered = match entry.admission {
             Some(admission) => admission.while_current(settle).unwrap_or(false),
             None => settle(),
