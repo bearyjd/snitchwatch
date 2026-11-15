@@ -229,6 +229,14 @@ pub(crate) fn complete_pids(text: &str) -> Vec<i32> {
         .collect()
 }
 
+/// [`complete_pids`] of the pid file at `file`; an unreadable file reports
+/// no pids.
+pub(crate) fn reported_pids(file: &std::path::Path) -> Vec<i32> {
+    std::fs::read_to_string(file)
+        .map(|text| complete_pids(&text))
+        .unwrap_or_default()
+}
+
 /// A marker no other test invocation shares: pid, clock and a counter.
 pub(crate) fn unique_marker() -> String {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

@@ -169,7 +169,12 @@ fn expire_watchdog_with(
 #[cfg_attr(test, allow(dead_code))]
 const SPAWN_REGISTER_WAIT: Duration = Duration::from_secs(1);
 /// How long the main thread waits for the watchdog's cleanup: the sweep bound
-/// plus a margin. In production the final `killpg` ends the process first.
+/// plus a margin. In production the watchdog's final `killpg` normally ends the
+/// process first. If the watchdog is still `Expiring` when this elapses, the
+/// wait reports an unfinished sweep and a normal exit path returns
+/// `EXIT_SWEEP_INCOMPLETE` (3) (`ExitGuard` skips it while a panic unwinds);
+/// no exit alarm is armed on this path, so the wait is bounded only by this
+/// constant.
 const WATCHDOG_CLEANUP_WAIT: Duration = Duration::from_secs(5);
 
 #[cfg_attr(test, allow(dead_code))]
@@ -954,13 +959,7 @@ mod tests {
     /// Env var carrying a fixture's unique marker (see `fixture_signal`).
     const MARKER: &str = crate::containment::test_fixtures::scanner_fixture::MARKER_ENV;
 
-    /// The pids a fixture script wrote, one per line; only newline-terminated
-    /// lines count, so a half-written file is never taken for a complete one.
-    fn reported_pids(file: &std::path::Path) -> Vec<i32> {
-        std::fs::read_to_string(file)
-            .map(|text| crate::containment::fixture_signal::complete_pids(&text))
-            .unwrap_or_default()
-    }
+    use crate::containment::fixture_signal::reported_pids;
 
     /// A primitive that execs and forks a long-lived helper before the scanner
     /// has registered its pid: the watchdog fires, and within the bound the

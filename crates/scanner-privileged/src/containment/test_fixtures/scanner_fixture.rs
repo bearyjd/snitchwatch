@@ -68,9 +68,7 @@ impl ScannerFixture {
 
     /// The pids the fixture reported (newline-terminated lines only).
     pub(crate) fn reported(&self) -> Vec<i32> {
-        std::fs::read_to_string(&self.pid_file)
-            .map(|text| fixture_signal::complete_pids(&text))
-            .unwrap_or_default()
+        fixture_signal::reported_pids(&self.pid_file)
     }
 
     /// Reports `pid` for cleanup (killed on drop if it still carries the marker).
