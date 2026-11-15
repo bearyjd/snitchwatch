@@ -229,7 +229,7 @@ fn kill_if_descendant_reading(
     };
     let result = match in_tree() {
         Ok(true) => {
-            // SAFETY: `fd` is the pidfd opened above and still open; the siginfo pointer is allowed to be null for pidfd_send_signal, and the flags are 0.
+            // SAFETY: `fd` is the descriptor opened above and still open (a pidfd in production; a test opener may return another fd, which the syscall rejects with an error); the siginfo pointer is allowed to be null for pidfd_send_signal, and the flags are 0.
             let sent = unsafe {
                 libc::syscall(
                     libc::SYS_pidfd_send_signal,
@@ -248,7 +248,7 @@ fn kill_if_descendant_reading(
         Ok(false) => Ok(()),
         Err(e) => Err(e),
     };
-    // SAFETY: `fd` is a pidfd this function opened and has not closed; it is closed exactly once, here.
+    // SAFETY: `fd` is the descriptor the opener handed to this function, which owns it; it has not been closed and is closed exactly once, here.
     unsafe {
         libc::close(fd);
     }
@@ -739,7 +739,11 @@ mod tests {
         let stat = read_stat_with_start(child).unwrap().unwrap();
         assert_eq!(stat.parent, tree.root, "parent field misparsed");
         assert!(!stat.zombie);
-        assert_eq!(fields[0], "S", "oracle sanity: state field");
+        // The child sets its name before it reaches `pause()`, so it may still be running.
+        assert!(
+            ["R", "S"].contains(&fields[0]),
+            "oracle sanity: state field"
+        );
         assert_eq!(stat.start, fields[19].parse::<u64>().unwrap());
         assert!(stat.start > 0);
     }
@@ -848,16 +852,16 @@ mod tests {
 
     /// The leader exits (SYS_exit) while a second thread keeps running.
     fn exit_the_leader_keeping_a_thread() {
-        // SAFETY: pthread_create gets a valid out-pointer, null attrs, an `extern "C"` entry point that never returns, and a null arg; this runs in a forked test child.
+        // SAFETY: pthread_create gets a valid out-pointer, null attrs, an `extern "C"` entry point that never returns, and a null arg. It is NOT async-signal-safe: this runs in a child forked from the multithreaded test harness and relies on glibc resetting its stack-cache and malloc locks in the child. If that ever failed the test would hang, which the fork tree's PDEATHSIG contains; a failed create is reported through the leader's exit status.
         unsafe {
             let mut thread: libc::pthread_t = 0;
-            libc::pthread_create(
+            let created = libc::pthread_create(
                 &mut thread,
                 std::ptr::null(),
                 pause_forever,
                 std::ptr::null_mut(),
             );
-            libc::syscall(libc::SYS_exit, 0);
+            libc::syscall(libc::SYS_exit, i32::from(created != 0));
         }
     }
 
@@ -937,7 +941,7 @@ mod tests {
             let own = me();
             #[allow(clippy::zombie_processes)] // killed with the fixture's group
             let _descendant = Command::new("/usr/bin/sleep").arg("60").spawn().unwrap();
-            // SAFETY: dup/close/getrlimit/setrlimit act on this forked test child's own fds and limits; `limit` is a valid, initialised rlimit that outlives the calls.
+            // SAFETY: dup/close/getrlimit/setrlimit act on this re-executed fixture process's own fds and limits; `limit` is a valid, initialised rlimit that outlives the calls.
             unsafe {
                 // The lowest free fd is the only one the limit may leave.
                 let lowest = libc::dup(0);
@@ -1011,7 +1015,7 @@ mod tests {
         loop {
             // SAFETY: siginfo_t is plain C data for which the all-zero bit pattern is valid.
             let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            // SAFETY: `&mut info` is a valid siginfo_t, the child id is our own live child, and the flags include WNOWAIT so nothing is reaped.
+            // SAFETY: `&mut info` is a valid siginfo_t, the child id is our own child, not yet reaped (WNOWAIT keeps it waitable, so its pid cannot be recycled), and nothing is reaped here.
             let done = unsafe {
                 libc::waitid(
                     libc::P_PID,

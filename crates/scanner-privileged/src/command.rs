@@ -169,10 +169,12 @@ fn expire_watchdog_with(
 #[cfg_attr(test, allow(dead_code))]
 const SPAWN_REGISTER_WAIT: Duration = Duration::from_secs(1);
 /// How long the main thread waits for the watchdog's cleanup: the sweep bound
-/// plus a margin. If the watchdog is still `Expiring` when this elapses, the
-/// wait reports an unfinished sweep and the process exits with
-/// `EXIT_SWEEP_INCOMPLETE` (3); no exit alarm is armed on this path, so the
-/// wait is bounded only by this constant.
+/// plus a margin. In production the watchdog's final `killpg` normally ends the
+/// process first. If the watchdog is still `Expiring` when this elapses, the
+/// wait reports an unfinished sweep and a normal exit path returns
+/// `EXIT_SWEEP_INCOMPLETE` (3) (`ExitGuard` skips it while a panic unwinds);
+/// no exit alarm is armed on this path, so the wait is bounded only by this
+/// constant.
 const WATCHDOG_CLEANUP_WAIT: Duration = Duration::from_secs(5);
 
 #[cfg_attr(test, allow(dead_code))]
