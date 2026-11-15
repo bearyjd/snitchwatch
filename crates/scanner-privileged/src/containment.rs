@@ -19,6 +19,9 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::{Duration, Instant};
 
+mod subtree;
+use subtree::Pass;
+
 /// Keep orphaned descendants in the scanner's subtree. Called once at
 /// startup, before any primitive runs.
 pub fn become_subreaper() -> io::Result<()> {
@@ -307,12 +310,40 @@ fn failed_sweep(e: io::Error) -> Sweep {
     }
 }
 
-/// [`kill_descendants`] with the `/proc` scan and the kill injected; `root` is
-/// the scanner's `(pid, start time)`.
+/// [`kill_descendants_passes`] over scans that are either whole or cut short.
 fn kill_descendants_with(
     root: (i32, u64),
     deadline: Instant,
     mut scan: impl FnMut() -> io::Result<Option<Vec<(i32, u64)>>>,
+    kill: impl FnMut(i32, &Tree) -> io::Result<()>,
+) -> Sweep {
+    kill_descendants_passes(
+        root,
+        deadline,
+        || {
+            Ok(match scan()? {
+                Some(live) => Pass {
+                    live,
+                    complete: true,
+                    first_error: None,
+                },
+                None => Pass {
+                    live: Vec::new(),
+                    complete: false,
+                    first_error: None,
+                },
+            })
+        },
+        kill,
+    )
+}
+
+/// [`kill_descendants`] with the `/proc` scan and the kill injected; `root` is
+/// the scanner's `(pid, start time)`.
+fn kill_descendants_passes(
+    root: (i32, u64),
+    deadline: Instant,
+    mut scan: impl FnMut() -> io::Result<Pass>,
     mut kill: impl FnMut(i32, &Tree) -> io::Result<()>,
 ) -> Sweep {
     let mut sweep = Sweep {
@@ -329,15 +360,14 @@ fn kill_descendants_with(
                 sweep.failures += 1;
                 sweep.first_error.get_or_insert(e);
             }
-            Ok(None) => empty_passes = 0,
-            Ok(Some(live)) if live.is_empty() => {
+            Ok(Pass { live, .. }) if live.is_empty() => {
                 empty_passes += 1;
                 if empty_passes == 2 {
                     sweep.complete = true;
                     return sweep;
                 }
             }
-            Ok(Some(live)) => {
+            Ok(Pass { live, .. }) => {
                 empty_passes = 0;
                 let tree: Tree = live.iter().copied().chain([root]).collect();
                 for &(pid, _) in &live {
