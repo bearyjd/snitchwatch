@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 /// Keep orphaned descendants in the scanner's subtree. Called once at
 /// startup, before any primitive runs.
 pub fn become_subreaper() -> io::Result<()> {
+    // SAFETY: prctl(PR_SET_CHILD_SUBREAPER, 1) takes only integer arguments and touches no memory.
     if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -169,6 +170,7 @@ fn live_members(root: i32, deadline: Instant) -> io::Result<Option<Vec<(i32, u64
 
 /// `pidfd_open(pid)`, as a raw fd or the OS error.
 fn open_pidfd(pid: i32) -> io::Result<i32> {
+    // SAFETY: pidfd_open takes two integers (pid, flags=0) and no pointers; a failure is returned as -1/errno and handled below.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
     if fd < 0 {
         Err(io::Error::last_os_error())
@@ -227,6 +229,7 @@ fn kill_if_descendant_reading(
     };
     let result = match in_tree() {
         Ok(true) => {
+            // SAFETY: `fd` is the pidfd opened above and still open; the siginfo pointer is allowed to be null for pidfd_send_signal, and the flags are 0.
             let sent = unsafe {
                 libc::syscall(
                     libc::SYS_pidfd_send_signal,
@@ -245,6 +248,7 @@ fn kill_if_descendant_reading(
         Ok(false) => Ok(()),
         Err(e) => Err(e),
     };
+    // SAFETY: `fd` is a pidfd this function opened and has not closed; it is closed exactly once, here.
     unsafe {
         libc::close(fd);
     }
@@ -552,6 +556,7 @@ mod tests {
         let mut child = sleeper();
         let pid = child.0.id() as i32;
         // A pidfd of the wrong kind (a plain fd) makes pidfd_send_signal fail.
+        // SAFETY: open(2) with a NUL-terminated C-string literal; the fd is checked right below.
         let bogus = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
         assert!(bogus >= 0);
         let err =
@@ -594,6 +599,7 @@ mod tests {
             if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
                 -1
             } else {
+                // SAFETY: fork(2) in a test thread; the child only runs async-signal-safe calls (see fork_tree_with).
                 unsafe { libc::fork() }
             }
         });
@@ -611,6 +617,7 @@ mod tests {
             let tree = fork_tree(nothing);
             std::fs::write(&file, format!("{} {}\n", tree.root, tree.child)).unwrap();
             loop {
+                // SAFETY: pause(2) takes no arguments and touches no memory.
                 unsafe { libc::pause() };
             }
         }
@@ -663,6 +670,7 @@ mod tests {
     }
 
     fn set_binary_name() {
+        // SAFETY: prctl(PR_SET_NAME) reads a NUL-terminated string of at most 15 bytes plus NUL; it runs in the forked child.
         unsafe {
             libc::prctl(libc::PR_SET_NAME, c"\xff\xfex".as_ptr());
         }
@@ -694,6 +702,46 @@ mod tests {
         };
         assert!(swept.complete);
         assert!(!alive, "the non-UTF-8-named descendant survived");
+    }
+
+    fn set_hostile_name() {
+        // SAFETY: prctl(PR_SET_NAME) reads a NUL-terminated string that is at most 15 bytes plus NUL; it runs in the forked child.
+        unsafe {
+            libc::prctl(libc::PR_SET_NAME, c"x) 1 2 (y".as_ptr());
+        }
+    }
+
+    /// Characterisation test: the parser already splits at the last `)`, so
+    /// this passes on first run. Its red is a mutation (`rposition` ->
+    /// `position`), which the parser then fails on.
+    #[test]
+    fn a_comm_that_mimics_stat_fields_does_not_fool_the_parse() {
+        let tree = fork_tree(set_hostile_name);
+        let child = tree.child;
+        let hostile = b"(x) 1 2 (y)";
+        let start = Instant::now();
+        let raw = loop {
+            let raw = std::fs::read(format!("/proc/{child}/stat")).unwrap();
+            if raw.windows(hostile.len()).any(|w| w == hostile)
+                || start.elapsed() > Duration::from_secs(3)
+            {
+                break raw;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        // Oracle: split after the literal hostile comm, not at the last ')'.
+        let at = raw
+            .windows(hostile.len())
+            .position(|w| w == hostile)
+            .expect("the child never took the hostile name");
+        let tail = std::str::from_utf8(&raw[at + hostile.len()..]).unwrap();
+        let fields: Vec<&str> = tail.split_whitespace().collect();
+        let stat = read_stat_with_start(child).unwrap().unwrap();
+        assert_eq!(stat.parent, tree.root, "parent field misparsed");
+        assert!(!stat.zombie);
+        assert_eq!(fields[0], "S", "oracle sanity: state field");
+        assert_eq!(stat.start, fields[19].parse::<u64>().unwrap());
+        assert!(stat.start > 0);
     }
 
     #[test]
@@ -793,12 +841,14 @@ mod tests {
 
     extern "C" fn pause_forever(_: *mut libc::c_void) -> *mut libc::c_void {
         loop {
+            // SAFETY: pause(2) takes no arguments and touches no memory.
             unsafe { libc::pause() };
         }
     }
 
     /// The leader exits (SYS_exit) while a second thread keeps running.
     fn exit_the_leader_keeping_a_thread() {
+        // SAFETY: pthread_create gets a valid out-pointer, null attrs, an `extern "C"` entry point that never returns, and a null arg; this runs in a forked test child.
         unsafe {
             let mut thread: libc::pthread_t = 0;
             libc::pthread_create(
@@ -887,6 +937,7 @@ mod tests {
             let own = me();
             #[allow(clippy::zombie_processes)] // killed with the fixture's group
             let _descendant = Command::new("/usr/bin/sleep").arg("60").spawn().unwrap();
+            // SAFETY: dup/close/getrlimit/setrlimit act on this forked test child's own fds and limits; `limit` is a valid, initialised rlimit that outlives the calls.
             unsafe {
                 // The lowest free fd is the only one the limit may leave.
                 let lowest = libc::dup(0);
@@ -900,8 +951,10 @@ mod tests {
                 assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &limit), 0);
             }
             // An unreadable task list is unknown, not "dead".
+            // SAFETY: dup(0) on the child's own fd table; the fd is closed below.
             let held = unsafe { libc::dup(0) }; // the last free slot
             let tasks = has_other_tasks(own);
+            // SAFETY: closes the fd `held` obtained from dup above, once.
             unsafe {
                 libc::close(held);
             }
@@ -956,7 +1009,9 @@ mod tests {
     fn exited_unreaped(child: &Child, bound: Duration) -> bool {
         let start = Instant::now();
         loop {
+            // SAFETY: siginfo_t is plain C data for which the all-zero bit pattern is valid.
             let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `&mut info` is a valid siginfo_t, the child id is our own live child, and the flags include WNOWAIT so nothing is reaped.
             let done = unsafe {
                 libc::waitid(
                     libc::P_PID,
@@ -965,6 +1020,7 @@ mod tests {
                     libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
                 )
             } == 0
+                // SAFETY: waitid returned 0, so it filled `info`; si_pid is a plain field read of that initialised struct.
                 && unsafe { info.si_pid() } != 0;
             if done || start.elapsed() > bound {
                 return done;
@@ -1175,9 +1231,11 @@ mod tests {
         // nothing to hit and the survival assertion could never fail.
         let pid = orphan_sleeper_with(&marker, "setsid ");
         let start = Instant::now();
+        // SAFETY: getpgid(2) takes an integer pid and touches no memory.
         while unsafe { libc::getpgid(pid) } != pid && start.elapsed() < Duration::from_secs(5) {
             std::thread::sleep(Duration::from_millis(10));
         }
+        // SAFETY: getpgid(2) takes an integer pid and touches no memory.
         let leads = unsafe { libc::getpgid(pid) } == pid;
         let verdict = fixture_signal::killpg_marked(pid, "some-other-marker");
         std::thread::sleep(Duration::from_millis(200));
@@ -1471,6 +1529,7 @@ mod tests {
         let file = dir.path().join("pids");
         let mut command = Command::new("/usr/bin/sh");
         // Like the scanner, `root` adopts orphans: they stay in its subtree.
+        // SAFETY: pre_exec runs `become_subreaper` in the forked child before exec; it only calls the async-signal-safe prctl and allocates nothing.
         unsafe {
             command.pre_exec(become_subreaper);
         }

@@ -154,8 +154,7 @@ impl MarkedSleeps {
         let reported = self
             .pid_file
             .as_ref()
-            .and_then(|file| std::fs::read_to_string(file).ok())
-            .map(|text| fixture_signal::complete_pids(&text))
+            .map(|file| fixture_signal::reported_pids(file))
             .unwrap_or_default();
         let known = self.known.lock().map(|k| k.clone()).unwrap_or_default();
         let mut seen = HashSet::new();
