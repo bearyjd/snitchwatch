@@ -63,10 +63,18 @@ fn start_privileged_watchdog() -> anyhow::Result<()> {
 }
 
 /// Own session first, so a same-session process cannot `setpgid` itself into
-/// the group the watchdog kills. `setsid` fails with EPERM exactly when the
-/// caller is already a group leader (the broker spawns pkexec that way); then
-/// the old rule applies: the group must really be ours. Any other `setsid`
-/// error is returned as is. `Err` carries the errno.
+/// the group the watchdog kills. `setsid` fails with EPERM when the caller is
+/// already a process group leader (the broker spawns pkexec as a session AND
+/// group leader, so the scanner always takes this branch there); then the old
+/// rule applies: the group must really be ours. Any other `setsid` error is
+/// returned as is. `Err` carries the errno.
+///
+/// Residual exposure, accepted: a scanner started by hand from a job-control
+/// shell is a group leader but not a session leader, takes the EPERM branch,
+/// and keeps the pre-#329 exposure (a process in that terminal session can
+/// still join its group). The hardening is delivered on the broker launch path,
+/// where the scanner is a session leader. Refusing to run here would break
+/// manual runs, so this stays fail-open by design.
 fn session_setup_decision(setsid: Result<(), i32>, is_group_leader: bool) -> Result<(), i32> {
     match setsid {
         Ok(()) => Ok(()),
@@ -461,6 +469,10 @@ mod argument_tests {
                 }
             }
             start_privileged_watchdog_after(Duration::from_millis(50)).unwrap();
+            // The scanner must now lead its own session (the wiring the pure
+            // decision test cannot see); a panic here fails the fixture.
+            // SAFETY: getsid and getpid take no pointers and have no preconditions.
+            assert_eq!(unsafe { libc::getsid(0) }, unsafe { libc::getpid() });
             // This check child inherits the scanner's group and both pipes. A
             // surviving check would prevent wait_with_output from completing.
             let _ = scanner_privileged::command::run("sleep", &["20"]);

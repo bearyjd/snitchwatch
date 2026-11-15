@@ -366,8 +366,6 @@ mod tests {
             .collect();
         assert_eq!(ids.len(), 3, "{detail}");
         assert_eq!((ids[1], ids[2]), (ids[0], ids[0]), "{detail}");
-        // SAFETY: getsid takes no pointers; the broker's own session differs.
-        assert_ne!(unsafe { libc::getsid(0) } as u32, ids[0]);
     }
     #[tokio::test]
     async fn bounds_execution_and_output() {
