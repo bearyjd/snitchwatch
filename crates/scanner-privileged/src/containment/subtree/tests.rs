@@ -32,6 +32,9 @@ struct Fake {
     /// From its n-th `stat` call on, a pid reports another start time.
     bump_from_call: HashMap<i32, usize>,
     stat_calls: RefCell<HashMap<i32, usize>>,
+    /// From its n-th `stat` call on, a zombie pid reports a live process (a
+    /// thread exec'd and took over the leader's pid).
+    revive_from_call: HashMap<i32, usize>,
     /// From its n-th `children` call on, a pid reports no `children` file.
     unsupported_from_call: HashMap<i32, usize>,
     children_calls: RefCell<HashMap<i32, usize>>,
@@ -72,6 +75,7 @@ impl ProcView for Fake {
         let bumped = self.recycled.borrow().contains(&pid)
             || self.bump_from_call.get(&pid).is_some_and(|&n| call >= n);
         let bump = if bumped { 1000 } else { 0 };
+        let revived = self.revive_from_call.get(&pid).is_some_and(|&n| call >= n);
         match self.stats.get(&pid) {
             Some(&Entry::Live(parent, start)) => Ok(Some(Stat {
                 parent,
@@ -80,7 +84,7 @@ impl ProcView for Fake {
             })),
             Some(&Entry::Zombie(parent, start)) => Ok(Some(Stat {
                 parent,
-                zombie: true,
+                zombie: !revived,
                 start: start + bump,
             })),
             Some(&Entry::Errno(e)) => Err(io::Error::from_raw_os_error(e)),
@@ -424,6 +428,20 @@ fn a_dead_node_is_not_walked() {
     let pass = walk(1, far(), &fake).unwrap();
     assert!(pids(&pass).is_empty() && pass.complete);
     assert!(!fake.asked.borrow().contains(&3));
+}
+
+/// A zombie leader whose last other thread exec'd becomes a live process
+/// under the same pid and start time: the stale zombie flag must not hide
+/// what hangs below it.
+#[test]
+fn a_zombie_revived_by_exec_after_the_task_check_is_live_and_walked() {
+    let mut fake = Fake::default();
+    fake.root();
+    fake.add(2, 1, Entry::Zombie(1, 2));
+    fake.revive_from_call.insert(2, 2);
+    fake.live(3, 2);
+    let pass = walk(1, far(), &fake).unwrap();
+    assert_eq!(pids(&pass), [2, 3]);
 }
 
 /// The root's list is readable at first and unsupported on the re-read: the

@@ -217,9 +217,20 @@ fn read_task_children(pid: i32, tid: i32, deadline: Instant, kids: &mut Kids) {
     }
 }
 
-/// Whether a process is dead: a zombie with no other thread left.
-fn is_dead(view: &impl ProcView, pid: i32, stat: &Stat) -> io::Result<bool> {
-    Ok(stat.zombie && !view.has_other_tasks(pid)?)
+/// Whether a process is dead: a zombie with no other thread left. `None`: it
+/// vanished while being checked.
+///
+/// Death is re-read after the task listing: a surviving thread of a zombie
+/// leader can `execve`, take over the leader's pid (and start time) and make
+/// it a live process, so the first stat alone may be stale. Anything but the
+/// same zombie on the second read counts as live.
+fn is_dead(view: &impl ProcView, pid: i32, stat: &Stat) -> io::Result<Option<bool>> {
+    if !stat.zombie || view.has_other_tasks(pid)? {
+        return Ok(Some(false));
+    }
+    Ok(view
+        .stat(pid)?
+        .map(|again| again.zombie && again.parent == stat.parent && again.start == stat.start))
 }
 
 /// Rounds of re-reading the root's list after the walk before the pass gives
@@ -386,11 +397,15 @@ impl<V: ProcView> Walk<'_, V> {
             return None;
         }
         match is_dead(self.view, pid, &stat) {
-            Ok(dead) => Some(Admitted {
+            Ok(Some(dead)) => Some(Admitted {
                 pid,
                 start: stat.start,
                 dead,
             }),
+            Ok(None) => {
+                self.pass.complete = false;
+                None
+            }
             Err(e) => {
                 self.pass.fail(e);
                 None
@@ -423,8 +438,9 @@ pub(super) fn scan_all(root: i32, deadline: Instant, view: &impl ProcView) -> io
             return Ok(pass);
         }
         match view.stat(pid).and_then(|stat| {
-            stat.map(|stat| is_dead(view, pid, &stat).map(|dead| (stat, dead)))
+            stat.map(|stat| is_dead(view, pid, &stat).map(|dead| dead.map(|dead| (stat, dead))))
                 .transpose()
+                .map(Option::flatten)
         }) {
             Ok(Some((stat, dead))) => children
                 .entry(stat.parent)
