@@ -437,18 +437,31 @@ pub(super) fn scan_all(root: i32, deadline: Instant, view: &impl ProcView) -> io
             pass.complete = false;
             return Ok(pass);
         }
-        match view.stat(pid).and_then(|stat| {
-            stat.map(|stat| is_dead(view, pid, &stat).map(|dead| dead.map(|dead| (stat, dead))))
-                .transpose()
-                .map(Option::flatten)
-        }) {
-            Ok(Some((stat, dead))) => children
-                .entry(stat.parent)
-                .or_default()
-                .push((pid, dead, stat.start)),
-            Ok(None) => {}
-            Err(e) => pass.fail(e),
-        }
+        let stat = match view.stat(pid) {
+            Ok(Some(stat)) => stat,
+            Ok(None) => continue,
+            Err(e) => {
+                pass.fail(e);
+                continue;
+            }
+        };
+        let dead = match is_dead(view, pid, &stat) {
+            Ok(Some(dead)) => dead,
+            // Vanished during revalidation: keep it as a dead intermediary so
+            // its children stay reachable, but the pass saw it only partly.
+            Ok(None) => {
+                pass.complete = false;
+                true
+            }
+            Err(e) => {
+                pass.fail(e);
+                continue;
+            }
+        };
+        children
+            .entry(stat.parent)
+            .or_default()
+            .push((pid, dead, stat.start));
     }
     let mut seen = HashSet::from([root]);
     let mut stack = vec![root];

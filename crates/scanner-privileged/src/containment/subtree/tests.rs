@@ -35,6 +35,8 @@ struct Fake {
     /// From its n-th `stat` call on, a zombie pid reports a live process (a
     /// thread exec'd and took over the leader's pid).
     revive_from_call: HashMap<i32, usize>,
+    /// From its n-th `stat` call on, a pid has vanished.
+    vanish_from_call: HashMap<i32, usize>,
     /// From its n-th `children` call on, a pid reports no `children` file.
     unsupported_from_call: HashMap<i32, usize>,
     children_calls: RefCell<HashMap<i32, usize>>,
@@ -76,6 +78,9 @@ impl ProcView for Fake {
             || self.bump_from_call.get(&pid).is_some_and(|&n| call >= n);
         let bump = if bumped { 1000 } else { 0 };
         let revived = self.revive_from_call.get(&pid).is_some_and(|&n| call >= n);
+        if self.vanish_from_call.get(&pid).is_some_and(|&n| call >= n) {
+            return Ok(None);
+        }
         match self.stats.get(&pid) {
             Some(&Entry::Live(parent, start)) => Ok(Some(Stat {
                 parent,
@@ -269,6 +274,23 @@ fn without_children_files_the_walk_defers_to_the_full_scan() {
     let pass = live_members_via(1, far(), &fake).unwrap();
     assert_eq!(pids(&pass), [2, 3]);
     assert!(pass.complete);
+}
+
+/// A zombie that vanishes while its death is re-checked still links its
+/// children to the root: they are found, but the pass is not complete.
+#[test]
+fn the_fallback_keeps_a_zombie_that_vanishes_on_revalidation_as_an_intermediary() {
+    let mut fake = Fake {
+        unsupported: true,
+        ..Fake::default()
+    };
+    fake.root();
+    fake.add(2, 1, Entry::Zombie(1, 2));
+    fake.vanish_from_call.insert(2, 2);
+    fake.live(3, 2);
+    let pass = live_members_via(1, far(), &fake).unwrap();
+    assert_eq!(pids(&pass), [3]);
+    assert!(!pass.complete);
 }
 
 #[test]
