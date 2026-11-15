@@ -102,8 +102,20 @@ async fn run_process(pkexec: &Path, scanner: &Path, timeout: Duration) -> Reply 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
         .kill_on_drop(true);
+    // SAFETY: the closure runs between fork and exec and calls only setsid,
+    // which is async-signal-safe and touches no memory or locks. The child
+    // becomes session and group leader (pgid == pid), so the killpg below
+    // still names exactly its group; a fresh forked child is never already a
+    // group leader, so setsid cannot fail with EPERM here.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -337,6 +349,23 @@ mod tests {
             .0,
             "unavailable"
         );
+    }
+    #[tokio::test]
+    async fn spawned_child_is_its_own_session_and_group_leader() {
+        // /proc/self/stat after the comm: pid(1) pgrp(5) session(6). The
+        // broker's killpg(-pid) relies on pgrp == pid; setsid adds session.
+        let script = "awk '{print $1, $5, $6}' /proc/$$/stat >&2\nexit 1";
+        let (code, detail) = fake(script, Duration::from_secs(2)).await;
+        assert_eq!(code, "failed");
+        let ids: Vec<u32> = detail
+            .rsplit(": ")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .map(|n| n.parse().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 3, "{detail}");
+        assert_eq!((ids[1], ids[2]), (ids[0], ids[0]), "{detail}");
     }
     #[tokio::test]
     async fn bounds_execution_and_output() {
