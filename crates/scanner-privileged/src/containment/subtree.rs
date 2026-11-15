@@ -7,7 +7,9 @@
 //! was read is caught by the next pass; the sweep already needs two
 //! consecutive empty complete passes before it calls the subtree empty.
 //! The scanner is a subreaper, so a node that exits hands its children to the
-//! root: the walk re-reads the root's list until it stops changing (bounded
+//! nearest subreaper ancestor: the root, or an intermediate
+//! `PR_SET_CHILD_SUBREAPER` node, which is itself walked and signalled. The
+//! walk re-reads the root's list until it stops changing (bounded
 //! by a round cap and the deadline, else the pass is incomplete), so a
 //! fork-relay cannot hide an orphan from consecutive passes.
 //!
@@ -28,7 +30,10 @@
 //! zombie). A dead node that has vanished by the time it is expanded does not
 //! make the pass incomplete: its children were reparented to the root before
 //! it became a zombie, and the root re-read covers them. The sweep still
-//! needs two consecutive complete passes with an empty `live`.
+//! needs two consecutive complete passes with an empty `live`, and a pass
+//! counts only if every `dead` member was already signalled in an EARLIER pass
+//! (see `signal_pass`): a node signalled earlier cannot fork again, while one
+//! first signalled after the walk may have forked a child the walk missed.
 //!
 //! Accepted limits, not coded around: (1) the fallback full scan (kernels
 //! without `CONFIG_PROC_CHILDREN`) reads `/proc` non-atomically, so a fork

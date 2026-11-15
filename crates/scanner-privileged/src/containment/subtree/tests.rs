@@ -489,22 +489,29 @@ fn a_misclassified_node_is_walked_and_signalled() {
         (1, 1),
         far(),
         || {
+            // After the walk, the node is a childless misclassified one: the
+            // empty-pass kill path must still signal it.
             Ok(scans.next().unwrap_or_else(|| Pass {
                 live: vec![],
-                dead: vec![],
+                dead: vec![(2, 2)],
                 complete: true,
                 first_error: None,
             }))
         },
         |pid, tree| {
-            assert!(tree.contains(&(2, 2)) && tree.contains(&(3, 3)));
+            assert!(tree.contains(&(2, 2)));
             killed.borrow_mut().push(pid);
             Ok(())
         },
     );
     let mut killed = killed.into_inner();
     killed.sort_unstable();
-    assert_eq!(killed, [2, 3]);
+    assert_eq!(killed.iter().filter(|&&p| p == 3).count(), 1);
+    // Pass 1 (as a dead node) and every later empty pass signal pid 2.
+    assert!(
+        killed.iter().filter(|&&p| p == 2).count() >= 2,
+        "{killed:?}"
+    );
 }
 
 /// A dead node reaped before its list or identity is re-read hands its
@@ -518,6 +525,12 @@ fn a_dead_node_that_vanishes_when_expanded_keeps_the_pass_complete() {
     fake.vanish_from_call.insert(2, 3);
     let pass = walk(1, far(), &fake).unwrap();
     assert!(pass.live.is_empty());
+    assert_eq!(pass.dead, [(2, 2)]);
+    assert!(fake
+        .children_calls
+        .borrow()
+        .get(&2)
+        .is_some_and(|&n| n >= 1));
     assert!(pass.complete, "{:?}", pass.first_error);
 
     // Vanishing only between the two expand stats is no doubt either.
@@ -526,7 +539,111 @@ fn a_dead_node_that_vanishes_when_expanded_keeps_the_pass_complete() {
     fake.add(2, 1, Entry::Zombie(1, 2));
     fake.vanish_from_call.insert(2, 4);
     let pass = walk(1, far(), &fake).unwrap();
+    assert_eq!(pass.dead, [(2, 2)]);
+    assert!(fake
+        .children_calls
+        .borrow()
+        .get(&2)
+        .is_some_and(|&n| n >= 1));
     assert!(pass.complete, "{:?}", pass.first_error);
+
+    // A child that shows up under the root on the re-read lands in `live`.
+    let mut fake = Fake::default();
+    fake.root();
+    fake.add(2, 1, Entry::Zombie(1, 2));
+    fake.stats.insert(3, Entry::Live(1, 3));
+    fake.vanish_from_call.insert(2, 3);
+    fake.script
+        .borrow_mut()
+        .insert(1, vec![vec![2], vec![2, 3]].into());
+    let pass = walk(1, far(), &fake).unwrap();
+    assert_eq!(pids(&pass), [3]);
+    assert_eq!(pass.dead, [(2, 2)]);
+    assert!(pass.complete, "{:?}", pass.first_error);
+}
+
+type Members = &'static [(i32, u64)];
+
+/// Scripted passes `(live, dead)`, all complete; the last one repeats. `calls`
+/// counts the scans.
+fn scripted<'a>(
+    passes: &'static [(Members, Members)],
+    calls: &'a std::cell::Cell<usize>,
+) -> impl FnMut() -> io::Result<Pass> + 'a {
+    move || {
+        let (live, dead) = passes[calls.get().min(passes.len() - 1)];
+        calls.set(calls.get() + 1);
+        Ok(Pass {
+            live: live.to_vec(),
+            dead: dead.to_vec(),
+            complete: true,
+            first_error: None,
+        })
+    }
+}
+
+/// A dead node first seen in the completing pass was signalled after the walk
+/// that produced its emptiness evidence: that pass cannot count.
+#[test]
+fn a_pass_with_a_newly_found_dead_node_does_not_count_toward_completion() {
+    const A: (i32, u64) = (2, 2);
+    const X: (i32, u64) = (3, 3);
+    static PASSES: [(Members, Members); 3] = [(&[], &[A]), (&[], &[X]), (&[], &[X])];
+    let calls = std::cell::Cell::new(0);
+    let killed = RefCell::new(Vec::new());
+    let sweep = kill_descendants_passes((1, 1), far(), scripted(&PASSES, &calls), |pid, _| {
+        killed.borrow_mut().push(pid);
+        Ok(())
+    });
+    assert!(sweep.complete && sweep.failures == 0);
+    assert!(calls.get() >= 3, "completed after {} passes", calls.get());
+    assert!(killed.borrow().contains(&2) && killed.borrow().contains(&3));
+}
+
+/// A true zombie reports the same (pid, start) every pass: it costs one extra
+/// pass and still cannot block completion.
+#[test]
+fn a_true_zombie_seen_in_every_pass_completes_after_the_third() {
+    static PASSES: [(Members, Members); 1] = [(&[], &[(2, 2)])];
+    let calls = std::cell::Cell::new(0);
+    let sweep = kill_descendants_passes((1, 1), far(), scripted(&PASSES, &calls), |_, _| Ok(()));
+    assert!(sweep.complete && sweep.failures == 0);
+    assert_eq!(calls.get(), 3);
+}
+
+/// A signal that failed proves nothing: the pass does not count and the node
+/// is not remembered as signalled.
+#[test]
+fn a_failed_signal_on_a_dead_node_delays_completion_and_surfaces() {
+    static PASSES: [(Members, Members); 1] = [(&[], &[(2, 2)])];
+    let calls = std::cell::Cell::new(0);
+    let attempts = std::cell::Cell::new(0);
+    let sweep = kill_descendants_passes((1, 1), far(), scripted(&PASSES, &calls), |_, _| {
+        attempts.set(attempts.get() + 1);
+        if attempts.get() == 1 {
+            Err(io::Error::from_raw_os_error(libc::EMFILE))
+        } else {
+            Ok(())
+        }
+    });
+    // Pass 1 fails, pass 2 signals, pass 3 and 4 count.
+    assert!(sweep.complete);
+    assert_eq!(calls.get(), 4);
+    assert_eq!(sweep.failures, 1);
+    assert_eq!(
+        sweep.first_error.unwrap().raw_os_error(),
+        Some(libc::EMFILE)
+    );
+
+    // A signal that keeps failing never completes.
+    let calls = std::cell::Cell::new(0);
+    let sweep = kill_descendants_passes(
+        (1, 1),
+        Instant::now() + Duration::from_millis(60),
+        scripted(&PASSES, &calls),
+        |_, _| Err(io::Error::from_raw_os_error(libc::EMFILE)),
+    );
+    assert!(!sweep.complete && sweep.failures > 0);
 }
 
 /// An unreaped zombie is signalled but two consecutive passes that find only

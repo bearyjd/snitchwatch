@@ -245,7 +245,9 @@ pub struct Sweep {
 }
 
 /// Kill every process below `root` (the scanner), pass after pass, until two
-/// consecutive passes find none alive or `bound` has passed. Two, because one
+/// consecutive passes find none alive or `bound` has passed. A pass counts only
+/// if its dead-classified nodes were all signalled in an earlier pass without
+/// failure (see `signal_pass`). Two, because one
 /// `/proc` snapshot can miss an orphan (a child listed before its parent, the
 /// parent then exiting). A pass that failed or was cut short by the deadline
 /// is no evidence of "none". One deadline covers scans and signalling alike.
@@ -330,6 +332,37 @@ fn kill_descendants_with(
     )
 }
 
+/// One pass's signalling, after its scan: everything found (live and dead) is
+/// signalled. `None`: the deadline passed mid-signal and the sweep must stop.
+/// `Some(true)`: the pass is evidence of "none": complete, nothing live, no
+/// signal failed, and every dead node was already signalled in an EARLIER pass
+/// (a node with SIGKILL pending cannot fork, and a true zombie shows the same
+/// `(pid, start)` every pass, so it costs one pass of delay). A dead node
+/// first signalled now (a misclassified live node may have forked after the
+/// walk's last read; its orphan goes to the nearest subreaper ancestor, the
+/// root or an intermediate subreaper node that is itself walked and signalled)
+/// has no effect checked yet, so the pass cannot count. Members join
+/// `signalled` only after a signal round without a new failure.
+fn signal_pass(
+    pass: &Pass,
+    signalled: &mut HashSet<(i32, u64)>,
+    root: (i32, u64),
+    deadline: Instant,
+    kill: &mut impl FnMut(i32, &Tree) -> io::Result<()>,
+    sweep: &mut Sweep,
+) -> Option<bool> {
+    let all_signalled_before = pass.dead.iter().all(|d| signalled.contains(d));
+    let failures_before = sweep.failures;
+    if kill_all(&pass.live, &pass.dead, root, deadline, kill, sweep) {
+        return None;
+    }
+    let no_new_failure = sweep.failures == failures_before;
+    if no_new_failure {
+        signalled.extend(pass.dead.iter().copied());
+    }
+    Some(pass.live.is_empty() && pass.complete && all_signalled_before && no_new_failure)
+}
+
 /// [`kill_descendants`] with the `/proc` scan and the kill injected; `root` is
 /// the scanner's `(pid, start time)`.
 fn kill_descendants_passes(
@@ -343,6 +376,7 @@ fn kill_descendants_passes(
         failures: 0,
         first_error: None,
     };
+    let mut signalled = HashSet::new();
     let mut empty_passes = 0;
     while Instant::now() < deadline {
         match scan() {
@@ -352,33 +386,23 @@ fn kill_descendants_passes(
                 sweep.failures += 1;
                 sweep.first_error.get_or_insert(e);
             }
-            Ok(pass) => {
-                if let Some(e) = pass.first_error {
+            Ok(mut pass) => {
+                if let Some(e) = pass.first_error.take() {
                     sweep.failures += 1;
                     sweep.first_error.get_or_insert(e);
                 }
                 // An incomplete pass is no evidence of "none", but what it
-                // found is still killed. Dead nodes are signalled too (a
-                // misclassified one dies) but never count against completion.
-                if pass.live.is_empty()
-                    && pass.complete
-                    && kill_all(&[], &pass.dead, root, deadline, &mut kill, &mut sweep)
-                {
-                    return sweep;
-                }
-                if pass.live.is_empty() && pass.complete {
-                    empty_passes += 1;
-                    if empty_passes == 2 {
-                        sweep.complete = true;
-                        return sweep;
+                // found is still killed.
+                match signal_pass(&pass, &mut signalled, root, deadline, &mut kill, &mut sweep) {
+                    None => return sweep,
+                    Some(true) => {
+                        empty_passes += 1;
+                        if empty_passes == 2 {
+                            sweep.complete = true;
+                            return sweep;
+                        }
                     }
-                } else {
-                    empty_passes = 0;
-                    if kill_all(
-                        &pass.live, &pass.dead, root, deadline, &mut kill, &mut sweep,
-                    ) {
-                        return sweep;
-                    }
+                    Some(false) => empty_passes = 0,
                 }
             }
         }
