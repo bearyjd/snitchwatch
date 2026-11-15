@@ -15,7 +15,7 @@
 //! scope, with no systemd-run or Delegate=), and creating one would add the
 //! persistent privileged machinery the scanner's design rules out.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -116,59 +116,24 @@ fn has_other_tasks(pid: i32) -> io::Result<bool> {
 }
 
 /// Every live process below `root`, by the current `/proc` (a zombie is dead
-/// unless threads of its group still run). `Ok(None)`: the scan hit `deadline`
-/// and is incomplete; `Err`: `/proc` could not be read. Neither says "none".
+/// unless threads of its group still run). `Ok(None)`: the pass hit `deadline`
+/// and is incomplete; `Err`: something could not be read. Neither says "none".
 #[cfg(test)]
 fn live_descendants(root: i32, deadline: Instant) -> io::Result<Option<Vec<i32>>> {
-    Ok(live_members(root, deadline)?.map(|live| live.into_iter().map(|(pid, _)| pid).collect()))
+    let pass = live_members(root, deadline)?;
+    if let Some(e) = pass.first_error {
+        return Err(e);
+    }
+    Ok(pass
+        .complete
+        .then(|| pass.live.into_iter().map(|(pid, _)| pid).collect()))
 }
 
-/// Every live process below `root` with its start time, as `(pid, start)`
-/// (see `live_descendants` for what counts as live and what `None` means).
-fn live_members(root: i32, deadline: Instant) -> io::Result<Option<Vec<(i32, u64)>>> {
-    let entries = std::fs::read_dir("/proc")?;
-    let mut children: HashMap<i32, Vec<(i32, bool, u64)>> = HashMap::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) if vanished(&e) => continue,
-            Err(e) => return Err(e),
-        };
-        // A pass over a huge /proc must not outlast the bound.
-        if Instant::now() >= deadline {
-            return Ok(None);
-        }
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        if let Some(stat) = read_stat_with_start(pid)? {
-            let dead = stat.zombie && !has_other_tasks(pid)?;
-            children
-                .entry(stat.parent)
-                .or_default()
-                .push((pid, dead, stat.start));
-        }
-    }
-    let mut live = Vec::new();
-    let mut seen = HashSet::from([root]);
-    let mut stack = vec![root];
-    while let Some(parent) = stack.pop() {
-        for &(pid, dead, start) in children.get(&parent).into_iter().flatten() {
-            if seen.insert(pid) {
-                if !dead {
-                    live.push((pid, start));
-                }
-                // Walk through dead nodes too: a snapshot can list a child
-                // under a parent that is already exiting.
-                stack.push(pid);
-            }
-        }
-    }
-    Ok(Some(live))
+/// One pass over the subtree below `root`: every live process with its start
+/// time, `(pid, start)`, and whether the pass was complete (see [`subtree`]).
+/// An unreadable pid does not discard what the pass found.
+fn live_members(root: i32, deadline: Instant) -> io::Result<Pass> {
+    subtree::live_members_via(root, deadline, &subtree::Procfs)
 }
 
 /// `pidfd_open(pid)`, as a raw fd or the OS error.
@@ -293,7 +258,7 @@ pub fn kill_descendants(root: i32, bound: Duration) -> Sweep {
         Ok(None) => return failed_sweep(io::Error::from_raw_os_error(libc::ESRCH)),
         Err(e) => return failed_sweep(e),
     };
-    kill_descendants_with(
+    kill_descendants_passes(
         (root, root_start),
         deadline,
         || live_members(root, deadline),
@@ -310,6 +275,29 @@ fn failed_sweep(e: io::Error) -> Sweep {
     }
 }
 
+/// Kill each of `live` (a pass's finds, all below `root`); `true`: the
+/// deadline passed first and the sweep must stop.
+fn kill_all(
+    live: &[(i32, u64)],
+    root: (i32, u64),
+    deadline: Instant,
+    kill: &mut impl FnMut(i32, &Tree) -> io::Result<()>,
+    sweep: &mut Sweep,
+) -> bool {
+    let tree: Tree = live.iter().copied().chain([root]).collect();
+    for &(pid, _) in live {
+        if Instant::now() >= deadline {
+            return true;
+        }
+        if let Err(e) = kill(pid, &tree) {
+            sweep.failures += 1;
+            sweep.first_error.get_or_insert(e);
+        }
+    }
+    false
+}
+
+#[cfg(test)]
 /// [`kill_descendants_passes`] over scans that are either whole or cut short.
 fn kill_descendants_with(
     root: (i32, u64),
@@ -360,23 +348,23 @@ fn kill_descendants_passes(
                 sweep.failures += 1;
                 sweep.first_error.get_or_insert(e);
             }
-            Ok(Pass { live, .. }) if live.is_empty() => {
-                empty_passes += 1;
-                if empty_passes == 2 {
-                    sweep.complete = true;
-                    return sweep;
+            Ok(pass) => {
+                if let Some(e) = pass.first_error {
+                    sweep.failures += 1;
+                    sweep.first_error.get_or_insert(e);
                 }
-            }
-            Ok(Pass { live, .. }) => {
-                empty_passes = 0;
-                let tree: Tree = live.iter().copied().chain([root]).collect();
-                for &(pid, _) in &live {
-                    if Instant::now() >= deadline {
+                // An incomplete pass is no evidence of "none", but what it
+                // found is still killed.
+                if pass.live.is_empty() && pass.complete {
+                    empty_passes += 1;
+                    if empty_passes == 2 {
+                        sweep.complete = true;
                         return sweep;
                     }
-                    if let Err(e) = kill(pid, &tree) {
-                        sweep.failures += 1;
-                        sweep.first_error.get_or_insert(e);
+                } else {
+                    empty_passes = 0;
+                    if kill_all(&pass.live, root, deadline, &mut kill, &mut sweep) {
+                        return sweep;
                     }
                 }
             }

@@ -9,7 +9,7 @@
 //! Without `CONFIG_PROC_CHILDREN` (no `children` file) the caller falls back
 //! to a full `/proc` scan.
 
-use super::{Stat, vanished};
+use super::{vanished, Stat};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::Instant;
@@ -63,32 +63,177 @@ pub(super) struct Procfs;
 
 impl ProcView for Procfs {
     fn stat(&self, pid: i32) -> io::Result<Option<Stat>> {
-        todo!("{pid}")
+        super::read_stat_with_start(pid)
     }
 
     fn has_other_tasks(&self, pid: i32) -> io::Result<bool> {
-        todo!("{pid}")
+        super::has_other_tasks(pid)
     }
 
     fn children(&self, pid: i32) -> Kids {
-        todo!("{pid}")
+        let mut kids = Kids::default();
+        let tasks = match std::fs::read_dir(format!("/proc/{pid}/task")) {
+            Ok(tasks) => tasks,
+            Err(e) if vanished(&e) => return kids,
+            Err(e) => {
+                kids.error = Some(e);
+                return kids;
+            }
+        };
+        for task in tasks {
+            match task {
+                Ok(task) => {
+                    let tid = task
+                        .file_name()
+                        .to_str()
+                        .and_then(|t| t.parse::<i32>().ok());
+                    if let Some(tid) = tid {
+                        read_task_children(pid, tid, &mut kids);
+                    }
+                }
+                Err(e) if vanished(&e) => {}
+                Err(e) => {
+                    kids.error.get_or_insert(e);
+                }
+            }
+        }
+        kids
     }
 
     fn all_pids(&self) -> io::Result<Vec<i32>> {
-        todo!()
+        let mut pids = Vec::new();
+        for entry in std::fs::read_dir("/proc")? {
+            match entry {
+                Ok(entry) => pids.extend(
+                    entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|n| n.parse::<i32>().ok()),
+                ),
+                Err(e) if vanished(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(pids)
     }
+}
+
+/// Append the pids in `/proc/<pid>/task/<tid>/children` to `kids`. A missing
+/// file under a task that still exists means the kernel has no such file; under
+/// a task that is gone it means the thread exited.
+fn read_task_children(pid: i32, tid: i32, kids: &mut Kids) {
+    match std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children")) {
+        Ok(text) => {
+            for word in text.split_ascii_whitespace() {
+                match word.parse() {
+                    Ok(child) => kids.pids.push(child),
+                    Err(_) => {
+                        kids.error.get_or_insert_with(|| {
+                            io::Error::new(io::ErrorKind::InvalidData, "malformed children list")
+                        });
+                    }
+                }
+            }
+        }
+        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+            if std::path::Path::new(&format!("/proc/{pid}/task/{tid}")).exists() {
+                kids.unsupported = true;
+            }
+        }
+        Err(e) if vanished(&e) => {}
+        Err(e) => {
+            kids.error.get_or_insert(e);
+        }
+    }
+}
+
+/// Whether a process is dead: a zombie with no other thread left.
+fn is_dead(view: &impl ProcView, pid: i32, stat: &Stat) -> io::Result<bool> {
+    Ok(stat.zombie && !view.has_other_tasks(pid)?)
 }
 
 /// Walk the subtree below `root`. `None`: this kernel has no `children`
 /// files, use [`scan_all`].
 pub(super) fn walk(root: i32, deadline: Instant, view: &impl ProcView) -> Option<Pass> {
-    todo!("{root} {deadline:?} {}", std::mem::size_of_val(view))
+    let mut pass = Pass::new();
+    let mut seen = HashSet::from([root]);
+    let mut stack = vec![root];
+    while let Some(parent) = stack.pop() {
+        if Instant::now() >= deadline {
+            pass.complete = false;
+            break;
+        }
+        let kids = view.children(parent);
+        if kids.unsupported {
+            if parent == root {
+                return None;
+            }
+            pass.fail(io::Error::other("no /proc children file below the root"));
+        }
+        if let Some(e) = kids.error {
+            pass.fail(e);
+        }
+        for pid in kids.pids {
+            if seen.insert(pid) {
+                note_live(view, pid, &mut pass);
+                // Walk through dead nodes too: a list can name a child under
+                // a parent that is already exiting.
+                stack.push(pid);
+            }
+        }
+    }
+    Some(pass)
+}
+
+/// Record `pid` as live if it is; an unreadable one only fails the pass.
+fn note_live(view: &impl ProcView, pid: i32, pass: &mut Pass) {
+    match view.stat(pid).and_then(|stat| {
+        stat.map(|stat| is_dead(view, pid, &stat).map(|dead| (stat, dead)))
+            .transpose()
+    }) {
+        Ok(Some((stat, false))) => pass.live.push((pid, stat.start)),
+        Ok(_) => {}
+        Err(e) => pass.fail(e),
+    }
 }
 
 /// The fallback: read every `/proc` entry and follow parent links from `root`.
+/// A pid whose own stat is unreadable hides what hangs below it (its parent
+/// link is unknown); the pass is marked incomplete.
 pub(super) fn scan_all(root: i32, deadline: Instant, view: &impl ProcView) -> io::Result<Pass> {
-    let _ = (vanished, HashMap::<i32, i32>::new(), HashSet::<i32>::new());
-    todo!("{root} {deadline:?} {}", std::mem::size_of_val(view))
+    let mut pass = Pass::new();
+    let mut children: HashMap<i32, Vec<(i32, bool, u64)>> = HashMap::new();
+    for pid in view.all_pids()? {
+        // A pass over a huge /proc must not outlast the bound.
+        if Instant::now() >= deadline {
+            pass.complete = false;
+            return Ok(pass);
+        }
+        match view.stat(pid).and_then(|stat| {
+            stat.map(|stat| is_dead(view, pid, &stat).map(|dead| (stat, dead)))
+                .transpose()
+        }) {
+            Ok(Some((stat, dead))) => children
+                .entry(stat.parent)
+                .or_default()
+                .push((pid, dead, stat.start)),
+            Ok(None) => {}
+            Err(e) => pass.fail(e),
+        }
+    }
+    let mut seen = HashSet::from([root]);
+    let mut stack = vec![root];
+    while let Some(parent) = stack.pop() {
+        for &(pid, dead, start) in children.get(&parent).into_iter().flatten() {
+            if seen.insert(pid) {
+                if !dead {
+                    pass.live.push((pid, start));
+                }
+                stack.push(pid);
+            }
+        }
+    }
+    Ok(pass)
 }
 
 /// [`walk`], else [`scan_all`].
@@ -136,7 +281,11 @@ mod tests {
         }
 
         fn live(&mut self, pid: i32, parent: i32) {
-            self.add(pid, parent, Entry::Live(parent, u64::from(pid.unsigned_abs())));
+            self.add(
+                pid,
+                parent,
+                Entry::Live(parent, u64::from(pid.unsigned_abs())),
+            );
         }
     }
 
@@ -200,14 +349,18 @@ mod tests {
     }
 
     #[test]
-    fn the_fallback_scan_also_survives_an_unreadable_pid() {
-        let mut fake = Fake::default();
-        fake.unsupported = true;
+    fn the_fallback_scan_also_survives_an_unreadable_pid_but_cannot_see_below_it() {
+        let mut fake = Fake {
+            unsupported: true,
+            ..Fake::default()
+        };
         fake.add(2, 1, Entry::Errno(libc::EMFILE));
         fake.live(3, 2);
         fake.live(4, 1);
         let pass = live_members_via(1, far(), &fake).unwrap();
-        assert_eq!(pids(&pass), [3, 4]);
+        // Parent links are read from each pid's own stat: what hangs below the
+        // unreadable pid is unreachable, which the incomplete flag reports.
+        assert_eq!(pids(&pass), [4]);
         assert!(!pass.complete);
         assert_eq!(pass.first_error.unwrap().raw_os_error(), Some(libc::EMFILE));
     }
@@ -297,8 +450,10 @@ mod tests {
 
     #[test]
     fn without_children_files_the_walk_defers_to_the_full_scan() {
-        let mut fake = Fake::default();
-        fake.unsupported = true;
+        let mut fake = Fake {
+            unsupported: true,
+            ..Fake::default()
+        };
         fake.live(2, 1);
         fake.live(3, 2);
         fake.live(50, 49);
@@ -361,9 +516,15 @@ mod tests {
         let leader_kids = std::fs::read_to_string(format!("/proc/{child}/task/{child}/children"))
             .unwrap_or_default();
         assert!(
-            !leader_kids.split_whitespace().any(|p| p == grandchild.to_string()),
+            !leader_kids
+                .split_whitespace()
+                .any(|p| p == grandchild.to_string()),
             "fixture invalid: the grandchild hangs off the leader"
         );
+        // Not the fallback in disguise, wherever this kernel has the files.
+        if std::path::Path::new(&format!("/proc/{child}/task/{child}/children")).exists() {
+            assert!(walk(root, far(), &Procfs).is_some());
+        }
         let swept = kill_descendants(root, Duration::from_secs(3));
         assert!(swept.complete);
         let start = Instant::now();
