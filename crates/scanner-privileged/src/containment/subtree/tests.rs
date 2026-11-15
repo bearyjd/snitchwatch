@@ -29,6 +29,9 @@ struct Fake {
     recycled: RefCell<HashSet<i32>>,
     /// Each `stat` takes this long.
     slow_stat: Duration,
+    /// From its n-th `stat` call on, a pid reports another start time.
+    bump_from_call: HashMap<i32, usize>,
+    stat_calls: RefCell<HashMap<i32, usize>>,
 }
 
 impl Fake {
@@ -55,11 +58,15 @@ impl ProcView for Fake {
     fn stat(&self, pid: i32) -> io::Result<Option<Stat>> {
         self.asked.borrow_mut().push(pid);
         std::thread::sleep(self.slow_stat);
-        let bump = if self.recycled.borrow().contains(&pid) {
-            1000
-        } else {
-            0
+        let call = {
+            let mut calls = self.stat_calls.borrow_mut();
+            let call = calls.entry(pid).or_default();
+            *call += 1;
+            *call
         };
+        let bumped = self.recycled.borrow().contains(&pid)
+            || self.bump_from_call.get(&pid).is_some_and(|&n| call >= n);
+        let bump = if bumped { 1000 } else { 0 };
         match self.stats.get(&pid) {
             Some(&Entry::Live(parent, start)) => Ok(Some(Stat {
                 parent,
@@ -208,7 +215,6 @@ fn a_deep_tree_is_found_and_an_unrelated_process_is_never_read() {
     }
     fake.live(8, 3);
     fake.add(9, 4, Entry::Zombie(4, 9));
-    fake.add(10, 4, Entry::Gone);
     fake.live(99, 98); // unrelated: 98 is not in the tree
     fake.live(100, 1000);
     let pass = walk(1, far(), &fake).unwrap();
@@ -354,6 +360,79 @@ fn a_root_list_that_keeps_changing_is_incomplete_at_the_round_cap() {
     let pass = walk(1, far(), &fake).unwrap();
     assert!(!pass.complete);
     assert!(!pass.live.is_empty());
+}
+
+/// P and its listed child C both exit and their numbers are reused between
+/// P's start-time check and the admission of C: the check after the
+/// admissions catches it, and nothing P listed is authorised.
+#[test]
+fn a_node_replaced_while_its_children_are_admitted_authorises_nothing() {
+    let mut fake = Fake {
+        // 2's stats: 1st = its admission, 2nd = the check before its
+        // children are admitted, 3rd = the check after.
+        bump_from_call: HashMap::from([(2, 3)]),
+        ..Fake::default()
+    };
+    fake.root();
+    fake.live(2, 1);
+    fake.live(3, 2);
+    fake.live(4, 3);
+    let pass = walk(1, far(), &fake).unwrap();
+    assert_eq!(pids(&pass), [2], "{:?}", pass.live);
+    assert!(!pass.complete);
+    assert!(!fake.asked.borrow().contains(&4), "walked below 3");
+}
+
+/// Relay A -> B -> C with the root reaping: a listed child that vanishes may
+/// have forked first, so the pass cannot look complete.
+#[test]
+fn a_listed_child_that_vanishes_keeps_the_pass_incomplete() {
+    let mut fake = Fake::default();
+    fake.root();
+    fake.stats.insert(2, Entry::Gone);
+    fake.stats.insert(3, Entry::Gone);
+    fake.script
+        .borrow_mut()
+        .insert(1, vec![vec![2], vec![3]].into());
+    let pass = walk(1, far(), &fake).unwrap();
+    assert!(pass.live.is_empty());
+    assert!(!pass.complete);
+}
+
+#[test]
+fn a_dead_node_is_not_walked() {
+    let mut fake = Fake::default();
+    fake.root();
+    fake.add(2, 1, Entry::Zombie(1, 2));
+    fake.live(3, 2);
+    let pass = walk(1, far(), &fake).unwrap();
+    assert!(pids(&pass).is_empty() && pass.complete);
+    assert!(!fake.asked.borrow().contains(&3));
+}
+
+fn parsed(src: impl std::io::Read, deadline: Instant) -> Kids {
+    let mut kids = Kids::default();
+    parse_children(src, deadline, &mut kids);
+    kids
+}
+
+#[test]
+fn an_oversized_children_list_is_truncated_without_an_error() {
+    let text = "1 ".repeat(MAX_CHILDREN_BYTES as usize);
+    let kids = parsed(std::io::Cursor::new(text), far());
+    assert!(kids.truncated && kids.error.is_none());
+    let kids = parsed(std::io::Cursor::new("4 5 6\n"), far());
+    assert_eq!(kids.pids, [4, 5, 6]);
+    assert!(!kids.truncated);
+}
+
+#[test]
+fn parsing_a_long_children_list_stops_at_the_deadline() {
+    let text = "7 ".repeat(100_000);
+    let past = Instant::now() - Duration::from_secs(1);
+    let kids = parsed(std::io::Cursor::new(text), past);
+    assert!(kids.truncated && kids.error.is_none());
+    assert!(kids.pids.len() < 1000, "{}", kids.pids.len());
 }
 
 #[test]

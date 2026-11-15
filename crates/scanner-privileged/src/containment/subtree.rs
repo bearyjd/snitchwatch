@@ -138,6 +138,22 @@ impl ProcView for Procfs {
     }
 }
 
+/// The most bytes read from one `children` file.
+const MAX_CHILDREN_BYTES: u64 = 1 << 20;
+
+/// Parse a `children` file's pids into `kids`.
+fn parse_children(mut src: impl std::io::Read, _deadline: Instant, kids: &mut Kids) {
+    let mut text = String::new();
+    if let Err(e) = src.read_to_string(&mut text) {
+        kids.error.get_or_insert(e);
+        return;
+    }
+    kids.pids.extend(
+        text.split_ascii_whitespace()
+            .filter_map(|w| w.parse::<i32>().ok()),
+    );
+}
+
 /// Append the pids in `/proc/<pid>/task/<tid>/children` to `kids`. A missing
 /// file under a task that still exists means the kernel has no such file; under
 /// a task that is gone it means the thread exited.
