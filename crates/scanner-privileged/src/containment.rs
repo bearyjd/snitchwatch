@@ -15,9 +15,12 @@
 //! scope, with no systemd-run or Delegate=), and creating one would add the
 //! persistent privileged machinery the scanner's design rules out.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::time::{Duration, Instant};
+
+mod subtree;
+use subtree::Pass;
 
 /// Keep orphaned descendants in the scanner's subtree. Called once at
 /// startup, before any primitive runs.
@@ -113,59 +116,24 @@ fn has_other_tasks(pid: i32) -> io::Result<bool> {
 }
 
 /// Every live process below `root`, by the current `/proc` (a zombie is dead
-/// unless threads of its group still run). `Ok(None)`: the scan hit `deadline`
-/// and is incomplete; `Err`: `/proc` could not be read. Neither says "none".
+/// unless threads of its group still run). `Ok(None)`: the pass hit `deadline`
+/// and is incomplete; `Err`: something could not be read. Neither says "none".
 #[cfg(test)]
 fn live_descendants(root: i32, deadline: Instant) -> io::Result<Option<Vec<i32>>> {
-    Ok(live_members(root, deadline)?.map(|live| live.into_iter().map(|(pid, _)| pid).collect()))
+    let pass = live_members(root, deadline)?;
+    if let Some(e) = pass.first_error {
+        return Err(e);
+    }
+    Ok(pass
+        .complete
+        .then(|| pass.live.into_iter().map(|(pid, _)| pid).collect()))
 }
 
-/// Every live process below `root` with its start time, as `(pid, start)`
-/// (see `live_descendants` for what counts as live and what `None` means).
-fn live_members(root: i32, deadline: Instant) -> io::Result<Option<Vec<(i32, u64)>>> {
-    let entries = std::fs::read_dir("/proc")?;
-    let mut children: HashMap<i32, Vec<(i32, bool, u64)>> = HashMap::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) if vanished(&e) => continue,
-            Err(e) => return Err(e),
-        };
-        // A pass over a huge /proc must not outlast the bound.
-        if Instant::now() >= deadline {
-            return Ok(None);
-        }
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        if let Some(stat) = read_stat_with_start(pid)? {
-            let dead = stat.zombie && !has_other_tasks(pid)?;
-            children
-                .entry(stat.parent)
-                .or_default()
-                .push((pid, dead, stat.start));
-        }
-    }
-    let mut live = Vec::new();
-    let mut seen = HashSet::from([root]);
-    let mut stack = vec![root];
-    while let Some(parent) = stack.pop() {
-        for &(pid, dead, start) in children.get(&parent).into_iter().flatten() {
-            if seen.insert(pid) {
-                if !dead {
-                    live.push((pid, start));
-                }
-                // Walk through dead nodes too: a snapshot can list a child
-                // under a parent that is already exiting.
-                stack.push(pid);
-            }
-        }
-    }
-    Ok(Some(live))
+/// One pass over the subtree below `root`: every live process with its start
+/// time, `(pid, start)`, and whether the pass was complete (see [`subtree`]).
+/// An unreadable pid does not discard what the pass found.
+fn live_members(root: i32, deadline: Instant) -> io::Result<Pass> {
+    subtree::live_members_via(root, deadline, &subtree::Procfs)
 }
 
 /// `pidfd_open(pid)`, as a raw fd or the OS error.
@@ -183,15 +151,29 @@ fn open_pidfd(pid: i32) -> io::Result<i32> {
 /// process found below it. A recycled pid number has another start time.
 type Tree = HashSet<(i32, u64)>;
 
+/// What one kill step did to its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillOutcome {
+    /// `pidfd_send_signal` succeeded: SIGKILL is pending on the target.
+    Signalled,
+    /// The target vanished (`ESRCH` from the pidfd open, the signal, or the
+    /// stat read): nothing to kill.
+    Gone,
+    /// Ancestry validation skipped the signal (parent vanished, not in the
+    /// tree, or another start time): the target may still be running.
+    Unverified,
+}
+
 /// SIGKILL `pid` only if, once held by a pidfd, its parent is still one of
 /// `tree` (the scanner or a process found below it), matched by pid *and*
 /// start time, so a recycled ancestor number admits nothing. A pid reused by
 /// an unrelated process before the pidfd opened fails that check; one reused
 /// after it can't be signalled through the pidfd, which names the original.
-/// A process that is already gone (`ESRCH`) is skipped, not an error. Without
+/// A process that is already gone (`ESRCH`) is [`KillOutcome::Gone`], a failed
+/// ancestry check [`KillOutcome::Unverified`]; neither is an error. Without
 /// a pidfd (EMFILE, no `pidfd_open`, a seccomp filter...) nothing is signalled
 /// and the errno is returned: a bare-pid kill could hit a recycled number.
-fn kill_if_descendant(pid: i32, tree: &Tree) -> io::Result<()> {
+fn kill_if_descendant(pid: i32, tree: &Tree) -> io::Result<KillOutcome> {
     kill_if_descendant_with(pid, tree, open_pidfd)
 }
 
@@ -200,7 +182,7 @@ fn kill_if_descendant_with(
     pid: i32,
     tree: &Tree,
     open: impl FnOnce(i32) -> io::Result<i32>,
-) -> io::Result<()> {
+) -> io::Result<KillOutcome> {
     kill_if_descendant_reading(pid, tree, open, read_stat_with_start)
 }
 
@@ -210,25 +192,25 @@ fn kill_if_descendant_reading(
     tree: &Tree,
     open: impl FnOnce(i32) -> io::Result<i32>,
     read: impl Fn(i32) -> io::Result<Option<Stat>>,
-) -> io::Result<()> {
-    // A vanished target or parent is simply not ours to kill (a live target
-    // shows up again in the next pass, which then cannot count as empty); an
-    // unreadable one is an error.
-    let in_tree =
-        || -> io::Result<bool> {
-            let Some(target) = read(pid)? else {
-                return Ok(false);
-            };
-            Ok(read(target.parent)?
-                .is_some_and(|parent| tree.contains(&(target.parent, parent.start))))
+) -> io::Result<KillOutcome> {
+    // `None`: the target's stat vanished (see the `Ok(None)` arm below). A
+    // vanished parent is simply not ours to kill (a live target shows up again
+    // in the next pass); an unreadable one is an error.
+    let in_tree = || -> io::Result<Option<bool>> {
+        let Some(target) = read(pid)? else {
+            return Ok(None);
         };
+        Ok(Some(read(target.parent)?.is_some_and(|parent| {
+            tree.contains(&(target.parent, parent.start))
+        })))
+    };
     let fd = match open(pid) {
         Ok(fd) => fd,
-        Err(e) if e.raw_os_error() == Some(libc::ESRCH) => return Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::ESRCH) => return Ok(KillOutcome::Gone),
         Err(e) => return Err(e),
     };
     let result = match in_tree() {
-        Ok(true) => {
+        Ok(Some(true)) => {
             // SAFETY: `fd` is the descriptor opened above and still open (a pidfd in production; a test opener may return another fd, which the syscall rejects with an error); the siginfo pointer is allowed to be null for pidfd_send_signal, and the flags are 0.
             let sent = unsafe {
                 libc::syscall(
@@ -240,12 +222,18 @@ fn kill_if_descendant_reading(
                 )
             };
             if sent != 0 {
-                ignore_gone(io::Error::last_os_error())
+                gone_if_esrch(io::Error::last_os_error())
             } else {
-                Ok(())
+                Ok(KillOutcome::Signalled)
             }
         }
-        Ok(false) => Ok(()),
+        Ok(Some(false)) => Ok(KillOutcome::Unverified),
+        // The target's stat vanished while the pidfd is held. Not proof of
+        // death: during an exec handover a live leader's /proc entry can be
+        // briefly missing. Only a pidfd ESRCH is `Gone`; this delays
+        // completion by one pass (the next pass either re-finds the node or
+        // no longer lists it).
+        Ok(None) => Ok(KillOutcome::Unverified),
         Err(e) => Err(e),
     };
     // SAFETY: `fd` is the descriptor the opener handed to this function, which owns it; it has not been closed and is closed exactly once, here.
@@ -255,10 +243,10 @@ fn kill_if_descendant_reading(
     result
 }
 
-/// `ESRCH` (already dead) is success; any other error is surfaced.
-fn ignore_gone(e: io::Error) -> io::Result<()> {
+/// `ESRCH` (already dead) is [`KillOutcome::Gone`]; any other error is surfaced.
+fn gone_if_esrch(e: io::Error) -> io::Result<KillOutcome> {
     if e.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
+        Ok(KillOutcome::Gone)
     } else {
         Err(e)
     }
@@ -277,7 +265,9 @@ pub struct Sweep {
 }
 
 /// Kill every process below `root` (the scanner), pass after pass, until two
-/// consecutive passes find none alive or `bound` has passed. Two, because one
+/// consecutive passes find none alive or `bound` has passed. A pass counts only
+/// if its dead-classified nodes were all signalled in an earlier pass without
+/// failure (see `signal_pass`). Two, because one
 /// `/proc` snapshot can miss an orphan (a child listed before its parent, the
 /// parent then exiting). A pass that failed or was cut short by the deadline
 /// is no evidence of "none". One deadline covers scans and signalling alike.
@@ -290,7 +280,7 @@ pub fn kill_descendants(root: i32, bound: Duration) -> Sweep {
         Ok(None) => return failed_sweep(io::Error::from_raw_os_error(libc::ESRCH)),
         Err(e) => return failed_sweep(e),
     };
-    kill_descendants_with(
+    kill_descendants_passes(
         (root, root_start),
         deadline,
         || live_members(root, deadline),
@@ -307,19 +297,136 @@ fn failed_sweep(e: io::Error) -> Sweep {
     }
 }
 
-/// [`kill_descendants`] with the `/proc` scan and the kill injected; `root` is
-/// the scanner's `(pid, start time)`.
+/// What one signal round did to a pass's dead nodes.
+struct Round {
+    /// Dead nodes whose kill step ended [`KillOutcome::Signalled`] or `Gone`.
+    credited: Vec<(i32, u64)>,
+    /// A dead node came back [`KillOutcome::Unverified`]: not credited, and no
+    /// failure, but the pass cannot count.
+    dead_unverified: bool,
+}
+
+/// Kill each of `live` and `dead` (a pass's finds, all below `root`; a dead
+/// one is a no-op unless it was misclassified); `None`: the deadline passed
+/// first and the sweep must stop.
+fn kill_all(
+    live: &[(i32, u64)],
+    dead: &[(i32, u64)],
+    root: (i32, u64),
+    deadline: Instant,
+    kill: &mut impl FnMut(i32, &Tree) -> io::Result<KillOutcome>,
+    sweep: &mut Sweep,
+) -> Option<Round> {
+    let tree: Tree = live.iter().chain(dead).copied().chain([root]).collect();
+    let mut round = Round {
+        credited: Vec::new(),
+        dead_unverified: false,
+    };
+    let members = live
+        .iter()
+        .map(|m| (m, false))
+        .chain(dead.iter().map(|m| (m, true)));
+    for (&member, is_dead) in members {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        match kill(member.0, &tree) {
+            Err(e) => {
+                sweep.failures += 1;
+                sweep.first_error.get_or_insert(e);
+            }
+            Ok(KillOutcome::Unverified) => round.dead_unverified |= is_dead,
+            Ok(KillOutcome::Signalled | KillOutcome::Gone) if is_dead => {
+                round.credited.push(member);
+            }
+            Ok(_) => {}
+        }
+    }
+    Some(round)
+}
+
+#[cfg(test)]
+/// [`kill_descendants_passes`] over scans that are either whole or cut short.
 fn kill_descendants_with(
     root: (i32, u64),
     deadline: Instant,
     mut scan: impl FnMut() -> io::Result<Option<Vec<(i32, u64)>>>,
-    mut kill: impl FnMut(i32, &Tree) -> io::Result<()>,
+    kill: impl FnMut(i32, &Tree) -> io::Result<KillOutcome>,
+) -> Sweep {
+    kill_descendants_passes(
+        root,
+        deadline,
+        || {
+            Ok(match scan()? {
+                Some(live) => Pass {
+                    live,
+                    dead: Vec::new(),
+                    complete: true,
+                    first_error: None,
+                },
+                None => Pass {
+                    live: Vec::new(),
+                    dead: Vec::new(),
+                    complete: false,
+                    first_error: None,
+                },
+            })
+        },
+        kill,
+    )
+}
+
+/// One pass's signalling, after its scan: everything found (live and dead) is
+/// signalled. `None`: the deadline passed mid-signal and the sweep must stop.
+/// `Some(true)`: the pass is evidence of "none": complete, nothing live, no
+/// signal failed, and every dead node was already signalled in an EARLIER pass
+/// (a node with SIGKILL pending cannot fork, and a true zombie shows the same
+/// `(pid, start)` every pass, so it costs one pass of delay). A dead node
+/// first signalled now (a misclassified live node may have forked after the
+/// walk's last read; its orphan goes to the nearest subreaper ancestor, the
+/// root or an intermediate subreaper node that is itself walked and signalled)
+/// has no effect checked yet, so the pass cannot count. Dead members join
+/// `signalled` only if their kill step was `Signalled` or `Gone` and the round
+/// had no new failure; an `Unverified` one (ancestry check skipped) is neither
+/// credited nor a failure, it only keeps the pass from counting.
+fn signal_pass(
+    pass: &Pass,
+    signalled: &mut HashSet<(i32, u64)>,
+    root: (i32, u64),
+    deadline: Instant,
+    kill: &mut impl FnMut(i32, &Tree) -> io::Result<KillOutcome>,
+    sweep: &mut Sweep,
+) -> Option<bool> {
+    let all_signalled_before = pass.dead.iter().all(|d| signalled.contains(d));
+    let failures_before = sweep.failures;
+    let round = kill_all(&pass.live, &pass.dead, root, deadline, kill, sweep)?;
+    let no_new_failure = sweep.failures == failures_before;
+    if no_new_failure {
+        signalled.extend(round.credited);
+    }
+    Some(
+        pass.live.is_empty()
+            && pass.complete
+            && all_signalled_before
+            && no_new_failure
+            && !round.dead_unverified,
+    )
+}
+
+/// [`kill_descendants`] with the `/proc` scan and the kill injected; `root` is
+/// the scanner's `(pid, start time)`.
+fn kill_descendants_passes(
+    root: (i32, u64),
+    deadline: Instant,
+    mut scan: impl FnMut() -> io::Result<Pass>,
+    mut kill: impl FnMut(i32, &Tree) -> io::Result<KillOutcome>,
 ) -> Sweep {
     let mut sweep = Sweep {
         complete: false,
         failures: 0,
         first_error: None,
     };
+    let mut signalled = HashSet::new();
     let mut empty_passes = 0;
     while Instant::now() < deadline {
         match scan() {
@@ -329,25 +436,23 @@ fn kill_descendants_with(
                 sweep.failures += 1;
                 sweep.first_error.get_or_insert(e);
             }
-            Ok(None) => empty_passes = 0,
-            Ok(Some(live)) if live.is_empty() => {
-                empty_passes += 1;
-                if empty_passes == 2 {
-                    sweep.complete = true;
-                    return sweep;
+            Ok(mut pass) => {
+                if let Some(e) = pass.first_error.take() {
+                    sweep.failures += 1;
+                    sweep.first_error.get_or_insert(e);
                 }
-            }
-            Ok(Some(live)) => {
-                empty_passes = 0;
-                let tree: Tree = live.iter().copied().chain([root]).collect();
-                for &(pid, _) in &live {
-                    if Instant::now() >= deadline {
-                        return sweep;
+                // An incomplete pass is no evidence of "none", but what it
+                // found is still killed.
+                match signal_pass(&pass, &mut signalled, root, deadline, &mut kill, &mut sweep) {
+                    None => return sweep,
+                    Some(true) => {
+                        empty_passes += 1;
+                        if empty_passes == 2 {
+                            sweep.complete = true;
+                            return sweep;
+                        }
                     }
-                    if let Err(e) = kill(pid, &tree) {
-                        sweep.failures += 1;
-                        sweep.first_error.get_or_insert(e);
-                    }
+                    Some(false) => empty_passes = 0,
                 }
             }
         }
@@ -425,11 +530,13 @@ mod tests {
         let mut outsider = sleeper();
         let pid = outsider.0.id() as i32;
         // Its parent (this test process) is not in the tree.
-        kill_if_descendant(pid, &HashSet::from([ident(1)])).unwrap();
+        let skipped = kill_if_descendant(pid, &HashSet::from([ident(1)])).unwrap();
+        assert_eq!(skipped, KillOutcome::Unverified);
         std::thread::sleep(Duration::from_millis(100));
         assert!(alive(&mut outsider));
         // Control: with the parent in the tree the same call kills it.
-        kill_if_descendant(pid, &HashSet::from([ident(me())])).unwrap();
+        let sent = kill_if_descendant(pid, &HashSet::from([ident(me())])).unwrap();
+        assert_eq!(sent, KillOutcome::Signalled);
         assert!(wait_dead(&mut outsider));
     }
 
@@ -475,11 +582,13 @@ mod tests {
         let pid = child.0.id() as i32;
         // Same pid number as the parent, another start time: a recycled pid.
         let (own, start) = ident(me());
-        kill_if_descendant(pid, &HashSet::from([(own, start + 1)])).unwrap();
+        let skipped = kill_if_descendant(pid, &HashSet::from([(own, start + 1)])).unwrap();
+        assert_eq!(skipped, KillOutcome::Unverified);
         std::thread::sleep(Duration::from_millis(100));
         assert!(alive(&mut child), "a recycled ancestor admitted the kill");
         // Control: the real identity admits it.
-        kill_if_descendant(pid, &HashSet::from([(own, start)])).unwrap();
+        let sent = kill_if_descendant(pid, &HashSet::from([(own, start)])).unwrap();
+        assert_eq!(sent, KillOutcome::Signalled);
         assert!(wait_dead(&mut child));
     }
 
@@ -497,7 +606,9 @@ mod tests {
                 Ok(None)
             }
         };
-        kill_if_descendant_reading(pid, &tree, open_pidfd, vanished_parent).unwrap();
+        // Formerly `Ok(())`: the skipped check is now `Unverified`.
+        let skipped = kill_if_descendant_reading(pid, &tree, open_pidfd, vanished_parent).unwrap();
+        assert_eq!(skipped, KillOutcome::Unverified);
         std::thread::sleep(Duration::from_millis(50));
         assert!(alive(&mut child), "a vanished parent admitted the kill");
         let unreadable_parent = |p: i32| {
@@ -543,12 +654,31 @@ mod tests {
     #[test]
     fn pidfd_esrch_means_gone_and_skips_the_kill() {
         let mut child = sleeper();
-        kill_if_descendant_with(child.0.id() as i32, &HashSet::from([ident(me())]), |_| {
-            Err(io::Error::from_raw_os_error(libc::ESRCH))
-        })
-        .unwrap();
+        let gone =
+            kill_if_descendant_with(child.0.id() as i32, &HashSet::from([ident(me())]), |_| {
+                Err(io::Error::from_raw_os_error(libc::ESRCH))
+            })
+            .unwrap();
+        assert_eq!(gone, KillOutcome::Gone);
         std::thread::sleep(Duration::from_millis(50));
         assert!(alive(&mut child));
+    }
+
+    /// A vanished `/proc/<pid>/stat` under a held pidfd is not proof of death:
+    /// during an exec handover a live leader's entry can be briefly missing.
+    /// Only a pidfd ESRCH (the original process is gone) is `Gone`; a vanished
+    /// stat delays completion one pass instead (`Unverified`).
+    #[test]
+    fn a_target_whose_stat_vanishes_under_a_held_pidfd_is_unverified_not_gone() {
+        use std::os::fd::IntoRawFd;
+        let outcome = kill_if_descendant_reading(
+            4242,
+            &HashSet::new(),
+            |_| Ok(std::fs::File::open("/dev/null")?.into_raw_fd()),
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(outcome, KillOutcome::Unverified);
     }
 
     #[test]
@@ -764,7 +894,7 @@ mod tests {
             },
             |pid, _| {
                 killed.push(pid);
-                Ok(())
+                Ok(KillOutcome::Signalled)
             },
         );
         assert!(sweep.complete);
@@ -794,7 +924,7 @@ mod tests {
                 count += 1;
                 scans.next().unwrap_or(Ok(None))
             },
-            |_, _| Ok(()),
+            |_, _| Ok(KillOutcome::Signalled),
         );
         assert!(sweep.complete);
         assert_eq!(count, 6, "completed on a pair that straddled a bad scan");
@@ -808,14 +938,14 @@ mod tests {
             (1, 0),
             Instant::now() + Duration::from_millis(60),
             || Ok(None),
-            |_, _| Ok(()),
+            |_, _| Ok(KillOutcome::Signalled),
         );
         assert!(!sweep.complete);
         let sweep = kill_descendants_with(
             (1, 0),
             Instant::now() + Duration::from_millis(60),
             || Err(io::Error::from_raw_os_error(libc::EIO)),
-            |_, _| Ok(()),
+            |_, _| Ok(KillOutcome::Signalled),
         );
         assert!(!sweep.complete && sweep.failures > 0);
     }
@@ -836,7 +966,7 @@ mod tests {
             |_, _| {
                 kills += 1;
                 std::thread::sleep(Duration::from_millis(40));
-                Ok(())
+                Ok(KillOutcome::Signalled)
             },
         );
         assert!(!sweep.complete);
