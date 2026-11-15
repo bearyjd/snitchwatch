@@ -62,11 +62,37 @@ fn start_privileged_watchdog() -> anyhow::Result<()> {
     start_privileged_watchdog_after(std::time::Duration::from_secs(540))
 }
 
+/// Own session first, so a same-session process cannot `setpgid` itself into
+/// the group the watchdog kills. `setsid` fails with EPERM when the caller is
+/// already a process group leader (the broker spawns pkexec as a session AND
+/// group leader, so the scanner always takes this branch there); then the old
+/// rule applies: the group must really be ours. Any other `setsid` error is
+/// returned as is. `Err` carries the errno.
+///
+/// Residual exposure, accepted: a scanner started by hand from a job-control
+/// shell is a group leader but not a session leader, takes the EPERM branch,
+/// and keeps the pre-#329 exposure (a process in that terminal session can
+/// still join its group). The hardening is delivered on the broker launch path,
+/// where the scanner is a session leader. Refusing to run here would break
+/// manual runs, so this stays fail-open by design.
+fn session_setup_decision(setsid: Result<(), i32>, is_group_leader: bool) -> Result<(), i32> {
+    match setsid {
+        Ok(()) => Ok(()),
+        Err(libc::EPERM) if is_group_leader => Ok(()),
+        Err(errno) => Err(errno),
+    }
+}
+
 fn start_privileged_watchdog_after(timeout: std::time::Duration) -> anyhow::Result<()> {
     let pid = unsafe { libc::getpid() };
-    if unsafe { libc::setpgid(0, 0) } != 0 && unsafe { libc::getpgrp() } != pid {
-        return Err(std::io::Error::last_os_error().into());
-    }
+    // SAFETY: setsid and getpgrp take no pointers and have no preconditions.
+    let setsid = if unsafe { libc::setsid() } == -1 {
+        Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+    } else {
+        Ok(())
+    };
+    let is_group_leader = unsafe { libc::getpgrp() } == pid;
+    session_setup_decision(setsid, is_group_leader).map_err(std::io::Error::from_raw_os_error)?;
     // Before any primitive runs: orphans of primitives stay below the scanner,
     // where the watchdog's sweep finds them.
     scanner_privileged::containment::become_subreaper()?;
@@ -288,6 +314,24 @@ mod argument_tests {
     use super::*;
     use std::process::Command;
 
+    #[test]
+    fn session_setup_decision_covers_setsid_and_leader_fallback() {
+        // setsid succeeded: new session and group leader, whatever getpgrp says.
+        assert_eq!(session_setup_decision(Ok(()), false), Ok(()));
+        // EPERM means already a group leader (the broker's spawn): accept only
+        // if getpgrp() really is the pid, as before.
+        assert_eq!(session_setup_decision(Err(libc::EPERM), true), Ok(()));
+        assert_eq!(
+            session_setup_decision(Err(libc::EPERM), false),
+            Err(libc::EPERM)
+        );
+        // Any other setsid failure is an error, never papered over by the rule.
+        assert_eq!(
+            session_setup_decision(Err(libc::ENOMEM), true),
+            Err(libc::ENOMEM)
+        );
+    }
+
     /// Whether `child` has exited, polled until `bound`, without reaping it:
     /// its pid (and group) stays reserved, so no later signal can reach a
     /// recycled one, and no other thread competes for the reap.
@@ -425,6 +469,10 @@ mod argument_tests {
                 }
             }
             start_privileged_watchdog_after(Duration::from_millis(50)).unwrap();
+            // The scanner must now lead its own session (the wiring the pure
+            // decision test cannot see); a panic here fails the fixture.
+            // SAFETY: getsid and getpid take no pointers and have no preconditions.
+            assert_eq!(unsafe { libc::getsid(0) }, unsafe { libc::getpid() });
             // This check child inherits the scanner's group and both pipes. A
             // surviving check would prevent wait_with_output from completing.
             let _ = scanner_privileged::command::run("sleep", &["20"]);
