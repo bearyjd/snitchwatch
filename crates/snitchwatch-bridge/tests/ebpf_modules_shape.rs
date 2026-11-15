@@ -47,13 +47,35 @@ fn vendor() -> String {
         .to_string()
 }
 
-fn run_script(script: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut cmd = Command::new(script);
-    cmd.args(args);
-    for (k, v) in env {
-        cmd.env(k, v);
+/// How many times a spawn that hits ETXTBSY is retried, and how long between.
+const BUSY_RETRIES: u32 = 40;
+const BUSY_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Runs `spawn`, retrying while it fails with "Text file busy" (ETXTBSY): a
+/// script a test just wrote can still be open for writing in a child another
+/// test thread forked at that moment, and exec of it fails until that child
+/// execs. Any other error, or the last attempt's, panics.
+fn output_retrying_busy(mut spawn: impl FnMut() -> std::io::Result<Output>) -> Output {
+    for _ in 0..BUSY_RETRIES {
+        match spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(BUSY_PAUSE);
+            }
+            other => return other.expect("spawn script"),
+        }
     }
-    cmd.output().expect("spawn script")
+    spawn().expect("spawn script")
+}
+
+fn run_script(script: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    output_retrying_busy(|| {
+        let mut cmd = Command::new(script);
+        cmd.args(args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.output()
+    })
 }
 
 fn run(args: &[&str], env: &[(&str, &str)]) -> Output {
@@ -775,4 +797,30 @@ fn kernel_ver_is_tied_to_the_pin() {
     // The pinned value itself needs no override.
     let o = run(&with(dry_args(st, &os), &["--kernel-ver", "7.2.15"]), &[]);
     assert!(o.status.success(), "{}", text(&o));
+}
+
+#[test]
+fn a_busy_script_is_retried_until_it_can_run() {
+    let mut attempts = 0;
+    let out = output_retrying_busy(|| {
+        attempts += 1;
+        if attempts < 3 {
+            Err(std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy))
+        } else {
+            Command::new("true").output()
+        }
+    });
+    assert_eq!(attempts, 3);
+    assert!(out.status.success());
+}
+
+#[test]
+#[should_panic(expected = "spawn script")]
+fn a_non_busy_spawn_error_is_not_retried() {
+    let mut attempts = 0;
+    let _ = output_retrying_busy(|| {
+        attempts += 1;
+        assert_eq!(attempts, 1, "a non-busy error must not be retried");
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+    });
 }
