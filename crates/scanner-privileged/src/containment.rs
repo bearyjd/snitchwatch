@@ -193,9 +193,9 @@ fn kill_if_descendant_reading(
     open: impl FnOnce(i32) -> io::Result<i32>,
     read: impl Fn(i32) -> io::Result<Option<Stat>>,
 ) -> io::Result<KillOutcome> {
-    // `None`: the target vanished. A vanished parent is simply not ours to
-    // kill (a live target shows up again in the next pass); an unreadable
-    // one is an error.
+    // `None`: the target's stat vanished (see the `Ok(None)` arm below). A
+    // vanished parent is simply not ours to kill (a live target shows up again
+    // in the next pass); an unreadable one is an error.
     let in_tree = || -> io::Result<Option<bool>> {
         let Some(target) = read(pid)? else {
             return Ok(None);
@@ -228,7 +228,12 @@ fn kill_if_descendant_reading(
             }
         }
         Ok(Some(false)) => Ok(KillOutcome::Unverified),
-        Ok(None) => Ok(KillOutcome::Gone),
+        // The target's stat vanished while the pidfd is held. Not proof of
+        // death: during an exec handover a live leader's /proc entry can be
+        // briefly missing. Only a pidfd ESRCH is `Gone`; this delays
+        // completion by one pass (the next pass either re-finds the node or
+        // no longer lists it).
+        Ok(None) => Ok(KillOutcome::Unverified),
         Err(e) => Err(e),
     };
     // SAFETY: `fd` is the descriptor the opener handed to this function, which owns it; it has not been closed and is closed exactly once, here.
@@ -657,6 +662,23 @@ mod tests {
         assert_eq!(gone, KillOutcome::Gone);
         std::thread::sleep(Duration::from_millis(50));
         assert!(alive(&mut child));
+    }
+
+    /// A vanished `/proc/<pid>/stat` under a held pidfd is not proof of death:
+    /// during an exec handover a live leader's entry can be briefly missing.
+    /// Only a pidfd ESRCH (the original process is gone) is `Gone`; a vanished
+    /// stat delays completion one pass instead (`Unverified`).
+    #[test]
+    fn a_target_whose_stat_vanishes_under_a_held_pidfd_is_unverified_not_gone() {
+        use std::os::fd::IntoRawFd;
+        let outcome = kill_if_descendant_reading(
+            4242,
+            &HashSet::new(),
+            |_| Ok(std::fs::File::open("/dev/null")?.into_raw_fd()),
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(outcome, KillOutcome::Unverified);
     }
 
     #[test]
