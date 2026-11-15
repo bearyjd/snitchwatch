@@ -222,15 +222,22 @@ fn read_task_children(pid: i32, tid: i32, deadline: Instant, kids: &mut Kids) {
 ///
 /// Death is re-read after the task listing: a surviving thread of a zombie
 /// leader can `execve`, take over the leader's pid (and start time) and make
-/// it a live process, so the first stat alone may be stale. Anything but the
-/// same zombie on the second read counts as live.
+/// it a live process, so the first stat alone may be stale. A zombie cannot
+/// gain threads, but that process can create a new worker and exit its main
+/// thread again, matching the first stat; so the tasks are listed once more
+/// after the second stat. Anything but the same zombie with no other task on
+/// both listings counts as live.
 fn is_dead(view: &impl ProcView, pid: i32, stat: &Stat) -> io::Result<Option<bool>> {
     if !stat.zombie || view.has_other_tasks(pid)? {
         return Ok(Some(false));
     }
-    Ok(view
-        .stat(pid)?
-        .map(|again| again.zombie && again.parent == stat.parent && again.start == stat.start))
+    let Some(again) = view.stat(pid)? else {
+        return Ok(None);
+    };
+    if !(again.zombie && again.parent == stat.parent && again.start == stat.start) {
+        return Ok(Some(false));
+    }
+    Ok(Some(!view.has_other_tasks(pid)?))
 }
 
 /// Rounds of re-reading the root's list after the walk before the pass gives

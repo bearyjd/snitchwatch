@@ -35,6 +35,10 @@ struct Fake {
     /// From its n-th `stat` call on, a zombie pid reports a live process (a
     /// thread exec'd and took over the leader's pid).
     revive_from_call: HashMap<i32, usize>,
+    /// From its n-th `has_other_tasks` call on, a pid has another task (a
+    /// live worker appeared under the zombie leader).
+    threaded_from_call: HashMap<i32, usize>,
+    task_calls: RefCell<HashMap<i32, usize>>,
     /// From its n-th `stat` call on, a pid has vanished.
     vanish_from_call: HashMap<i32, usize>,
     /// From its n-th `children` call on, a pid reports no `children` file.
@@ -98,7 +102,17 @@ impl ProcView for Fake {
     }
 
     fn has_other_tasks(&self, pid: i32) -> io::Result<bool> {
-        Ok(self.threaded.contains(&pid))
+        let call = {
+            let mut calls = self.task_calls.borrow_mut();
+            let call = calls.entry(pid).or_default();
+            *call += 1;
+            *call
+        };
+        let late = self
+            .threaded_from_call
+            .get(&pid)
+            .is_some_and(|&n| call >= n);
+        Ok(self.threaded.contains(&pid) || late)
     }
 
     fn children(&self, pid: i32, _deadline: Instant) -> Kids {
@@ -461,6 +475,21 @@ fn a_zombie_revived_by_exec_after_the_task_check_is_live_and_walked() {
     fake.root();
     fake.add(2, 1, Entry::Zombie(1, 2));
     fake.revive_from_call.insert(2, 2);
+    fake.live(3, 2);
+    let pass = walk(1, far(), &fake).unwrap();
+    assert_eq!(pids(&pass), [2, 3]);
+}
+
+/// A zombie leader's worker exec'd into the leader pid and a new worker was
+/// created before the main thread exited again: the second stat matches the
+/// first (same parent and start) and only a task listing read after it sees
+/// the live worker.
+#[test]
+fn a_zombie_that_gains_a_worker_after_the_second_stat_is_live_and_walked() {
+    let mut fake = Fake::default();
+    fake.root();
+    fake.add(2, 1, Entry::Zombie(1, 2));
+    fake.threaded_from_call.insert(2, 2);
     fake.live(3, 2);
     let pass = walk(1, far(), &fake).unwrap();
     assert_eq!(pids(&pass), [2, 3]);
