@@ -451,14 +451,35 @@ fn the_deadline_is_checked_per_child() {
     assert!(stats < 8, "kept reading past the bound: {stats}");
 }
 
-/// The forker is a non-leader thread: the leader's own `children` file
-/// does not list the grandchild. The grandchild has no PDEATHSIG, so only
-/// a signal (the sweep's) or [`ChildrenOf`] ends it.
+/// A flag in a `MAP_SHARED` page (a plain static would not cross the fixture's
+/// fork, and the fixture closes every fd, so no pipe): the forker thread sets
+/// it to 1 once its `fork` has returned, so [`ChildrenOf`] never scans before
+/// the grandchild exists.
+static FORKED: std::sync::atomic::AtomicPtr<std::sync::atomic::AtomicU32> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+fn mark_forked() {
+    let flag = FORKED.load(std::sync::atomic::Ordering::SeqCst);
+    if !flag.is_null() {
+        // SAFETY: a non-null FORKED points to a live MAP_SHARED page that the test unmaps only after its guard saw this flag or timed out; an AtomicU32 store needs nothing else.
+        unsafe { (*flag).store(1, std::sync::atomic::Ordering::SeqCst) };
+    }
+}
+
+/// The forker is a non-leader thread: the leader's own `children` file does
+/// not list the grandchild. The grandchild dies with the forking THREAD
+/// (PDEATHSIG), which stays alive while the sweep runs: only the sweep's
+/// signal (or the guard's, or the thread's death) ends it. Residual: if the
+/// thread died before the grandchild's `prctl`, the grandchild is left alive;
+/// the guard waits for `mark_forked` and kills whatever is below the child.
 extern "C" fn fork_then_pause(_: *mut libc::c_void) -> *mut libc::c_void {
-    // SAFETY: fork/close_range/pause take integers only. Runs in a forked fixture child; the grandchild holds no inherited fds.
+    // SAFETY: fork/prctl/close_range/pause take integers only. Runs in a forked fixture child; the grandchild holds no inherited fds.
     unsafe {
         if libc::fork() == 0 {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
             libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
+        } else {
+            mark_forked();
         }
         loop {
             libc::pause();
@@ -482,35 +503,66 @@ fn thread_forks_a_child() {
     }
 }
 
-/// On drop, kills every live process whose parent is `.0` (the fixture's
-/// child), through a pidfd and only while the parent is still `.0`. Declare
-/// it after the `ForkedTree` so it runs first, while `.0` is alive.
-struct ChildrenOf(i32);
+/// On drop: waits (bounded) for the forker's flag, kills every live process
+/// whose parent is `.0` (the fixture's child) through a pidfd and only while
+/// the parent is still `.0`, then unmaps the flag page. Declare it after the
+/// `ForkedTree` so it runs first, while `.0` is alive.
+struct ChildrenOf(i32, *mut libc::c_void);
+impl ChildrenOf {
+    /// Map the flag page; call before `fork_tree`.
+    fn flag_page() -> *mut libc::c_void {
+        // SAFETY: an anonymous shared mapping of one page: no fd, no address hint.
+        let page = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(page, libc::MAP_FAILED);
+        FORKED.store(page.cast(), std::sync::atomic::Ordering::SeqCst);
+        page
+    }
+}
 impl Drop for ChildrenOf {
     fn drop(&mut self) {
-        let Ok(dir) = std::fs::read_dir("/proc") else {
-            return;
-        };
-        for pid in dir
-            .flatten()
-            .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        let flag = self.1.cast::<std::sync::atomic::AtomicU32>();
+        let start = Instant::now();
+        // SAFETY: `self.1` is the live page from `flag_page`, unmapped below only.
+        while unsafe { (*flag).load(std::sync::atomic::Ordering::SeqCst) } == 0
+            && start.elapsed() < Duration::from_secs(3)
         {
-            let ours = |p| {
-                super::super::parent_and_zombie(p)
-                    .is_some_and(|(parent, zombie)| parent == self.0 && !zombie)
-            };
-            if ours(pid) {
-                fixture_signal::kill_verified(pid, ours);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if let Ok(dir) = std::fs::read_dir("/proc") {
+            for pid in dir
+                .flatten()
+                .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+            {
+                let ours = |p| {
+                    super::super::parent_and_zombie(p)
+                        .is_some_and(|(parent, zombie)| parent == self.0 && !zombie)
+                };
+                if ours(pid) {
+                    fixture_signal::kill_verified(pid, ours);
+                }
             }
         }
+        FORKED.store(std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: unmaps the page mapped by `flag_page`, once, after the last use above.
+        unsafe { libc::munmap(self.1, 4096) };
     }
 }
 
 #[test]
 fn a_child_of_a_non_leader_thread_is_found_and_killed() {
+    let page = ChildrenOf::flag_page();
     let tree = fork_tree(thread_forks_a_child);
     let (root, child) = (tree.root, tree.child);
-    let _cleanup = ChildrenOf(child);
+    let _cleanup = ChildrenOf(child, page);
     let start = Instant::now();
     let mut found = Vec::new();
     while found.len() < 2 && start.elapsed() < Duration::from_secs(3) {

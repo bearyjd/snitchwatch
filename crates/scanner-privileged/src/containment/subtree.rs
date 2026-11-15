@@ -15,13 +15,21 @@
 //! and a node's start time is re-checked after its list is read: a pid reused
 //! by an unrelated process is never admitted, so nothing below it can be
 //! signalled. A pid whose stat cannot be read is not walked below (it cannot
-//! be vouched for); the pass is incomplete instead.
+//! be vouched for); the pass is incomplete instead. A listed child that has
+//! vanished may have forked first, so it also makes the pass incomplete.
+//!
+//! Accepted limits, not coded around: (1) the fallback full scan (kernels
+//! without `CONFIG_PROC_CHILDREN`) reads `/proc` non-atomically, so a fork
+//! relay can hide from two passes there; the walk is the default, and the
+//! fallback is unreachable on Fedora/Bazzite kernels (`CONFIG_PROC_CHILDREN=y`).
+//! (2) The kernel documents `children` as exact only while the tasks are
+//! stopped; a miss is for the next pass to catch.
 //! Without `CONFIG_PROC_CHILDREN` (no `children` file) the caller falls back
 //! to a full `/proc` scan.
 
 use super::{vanished, Stat};
 use std::collections::{HashMap, HashSet};
-use std::io;
+use std::io::{self, Read};
 use std::time::Instant;
 
 /// One scan of the subtree. `complete == false` means something could not be
@@ -105,7 +113,7 @@ impl ProcView for Procfs {
                         .to_str()
                         .and_then(|t| t.parse::<i32>().ok());
                     if let Some(tid) = tid {
-                        read_task_children(pid, tid, &mut kids);
+                        read_task_children(pid, tid, deadline, &mut kids);
                     }
                 }
                 Err(e) if vanished(&e) => {}
@@ -141,36 +149,44 @@ impl ProcView for Procfs {
 /// The most bytes read from one `children` file.
 const MAX_CHILDREN_BYTES: u64 = 1 << 20;
 
-/// Parse a `children` file's pids into `kids`.
-fn parse_children(mut src: impl std::io::Read, _deadline: Instant, kids: &mut Kids) {
+/// Parse a `children` file's pids into `kids`: at most [`MAX_CHILDREN_BYTES`]
+/// are read (more: truncated) and the deadline is checked every 256 pids.
+fn parse_children(src: impl std::io::Read, deadline: Instant, kids: &mut Kids) {
     let mut text = String::new();
-    if let Err(e) = src.read_to_string(&mut text) {
-        kids.error.get_or_insert(e);
-        return;
+    match src.take(MAX_CHILDREN_BYTES + 1).read_to_string(&mut text) {
+        Ok(n) if n as u64 > MAX_CHILDREN_BYTES => {
+            kids.truncated = true;
+            return;
+        }
+        Ok(_) => {}
+        Err(e) if vanished(&e) => return,
+        Err(e) => {
+            kids.error.get_or_insert(e);
+            return;
+        }
     }
-    kids.pids.extend(
-        text.split_ascii_whitespace()
-            .filter_map(|w| w.parse::<i32>().ok()),
-    );
+    for (i, word) in text.split_ascii_whitespace().enumerate() {
+        if i % 256 == 0 && Instant::now() >= deadline {
+            kids.truncated = true;
+            return;
+        }
+        match word.parse() {
+            Ok(child) => kids.pids.push(child),
+            Err(_) => {
+                kids.error.get_or_insert_with(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "malformed children list")
+                });
+            }
+        }
+    }
 }
 
 /// Append the pids in `/proc/<pid>/task/<tid>/children` to `kids`. A missing
 /// file under a task that still exists means the kernel has no such file; under
 /// a task that is gone it means the thread exited.
-fn read_task_children(pid: i32, tid: i32, kids: &mut Kids) {
-    match std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children")) {
-        Ok(text) => {
-            for word in text.split_ascii_whitespace() {
-                match word.parse() {
-                    Ok(child) => kids.pids.push(child),
-                    Err(_) => {
-                        kids.error.get_or_insert_with(|| {
-                            io::Error::new(io::ErrorKind::InvalidData, "malformed children list")
-                        });
-                    }
-                }
-            }
-        }
+fn read_task_children(pid: i32, tid: i32, deadline: Instant, kids: &mut Kids) {
+    match std::fs::File::open(format!("/proc/{pid}/task/{tid}/children")) {
+        Ok(file) => parse_children(file, deadline, kids),
         Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
             if std::path::Path::new(&format!("/proc/{pid}/task/{tid}")).exists() {
                 kids.unsupported = true;
@@ -294,44 +310,78 @@ impl<V: ProcView> Walk<'_, V> {
                 return false;
             }
         }
+        let mut batch: Vec<Admitted> = Vec::new();
         for pid in kids.pids {
             if self.out_of_time() {
                 break;
             }
-            if !self.seen.contains(&pid) {
-                self.admit(pid, node);
+            if !self.seen.contains(&pid) && !batch.iter().any(|a| a.pid == pid) {
+                batch.extend(self.admit(pid, node));
             }
+        }
+        // The pids above were only trusted while `node` stayed the same
+        // process (it and a child could both exit and be reused meanwhile):
+        // commit them only if it did.
+        match self.view.stat(node) {
+            Ok(Some(now)) if now.start == start => self.commit(batch),
+            Ok(_) => self.pass.complete = false,
+            Err(e) => self.pass.fail(e),
         }
         false
     }
 
-    /// Admit `pid`, listed as a child of `parent`, if its own stat says so;
-    /// record it if live. Anything else leaves it unseen and the pass incomplete.
-    fn admit(&mut self, pid: i32, parent: i32) {
+    /// Record a verified batch: seen, live and (unless dead) still to expand.
+    fn commit(&mut self, batch: Vec<Admitted>) {
+        for admitted in batch {
+            self.seen.insert(admitted.pid);
+            if admitted.dead {
+                // No children left to list; expanding it would only fail
+                // spuriously once it is reaped.
+                continue;
+            }
+            self.pass.live.push((admitted.pid, admitted.start));
+            self.stack.push((admitted.pid, admitted.start));
+        }
+    }
+
+    /// `pid`, listed as a child of `parent`, if its own stat says so. A
+    /// vanished or doubtful one is skipped and the pass marked incomplete
+    /// (a vanished child may have forked first).
+    fn admit(&mut self, pid: i32, parent: i32) -> Option<Admitted> {
         let stat = match self.view.stat(pid) {
             Ok(Some(stat)) => stat,
-            // Gone: it was a stale entry; a live reparented orphan is read
-            // again from the root.
-            Ok(None) => return,
-            Err(e) => return self.pass.fail(e),
+            Ok(None) => {
+                self.pass.complete = false;
+                return None;
+            }
+            Err(e) => {
+                self.pass.fail(e);
+                return None;
+            }
         };
         if stat.parent != parent {
             self.pass.complete = false;
-            return;
+            return None;
         }
         match is_dead(self.view, pid, &stat) {
-            Ok(dead) => {
-                if !dead {
-                    self.pass.live.push((pid, stat.start));
-                }
-                self.seen.insert(pid);
-                // Walk through dead nodes too: a list can name a child under
-                // a parent that is already exiting.
-                self.stack.push((pid, stat.start));
+            Ok(dead) => Some(Admitted {
+                pid,
+                start: stat.start,
+                dead,
+            }),
+            Err(e) => {
+                self.pass.fail(e);
+                None
             }
-            Err(e) => self.pass.fail(e),
         }
     }
+}
+
+/// A listed child that passed its own checks, not yet committed.
+struct Admitted {
+    pid: i32,
+    start: u64,
+    dead: bool,
 }
 
 /// The fallback: read every `/proc` entry and follow parent links from `root`.
@@ -365,6 +415,10 @@ pub(super) fn scan_all(root: i32, deadline: Instant, view: &impl ProcView) -> io
     let mut seen = HashSet::from([root]);
     let mut stack = vec![root];
     while let Some(parent) = stack.pop() {
+        if Instant::now() >= deadline {
+            pass.complete = false;
+            return Ok(pass);
+        }
         for &(pid, dead, start) in children.get(&parent).into_iter().flatten() {
             if seen.insert(pid) {
                 if !dead {
