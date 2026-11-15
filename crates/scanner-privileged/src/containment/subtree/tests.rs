@@ -32,6 +32,11 @@ struct Fake {
     /// From its n-th `stat` call on, a pid reports another start time.
     bump_from_call: HashMap<i32, usize>,
     stat_calls: RefCell<HashMap<i32, usize>>,
+    /// From its n-th `children` call on, a pid reports no `children` file.
+    unsupported_from_call: HashMap<i32, usize>,
+    children_calls: RefCell<HashMap<i32, usize>>,
+    /// Every `children` answer is flagged truncated.
+    truncated: bool,
 }
 
 impl Fake {
@@ -97,9 +102,20 @@ impl ProcView for Fake {
             .borrow_mut()
             .get_mut(&pid)
             .and_then(|q| q.pop_front());
+        let call = {
+            let mut calls = self.children_calls.borrow_mut();
+            let call = calls.entry(pid).or_default();
+            *call += 1;
+            *call
+        };
+        let unsupported_now = self
+            .unsupported_from_call
+            .get(&pid)
+            .is_some_and(|&n| call >= n);
         Kids {
             pids: scripted.unwrap_or_else(|| self.kids.get(&pid).cloned().unwrap_or_default()),
-            unsupported: self.unsupported,
+            unsupported: self.unsupported || unsupported_now,
+            truncated: self.truncated,
             ..Kids::default()
         }
     }
@@ -410,6 +426,53 @@ fn a_dead_node_is_not_walked() {
     assert!(!fake.asked.borrow().contains(&3));
 }
 
+/// The root's list is readable at first and unsupported on the re-read: the
+/// re-read dropped every pid, so the pass is no evidence of an empty subtree.
+#[test]
+fn a_root_list_unsupported_only_on_the_reread_fails_the_pass() {
+    let mut fake = Fake::default();
+    fake.root();
+    fake.live(2, 1);
+    fake.unsupported_from_call.insert(1, 2);
+    let pass = walk(1, far(), &fake).unwrap();
+    assert!(!pass.complete);
+    assert!(pass.first_error.is_some());
+}
+
+/// A truncated list still admits what was read; the pass stays incomplete.
+#[test]
+fn a_truncated_list_still_admits_its_pids_but_is_incomplete() {
+    let mut fake = Fake {
+        truncated: true,
+        ..Fake::default()
+    };
+    fake.root();
+    fake.live(2, 1);
+    fake.live(3, 1);
+    let pass = walk(1, far(), &fake).unwrap();
+    assert_eq!(pids(&pass), [2, 3]);
+    assert!(!pass.complete);
+}
+
+/// 50k siblings: the duplicate check must not be quadratic.
+#[test]
+fn admitting_a_large_sibling_list_is_linear() {
+    let mut fake = Fake::default();
+    fake.root();
+    for pid in 2..50_002 {
+        fake.live(pid, 1);
+    }
+    let start = Instant::now();
+    let pass = walk(1, Instant::now() + Duration::from_secs(60), &fake).unwrap();
+    assert_eq!(pass.live.len(), 50_000);
+    assert!(pass.complete);
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
 fn parsed(src: impl std::io::Read, deadline: Instant) -> Kids {
     let mut kids = Kids::default();
     parse_children(src, deadline, &mut kids);
@@ -424,6 +487,23 @@ fn an_oversized_children_list_is_truncated_without_an_error() {
     let kids = parsed(std::io::Cursor::new("4 5 6\n"), far());
     assert_eq!(kids.pids, [4, 5, 6]);
     assert!(!kids.truncated);
+}
+
+/// Over the cap the readable prefix is kept, cut at its last whitespace so a
+/// pid cut in half is never parsed.
+#[test]
+fn an_oversized_list_keeps_the_pids_read_before_the_cap_but_not_a_cut_one() {
+    let text = format!("4 5 {}", "9".repeat(MAX_CHILDREN_BYTES as usize));
+    let kids = parsed(std::io::Cursor::new(text), far());
+    assert!(kids.truncated && kids.error.is_none());
+    assert_eq!(kids.pids, [4, 5]);
+    // The cap lands exactly after a whole pid: it is kept.
+    let mut text = "6 ".repeat(MAX_CHILDREN_BYTES as usize / 2);
+    text.push_str("7 8");
+    let kids = parsed(std::io::Cursor::new(text), far());
+    assert!(kids.truncated);
+    assert_eq!(kids.pids.len(), MAX_CHILDREN_BYTES as usize / 2);
+    assert!(kids.pids.iter().all(|&p| p == 6));
 }
 
 #[test]
@@ -461,7 +541,7 @@ static FORKED: std::sync::atomic::AtomicPtr<std::sync::atomic::AtomicU32> =
 fn mark_forked() {
     let flag = FORKED.load(std::sync::atomic::Ordering::SeqCst);
     if !flag.is_null() {
-        // SAFETY: a non-null FORKED points to a live MAP_SHARED page that the test unmaps only after its guard saw this flag or timed out; an AtomicU32 store needs nothing else.
+        // SAFETY: only called in the forked child, whose inherited MAP_SHARED mapping of the page stays mapped for its lifetime, whatever the parent unmaps. An AtomicU32 store needs nothing else.
         unsafe { (*flag).store(1, std::sync::atomic::Ordering::SeqCst) };
     }
 }
@@ -469,14 +549,22 @@ fn mark_forked() {
 /// The forker is a non-leader thread: the leader's own `children` file does
 /// not list the grandchild. The grandchild dies with the forking THREAD
 /// (PDEATHSIG), which stays alive while the sweep runs: only the sweep's
-/// signal (or the guard's, or the thread's death) ends it. Residual: if the
-/// thread died before the grandchild's `prctl`, the grandchild is left alive;
-/// the guard waits for `mark_forked` and kills whatever is below the child.
+/// signal (or the guard's, or the thread's death) ends it. If the thread died
+/// before the grandchild's `prctl` the signal would never come, so after it
+/// the grandchild checks (signal 0, nothing is sent) that the forking thread
+/// and process are still there and exits at once if not.
 extern "C" fn fork_then_pause(_: *mut libc::c_void) -> *mut libc::c_void {
-    // SAFETY: fork/prctl/close_range/pause take integers only. Runs in a forked fixture child; the grandchild holds no inherited fds.
+    // SAFETY: getpid/gettid/fork/prctl/tgkill(sig 0)/getppid/_exit/close_range/pause take integers only. Runs in a forked fixture child; the grandchild holds no inherited fds. tgkill with signal 0 only probes the grandchild's own forking thread, captured before the fork.
     unsafe {
+        let tgid = libc::getpid();
+        let tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
         if libc::fork() == 0 {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            let parent_gone =
+                libc::getppid() != tgid || libc::syscall(libc::SYS_tgkill, tgid, tid, 0) != 0;
+            if parent_gone {
+                libc::_exit(0);
+            }
             libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32);
         } else {
             mark_forked();

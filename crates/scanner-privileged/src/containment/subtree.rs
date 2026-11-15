@@ -150,14 +150,13 @@ impl ProcView for Procfs {
 const MAX_CHILDREN_BYTES: u64 = 1 << 20;
 
 /// Parse a `children` file's pids into `kids`: at most [`MAX_CHILDREN_BYTES`]
-/// are read (more: truncated) and the deadline is checked every 256 pids.
+/// are read and the deadline is checked every 256 pids. A longer file is
+/// marked truncated but its readable prefix is still parsed, cut at the last
+/// whitespace so a half-read pid is never admitted (each pid is stat-verified
+/// later anyway).
 fn parse_children(src: impl std::io::Read, deadline: Instant, kids: &mut Kids) {
-    let mut text = String::new();
-    match src.take(MAX_CHILDREN_BYTES + 1).read_to_string(&mut text) {
-        Ok(n) if n as u64 > MAX_CHILDREN_BYTES => {
-            kids.truncated = true;
-            return;
-        }
+    let mut bytes = Vec::new();
+    match src.take(MAX_CHILDREN_BYTES + 1).read_to_end(&mut bytes) {
         Ok(_) => {}
         Err(e) if vanished(&e) => return,
         Err(e) => {
@@ -165,6 +164,25 @@ fn parse_children(src: impl std::io::Read, deadline: Instant, kids: &mut Kids) {
             return;
         }
     }
+    if bytes.len() as u64 > MAX_CHILDREN_BYTES {
+        kids.truncated = true;
+        // The extra byte only proves there was more; keep whole tokens.
+        let extra_is_space = bytes.last().is_some_and(u8::is_ascii_whitespace);
+        bytes.pop();
+        if !extra_is_space {
+            let keep = bytes
+                .iter()
+                .rposition(u8::is_ascii_whitespace)
+                .map_or(0, |i| i + 1);
+            bytes.truncate(keep);
+        }
+    }
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        kids.error.get_or_insert_with(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "malformed children list")
+        });
+        return;
+    };
     for (i, word) in text.split_ascii_whitespace().enumerate() {
         if i % 256 == 0 && Instant::now() >= deadline {
             kids.truncated = true;
@@ -256,7 +274,10 @@ pub(super) fn walk(root: i32, deadline: Instant, view: &impl ProcView) -> Option
             break;
         }
         rounds += 1;
-        w.expand(root, root_start);
+        if w.expand(root, root_start) {
+            w.pass
+                .fail(io::Error::other("root children file vanished on re-read"));
+        }
         if w.stack.is_empty() {
             break;
         }
@@ -311,11 +332,12 @@ impl<V: ProcView> Walk<'_, V> {
             }
         }
         let mut batch: Vec<Admitted> = Vec::new();
+        let mut in_batch: HashSet<i32> = HashSet::new();
         for pid in kids.pids {
             if self.out_of_time() {
                 break;
             }
-            if !self.seen.contains(&pid) && !batch.iter().any(|a| a.pid == pid) {
+            if !self.seen.contains(&pid) && in_batch.insert(pid) {
                 batch.extend(self.admit(pid, node));
             }
         }
