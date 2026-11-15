@@ -598,7 +598,7 @@ fn a_pass_with_a_newly_found_dead_node_does_not_count_toward_completion() {
         Ok(KillOutcome::Signalled)
     });
     assert!(sweep.complete && sweep.failures == 0);
-    assert!(calls.get() >= 3, "completed after {} passes", calls.get());
+    assert_eq!(calls.get(), 4, "completed after {} passes", calls.get());
     assert!(killed.borrow().contains(&2) && killed.borrow().contains(&3));
 }
 

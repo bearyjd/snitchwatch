@@ -28,8 +28,13 @@
 //! dance, so this does not try to prevent a misclassification: it makes one
 //! harmless (the node is walked through and SIGKILLed, a no-op on a true
 //! zombie). A dead node that has vanished by the time it is expanded does not
-//! make the pass incomplete: its children were reparented to the root before
-//! it became a zombie, and the root re-read covers them. The sweep still
+//! make the pass incomplete: its children were reparented to the nearest live
+//! subreaper ancestor (the root, or an intermediate `PR_SET_CHILD_SUBREAPER`
+//! node). The root re-read covers the root's; an intermediate subreaper's list
+//! may have been read earlier in this pass, so its new children are found by
+//! the NEXT pass (or via the root once that subreaper exits). Completion is
+//! unaffected: counting requires that subreaper itself to be dead and already
+//! signalled. The sweep still
 //! needs two consecutive complete passes with an empty `live`, and a pass
 //! counts only if every `dead` member was already signalled in an EARLIER pass
 //! (see `signal_pass`): a node signalled earlier cannot fork again, while one
@@ -364,6 +369,8 @@ impl<V: ProcView> Walk<'_, V> {
         }
         match self.view.stat(node) {
             Ok(Some(now)) if now.start == start => {}
+            // Vanished dead node: its children went to the nearest live
+            // subreaper ancestor, found by the root re-read or a later pass.
             Ok(None) if dead => return false,
             Ok(_) => {
                 self.pass.complete = false;
@@ -389,6 +396,7 @@ impl<V: ProcView> Walk<'_, V> {
         // commit them only if it did.
         match self.view.stat(node) {
             Ok(Some(now)) if now.start == start => self.commit(batch),
+            // As above: the batch is dropped, later passes find its children.
             Ok(None) if dead => {}
             Ok(_) => self.pass.complete = false,
             Err(e) => self.pass.fail(e),
