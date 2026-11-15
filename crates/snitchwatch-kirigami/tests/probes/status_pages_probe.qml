@@ -342,7 +342,7 @@ Window {
             probe.page.selected = "allow";
             probe.exercise("Continue", () => probe.n("chosen") + "|" + (settingsCtl.silentMode === "allow"));
         } },
-        { gate: () => probe.n("chosen") >= 1 ? "" : "Continue", run: () => {
+        { gate: () => probe.n("chosen") < 1 ? "Continue" : (settingsCtl.silentMode === "allow" ? "" : "Allow saved"), run: () => {
             probe.expect(probe.n("chosen") === 1, "Continue fired " + probe.n("chosen") + " times");
             probe.expect(settingsCtl.silentMode === "allow", "Continue saved " + settingsCtl.silentMode);
         } },
