@@ -217,6 +217,7 @@ fn an_incomplete_empty_pass_never_counts_toward_completion() {
     let pass = |complete| {
         Ok(Pass {
             live: vec![],
+            dead: vec![],
             complete,
             first_error: (!complete).then(|| io::Error::from_raw_os_error(libc::EIO)),
         })
@@ -455,15 +456,98 @@ fn a_listed_child_that_vanishes_keeps_the_pass_incomplete() {
     assert!(!pass.complete);
 }
 
+/// A true zombie is walked through (its children are found) and reported in
+/// `dead`, never in `live`, so it cannot block completion.
 #[test]
-fn a_dead_node_is_not_walked() {
+fn a_dead_node_is_walked_but_not_live() {
     let mut fake = Fake::default();
     fake.root();
     fake.add(2, 1, Entry::Zombie(1, 2));
     fake.live(3, 2);
     let pass = walk(1, far(), &fake).unwrap();
-    assert!(pids(&pass).is_empty() && pass.complete);
-    assert!(!fake.asked.borrow().contains(&3));
+    assert_eq!(pids(&pass), [3]);
+    assert_eq!(pass.dead, [(2, 2)]);
+    assert!(pass.complete);
+    assert!(fake.asked.borrow().contains(&3));
+}
+
+/// The is_dead sequence is fooled (zombie, no tasks, same zombie, no tasks)
+/// yet the node has a live child: the child is found and the node is still
+/// handed to the kill step.
+#[test]
+fn a_misclassified_node_is_walked_and_signalled() {
+    let mut fake = Fake::default();
+    fake.root();
+    fake.add(2, 1, Entry::Zombie(1, 2));
+    fake.live(3, 2);
+    let pass = walk(1, far(), &fake).unwrap();
+    assert_eq!(pids(&pass), [3]);
+    assert_eq!(pass.dead, [(2, 2)]);
+    let killed = RefCell::new(Vec::new());
+    let mut scans = vec![pass].into_iter();
+    kill_descendants_passes(
+        (1, 1),
+        far(),
+        || {
+            Ok(scans.next().unwrap_or_else(|| Pass {
+                live: vec![],
+                dead: vec![],
+                complete: true,
+                first_error: None,
+            }))
+        },
+        |pid, tree| {
+            assert!(tree.contains(&(2, 2)) && tree.contains(&(3, 3)));
+            killed.borrow_mut().push(pid);
+            Ok(())
+        },
+    );
+    let mut killed = killed.into_inner();
+    killed.sort_unstable();
+    assert_eq!(killed, [2, 3]);
+}
+
+/// A dead node reaped before its list or identity is re-read hands its
+/// children to the root: that is no doubt, the pass stays complete.
+#[test]
+fn a_dead_node_that_vanishes_when_expanded_keeps_the_pass_complete() {
+    let mut fake = Fake::default();
+    fake.root();
+    fake.add(2, 1, Entry::Zombie(1, 2));
+    // is_dead's second stat is call 2; the expand's two stats are 3 and 4.
+    fake.vanish_from_call.insert(2, 3);
+    let pass = walk(1, far(), &fake).unwrap();
+    assert!(pass.live.is_empty());
+    assert!(pass.complete, "{:?}", pass.first_error);
+
+    // Vanishing only between the two expand stats is no doubt either.
+    let mut fake = Fake::default();
+    fake.root();
+    fake.add(2, 1, Entry::Zombie(1, 2));
+    fake.vanish_from_call.insert(2, 4);
+    let pass = walk(1, far(), &fake).unwrap();
+    assert!(pass.complete, "{:?}", pass.first_error);
+}
+
+/// An unreaped zombie is signalled but two consecutive passes that find only
+/// it still complete the sweep.
+#[test]
+fn a_true_zombie_is_signalled_and_does_not_block_completion() {
+    let mut fake = Fake::default();
+    fake.root();
+    fake.add(2, 1, Entry::Zombie(1, 2));
+    let killed = RefCell::new(Vec::new());
+    let sweep = kill_descendants_passes(
+        (1, 1),
+        far(),
+        || Ok(walk(1, far(), &fake).unwrap()),
+        |pid, _| {
+            killed.borrow_mut().push(pid);
+            Ok(())
+        },
+    );
+    assert!(sweep.complete && sweep.failures == 0);
+    assert!(killed.borrow().contains(&2));
 }
 
 /// A zombie leader whose last other thread exec'd becomes a live process

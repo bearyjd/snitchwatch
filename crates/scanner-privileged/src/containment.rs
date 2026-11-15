@@ -275,17 +275,19 @@ fn failed_sweep(e: io::Error) -> Sweep {
     }
 }
 
-/// Kill each of `live` (a pass's finds, all below `root`); `true`: the
-/// deadline passed first and the sweep must stop.
+/// Kill each of `live` and `dead` (a pass's finds, all below `root`; a dead
+/// one is a no-op unless it was misclassified); `true`: the deadline passed
+/// first and the sweep must stop.
 fn kill_all(
     live: &[(i32, u64)],
+    dead: &[(i32, u64)],
     root: (i32, u64),
     deadline: Instant,
     kill: &mut impl FnMut(i32, &Tree) -> io::Result<()>,
     sweep: &mut Sweep,
 ) -> bool {
-    let tree: Tree = live.iter().copied().chain([root]).collect();
-    for &(pid, _) in live {
+    let tree: Tree = live.iter().chain(dead).copied().chain([root]).collect();
+    for &(pid, _) in live.iter().chain(dead) {
         if Instant::now() >= deadline {
             return true;
         }
@@ -312,11 +314,13 @@ fn kill_descendants_with(
             Ok(match scan()? {
                 Some(live) => Pass {
                     live,
+                    dead: Vec::new(),
                     complete: true,
                     first_error: None,
                 },
                 None => Pass {
                     live: Vec::new(),
+                    dead: Vec::new(),
                     complete: false,
                     first_error: None,
                 },
@@ -354,7 +358,14 @@ fn kill_descendants_passes(
                     sweep.first_error.get_or_insert(e);
                 }
                 // An incomplete pass is no evidence of "none", but what it
-                // found is still killed.
+                // found is still killed. Dead nodes are signalled too (a
+                // misclassified one dies) but never count against completion.
+                if pass.live.is_empty()
+                    && pass.complete
+                    && kill_all(&[], &pass.dead, root, deadline, &mut kill, &mut sweep)
+                {
+                    return sweep;
+                }
                 if pass.live.is_empty() && pass.complete {
                     empty_passes += 1;
                     if empty_passes == 2 {
@@ -363,7 +374,9 @@ fn kill_descendants_passes(
                     }
                 } else {
                     empty_passes = 0;
-                    if kill_all(&pass.live, root, deadline, &mut kill, &mut sweep) {
+                    if kill_all(
+                        &pass.live, &pass.dead, root, deadline, &mut kill, &mut sweep,
+                    ) {
                         return sweep;
                     }
                 }

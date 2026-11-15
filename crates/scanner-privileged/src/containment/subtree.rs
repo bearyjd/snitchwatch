@@ -18,6 +18,18 @@
 //! be vouched for); the pass is incomplete instead. A listed child that has
 //! vanished may have forked first, so it also makes the pass incomplete.
 //!
+//! A node classified dead (a zombie with no other thread) is still walked
+//! through, as a snapshot can list a child under a parent that is already
+//! exiting, and it is still signalled, but it is reported in `dead`, not
+//! `live`, so an unreaped zombie never blocks completion. Classifying a zombie
+//! as dead cannot be made race-free against an adversarial exec/thread-respawn
+//! dance, so this does not try to prevent a misclassification: it makes one
+//! harmless (the node is walked through and SIGKILLed, a no-op on a true
+//! zombie). A dead node that has vanished by the time it is expanded does not
+//! make the pass incomplete: its children were reparented to the root before
+//! it became a zombie, and the root re-read covers them. The sweep still
+//! needs two consecutive complete passes with an empty `live`.
+//!
 //! Accepted limits, not coded around: (1) the fallback full scan (kernels
 //! without `CONFIG_PROC_CHILDREN`) reads `/proc` non-atomically, so a fork
 //! relay can hide from two passes there; the walk is the default, and the
@@ -38,6 +50,9 @@ use std::time::Instant;
 #[derive(Debug)]
 pub(super) struct Pass {
     pub live: Vec<(i32, u64)>,
+    /// Nodes classified dead (unreaped zombies): walked through and
+    /// signalled, never counted in `live`.
+    pub dead: Vec<(i32, u64)>,
     pub complete: bool,
     pub first_error: Option<io::Error>,
 }
@@ -46,6 +61,7 @@ impl Pass {
     fn new() -> Self {
         Pass {
             live: Vec::new(),
+            dead: Vec::new(),
             complete: true,
             first_error: None,
         }
@@ -276,13 +292,13 @@ pub(super) fn walk(root: i32, deadline: Instant, view: &impl ProcView) -> Option
             return Some(w.pass);
         }
     };
-    if w.expand(root, root_start) {
+    if w.expand(root, root_start, false) {
         return None;
     }
     let mut rounds = 0;
     loop {
-        while let Some((node, start)) = w.stack.pop() {
-            if w.expand(node, start) {
+        while let Some((node, start, dead)) = w.stack.pop() {
+            if w.expand(node, start, dead) {
                 w.pass
                     .fail(io::Error::other("no /proc children file below the root"));
             }
@@ -292,7 +308,7 @@ pub(super) fn walk(root: i32, deadline: Instant, view: &impl ProcView) -> Option
             break;
         }
         rounds += 1;
-        if w.expand(root, root_start) {
+        if w.expand(root, root_start, false) {
             w.pass
                 .fail(io::Error::other("root children file vanished on re-read"));
         }
@@ -308,8 +324,9 @@ struct Walk<'a, V: ProcView> {
     deadline: Instant,
     pass: Pass,
     seen: HashSet<i32>,
-    /// Admitted nodes whose lists are still to be read, with their start times.
-    stack: Vec<(i32, u64)>,
+    /// Admitted nodes whose lists are still to be read, with their start
+    /// times and whether they were classified dead.
+    stack: Vec<(i32, u64, bool)>,
 }
 
 impl<V: ProcView> Walk<'_, V> {
@@ -323,8 +340,10 @@ impl<V: ProcView> Walk<'_, V> {
 
     /// Read `node`'s children and admit the new ones. `true`: the kernel has
     /// no `children` file. If `node` is no longer the process admitted (its
-    /// start time changed or it is gone) nothing it listed is trusted.
-    fn expand(&mut self, node: i32, start: u64) -> bool {
+    /// start time changed or it is gone) nothing it listed is trusted. A
+    /// `dead` node that is gone is not a doubt: its children were reparented
+    /// to the root, whose re-read covers them.
+    fn expand(&mut self, node: i32, start: u64, dead: bool) -> bool {
         if self.out_of_time() {
             return false;
         }
@@ -340,6 +359,7 @@ impl<V: ProcView> Walk<'_, V> {
         }
         match self.view.stat(node) {
             Ok(Some(now)) if now.start == start => {}
+            Ok(None) if dead => return false,
             Ok(_) => {
                 self.pass.complete = false;
                 return false;
@@ -364,23 +384,25 @@ impl<V: ProcView> Walk<'_, V> {
         // commit them only if it did.
         match self.view.stat(node) {
             Ok(Some(now)) if now.start == start => self.commit(batch),
+            Ok(None) if dead => {}
             Ok(_) => self.pass.complete = false,
             Err(e) => self.pass.fail(e),
         }
         false
     }
 
-    /// Record a verified batch: seen, live and (unless dead) still to expand.
+    /// Record a verified batch: seen, live or dead, and still to expand.
     fn commit(&mut self, batch: Vec<Admitted>) {
         for admitted in batch {
             self.seen.insert(admitted.pid);
+            let member = (admitted.pid, admitted.start);
             if admitted.dead {
-                // No children left to list; expanding it would only fail
-                // spuriously once it is reaped.
-                continue;
+                self.pass.dead.push(member);
+            } else {
+                self.pass.live.push(member);
             }
-            self.pass.live.push((admitted.pid, admitted.start));
-            self.stack.push((admitted.pid, admitted.start));
+            self.stack
+                .push((admitted.pid, admitted.start, admitted.dead));
         }
     }
 
@@ -479,7 +501,9 @@ pub(super) fn scan_all(root: i32, deadline: Instant, view: &impl ProcView) -> io
         }
         for &(pid, dead, start) in children.get(&parent).into_iter().flatten() {
             if seen.insert(pid) {
-                if !dead {
+                if dead {
+                    pass.dead.push((pid, start));
+                } else {
                     pass.live.push((pid, start));
                 }
                 stack.push(pid);
