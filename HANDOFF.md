@@ -1,6 +1,17 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-11-14)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-11-15)
 
-> Start with the 2026-11-14 section below, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are dated history.
+> Start with the 2026-11-15 section below, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-15 — r16.3 decided: master daemon + eBPF; #363 probe flakes in progress
+
+- **Source:** `origin/main` at `a2ae174a` (#365). No other PR was open at hand-off except the #363 fix (below).
+- **Owner decisions today:** r16.3 = master daemon `a1353848` with eBPF (not the v1.8.0 RPM); #35 keep the TCP fallback behind a dev-only flag; #356 accept the 3 s grace and file the upstream field request; the 2026-11-14 load test counts as "A" for the v1.8.0 modules only. Plan and tower brief: `docs/superpowers/plans/2026-11-08-ebpf-r16-3.md` ("Owner decisions" and "Tower brief").
+- **Consequence:** the master daemon and the `.o` modules must be built as a matched pair from the pin; the load test must be re-run on that pair; the modules are not CO-RE (need the ogc `kernel-devel`, rebuild per kernel). Repo-side prerequisites are merged (#341 #342 #343 #347 #348).
+- **#363:** #365 `a2ae174a` fixed the status-pages Continue save race. A load hunt (every `*keyboard*` probe, 15 rounds, `3 x nproc` `yes` loops, `QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic`) failed 48 of 165 runs across 8 probes: the step engines run steps before layout and focus settle, and their 200-tick stall budget is about 12 s. Fix in progress: a settle gate plus a 1000-tick budget in every step engine (plan `docs/superpowers/plans/2026-11-15-kirigami-probe-load-flakes.md`; branch `fix/363-probe-settle`). On the shared helper alone blocklists went 7 to 1, profiles 10 to 2 failing rounds. Open question: a `ScrollView` appearing as the last Tab stop in the profiles sheet may be a real product quirk. #363 closes when the same hunt stays at 0.
+- **Needs the tower:** everything in the plan's "Tower brief" (kernel-devel, clang/llvm major, a real `build-modules.sh` run, matched daemon build, flip of the three `proc` checks, load test on the master pair) and one real pkexec scan before any image.
+- **Needs the owner:** be present for the re-run load test; removal of the old worktrees (`wt-e*`, `wt-ci`, `w1-w4`; `git worktree remove` refuses with a submodule, needs `rm -rf` and an OK).
+- **Lessons:** reproduce load-dependent flakes with `3 x nproc` busy loops (no load and 2 loops never failed); gate probe steps on the effect, not the trigger signal; test binaries run directly use the real HOME, so use a throwaway HOME.
+- **Resume checklist:** `git fetch`; `gh pr list`; read `.omc/STATE.md`; read this section; do not touch the tower's release workflow.
+
+ dated history.
 
 ## 2026-11-14 — E3 (honest eBPF process-monitor state) merged; CI drift fixed; eBPF load test has run
 
