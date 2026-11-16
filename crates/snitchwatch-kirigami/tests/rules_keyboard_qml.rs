@@ -235,7 +235,7 @@ Window {
 
     // A probe that hangs (a loop, a lost event) fails naming where.
     Timer {
-        interval: 45000
+        interval: 80000 // above the ~60 s stall budget, below the runner's 150 s
         running: true
         onTriggered: {
             console.warn("rules probe: stuck in phase " + probe.phase + "." + probe.sub + "; " + probe.failures.join("; "));
