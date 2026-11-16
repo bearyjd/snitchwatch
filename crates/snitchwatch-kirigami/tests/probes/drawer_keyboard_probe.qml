@@ -34,7 +34,7 @@ QtObject {
         }
     }
     property Timer watchdog: Timer {
-        interval: 45000
+        interval: 120000 // above waitFor's 20 s gates, below the runner's 150 s
         running: true
         onTriggered: {
             probe.failures.push("watchdog: stuck in phase '" + probe.phase + "'");
