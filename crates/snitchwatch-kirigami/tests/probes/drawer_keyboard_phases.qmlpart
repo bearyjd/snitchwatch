@@ -34,8 +34,13 @@
     function inDrawer(item) { return probe.inside(item, probe.drawer().contentItem); }
     function page() { return probe.shell.pageStack.currentItem; }
     // Wait (bounded, spinning the event loop) until cond() holds.
+    // Wall clock, not a loop count: on a loaded machine each wait(25) takes
+    // far longer than 25 ms (#363). A tripped watchdog aborts the run here, so
+    // its report names the phase instead of a null-shell TypeError.
     function waitFor(cond, what) {
-        for (let i = 0; i < 200; ++i) {
+        const deadline = Date.now() + 20000;
+        while (Date.now() < deadline) {
+            if (probe.finished) throw new Error("aborted by the watchdog while waiting for " + what);
             if (cond()) return;
             probe.tc.wait(25);
         }

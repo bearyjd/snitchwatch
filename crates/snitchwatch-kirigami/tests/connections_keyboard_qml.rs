@@ -191,6 +191,11 @@ Window {
             ? "" : "two rows";
         case 4: case 8: case 13: return probe.menuOpen() ? "" : "menu open";
         case 5: case 9: case 14: return probe.menuClosed() ? "" : "menu closed";
+        // After the Allow verdict the model may still be updating the rows (#363).
+        case 6: return probe.list.count === 2 && probe.stable("r0", probe.list.itemAtIndex(0))
+            && probe.stable("r1", probe.list.itemAtIndex(1)) && probe.settled() ? "" : "the rows to settle after the verdict";
+        case 7: return probe.list.currentIndex === 1 && probe.stable("r1", probe.list.itemAtIndex(1))
+            && probe.settled() ? "" : "the selection to rest on the second row";
         case 11: return probe.stable("h1", probe.headerAt(1)) ? "" : "second group header";
         case 16: return probe.list.count === 3 && probe.stable("f2", probe.rowAt(2)) ? "" : "three flat rows";
         case 18: return probe.menuOpen() ? "" : "menu open";

@@ -32,10 +32,16 @@
         return JSON.stringify([conn.scopes, probe.map.camera.zoom, probe.map.camera.centerX, probe.map.camera.centerY,
                                MapBandState.collapsed, probe.map.countryMenu.opened]);
     }
+    // The stops the last tabTo visited, so a failure says where Tab went.
+    property var tabTrail: []
     function tabTo(target, here) {
         if (!here) start.forceActiveFocus();
+        const trail = [];
+        probe.tabTrail = trail;
         for (let i = 0; i < 40; ++i) {
-            if (probe.where(probe.focused()).indexOf(target) === 0) return true;
+            const at = probe.where(probe.focused());
+            if (at.indexOf(target) === 0) return true;
+            trail.push(at);
             tc.keyClick(Qt.Key_Tab);
         }
         return probe.where(probe.focused()).indexOf(target) === 0;
@@ -116,8 +122,8 @@
     function gate(phase) {
         switch (phase) {
         case 1: return probe.markersReady(3);
-        case 2: return probe.scope() === "country|country:US" ? probe.markersReady(2) : "the US scope";
-        case 3: return probe.scope() === "city|city:nyc" ? probe.markersReady(1) : "the New York scope";
+        case 2: return probe.scope() !== "country|country:US" ? "the US scope" : (probe.inMap() ? probe.markersReady(2) : "focus to return to the map");
+        case 3: return probe.scope() !== "city|city:nyc" ? "the New York scope" : (probe.inMap() ? probe.markersReady(1) : "focus to return to the map");
         case 4: case 6: case 10: case 12: case 14: case 16: return probe.popupReady();
         case 5: case 11: return probe.popupOpen() ? "the popup closed" : "";
         case 7: return probe.scope() === "ip|ip:8.8.4.4" || probe.scope() === "ip|ip:8.8.8.8" ? "" : "an IP scope";
@@ -163,7 +169,7 @@
             const us = probe.markers().find(m => m.cluster.members[0].code === "US");
             probe.expect(us.Accessible.description === "Scopes connections to this place", "marker description: " + us.Accessible.description);
             // A marker holds focus after Tab, and a held key does nothing to it.
-            probe.expect(probe.tabTo("band/United States"), "cannot Tab to the United States marker");
+            probe.expect(probe.tabTo("band/United States"), "cannot Tab to the United States marker: " + JSON.stringify(probe.tabTrail));
             probe.held("marker (Space)", Qt.Key_Space);
             probe.held("marker (Return)", Qt.Key_Return);
             probe.held("marker (Enter)", Qt.Key_Enter);
@@ -189,7 +195,7 @@
             // Return acts on the marker that has the focus, even after the markers reorder.
             const nyc = probe.markers().find(m => m.cluster.members[0].key === "city:nyc");
             probe.expect(nyc !== undefined, "no New York marker");
-            probe.expect(probe.tabTo("band/New York"), "cannot Tab to the New York marker");
+            probe.expect(probe.tabTo("band/New York"), "cannot Tab to the New York marker: " + JSON.stringify(probe.tabTrail));
             const before = probe.markers().indexOf(nyc);
             probe.map.applyClusters(probe.map.markers.slice().reverse());
             probe.expect(probe.markers().indexOf(nyc) !== before, "the markers did not reorder");
@@ -203,7 +209,7 @@
         case 3: {
             probe.expect(probe.inMap(), "focus left the map after the city scope: " + probe.where(probe.focused()));
             probe.expect(probe.markerNames()[0].indexOf("2 observed IPs") === 0, "no stack marker: " + JSON.stringify(probe.markerNames()));
-            probe.expect(probe.tabTo("band/2 observed IPs"), "cannot Tab to the IP stack");
+            probe.expect(probe.tabTo("band/2 observed IPs"), "cannot Tab to the IP stack: " + JSON.stringify(probe.tabTrail));
             probe.expect(probe.markers()[0].Accessible.description === "Lists these 2 places", "stack description: " + probe.markers()[0].Accessible.description);
             probe.held("stack (Return)", Qt.Key_Return);
             probe.held("stack (Space)", Qt.Key_Space);
