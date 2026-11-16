@@ -44,7 +44,23 @@ Window {
     property var failures: []
     property int phase: 0
     property int stalls: 0
-    readonly property int maxStalls: 200
+    // ~60 s of waiting at the tick (was 200 ticks: too little on a loaded
+    // machine, #363).
+    readonly property int maxStalls: 600
+    // The item tree's signature at the previous tick; a step runs only once it
+    // has held still for a full tick (layout, incubation and focus settled).
+    property string lastSignature: ""
+    function treeSignature() {
+        const out = [String(probe.activeFocusItem)];
+        const walk = (item, depth) => {
+            if (!item || depth > 40) return;
+            out.push(item.visible ? 1 : 0, item.enabled ? 1 : 0, Math.round(item.x), Math.round(item.y),
+                     Math.round(item.width), Math.round(item.height), item.activeFocusOnTab ? 1 : 0);
+            for (let i = 0; i < item.children.length; ++i) walk(item.children[i], depth + 1);
+        };
+        walk(probe.contentItem, 0);
+        return out.join(",");
+    }
     property var geo: ({})
     property var focusBefore: null
     property int rowsBefore: 0
@@ -191,7 +207,12 @@ Window {
         onTriggered: {
             let done = false;
             try {
-                const waiting = probe.gate(probe.phase);
+                let waiting = probe.gate(probe.phase);
+                if (waiting === "") {
+                    const signature = probe.treeSignature();
+                    if (signature !== probe.lastSignature) waiting = "the page to hold still";
+                    probe.lastSignature = signature;
+                }
                 if (waiting !== "") {
                     if (++probe.stalls < probe.maxStalls) return;
                     throw new Error("never ready for " + waiting);

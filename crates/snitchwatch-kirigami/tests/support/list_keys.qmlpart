@@ -11,10 +11,26 @@
     property var steps: []
     property int at: 0
     property int stalls: 0
-    readonly property int maxStalls: 200
+    // ~60 s of waiting at the 60 ms tick (was 200 ticks, ~12 s: too little on
+    // a loaded machine, #363).
+    readonly property int maxStalls: 1000
+    // The item tree's signature at the previous tick; a step runs only once it
+    // has held still for a full tick (layout, incubation and focus settled).
+    property string lastSignature: ""
     readonly property int stepLimit: @STEP_LIMIT@
     TestCase { id: tc; name: "listkeys"; when: false }
 
+    function treeSignature() {
+        const out = [probe.nameOf(probe.activeFocusItem)];
+        const walk = (item, depth) => {
+            if (!item || depth > 40) return;
+            out.push(item.visible ? 1 : 0, item.enabled ? 1 : 0, Math.round(item.x), Math.round(item.y),
+                     Math.round(item.width), Math.round(item.height), item.activeFocusOnTab ? 1 : 0);
+            for (let i = 0; i < item.children.length; ++i) walk(item.children[i], depth + 1);
+        };
+        walk(probe.contentItem, 0);
+        return out.join(",");
+    }
     function expect(ok, what) { if (!ok) probe.failures.push(what); }
     function step(name, wait, run) { probe.steps.push({ name: name, wait: wait, run: run }); }
     function focused() { return probe.activeFocusItem; }
@@ -130,7 +146,12 @@
                     done = true;
                 } else {
                     current = probe.steps[probe.at];
-                    const waiting = current.wait ? current.wait() : "";
+                    let waiting = current.wait ? current.wait() : "";
+                    if (waiting === "") {
+                        const signature = probe.treeSignature();
+                        if (signature !== probe.lastSignature) waiting = "the page to hold still";
+                        probe.lastSignature = signature;
+                    }
                     if (waiting !== "") {
                         if (++probe.stalls < probe.maxStalls) return;
                         throw new Error("never ready for " + waiting);
