@@ -34,7 +34,7 @@ QtObject {
         }
     }
     property Timer watchdog: Timer {
-        interval: 120000 // above waitFor's 20 s gates, below the runner's 150 s
+        interval: 120000 // an aggregate cap above waitFor's 20 s per gate; this test has no outer runner watchdog
         running: true
         onTriggered: {
             probe.failures.push("watchdog: stuck in phase '" + probe.phase + "'");
