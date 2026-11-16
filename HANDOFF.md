@@ -1,6 +1,16 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-11-15)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-11-16)
 
-> Start with the 2026-11-15 section below, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-15 — r16.3 decided: master daemon + eBPF; #363 probe flakes in progress
+> Start with the 2026-11-16 section below, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
+
+- **Source:** `origin/main` at `7adc6da9` (#368). No other PR was open at hand-off.
+- **#363 closed** by #365 `a2ae174a`, #367 `4b167b1a`, #368 `7adc6da9` (test-only). Hunt (every `*keyboard*` probe, 15 rounds, `3 x nproc` `yes` loops): 48/165 failures at baseline, 16 after #367, 1/165 after #368 (twice, different tests; the `learning` one did not reproduce in 40 more runs and its output was not captured). Residual about 0.6% per run at an overload CI does not reach. Learning: `.trail/learnings/2026-11-16-keyboard-probes-need-a-settle-gate-snitchwatch.md`.
+- **Owner decisions needed (#35):** TCP gRPC fallback behind a dev-only flag is decided, but five details are not (comment on #35): (1) without the flag, refuse to start or fall back to a per-user Unix socket; (2) does the per-user unit still ship; (3) bluebuild recipe config to `unix:opensnitchd.sock`; (4) are the Tauri/Kirigami embeds gated; (5) is the spike crate in scope. About 29 test files use a TCP address; one `BridgeConfig` helper can cover them.
+- **#356:** upstream per-process id field draft is tracked at `docs/superpowers/research/2026-11-16-opensnitch-upstream-session-id-draft.md` (NOT filed; owner reads it first).
+- **Tower SHAs to send (batched, not yet sent):** `a2ae174a` (#365), `4b167b1a` (#367), `7adc6da9` (#368); all test-only, none belong in an image. The r16.3 tower brief is in `docs/superpowers/plans/2026-11-08-ebpf-r16-3.md`.
+- **Overnight plan:** `docs/superpowers/plans/2026-11-16-overnight-run-7.md`. Items 1, 3, 4 done; item 2 (#35) parked on the decisions above.
+- **Resume checklist:** `git fetch`; `gh pr list`; read `.omc/STATE.md`; read this section and 2026-11-15; do not touch the tower's release workflow.
+
+## 2026-11-15 — r16.3 decided: master daemon + eBPF; #363 probe flakes in progress
 
 - **Source:** `origin/main` at `a2ae174a` (#365). No other PR was open at hand-off except the #363 fix (below).
 - **Owner decisions today:** r16.3 = master daemon `a1353848` with eBPF (not the v1.8.0 RPM); #35 keep the TCP fallback behind a dev-only flag; #356 accept the 3 s grace and file the upstream field request; the 2026-11-14 load test counts as "A" for the v1.8.0 modules only. Plan and tower brief: `docs/superpowers/plans/2026-11-08-ebpf-r16-3.md` ("Owner decisions" and "Tower brief").
