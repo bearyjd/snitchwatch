@@ -353,7 +353,12 @@
         onTriggered: {
             let done = false;
             try {
-                const waiting = probe.gate(probe.phase);
+                let waiting = probe.gate(probe.phase);
+                if (waiting === "") {
+                    const signature = probe.treeSignature();
+                    if (signature !== probe.lastSignature) waiting = "the page to hold still";
+                    probe.lastSignature = signature;
+                }
                 if (waiting !== "") {
                     if (++probe.stalls < probe.maxStalls) return;
                     throw new Error("phase " + probe.phase + " never ready for " + waiting);

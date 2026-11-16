@@ -36,18 +36,18 @@ pub fn run(qml: &str, url: &str, done_marker: &str) {
     });
 
     // The event loop never ends if the probe fails to load or a step hangs
-    // outside the QML watchdog: give up after 90 s, naming the stderr so far.
+    // outside the QML watchdog: give up after 150 s, naming the stderr so far.
     let finished = Arc::new(AtomicBool::new(false));
     let watchdog_done = finished.clone();
     std::thread::spawn(move || {
-        for _ in 0..900 {
+        for _ in 0..1500 {
             std::thread::sleep(std::time::Duration::from_millis(100));
             if watchdog_done.load(Ordering::SeqCst) {
                 return;
             }
         }
         let so_far = std::fs::read_to_string("/proc/self/fd/2").unwrap_or_default();
-        let msg = format!("probe watchdog: no result after 90 s; stderr so far:\n{so_far}\n");
+        let msg = format!("probe watchdog: no result after 150 s; stderr so far:\n{so_far}\n");
         // SAFETY: fd 1 is open for the whole process; the buffer is valid for its length.
         unsafe {
             libc::write(1, msg.as_ptr().cast(), msg.len());
