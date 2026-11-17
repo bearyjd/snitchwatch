@@ -109,7 +109,7 @@ fn manifest_is_canonical_and_its_files_match_the_extracted_bytes() {
         serde_json::to_string_pretty(&manifest).unwrap() + "\n",
         "MANIFEST.json must be 2-space indented with sorted keys and a trailing newline"
     );
-    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["schema_version"], 2);
     assert_eq!(manifest["name"], "snitchwatch-bridge");
     assert_eq!(manifest["version"], VERSION);
     assert_eq!(manifest["arch"], ARCH);

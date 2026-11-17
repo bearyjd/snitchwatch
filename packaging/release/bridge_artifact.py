@@ -66,6 +66,8 @@ DIRS = (
     DATA_DIR,
 )
 ALLOWED_NEEDED = frozenset({"libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"})
+# 2: install.unit, install.unit_name and install.unit_scope were removed (#35).
+SCHEMA_VERSION = 2
 INSTALL = {
     "binary": f"/{BIN_PATH}",
 }
@@ -652,7 +654,7 @@ def check_manifest_header(manifest: dict, version: str, arch: str) -> list[str]:
     if set(manifest) != MANIFEST_KEYS:
         fails.append(f"MANIFEST keys {sorted(manifest)} != {sorted(MANIFEST_KEYS)}")
     expected = {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "name": NAME,
         "version": version,
         "arch": arch,
@@ -752,7 +754,7 @@ def build_manifest(args: argparse.Namespace, meta: dict, files: dict[str, bytes]
         for rel, data in sorted(files.items())
     ]
     manifest = {
-        "schema_version": 1,
+        "schema_version": SCHEMA_VERSION,
         "name": NAME,
         "version": args.version,
         "arch": args.arch,

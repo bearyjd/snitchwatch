@@ -131,9 +131,10 @@ test-blocklists:
     cargo test -p snitchwatch-bridge blocklists -- --nocapture
     cargo test -p snitchwatch-bridge --test blocklists_e2e -- --nocapture
 
-# Validate the packaging artifacts without a Bazzite host. Parses the
-# YAML/JSON and runs the Rust packaging/release shape tests plus the release-tarball packer tests, and
-# shellchecks the release scripts (skipped when shellcheck isn't installed).
+# Validate the packaging artifacts without a Bazzite host: parse the YAML/JSON,
+# run the Rust packaging/release shape tests and the release-tarball packer
+# tests, and shellcheck the release scripts (skipped when shellcheck isn't
+# installed).
 package-check:
     python3 packaging/geo/test-country-data.py
     bash -n packaging/scanner/stage.sh
