@@ -97,7 +97,9 @@ pub fn runtime_dir() -> PathBuf {
 }
 
 /// Write `token` to `path`, creating the parent directory (mode 0700) if
-/// needed and tightening the file itself to mode 0600.
+/// needed. Whatever sits at `path` is removed first and a fresh file is
+/// created exclusively (`O_EXCL | O_NOFOLLOW`) at mode 0600, so a planted
+/// symlink is never written through.
 ///
 /// The parent must be a real directory (never a symlink) owned by the
 /// effective uid; it ends up mode 0700. Otherwise nothing is written.
@@ -109,8 +111,27 @@ fn write_token_file_as(token: &Token, path: &Path, euid: u32) -> io::Result<()> 
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         ensure_private_dir(parent, euid)?;
     }
-    fs::write(path, token.as_str())?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    // Never write through whatever sits at `path`: a symlink (or a file the
+    // loose directory let someone else plant) is removed, then a fresh file is
+    // created exclusively, without following links, already at mode 0600.
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    if file.metadata()?.uid() != euid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("token file {} is not owned by uid {euid}", path.display()),
+        ));
+    }
+    file.write_all(token.as_str().as_bytes())?;
     Ok(())
 }
 
@@ -281,6 +302,36 @@ mod tests {
         assert_eq!(fs::read_dir(&real).unwrap().count(), 0);
         let mode = fs::metadata(&real).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o755, "target must not be chmodded");
+    }
+
+    #[test]
+    fn a_symlink_planted_at_the_token_path_is_replaced_not_written_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("snitchwatch");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        let victim = tmp.path().join("victim");
+        fs::write(&victim, "precious").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        let path = dir.join("token");
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        write_token_file(&Token::generate(), &path).unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        let victim_mode = fs::metadata(&victim).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(victim_mode, 0o644, "symlink target must not be chmodded");
+        let meta = fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_file(), "token must be a regular file");
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o600);
+    }
+
+    #[test]
+    fn a_token_path_that_is_a_directory_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("token");
+        fs::create_dir(&path).unwrap();
+        assert!(write_token_file(&Token::generate(), &path).is_err());
     }
 
     #[test]
