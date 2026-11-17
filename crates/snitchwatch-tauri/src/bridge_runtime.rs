@@ -85,7 +85,18 @@ pub fn resolve_embed_listen(
     resolve_grpc_listen(dev_flag, grpc_bind, xdg_runtime_dir, system_flag)
 }
 
+/// The proxy forwards to the token-presenting WS socket, so it must never be
+/// reachable from off-host.
+fn ensure_loopback_proxy_bind(addr: SocketAddr) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        addr.ip().is_loopback(),
+        "ws_proxy_bind {addr} is not a loopback address; refusing to expose the WS proxy off-host"
+    );
+    Ok(())
+}
+
 pub async fn spawn_bridge_runtime(cfg: BridgeRuntimeConfig) -> anyhow::Result<BridgeRuntime> {
+    ensure_loopback_proxy_bind(cfg.ws_proxy_bind)?;
     let grpc_listen = resolve_embed_listen(
         std::env::var_os(DEV_TCP_ENV),
         std::env::var_os("SNITCHWATCH_GRPC_BIND"),
@@ -122,6 +133,28 @@ mod tests {
 
     fn os(s: &str) -> Option<OsString> {
         Some(OsString::from(s))
+    }
+
+    #[test]
+    fn proxy_bind_must_be_loopback() {
+        for bad in ["0.0.0.0:3031", "[::]:3031", "192.168.1.5:3031"] {
+            let err = ensure_loopback_proxy_bind(bad.parse().unwrap()).unwrap_err();
+            assert!(err.to_string().contains("ws_proxy_bind"), "{err}");
+        }
+        for ok in ["127.0.0.1:3031", "[::1]:3031"] {
+            ensure_loopback_proxy_bind(ok.parse().unwrap()).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_refuses_a_non_loopback_proxy_bind_first() {
+        let cfg = BridgeRuntimeConfig {
+            ws_proxy_bind: "0.0.0.0:3031".parse().unwrap(),
+        };
+        let Err(err) = spawn_bridge_runtime(cfg).await else {
+            panic!("expected refusal");
+        };
+        assert!(err.to_string().contains("ws_proxy_bind"), "{err}");
     }
 
     #[test]
