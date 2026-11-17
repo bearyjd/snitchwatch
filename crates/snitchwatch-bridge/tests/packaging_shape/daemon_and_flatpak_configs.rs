@@ -19,16 +19,15 @@ fn system_overlay_config_defaults_to_allow_on_the_bridge_socket() {
     assert_eq!(json["Server"]["Address"], "unix:opensnitchd.sock");
 }
 
-/// PR #166 H1: the recipe's own `files` module ships without the overlay,
-/// so its config must not dial the socket. It keeps the per-user bridge's
-/// TCP address and, like the overlay, defaults to `allow` (owner decision
-/// 2026-10-25); the squatter case (#35) is what the system overlay's socket
-/// fixes.
+/// #35: the recipe's config dials the same root-only socket as the system
+/// overlay's. Without the overlay the daemon (cwd `/`) can only dial
+/// `/opensnitchd.sock`, which only root can create: it finds no UI and applies
+/// `allow` (owner decision 2026-10-25). No TCP port is ever left to squat.
 #[test]
-fn recipe_config_defaults_to_allow_on_the_per_user_tcp_bind() {
+fn recipe_config_uses_the_root_only_unix_address() {
     let json =
         daemon_config("packaging/bluebuild/files/system/etc/opensnitchd/default-config.json");
-    assert_eq!(json["Server"]["Address"], "127.0.0.1:50051");
+    assert_eq!(json["Server"]["Address"], "unix:opensnitchd.sock");
     assert_eq!(json["DefaultAction"], "allow");
 }
 
@@ -52,16 +51,13 @@ fn both_daemon_configs_pin_the_ebpf_modules_path() {
     }
 }
 
-/// The two daemon configs differ only in where the daemon dials: the
-/// overlay's must not drift from the recipe's on any other setting.
+/// The recipe's config and the overlay's are the same file: they must not
+/// drift on any setting.
 #[test]
-fn the_two_daemon_configs_differ_only_in_server_address() {
-    let mut recipe =
+fn the_two_daemon_configs_are_identical() {
+    let recipe =
         daemon_config("packaging/bluebuild/files/system/etc/opensnitchd/default-config.json");
-    let mut system = daemon_config("packaging/system/opensnitchd-default-config.json");
-    assert_ne!(recipe["Server"]["Address"], system["Server"]["Address"]);
-    recipe["Server"]["Address"] = serde_json::Value::Null;
-    system["Server"]["Address"] = serde_json::Value::Null;
+    let system = daemon_config("packaging/system/opensnitchd-default-config.json");
     assert_eq!(recipe, system);
 }
 
@@ -76,57 +72,84 @@ fn json_files(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// PR #166 H1: a `unix:` Server.Address ships only in the staged system
-/// overlay, which installs it with the drop-in and the socket it dials, as
-/// one artifact. Nothing else under packaging/ (the recipe included) may.
+/// #35: no shipped daemon config names a TCP `Server.Address`, so there is no
+/// loopback port for a local process to squat on.
 #[test]
-fn a_unix_server_address_ships_only_with_the_socket_and_drop_in() {
+fn no_shipped_daemon_config_names_a_tcp_server_address() {
     let mut found = Vec::new();
     json_files(&workspace_file("packaging"), &mut found);
-    let system = workspace_file("packaging/system").canonicalize().unwrap();
-    let stage = read("packaging/system/stage.sh");
-    let mut unix_configs = 0;
+    let mut configs = 0;
     for path in found {
         let Ok(json) =
             serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap())
         else {
             continue;
         };
-        let address = json["Server"]["Address"].as_str().unwrap_or_default();
-        if !address.starts_with("unix:") {
+        let Some(address) = json["Server"]["Address"].as_str() else {
             continue;
-        }
-        unix_configs += 1;
-        let path = path.canonicalize().unwrap();
+        };
+        configs += 1;
         assert!(
-            path.starts_with(&system),
-            "{} ships a unix: Server.Address outside the staged overlay",
+            address.starts_with("unix:"),
+            "{} names a non-unix Server.Address `{address}`",
             path.display()
         );
-        let name = path.file_name().unwrap().to_str().unwrap();
-        assert!(stage.contains(name), "stage.sh doesn't install {name}");
     }
-    assert_eq!(unix_configs, 1);
+    assert_eq!(configs, 2, "expected the recipe and system daemon configs");
+    let stage = read("packaging/system/stage.sh");
     for staged in [
         "opensnitch-snitchwatch-system-bridge.conf",
         "snitchwatch-system-bridge-grpc.socket",
     ] {
         assert!(stage.contains(staged), "stage.sh doesn't install {staged}");
     }
-    let recipe = read("packaging/bluebuild/recipe.yml");
-    for line in recipe.lines().filter(|l| !l.trim_start().starts_with('#')) {
-        assert!(!line.contains("unix:"), "recipe.yml line: {line}");
+}
+
+fn files_under(dir: &Path, found: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files_under(&path, found);
+        } else {
+            found.push(path);
+        }
+    }
+}
+
+/// #35: TCP gRPC is a developer-only transport. Nothing packaged sets the
+/// flag or the bind address.
+#[test]
+fn nothing_under_packaging_sets_the_dev_tcp_knobs() {
+    let mut found = Vec::new();
+    files_under(&workspace_file("packaging"), &mut found);
+    assert!(
+        found.len() > 20,
+        "scan found too few files: {}",
+        found.len()
+    );
+    for path in found {
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue; // binary fixture
+        };
+        for knob in ["SNITCHWATCH_GRPC_BIND", "SNITCHWATCH_DEV_TCP"] {
+            assert!(
+                !body.contains(knob),
+                "{} mentions {knob}: packaging must not set the dev TCP transport",
+                path.display()
+            );
+        }
     }
 }
 
 #[test]
-fn flatpak_manifest_grants_socket_filesystem_but_not_network() {
-    let body = read("packaging/flatpak/org.snitchwatch.Snitchwatch.yml");
-
+fn flatpak_manifest_grants_no_network() {
+    let body = read("packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml");
     assert!(
-        body.contains("--filesystem=xdg-run/snitchwatch"),
-        "Flatpak manifest must grant --filesystem=xdg-run/snitchwatch to reach \
-         the host-side bridge's Unix socket + token"
+        !std::path::Path::new(&workspace_file(
+            "packaging/flatpak/org.snitchwatch.Snitchwatch.yml"
+        ))
+        .exists(),
+        "the per-user Flatpak profile is retired (#35); the system profile ships"
     );
 
     // The critical negative invariant. --share=network is allowed in
@@ -161,10 +184,7 @@ fn flatpak_manifest_grants_socket_filesystem_but_not_network() {
 /// grants must stay out: system-package apps get the generic icon instead.
 #[test]
 fn flatpak_icon_grants_are_read_only_and_narrow() {
-    for path in [
-        "packaging/flatpak/org.snitchwatch.Snitchwatch.yml",
-        "packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml",
-    ] {
+    for path in ["packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml"] {
         let body = read(path);
         let finish_args = body
             .split("finish-args:")

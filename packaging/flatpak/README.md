@@ -1,13 +1,12 @@
 # GUI Flatpak builds
 
-Both profiles build the Kirigami GUI from source with KDE SDK 6.11 and its
-`org.freedesktop.Sdk.Extension.rust-stable` extension. The system profile
-uses read-only `/run/snitchwatch` and `/run/snitchwatch-auth` mounts; the
-primary profile retains the existing per-user transport. They share an
-app-id, so select one profile for each deployment.
+The system profile builds the Kirigami GUI from source with KDE SDK 6.11 and
+its `org.freedesktop.Sdk.Extension.rust-stable` extension. It uses read-only
+`/run/snitchwatch` and `/run/snitchwatch-auth` mounts. The per-user profile
+was retired with the per-user bridge (#35); the system profile is what ships.
 
 The October 5 validation retained KDE 6.9 and reported it as end-of-life.
-Both manifests now intentionally select supported stable KDE 6.11 with its
+The manifest now intentionally selects supported stable KDE 6.11 with its
 25.08 Rust extension. Record exact SDK/runtime/extension commits and repeat
 clean build and default KDE startup validation before publication. Historical
 6.9 conditional GUI results remain separate from those new release gates.
@@ -70,11 +69,10 @@ flatpak-builder --user --disable-cache --keep-build-dirs \
   packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml
 ```
 
-For the per-user profile select `org.snitchwatch.Snitchwatch.yml` instead.
 Cargo uses `--locked --offline`; source downloads occur before the build.
 The build sandbox has no network grant. Install SDK/runtime dependencies in
 an isolated Flatpak installation before building and retain their exact
-commits; neither manifest pins a mutable runtime branch to a commit itself.
+commits; the manifest does not pin a mutable runtime branch to a commit itself.
 
 Record the source commit and patch/snapshot hash, OpenSnitch gitlink,
 lockfile and generated source hashes, exact SDK/runtime/extension commits,

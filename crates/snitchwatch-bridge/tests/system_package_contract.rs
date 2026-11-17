@@ -111,17 +111,13 @@ fn service_is_unprivileged_socket_activation_only() {
 /// oversized blocklist can't take the desktop down with it.
 #[test]
 fn both_bridge_units_cap_memory() {
-    for unit in [
-        "packaging/system/snitchwatch-system-bridge.service",
-        "packaging/systemd/snitchwatch-bridge.service",
-    ] {
-        let body = file(unit);
-        let lines = active_lines(&body);
-        assert!(
-            lines.contains(&"MemoryMax=512M"),
-            "{unit} missing MemoryMax=512M"
-        );
-    }
+    let unit = "packaging/system/snitchwatch-system-bridge.service";
+    let body = file(unit);
+    let lines = active_lines(&body);
+    assert!(
+        lines.contains(&"MemoryMax=512M"),
+        "{unit} missing MemoryMax=512M"
+    );
 }
 
 #[test]
@@ -279,8 +275,4 @@ fn flatpak_mounts_only_the_system_bridge_paths_read_only() {
     assert!(manifest.contains("--env=SNITCHWATCH_SYSTEM_BRIDGE=1"));
     assert!(manifest.contains("same app-id"));
     assert!(!manifest.contains("--filesystem=xdg-run/snitchwatch"));
-
-    let legacy = file("packaging/flatpak/org.snitchwatch.Snitchwatch.yml");
-    assert!(legacy.contains("--filesystem=xdg-run/snitchwatch"));
-    assert!(!legacy.contains("--env=SNITCHWATCH_SYSTEM_BRIDGE=1"));
 }

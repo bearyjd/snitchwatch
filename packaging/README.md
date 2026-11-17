@@ -10,8 +10,8 @@ Three processes, three trust levels:
 | Process                     | Where it runs                    | Packaged as |
 | --------------------------- | --------------------------------- | ----------- |
 | `opensnitchd`               | Host, privileged (root)          | Baked into a bluebuild image **or** rpm-ostree layered |
-| `snitchwatch-bridge-cli`    | Host, unprivileged (`--user`)    | systemd user unit (`systemd/snitchwatch-bridge.service`) |
-| `snitchwatch-kirigami` GUI  | Flatpak sandbox, unprivileged    | Flatpak (`flatpak/org.snitchwatch.Snitchwatch.yml`) |
+| `snitchwatch-bridge-cli`    | Host, unprivileged system service (`snitchwatch` account) | system units in `system/` (socket-activated) |
+| `snitchwatch-kirigami` GUI  | Flatpak sandbox, unprivileged    | Flatpak (`flatpak/org.snitchwatch.Snitchwatch.system.yml`) |
 
 The Flatpak packages `snitchwatch-kirigami` (Qt6/QML + Kirigami), not
 `snitchwatch-tauri` — Kirigami is the settled GUI stack going forward (see
@@ -48,10 +48,10 @@ on and the socket it dials: one artifact (PR #166 H1); see
 [`../docs/packaging/system-bridge-integration.md`](../docs/packaging/system-bridge-integration.md).
 The recipe's own copy
 ([`bluebuild/files/system/etc/opensnitchd/default-config.json`](bluebuild/files/system/etc/opensnitchd/default-config.json))
-is the per-user flavour's: `127.0.0.1:50051` with `DefaultAction: allow`.
-That TCP port is **not squat-safe**: any local process that binds it first
-gets the daemon's UI authority, whatever the default. The staged overlay
-replaces it in the image.
+is identical to the overlay's: `unix:opensnitchd.sock` with
+`DefaultAction: allow`. Without the overlay the daemon (cwd `/`) can only dial
+`/opensnitchd.sock`, which only root can create, so it finds no UI and applies
+`allow`; no TCP port is left to squat (#35).
 
 ## The packaged fetch rule
 
@@ -75,8 +75,8 @@ one opensnitchd rule (owner decision, 2026-10-08):
   `user.name` when it loads the rule. Without the `snitchwatch` account it
   logs `Error compiling list rule` and skips the rule; it never broadens
   it.
-  - A host that runs only the per-user bridge has no such account, so
-    the rule is inert there for this reason.
+  - A host without the overlay has no such account, so the rule is inert
+    there for this reason.
   - With the system-bridge overlay, sysusers creates the account before
     `opensnitch.service` starts.
   - On a live host, restart `opensnitch.service` once after the account
@@ -100,7 +100,7 @@ one opensnitchd rule (owner decision, 2026-10-08):
     to `/etc/opensnitchd/rules/`, mode 0644).
 
   The release tarball and the Flatpak don't carry it: the tarball ships
-  the per-user bridge, which the rule deliberately doesn't match.
+  only the binary, and the rule matches the system bridge's account.
 
 Details and the daemon-source reasoning:
 [`../docs/superpowers/plans/2026-10-08-packaged-bridge-fetch-rule.md`](../docs/superpowers/plans/2026-10-08-packaged-bridge-fetch-rule.md).
@@ -112,17 +112,14 @@ packaging/
 ├── bluebuild/
 │   ├── recipe.yml                                  # batteries-included image recipe
 │   └── files/system/etc/opensnitchd/
-│       ├── default-config.json                     # per-user flavour's daemon config (TCP, allow)
+│       ├── default-config.json                     # daemon config (unix:opensnitchd.sock, allow)
 │       └── rules/000-snitchwatch-bridge-fetch.json # the one shipped allow rule (canonical)
 ├── flatpak/
-│   ├── org.snitchwatch.Snitchwatch.yml             # GUI-only Flatpak manifest (no --share=network)
-│   ├── org.snitchwatch.Snitchwatch.system.yml      # alternative system-bridge profile (same app-id)
+│   ├── org.snitchwatch.Snitchwatch.system.yml      # GUI-only Flatpak manifest (no --share=network)
 │   ├── org.snitchwatch.Snitchwatch.desktop
 │   └── org.snitchwatch.Snitchwatch.metainfo.xml
 ├── endpoint-events/                                # opt-in: share connection events with Vigie (not installed)
-├── systemd/
-│   └── snitchwatch-bridge.service                  # legacy host-side user bridge
-└── system/                                         # pending system-bridge overlay
+└── system/                                         # system-bridge overlay (units, sockets, daemon config)
 ```
 
 ## Build (needs tooling absent from CI)
@@ -130,7 +127,7 @@ packaging/
 None of these can be built in the CI sandbox — they need a real Bazzite host
 plus `bluebuild` / `flatpak-builder`. The files are authored as complete,
 correct artifacts and their syntax is validated in CI (YAML/JSON parse +
-`systemd-analyze verify` where available).
+shape tests).
 
 ```bash
 # Batteries-included image (needs the bluebuild CLI + podman/buildah):
@@ -140,7 +137,7 @@ bluebuild build packaging/bluebuild/recipe.yml
 python3 packaging/flatpak/generate-cargo-sources.py \
   --generator /path/to/preparation/flatpak-cargo-generator.py
 flatpak-builder --user --disable-cache \
-  build-dir packaging/flatpak/org.snitchwatch.Snitchwatch.yml
+  build-dir packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml
 ```
 
 See [`flatpak/README.md`](flatpak/README.md) for the pinned generator,
@@ -150,13 +147,12 @@ or launch the GUI.
 
 ## Pre-built bridge tarball (image-baked bridge)
 
-`packaging/release/` builds `snitchwatch-bridge-cli` plus
-`systemd/snitchwatch-bridge.service` into a deterministic, sha256-pinned
+`packaging/release/` builds `snitchwatch-bridge-cli` (binary and manifest only,
+no unit) into a deterministic, sha256-pinned
 release tarball inside the digest-pinned Fedora 45 image in
 `release/pins.env`. `.github/workflows/release.yml` runs it on `v*` tags and
 creates a draft GitHub release. It lets an image bake the bridge in
-(`/usr/bin` + `/usr/lib/systemd/user`, enabled with
-`systemctl --global enable`) instead of installing it per user. Consumer
+(`/usr/bin`); the system overlay (`system/stage.sh`) supplies its units. Consumer
 contract: [`../docs/packaging/bridge-release-artifact.md`](../docs/packaging/bridge-release-artifact.md).
 
 ```bash
@@ -164,8 +160,7 @@ just release-bridge-repro                       # build + reproducibility check 
 just release-verify dist/snitchwatch-bridge-<version>-x86_64.tar.gz <sha256>  # SHA256= from the build
 ```
 
-For the lightweight path's step-by-step (including installing the bridge user
-service and end-to-end verification), follow
+The DIY rpm-ostree-layering path is retired; see
 [`../docs/packaging/rpm-ostree-layering.md`](../docs/packaging/rpm-ostree-layering.md).
 
 For the full manual verification runbook covering the items above that

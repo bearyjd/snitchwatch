@@ -5,7 +5,7 @@ fn pack_is_byte_identical_and_ignores_stage_modes_and_mtimes() {
     let a = Fixture::standard();
     // A second stage at another path, with a hostile umask and other mtimes.
     let b = Fixture::new(0o700, 0o600, 0o700);
-    for rel in [BIN, UNIT, LICENSE] {
+    for rel in [BIN, LICENSE] {
         set_mtime(&b.stage.join(rel), 12_345);
     }
     let b_before = snapshot(&b.stage);
@@ -67,10 +67,6 @@ fn tarball_has_exact_members_modes_owners_and_mtime() {
         ("drwxr-xr-x", "usr/"),
         ("drwxr-xr-x", "usr/bin/"),
         ("-rwxr-xr-x", BIN),
-        ("drwxr-xr-x", "usr/lib/"),
-        ("drwxr-xr-x", "usr/lib/systemd/"),
-        ("drwxr-xr-x", "usr/lib/systemd/user/"),
-        ("-rw-r--r--", UNIT),
         ("drwxr-xr-x", "usr/share/"),
         ("drwxr-xr-x", "usr/share/licenses/"),
         ("drwxr-xr-x", "usr/share/licenses/snitchwatch-bridge/"),
@@ -129,10 +125,7 @@ fn manifest_is_canonical_and_its_files_match_the_extracted_bytes() {
     assert_eq!(
         manifest["install"],
         serde_json::json!({
-            "binary": "/usr/bin/snitchwatch-bridge-cli",
-            "unit": "/usr/lib/systemd/user/snitchwatch-bridge.service",
-            "unit_name": "snitchwatch-bridge.service",
-            "unit_scope": "user"
+            "binary": "/usr/bin/snitchwatch-bridge-cli"
         })
     );
     for key in ["build", "upstream", "runtime"] {
@@ -147,7 +140,7 @@ fn manifest_is_canonical_and_its_files_match_the_extracted_bytes() {
     let paths: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
     assert_eq!(
         paths,
-        [BIN, UNIT, LICENSE],
+        [BIN, LICENSE],
         "files[]: every file but MANIFEST/SHA256SUMS"
     );
     for entry in files {
@@ -177,7 +170,7 @@ fn sha256sums_passes_sha256sum_check_from_the_top_dir() {
     );
     assert_eq!(
         checked.lines().count(),
-        4,
+        3,
         "sha256sum -c output:\n{checked}"
     );
     assert!(checked.lines().all(|l| l.ends_with(": OK")), "{checked}");
@@ -189,7 +182,7 @@ fn sha256sums_passes_sha256sum_check_from_the_top_dir() {
         .collect();
     assert_eq!(
         listed,
-        [BIN, UNIT, LICENSE, MANIFEST],
+        [BIN, LICENSE, MANIFEST],
         "SHA256SUMS: every file except itself (MANIFEST included), sorted by path"
     );
 }

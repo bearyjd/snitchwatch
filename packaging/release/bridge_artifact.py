@@ -51,7 +51,6 @@ from typing import NamedTuple  # noqa: E402
 
 NAME = "snitchwatch-bridge"
 BIN_PATH = "usr/bin/snitchwatch-bridge-cli"
-UNIT_PATH = "usr/lib/systemd/user/snitchwatch-bridge.service"
 LICENSE_DIR = f"usr/share/licenses/{NAME}"
 DATA_DIR = f"usr/share/{NAME}"
 MANIFEST_PATH = f"{DATA_DIR}/MANIFEST.json"
@@ -61,9 +60,6 @@ GENERATED = frozenset({MANIFEST_PATH, SUMS_PATH})
 DIRS = (
     "usr",
     "usr/bin",
-    "usr/lib",
-    "usr/lib/systemd",
-    "usr/lib/systemd/user",
     "usr/share",
     "usr/share/licenses",
     LICENSE_DIR,
@@ -72,9 +68,6 @@ DIRS = (
 ALLOWED_NEEDED = frozenset({"libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"})
 INSTALL = {
     "binary": f"/{BIN_PATH}",
-    "unit": f"/{UNIT_PATH}",
-    "unit_name": "snitchwatch-bridge.service",
-    "unit_scope": "user",
 }
 # --no-default-features drops the `web-ui` feature: the vendored web/ frontend is
 # Objective Development's GPL-2.0-only code and must not ship in this binary
@@ -742,13 +735,12 @@ def collect_stage(stage: Path) -> dict[str, bytes]:
             )
         elif rel in GENERATED:
             raise Refusal(f"stage must not contain {rel}; pack generates it")
-        elif rel not in (BIN_PATH, UNIT_PATH) and not is_license(rel):
+        elif rel != BIN_PATH and not is_license(rel):
             raise Refusal(f"unexpected file in stage: {rel}")
         else:
             files[rel] = read_bytes(stage / rel)
-    for required in (BIN_PATH, UNIT_PATH):
-        if required not in files:
-            raise Refusal(f"stage is missing {required}")
+    if BIN_PATH not in files:
+        raise Refusal(f"stage is missing {BIN_PATH}")
     if not any(is_license(rel) for rel in files):
         raise Refusal(f"stage has no license files under {LICENSE_DIR}/")
     return files
@@ -931,7 +923,7 @@ def check_layout(by_rel: dict[str, tarfile.TarInfo], top: str) -> list[str]:
     if dirs != want_dirs:
         missing, extra = sorted(want_dirs - dirs), sorted(dirs - want_dirs)
         fails.append(f"directories: missing {missing}, unexpected {extra}")
-    required = {BIN_PATH, UNIT_PATH, *GENERATED}
+    required = {BIN_PATH, *GENERATED}
     if required - files:
         fails.append(f"missing files: {sorted(required - files)}")
     unexpected = sorted(rel for rel in files - required if not is_license(rel))
@@ -1099,7 +1091,6 @@ def isolated_env(tmp: str) -> dict[str, str]:
         "XDG_CONFIG_HOME": tmp,
         "XDG_CACHE_HOME": tmp,
         "SNITCHWATCH_WS_SOCKET": f"{tmp}/bridge.sock",
-        "SNITCHWATCH_GRPC_BIND": "127.0.0.1:0",
     }
 
 
@@ -1131,8 +1122,8 @@ def check_run_flags(binary: Path, version: str) -> list[str]:
             fails.append(f"--version printed {out[:200]!r}, want {want!r}")
         out, help_fails = run_flag(binary, "--help", tmp)
         fails += help_fails
-        if "SNITCHWATCH_GRPC_BIND" not in out:
-            fails.append(f"--help output does not mention SNITCHWATCH_GRPC_BIND: {out[:200]!r}")
+        if "SNITCHWATCH_SYSTEM_BRIDGE=1" not in out:
+            fails.append(f"--help output does not mention SNITCHWATCH_SYSTEM_BRIDGE=1: {out[:200]!r}")
         leftovers = sorted(os.listdir(tmp))
         if leftovers:
             fails.append(f"--version/--help did I/O: temp dir not empty afterwards: {leftovers}")

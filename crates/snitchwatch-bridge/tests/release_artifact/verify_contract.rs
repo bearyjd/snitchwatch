@@ -248,5 +248,5 @@ fn verify_extract_to_writes_exactly_the_verified_tree_with_contract_modes() {
 /// `snapshot` paths are relative to the top dir; files are the contract files.
 fn top_dir_relative_is_file(rel: &Path) -> bool {
     let rel = rel.to_string_lossy();
-    rel == BIN || rel == UNIT || rel == LICENSE || rel == MANIFEST || rel == SUMS
+    rel == BIN || rel == LICENSE || rel == MANIFEST || rel == SUMS
 }
