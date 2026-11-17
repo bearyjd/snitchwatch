@@ -76,9 +76,8 @@ async fn rules_nothing_manages_are_counted_with_their_cause_and_removable() {
     let dir = tempfile::tempdir().unwrap();
     let grpc_path = dir.path().join("opensnitchd.sock");
     let config = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     };
     let options = RunOptions {
         storage: Storage::Ephemeral(EphemeralReason::NotConfigured),

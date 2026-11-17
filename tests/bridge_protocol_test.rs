@@ -32,6 +32,8 @@ mod gui_lifecycle;
 mod rules;
 #[path = "bridge_protocol_test/source_network.rs"]
 mod source_network;
+#[path = "bridge_protocol_test/user_unix.rs"]
+mod user_unix;
 
 /// Connect to the bridge's `/stream` route over its Unix domain socket and
 /// present the handshake token as the first frame, exactly as a real client

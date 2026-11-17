@@ -59,7 +59,14 @@ With no flags the bridge starts and runs until SIGINT or SIGTERM. Any other
 argument is ignored.
 
 ENVIRONMENT (all optional):
-    SNITCHWATCH_GRPC_BIND   gRPC bind address (default: 127.0.0.1:0)
+    SNITCHWATCH_DEV_TCP=1   DEV ONLY: allow loopback TCP for the gRPC listener.
+                            Any other value is an error. Without it the bridge
+                            listens on $XDG_RUNTIME_DIR/snitchwatch-grpc/opensnitchd.sock
+                            (no XDG_RUNTIME_DIR: it refuses to start).
+                            Cannot be combined with SNITCHWATCH_SYSTEM_BRIDGE=1.
+    SNITCHWATCH_GRPC_BIND   gRPC bind address, loopback only (default: 127.0.0.1:0).
+                            Needs SNITCHWATCH_DEV_TCP=1; setting it without the
+                            flag is an error.
     SNITCHWATCH_WS_SOCKET   Unix domain socket path for the WS server
                             (default: $XDG_RUNTIME_DIR/snitchwatch/bridge.sock)
     SNITCHWATCH_SYSTEM_BRIDGE=1  Require systemd socket activation (no TCP fallback)
@@ -86,8 +93,8 @@ OUTPUT:
     On startup these lines are printed to stdout so wrapping processes can
     discover where the bridge is listening:
 
-    GRPC_LISTEN_ADDR=<addr>
-    GRPC_SOCKET_PATH=<path> (system mode, instead of GRPC_LISTEN_ADDR)
+    GRPC_SOCKET_PATH=<path>
+    GRPC_LISTEN_ADDR=<addr> (SNITCHWATCH_DEV_TCP=1 only, instead of GRPC_SOCKET_PATH)
     WS_SOCKET_PATH=<path>
     WS_TOKEN_PATH=<path>
 
@@ -216,6 +223,8 @@ mod tests {
         let text = usage();
         for needle in [
             "SNITCHWATCH_GRPC_BIND",
+            "SNITCHWATCH_DEV_TCP=1",
+            "snitchwatch-grpc/opensnitchd.sock",
             "127.0.0.1:0",
             "SNITCHWATCH_WS_SOCKET",
             "$XDG_RUNTIME_DIR/snitchwatch/bridge.sock",

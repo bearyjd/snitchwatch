@@ -6,9 +6,8 @@ async fn pause_request_without_an_authenticated_gui_is_ignored() {
     // session; it must not re-arm the pause for the next GUI (#47).
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     };
     let mut bridge = run(cfg).await.expect("run failed");
 
@@ -57,9 +56,8 @@ fn unix_ms_now() -> u64 {
 
 async fn test_bridge(dir: &tempfile::TempDir) -> RunningBridge {
     run(BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     })
     .await
     .expect("run failed")

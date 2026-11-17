@@ -60,9 +60,8 @@ async fn boot(
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run_with_answer_timeout(
         BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: socket_dir.path().join("bridge.sock"),
             cache_capacity: 1024,
+            ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
         },
         answer_timeout,
     )

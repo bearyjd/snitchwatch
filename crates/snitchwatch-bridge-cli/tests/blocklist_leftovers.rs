@@ -65,9 +65,8 @@ async fn start(storage: Storage, mode: BridgeMode, snapshot: Vec<Rule>) -> Setup
     let sockets = tempfile::tempdir().unwrap();
     let bridge = run_with_options(
         BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: sockets.path().join("bridge.sock"),
             cache_capacity: 64,
+            ..BridgeConfig::dev_tcp_for_tests(sockets.path().join("bridge.sock"))
         },
         RunOptions {
             storage,

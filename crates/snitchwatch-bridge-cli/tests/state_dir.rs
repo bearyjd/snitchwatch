@@ -39,6 +39,7 @@ fn start_bridge(dir: &Path, extra: &[(&str, &Path)]) -> ChildGuard {
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("XDG_RUNTIME_DIR", dir)
         .env("SNITCHWATCH_WS_SOCKET", "./bridge.sock")
+        .env("SNITCHWATCH_DEV_TCP", "1")
         .env("SNITCHWATCH_GRPC_BIND", "127.0.0.1:0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

@@ -12,7 +12,7 @@
 
 use snitchwatch_bridge::notice::Notice;
 use snitchwatch_bridge::tray_state::TrayState;
-use snitchwatch_bridge_cli::{BridgeConfig, RunningBridge};
+use snitchwatch_bridge_cli::{BridgeConfig, GrpcListen, RunningBridge};
 use std::net::SocketAddr;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
@@ -56,7 +56,8 @@ impl BridgeRuntime {
 
 pub async fn spawn_bridge_runtime(cfg: BridgeRuntimeConfig) -> anyhow::Result<BridgeRuntime> {
     let bridge_cfg = BridgeConfig {
-        grpc_bind: cfg.grpc_bind,
+        // TEMPORARY (PR A of #35): PR C gates this behind SNITCHWATCH_DEV_TCP=1.
+        grpc_listen: GrpcListen::DevTcp(cfg.grpc_bind),
         ws_socket_path: snitchwatch_bridge::auth::runtime_dir().join("bridge.sock"),
         cache_capacity: 10_000,
     };

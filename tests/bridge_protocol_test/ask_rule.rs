@@ -8,9 +8,8 @@ async fn ask_rule_round_trip_unary() {
     //    temp dir for the WS server.
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
@@ -106,9 +105,8 @@ async fn deny_round_trip_unary() {
 
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
@@ -172,9 +170,8 @@ async fn deny_round_trip_unary() {
 async fn ask_rule_round_trip_inline_deny_until_restart() {
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     })
     .await
     .expect("bridge run failed");

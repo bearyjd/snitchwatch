@@ -59,9 +59,8 @@ async fn start_as(persistent: bool, mode: BridgeMode) -> Setup {
     };
     let bridge = run_with_options(
         BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: sockets.path().join("bridge.sock"),
             cache_capacity: 64,
+            ..BridgeConfig::dev_tcp_for_tests(sockets.path().join("bridge.sock"))
         },
         RunOptions {
             storage,
@@ -409,9 +408,8 @@ async fn a_per_user_bridge_installs_no_file_or_rule() {
 async fn start_on(state: &Path, sockets: &Path) -> RunningBridge {
     run_with_options(
         BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: sockets.join("bridge.sock"),
             cache_capacity: 64,
+            ..BridgeConfig::dev_tcp_for_tests(sockets.join("bridge.sock"))
         },
         RunOptions {
             storage: Storage::Persistent(state.to_path_buf()),

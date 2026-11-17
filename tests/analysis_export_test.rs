@@ -100,9 +100,8 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         let bridge = BridgeGuard(Some(
             run(BridgeConfig {
-                grpc_bind: "127.0.0.1:0".parse().unwrap(),
-                ws_socket_path: directory.path().join("bridge.sock"),
                 cache_capacity: capacity,
+                ..BridgeConfig::dev_tcp_for_tests(directory.path().join("bridge.sock"))
             })
             .await
             .expect("mock bridge startup failed"),
