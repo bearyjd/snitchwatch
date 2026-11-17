@@ -71,10 +71,9 @@ Options:
                          DIR/usr/lib/opensnitchd/ebpf/
   --kernel-dir DIR       kernel-devel tree, /usr/src/kernels/<release> (required)
   --kernel-headers DIR   kernel headers tree; must resolve to --kernel-dir (default)
-  --kernel-ver VER       Makefile KERNEL_VER; must equal SW_EBPF_KERNEL_DEVEL_VERSION
-                         in pins.env (the default) unless --allow-kernel-mismatch
-  --allow-kernel-mismatch  accept a --kernel-ver other than the pin (loud warning;
-                         the modules are then NOT built against the pinned kernel)
+  --kernel-ver VER       Makefile KERNEL_VER (required, never defaulted or taken from
+                         the running kernel); the kernel trees must match it, so it is the
+                         release of the target image's kernel-devel
   --kernel-arch ARCH     Makefile KERNEL_ARCH (default: uname -m; only x86_64)
   --opensnitch-dir DIR   opensnitch git checkout (default: vendor/opensnitch; never modified)
   --dry-run              run every pin/argument/source check (including the
@@ -84,20 +83,19 @@ Options:
 
 Inputs come from flags only: the environment is discarded. Fails if
 clang/llc/llvm-strip/make are missing or not the pinned major version, if the
-kernel trees are not the pinned kernel-devel tree, if the opensnitch commit
+kernel trees do not match --kernel-ver, if the opensnitch commit
 differs from SW_OPENSNITCH_COMMIT (which must also equal
 packaging/release/pins.env), or if the extracted ebpf_prog tree does not match
 SW_EBPF_PROG_TREE_SHA256.
 USAGE
 }
 
-STAGING="" DRY_RUN=0 ALLOW_KMISMATCH=0 KVER="" KARCH="" OS_DIR="$REPO_ROOT/vendor/opensnitch"
+STAGING="" DRY_RUN=0 KVER="" KARCH="" OS_DIR="$REPO_ROOT/vendor/opensnitch"
 KERNEL_DIR="" KERNEL_HEADERS=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --help | -h) usage; exit 0 ;;
     --dry-run) DRY_RUN=1 ;;
-    --allow-kernel-mismatch) ALLOW_KMISMATCH=1 ;;
     --staging | --kernel-dir | --kernel-headers | --kernel-ver | --kernel-arch | --opensnitch-dir)
         [[ $# -ge 2 ]] || die "$1 needs a value"
         case "$1" in
@@ -127,15 +125,14 @@ declare -A PIN_RE=(
     [SW_EBPF_CLANG_MAJOR]='^[0-9]+$'
     [SW_EBPF_LLVM_MAJOR]='^[0-9]+$'
     [SW_EBPF_LLC_MAJOR]='^[0-9]+$'
-    [SW_EBPF_KERNEL_DEVEL_VERSION]="$KVER_RE"
 )
-for v in SW_OPENSNITCH_COMMIT SW_EBPF_PROG_TREE_SHA256 SW_EBPF_CLANG_MAJOR SW_EBPF_LLVM_MAJOR SW_EBPF_LLC_MAJOR SW_EBPF_KERNEL_DEVEL_VERSION; do
+for v in SW_OPENSNITCH_COMMIT SW_EBPF_PROG_TREE_SHA256 SW_EBPF_CLANG_MAJOR SW_EBPF_LLVM_MAJOR SW_EBPF_LLC_MAJOR; do
     val="$(pin "$v" "$PINS_FILE")"
     [[ -n "$val" ]] || die "$v not set in $PINS_FILE"
     [[ "$val" =~ ${PIN_RE[$v]} ]] || die "invalid $v in $PINS_FILE (must match ${PIN_RE[$v]}): $val"
     printf -v "$v" '%s' "$val"
 done
-KVER="${KVER:-$SW_EBPF_KERNEL_DEVEL_VERSION}"
+[[ -n "$KVER" ]] || die "--kernel-ver is required (the release of the target image's kernel-devel; the running kernel is never used)"
 
 # The release pins are the source of truth for the daemon commit.
 [[ -f "$RELEASE_PINS" ]] || die "release pins not found: $RELEASE_PINS"
@@ -164,13 +161,8 @@ KARCH="${KARCH:-$(clean uname -m)}"
 [[ "$KARCH" == x86_64 ]] || die "unsupported KERNEL_ARCH '$KARCH': only x86_64 is supported"
 [[ "$(clean uname -m)" == x86_64 ]] || die "host is not x86_64; cross builds are unsupported"
 [[ "$KVER" =~ $KVER_RE ]] || die "invalid KERNEL_VER (must match $KVER_RE): $KVER"
-# The kernel trees below are checked against KVER, so KVER itself is tied to
-# the pin; leaving it is an explicit, loudly reported operator decision.
-if [[ "$KVER" != "$SW_EBPF_KERNEL_DEVEL_VERSION" ]]; then
-    [[ $ALLOW_KMISMATCH -eq 1 ]] ||
-        die "--kernel-ver $KVER does not match the pin SW_EBPF_KERNEL_DEVEL_VERSION=$SW_EBPF_KERNEL_DEVEL_VERSION (use --allow-kernel-mismatch to override)"
-    log "WARNING: --allow-kernel-mismatch: building for KERNEL_VER $KVER, NOT the pinned $SW_EBPF_KERNEL_DEVEL_VERSION"
-fi
+# The kernel trees below are checked against KVER (no override path), so the
+# modules always match the kernel-devel tree they are compiled against.
 safe_path() { # <label> <value>: absolute, only [A-Za-z0-9._/+-]
     [[ "$2" =~ ^/[A-Za-z0-9._/+-]*$ ]] ||
         die "invalid $1 (must be absolute, allowed chars [A-Za-z0-9._/+-]): $2"
@@ -182,7 +174,7 @@ kver_match() { # <release>: exactly KERNEL_VER, or KERNEL_VER-<suffix> (7.2.15-3
 
 # ---- kernel trees ----------------------------------------------------------
 # The headers are an input of the build (kconfig.h is force-included), so only
-# the installed kernel-devel tree of the pinned kernel is accepted.
+# the installed kernel-devel tree matching --kernel-ver is accepted.
 canon() { # <label> <path>: canonical path (dry-run: need not exist)
     if [[ $DRY_RUN -eq 1 ]]; then
         clean realpath -m -- "$2" || die "cannot resolve $1: $2"
@@ -220,7 +212,7 @@ check_kernel_tree KERNEL_DIR "$KERNEL_DIR"
 check_kernel_tree KERNEL_HEADERS "$KERNEL_HEADERS"
 if [[ $DRY_RUN -eq 0 ]]; then
     [[ -f "$KERNEL_DIR/include/linux/kconfig.h" ]] ||
-        die "KERNEL_DIR=$KERNEL_DIR lacks include/linux/kconfig.h (install kernel-devel $SW_EBPF_KERNEL_DEVEL_VERSION)"
+        die "KERNEL_DIR=$KERNEL_DIR lacks include/linux/kconfig.h (install kernel-devel $KVER)"
     [[ -d "$KERNEL_HEADERS/include" ]] || die "KERNEL_HEADERS=$KERNEL_HEADERS lacks include/"
 fi
 

@@ -112,6 +112,8 @@ fn dry_args<'a>(stage: &'a str, os_dir: &'a str) -> Vec<&'a str> {
         DRY_KDIR,
         "--opensnitch-dir",
         os_dir,
+        "--kernel-ver",
+        "7.2.15",
     ]
 }
 
@@ -230,9 +232,8 @@ fn toolchain_and_tree_pins_present_and_well_formed() {
             "{k}={v}"
         );
     }
-    assert!(ebpf
-        .get("SW_EBPF_KERNEL_DEVEL_VERSION")
-        .is_some_and(|v| !v.is_empty()));
+    // The target kernel comes from the image via --kernel-ver, never from a pin.
+    assert!(!ebpf.contains_key("SW_EBPF_KERNEL_DEVEL_VERSION"));
     let t = ebpf.get("SW_EBPF_PROG_TREE_SHA256").expect("tree pin");
     assert_eq!(t.len(), 64);
     assert!(t
@@ -270,7 +271,7 @@ fn script_shape() {
         "kernel.release",
         "rpm -qf",
         "CC=\"$CLANG_BIN -DCC_USING_FENTRY\"",
-        "--allow-kernel-mismatch",
+        "--kernel-ver is required",
         "LLC=\"$LLC_BIN\"",
         "-i PATH=\"$SAFE_PATH\" HOME=/nonexistent LC_ALL=C",
         "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null",
@@ -296,6 +297,9 @@ fn script_shape() {
         "env -u",
         "#!/usr/bin/env",
         "SW_EBPF_PINS_FILE",
+        "SW_EBPF_KERNEL_DEVEL_VERSION",
+        "allow-kernel-mismatch",
+        "uname -r",
         "${KERNEL_DIR:-}",
         "${KERNEL_HEADERS:-}",
         "${KERNEL_ARCH:-",
@@ -394,7 +398,7 @@ fn kernel_inputs_come_from_flags_only() {
     let d = scratch("envk");
     let st = d.to_str().unwrap();
     let o = run(
-        &["--staging", st],
+        &["--staging", st, "--kernel-ver", "7.2.15"],
         &[("KERNEL_DIR", DRY_KDIR), ("KERNEL_HEADERS", DRY_KDIR)],
     );
     fails_with(&o, "--kernel-dir is required");
@@ -471,6 +475,8 @@ fn kernel_tree_must_be_the_pinned_kernel_under_usr_src_kernels() {
             "--dry-run",
             "--staging",
             st,
+            "--kernel-ver",
+            "7.2.15",
             "--kernel-dir",
             kdir,
             "--opensnitch-dir",
@@ -509,6 +515,8 @@ fn pinned_kernel_release_shapes_are_accepted() {
             "--dry-run",
             "--staging",
             st,
+            "--kernel-ver",
+            "7.2.15",
             "--kernel-dir",
             kdir,
             "--opensnitch-dir",
@@ -528,6 +536,8 @@ fn real_run_needs_existing_kernel_tree() {
         &[
             "--staging",
             d.to_str().unwrap(),
+            "--kernel-ver",
+            "7.2.15",
             "--kernel-dir",
             missing.to_str().unwrap(),
         ],
@@ -625,7 +635,6 @@ fn malformed_pins_are_rejected() {
         ("SW_EBPF_LLVM_MAJOR", ""),
         ("SW_EBPF_LLC_MAJOR", "$(id)"),
         ("SW_EBPF_PROG_TREE_SHA256", "abc"),
-        ("SW_EBPF_KERNEL_DEVEL_VERSION", "7"),
     ];
     for (i, (k, v)) in cases.iter().enumerate() {
         let d = scratch(&format!("badpin{i}"));
@@ -766,12 +775,28 @@ fn missing_blob_is_refused_without_fetching() {
 }
 
 #[test]
-fn kernel_ver_is_tied_to_the_pin() {
-    let d = scratch("kpin");
+fn kernel_ver_is_required_and_never_defaulted() {
+    let d = scratch("kreq");
     let os = vendor();
     let st = d.to_str().unwrap();
-    let kdir = "/usr/src/kernels/7.2.8-100.fc43.x86_64";
-    let args = |extra: &[&'static str]| {
+    let args = vec![
+        "--dry-run",
+        "--staging",
+        st,
+        "--kernel-dir",
+        DRY_KDIR,
+        "--opensnitch-dir",
+        &os,
+    ];
+    fails_with(&run(&args, &[]), "--kernel-ver is required");
+}
+
+#[test]
+fn kernel_ver_follows_the_image_kernel_with_no_override() {
+    let d = scratch("kimg");
+    let os = vendor();
+    let st = d.to_str().unwrap();
+    let args = |kdir: &'static str, ver: &'static str, extra: &[&'static str]| {
         let mut a = vec![
             "--dry-run",
             "--staging",
@@ -781,22 +806,27 @@ fn kernel_ver_is_tied_to_the_pin() {
             "--opensnitch-dir",
             &os,
             "--kernel-ver",
-            "7.2.8",
+            ver,
         ];
         a.extend_from_slice(extra);
         a
     };
-    fails_with(&run(&args(&[]), &[]), "does not match the pin");
-    let o = run(&args(&["--allow-kernel-mismatch"]), &[]);
-    assert!(o.status.success(), "{}", text(&o));
-    assert!(
-        text(&o).contains("WARNING: --allow-kernel-mismatch"),
-        "{}",
-        text(&o)
+    // Any image kernel is accepted when the tree and --kernel-ver agree.
+    for (kdir, ver) in [
+        ("/usr/src/kernels/7.2.15-ogc1.1.fc45.x86_64", "7.2.15"),
+        ("/usr/src/kernels/7.3.4-ogc6.1.fc45.x86_64", "7.3.4"),
+    ] {
+        let o = run(&args(kdir, ver, &[]), &[]);
+        assert!(o.status.success(), "{ver}: {}", text(&o));
+        assert!(text(&o).contains(&format!("KERNEL_VER={ver}")), "{}", text(&o));
+    }
+    // A tree of another kernel is refused, and there is no override flag.
+    let other = "/usr/src/kernels/7.2.15-ogc1.1.fc45.x86_64";
+    fails_with(&run(&args(other, "7.3.4", &[]), &[]), "does not match KERNEL_VER");
+    fails_with(
+        &run(&args(other, "7.3.4", &["--allow-kernel-mismatch"]), &[]),
+        "unknown argument: --allow-kernel-mismatch",
     );
-    // The pinned value itself needs no override.
-    let o = run(&with(dry_args(st, &os), &["--kernel-ver", "7.2.15"]), &[]);
-    assert!(o.status.success(), "{}", text(&o));
 }
 
 #[test]
