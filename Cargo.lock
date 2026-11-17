@@ -4746,6 +4746,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "futures-util",
+ "libc",
  "prost",
  "snitchwatch-proto",
  "tokio",

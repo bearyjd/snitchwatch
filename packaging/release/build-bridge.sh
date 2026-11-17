@@ -36,7 +36,7 @@ RUSTFLAGS_TEMPLATE='--remap-path-prefix=<src>=/snitchwatch --remap-path-prefix=<
 # Everything the binary is built from. rust-embed embeds EVERY file under web/
 # (git-ignored *.swp/.DS_Store included), so ignored files here are dirty too.
 BUILD_INPUTS=(web crates/snitchwatch-bridge crates/snitchwatch-bridge-cli crates/snitchwatch-proto
-    vendor/opensnitch/proto Cargo.toml Cargo.lock packaging/systemd)
+    vendor/opensnitch/proto Cargo.toml Cargo.lock)
 # Each would silently change what the MANIFEST's build command/rustflags say.
 TOOLCHAIN_OVERRIDES=(RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER RUSTC RUSTC_WORKSPACE_WRAPPER
     CARGO_BUILD_RUSTC CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER

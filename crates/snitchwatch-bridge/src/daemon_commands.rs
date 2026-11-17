@@ -32,14 +32,14 @@
 //! withdrawn list comes back only when the daemon reconnects.
 //!
 //! **Delivery, by transport.**
-//! - [`DaemonTransport::Tcp`] (legacy per-user mode, `127.0.0.1`): every
+//! - [`DaemonTransport::Tcp`] (dev-only, behind `SNITCHWATCH_DEV_TCP=1`, `127.0.0.1`): every
 //!   command fans out to every open stream, so a fake local "daemon" can
 //!   never stop the real one from receiving it. `send` reports
 //!   [`SendError::NoDaemon`] only when no stream is open at all, and
 //!   in-flight waiters fail with [`CommandError::StreamClosed`] only when the
 //!   last stream closes.
 //!
-//!   **Residual risk until #35 retires this transport.** Any local process
+//!   **Dev-only residual risk (nothing shipped uses this transport, #35).** Any local process
 //!   can subscribe and send a later HELLO. While its stream is current, the
 //!   Rules page shows *its* list and *its* replies decide command outcomes,
 //!   and a toggle the user makes on one of its forged rows is sent, forged

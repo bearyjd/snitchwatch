@@ -129,10 +129,10 @@ async fn run_bridge() -> Result<()> {
 /// Block until the process is asked to stop.
 ///
 /// Handles both SIGINT (Ctrl-C in an interactive shell) and SIGTERM (what
-/// `systemctl --user stop snitchwatch-bridge.service` sends). Without the
+/// `systemctl stop snitchwatch-system-bridge.service` sends). Without the
 /// SIGTERM arm, running under systemd would fall back to the default SIGTERM
 /// disposition (immediate termination) and skip the clean `bridge.shutdown()`
-/// path — the bridge is packaged as a systemd `--user` service, so a graceful
+/// path — the bridge is packaged as a systemd service, so a graceful
 /// SIGTERM stop is the common case, not the exception.
 #[cfg(unix)]
 async fn wait_for_shutdown_signal() -> Result<()> {

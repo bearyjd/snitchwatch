@@ -11,6 +11,7 @@ test.beforeAll(async () => {
     env: {
       ...process.env,
       SNITCHWATCH_WS_BIND: '127.0.0.1:3031',
+      SNITCHWATCH_DEV_TCP: '1',
       SNITCHWATCH_GRPC_BIND: '127.0.0.1:50321',
       RUST_LOG: 'warn',
     },

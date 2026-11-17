@@ -109,7 +109,7 @@ impl Storage {
 /// Which bridge is resolving its state directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeMode {
-    /// `snitchwatch-bridge.service` (or a manual start).
+    /// A manual (dev) start; there is no per-user unit since #35.
     User,
     /// `snitchwatch-system-bridge.service`: must resolve to
     /// [`SYSTEM_STATE_DIR`].

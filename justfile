@@ -43,8 +43,10 @@ regen-proto:
 run-bridge:
     RUST_LOG=info cargo run -p snitchwatch-bridge-cli
 
-run-spike endpoint="http://127.0.0.1:50051":
-    RUST_LOG=info cargo run -p snitchwatch-spike -- {{endpoint}}
+# Default: Unix socket $XDG_RUNTIME_DIR/snitchwatch-grpc/spike.sock. Pass a
+# loopback address (e.g. 127.0.0.1:50051) to listen on TCP (dev only).
+run-spike addr="":
+    {{ if addr == "" { "" } else { "SNITCHWATCH_DEV_TCP=1" } }} RUST_LOG=info cargo run -p snitchwatch-spike -- {{addr}}
 
 # Re-run the idempotent rebrand pass over the vendored web/ tree.
 web-rebrand:
@@ -129,9 +131,10 @@ test-blocklists:
     cargo test -p snitchwatch-bridge blocklists -- --nocapture
     cargo test -p snitchwatch-bridge --test blocklists_e2e -- --nocapture
 
-# Validate the packaging artifacts without a Bazzite host. Parses the
-# YAML/JSON and runs the Rust packaging/release shape tests plus the release-tarball packer tests, and
-# shellchecks the release scripts (skipped when shellcheck isn't installed).
+# Validate the packaging artifacts without a Bazzite host: parse the YAML/JSON,
+# run the Rust packaging/release shape tests and the release-tarball packer
+# tests, and shellcheck the release scripts (skipped when shellcheck isn't
+# installed).
 package-check:
     python3 packaging/geo/test-country-data.py
     bash -n packaging/scanner/stage.sh

@@ -10,8 +10,9 @@
 //! Usage:
 //!
 //! ```bash
-//! # opensnitchd must be running and configured to dial 127.0.0.1:50051
-//! RUST_LOG=info cargo run -p snitchwatch-bridge-cli --example live_rule_change -- change <rule-name> <file>
+//! # opensnitchd must be running and configured to dial 127.0.0.1:50051.
+//! # TCP gRPC is dev-only (#35): the flag is required.
+//! SNITCHWATCH_DEV_TCP=1 RUST_LOG=info cargo run -p snitchwatch-bridge-cli --example live_rule_change -- change <rule-name> <file>
 //! ```
 //!
 //! It re-sends an existing rule **unchanged**, so a successful run mutates
@@ -63,6 +64,12 @@ async fn main() -> anyhow::Result<()> {
     let tmp = std::env::temp_dir().join("snitchwatch-live");
     std::fs::create_dir_all(&tmp)?;
 
+    anyhow::ensure!(
+        std::env::var_os(snitchwatch_bridge_cli::DEV_TCP_ENV).as_deref()
+            == Some(std::ffi::OsStr::new("1")),
+        "this probe listens on TCP, which is dev-only: set {}=1",
+        snitchwatch_bridge_cli::DEV_TCP_ENV
+    );
     let cfg = BridgeConfig {
         // Dev only (#35): the daemon dials a fixed TCP port.
         grpc_listen: snitchwatch_bridge_cli::GrpcListen::DevTcp("127.0.0.1:50051".parse()?),

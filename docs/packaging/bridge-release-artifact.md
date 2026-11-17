@@ -82,9 +82,15 @@ compare against it — compare against the hash pinned in your repo.
   `packaging/system/stage.sh` stages its service, sockets and daemon config
   around this binary (`SNITCHWATCH_SYSTEM_BRIDGE=1`, #35).
 
-## MANIFEST.json (schema_version 1)
+## MANIFEST.json (schema_version 2)
 
 Sorted keys, 2-space indent. Contents independent of the checkout path.
+
+**Breaking change from schema_version 1** (#35): `install.unit`, `install.unit_name`
+and `install.unit_scope` are removed because the tarball no longer carries a unit.
+`install` is now `{"binary": "/usr/bin/snitchwatch-bridge-cli"}`. A consumer (the
+bazzite-tower image build) that reads those keys must stop; one that checks
+`schema_version == 1` must accept 2.
 
 | Key | Meaning |
 |---|---|
