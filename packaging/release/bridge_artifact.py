@@ -66,8 +66,10 @@ DIRS = (
     DATA_DIR,
 )
 ALLOWED_NEEDED = frozenset({"libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"})
-# 2: install.unit, install.unit_name and install.unit_scope were removed (#35).
-SCHEMA_VERSION = 2
+# Stays 1 although install.unit, install.unit_name and install.unit_scope were
+# removed (#35): the only known consumer (the tower image build) reads none of
+# them and pins schema_version == 1. Owner decision 2026-11-17.
+SCHEMA_VERSION = 1
 INSTALL = {
     "binary": f"/{BIN_PATH}",
 }
