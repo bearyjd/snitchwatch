@@ -337,6 +337,7 @@ mod tests {
             assert_eq!(accepted.peer_cred().unwrap().uid(), 0);
             return;
         }
+        eprintln!("SKIPPED-ROOT-ONLY: ran the non-root fallback; the uid 65534 re-exec needs root");
         // The bridge "owner" is some other uid: our own peer is foreign.
         let mut incoming = OwnerUnixIncoming {
             listener: UnixListener::bind(&path).unwrap(),

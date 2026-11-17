@@ -148,7 +148,7 @@ mod tests {
     fn a_directory_owned_by_someone_else_is_refused() {
         use std::os::unix::fs::chown;
         if euid() != 0 {
-            eprintln!("SKIPPED: needs root to chown a directory to another uid");
+            eprintln!("SKIPPED-ROOT-ONLY: needs root to chown a directory to another uid");
             return;
         }
         let tmp = tempfile::tempdir().unwrap();

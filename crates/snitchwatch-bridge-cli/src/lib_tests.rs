@@ -186,7 +186,7 @@ fn non_root_daemon_peer_helper() {
 async fn root_unix_incoming_rejects_non_root_and_keeps_accepting_every_peer() {
     use std::os::unix::process::CommandExt;
     if unsafe { libc::geteuid() } != 0 {
-        eprintln!("run this test as root to verify both credential classes");
+        eprintln!("SKIPPED-ROOT-ONLY: run this test as root to verify both credential classes");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
