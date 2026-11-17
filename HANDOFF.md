@@ -1,6 +1,18 @@
-# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-11-16)
+# Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-11-17)
 
-> Start with the 2026-11-16 section below, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
+> Start with the 2026-11-17 section below, then 2026-11-16, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
+
+## 2026-11-17 — #35 merged (TCP gRPC dev-only), root-only tests now run in CI
+
+- **Source:** `origin/main` at `9d067f48`. #35 shipped as #371 `5dd20092` (bridge gate), #372 `1cd28896` (drop the per-user unit), #373 `30f72aca` (Tauri/spike/docs), then #375 `a3bee43b` (CI step) and #376 `9d067f48` (MANIFEST stays `schema_version 1`). Plan: `docs/superpowers/plans/2026-11-16-35-tcp-dev-only.md`.
+- **What changed:** TCP gRPC only with `SNITCHWATCH_DEV_TCP=1` (loopback); default is a per-user Unix socket under `$XDG_RUNTIME_DIR/snitchwatch-grpc/` (new `DaemonTransport::UnixUser`, untrusted like TCP); Tauri refuses to start without the flag; the per-user unit and per-user Flatpak profile are deleted; the recipe daemon config is `unix:opensnitchd.sock`, so an image WITHOUT the system overlay has a daemon with no UI that applies `allow`.
+- **CI:** `scripts/ci-root-tests.sh` runs the three root-only tests as root and fails on skip (first run found they could not exec from the runner home; fixed by running a copy).
+- **Tower (bazzite-tower-dd):** told 30f72aca, then 9d067f48; it pins be4a6cd0, repin needs no verifier change. NOT run by anyone: `just release-bridge-repro` (podman) and the real `pkexec` scan.
+- **Open:** #35 stays open until the tower confirms the image config (#178). Dev-only LOWs untracked: Tauri `ws_proxy_bind` loopback check, spike socket chmod cleanup, `auth.rs` `/tmp` symlink chmod. Owner question: keep the Tauri shell at all now that it is dev-only?
+- **Resume checklist:** `git fetch`; `gh pr list`; read `.omc/STATE.md`; this section and 2026-11-16.
+
+
+## 2026-11-16 — overnight run 7: #363 closed, #35 awaited owner decisions (superseded by 2026-11-17 above)
 
 - **Source:** `origin/main` at `7adc6da9` (#368). No other PR was open at hand-off.
 - **#363 closed** by #365 `a2ae174a`, #367 `4b167b1a`, #368 `7adc6da9` (test-only). Hunt (every `*keyboard*` probe, 15 rounds, `3 x nproc` `yes` loops): 48/165 failures at baseline, 16 after #367, 1/165 after #368 (twice, different tests; the `learning` one did not reproduce in 40 more runs and its output was not captured). Residual about 0.6% per run at an overload CI does not reach. Learning: `.trail/learnings/2026-11-16-keyboard-probes-need-a-settle-gate-snitchwatch.md`.
