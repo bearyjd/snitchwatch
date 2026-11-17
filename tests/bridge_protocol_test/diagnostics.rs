@@ -4,9 +4,8 @@ use super::*;
 async fn diagnostics_report_reflects_firewall_down_after_subscribe() {
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
@@ -73,9 +72,8 @@ async fn diagnostics_report_reflects_firewall_down_after_subscribe() {
 async fn idle_daemon_with_open_notifications_stream_stays_reachable() {
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     };
     let mut bridge = run(cfg).await.expect("bridge run failed");
 
@@ -153,9 +151,8 @@ async fn idle_daemon_with_open_notifications_stream_stays_reachable() {
 async fn notifications_stream_close_triggers_down_transition_within_one_tick() {
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     };
     let mut bridge = run(cfg).await.expect("bridge run failed");
 
@@ -221,9 +218,8 @@ async fn notifications_stream_close_triggers_down_transition_within_one_tick() {
 async fn generic_alert_fails_ebpf_check_persists_across_subscribe_clears_on_recheck() {
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
@@ -359,9 +355,8 @@ async fn ebpf_fallback_alert_is_reported_as_process_monitor_not_a_failure() {
 
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("bridge run failed");
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
@@ -460,9 +455,8 @@ async fn resubscribe_without_a_new_alert_pushes_a_report_without_the_fallback() 
     use snitchwatch_proto::protocol::alert::{Type, What};
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("bridge run failed");
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;

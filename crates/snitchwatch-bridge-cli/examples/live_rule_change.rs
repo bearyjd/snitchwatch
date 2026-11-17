@@ -64,7 +64,8 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&tmp)?;
 
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:50051".parse()?,
+        // Dev only (#35): the daemon dials a fixed TCP port.
+        grpc_listen: snitchwatch_bridge_cli::GrpcListen::DevTcp("127.0.0.1:50051".parse()?),
         ws_socket_path: tmp.join("bridge.sock"),
         cache_capacity: 64,
     };

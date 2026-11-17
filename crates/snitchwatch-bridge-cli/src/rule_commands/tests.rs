@@ -400,7 +400,18 @@ async fn without_a_usable_request_id_there_is_no_result() {
 /// before, but not add, edit or rename.
 #[tokio::test]
 async fn on_tcp_only_toggles_and_deletes_go_through() {
-    let mut daemon = daemon_on(DaemonTransport::Tcp, vec![bound("100-a", "deny")]);
+    untrusted_transport_only_toggles_and_deletes(DaemonTransport::Tcp).await;
+}
+
+/// The per-user socket (#35) is as untrusted as TCP: a same-uid process can
+/// pose as the daemon.
+#[tokio::test]
+async fn on_unix_user_only_toggles_and_deletes_go_through() {
+    untrusted_transport_only_toggles_and_deletes(DaemonTransport::UnixUser).await;
+}
+
+async fn untrusted_transport_only_toggles_and_deletes(transport: DaemonTransport) {
+    let mut daemon = daemon_on(transport, vec![bound("100-a", "deny")]);
     let seen = ok_all(&mut daemon);
     let commands = commands(&daemon);
     let mut rx = daemon.broadcast.subscribe();

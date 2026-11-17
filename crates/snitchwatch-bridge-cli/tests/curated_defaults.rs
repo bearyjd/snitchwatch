@@ -251,9 +251,8 @@ async fn unreadable_choices_leave_the_firewall_as_it_is() {
     std::fs::write(state.join("curated-defaults.json"), "not json").unwrap();
     let bridge = run_with_options(
         BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: sockets.path().join("bridge.sock"),
             cache_capacity: 64,
+            ..BridgeConfig::dev_tcp_for_tests(sockets.path().join("bridge.sock"))
         },
         RunOptions {
             storage: Storage::Persistent(state.clone()),

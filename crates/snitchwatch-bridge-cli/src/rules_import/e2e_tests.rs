@@ -120,9 +120,8 @@ async fn setup(rules: Vec<Rule>) -> Setup {
     let grpc_path = dir.path().join("opensnitchd.sock");
     let bridge = run_with_incoming(
         BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: dir.path().join("bridge.sock"),
             cache_capacity: 64,
+            ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
         },
         GrpcEndpoint::Unix(grpc_path.clone()),
         AnyPeer(UnixListener::bind(&grpc_path).unwrap()),

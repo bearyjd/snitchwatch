@@ -243,9 +243,8 @@ async fn activated_unix_ask_rule_roundtrip_preserves_socket_ownership_and_modes(
     let before_dir = std::fs::metadata(dir.path()).unwrap();
     let token_path = auth_dir.join("token");
     let config = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: gui_path.clone(),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(gui_path.clone())
     };
     let bridge = run_with_incoming(
         config,
@@ -370,9 +369,8 @@ async fn activated_unix_ask_rule_roundtrip_preserves_socket_ownership_and_modes(
 async fn run_binds_socket_and_grpc_port_and_shutdown_works() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("run failed");
     assert!(bridge.ws_socket_path.exists());
@@ -385,9 +383,8 @@ async fn run_binds_socket_and_grpc_port_and_shutdown_works() {
 async fn exposes_in_process_broadcast_and_inbound_handles() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("run failed");
 
@@ -420,9 +417,8 @@ const STEP: std::time::Duration = std::time::Duration::from_secs(10);
 async fn verdict_broadcasts_an_updated_non_pending_row() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("run failed");
     let mut rx = bridge.broadcast_tx.subscribe();
@@ -517,9 +513,8 @@ async fn verdict_broadcasts_an_updated_non_pending_row() {
 async fn request_snapshot_rebroadcasts_bridge_owned_state() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("run failed");
     let mut rx = bridge.broadcast_tx.subscribe();
@@ -571,9 +566,8 @@ async fn synthetic_connection_activity_is_rebroadcast_as_traffic_events() {
 
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("run failed");
     let mut rx = bridge.broadcast_tx.subscribe();

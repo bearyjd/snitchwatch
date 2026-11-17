@@ -57,9 +57,8 @@ fn row(name: &str, nolog: bool) -> Rule {
 async fn rule_hits_cross_the_websocket_and_reach_the_rules_tab_view() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg.clone()).await.expect("bridge run failed");
 

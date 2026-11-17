@@ -4,9 +4,8 @@ use super::*;
 async fn no_gui_ask_is_unavailable_despite_internal_bridge_consumers() {
     let dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     })
     .await
     .unwrap();
@@ -39,9 +38,8 @@ async fn no_gui_ask_is_unavailable_despite_internal_bridge_consumers() {
 async fn last_real_gui_disconnect_removes_prompt_and_rejects_late_persistent_verdict() {
     let dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     })
     .await
     .unwrap();
@@ -147,9 +145,8 @@ async fn last_real_gui_disconnect_removes_prompt_and_rejects_late_persistent_ver
 async fn ask_rule_deadline_removes_row_for_silent_gui_and_rejects_late_verdict() {
     let dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     })
     .await
     .unwrap();

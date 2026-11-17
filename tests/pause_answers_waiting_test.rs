@@ -43,9 +43,8 @@ async fn frames_until(ws: &mut WebSocketStream<UnixStream>, action: &str) -> Vec
 async fn pausing_answers_a_waiting_ask_allow_once_and_labels_its_row() {
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     })
     .await
     .expect("bridge run failed");

@@ -56,8 +56,9 @@ pub const DAEMON_UNREACHABLE_TROUBLESHOOTING: &str = "opensnitchd isn't \
     opensnitch), and that its Server.Address in \
     /etc/opensnitchd/default-config.json is the bridge's: \
     unix:opensnitchd.sock for the system bridge (with its \
-    opensnitch.service drop-in and grpc socket), or the per-user \
-    bridge's SNITCHWATCH_GRPC_BIND (default 127.0.0.1:50051). Check \
+    opensnitch.service drop-in and grpc socket). The system bridge is the \
+    only shipped flavour; a dev bridge on loopback TCP needs \
+    SNITCHWATCH_DEV_TCP=1 with SNITCHWATCH_GRPC_BIND. Check \
     /var/log/opensnitchd.log for dial errors.";
 
 pub const FIREWALL_NOT_RUNNING_TROUBLESHOOTING: &str = "opensnitchd \

@@ -34,9 +34,8 @@ pub async fn start(mode: BridgeMode) -> Setup {
     let state = state_dir.path().canonicalize().unwrap();
     let bridge = run_with_options(
         BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: sockets.path().join("bridge.sock"),
             cache_capacity: 64,
+            ..BridgeConfig::dev_tcp_for_tests(sockets.path().join("bridge.sock"))
         },
         RunOptions {
             storage: Storage::Persistent(state.clone()),
