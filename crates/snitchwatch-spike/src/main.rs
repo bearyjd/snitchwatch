@@ -231,6 +231,17 @@ fn resolve_listen(
 // are crate-private): depending on the bridge crate just for these would add
 // a heavy edge to a throwaway spike.
 fn bind_unix(path: &Path) -> Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+    bind_unix_with(path, |p| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))
+    })
+}
+
+/// `chmod_socket` is the final 0600 step, injectable so a failure is testable.
+fn bind_unix_with(
+    path: &Path,
+    chmod_socket: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<std::os::unix::net::UnixListener> {
     use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
     let dir = path.parent().context("socket path has no parent")?;
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
@@ -253,7 +264,11 @@ fn bind_unix(path: &Path) -> Result<std::os::unix::net::UnixListener> {
     }
     let listener = std::os::unix::net::UnixListener::bind(path)
         .with_context(|| format!("cannot bind {}", path.display()))?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    if let Err(e) = chmod_socket(path) {
+        // Never leave a socket with an unintended mode behind.
+        let _ = std::fs::remove_file(path);
+        return Err(e).with_context(|| format!("cannot chmod socket {}", path.display()));
+    }
     listener.set_nonblocking(true)?;
     Ok(listener)
 }
@@ -299,6 +314,24 @@ mod tests {
 
     fn os(s: &str) -> Option<OsString> {
         Some(OsString::from(s))
+    }
+
+    #[test]
+    fn a_failed_final_chmod_removes_the_socket_and_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("snitchwatch-grpc").join("spike.sock");
+        let err = bind_unix_with(&path, |_| Err(std::io::Error::other("boom"))).unwrap_err();
+        assert!(err.to_string().contains("chmod"), "{err}");
+        assert!(!path.exists(), "socket must not be left behind");
+    }
+
+    #[test]
+    fn bind_unix_yields_a_0600_socket() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("snitchwatch-grpc").join("spike.sock");
+        let _l = bind_unix(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
     }
 
     #[test]

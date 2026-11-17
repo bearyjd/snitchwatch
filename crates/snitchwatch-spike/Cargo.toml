@@ -20,3 +20,6 @@ anyhow = { workspace = true }
 async-stream = { workspace = true }
 futures-util = { workspace = true }
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
