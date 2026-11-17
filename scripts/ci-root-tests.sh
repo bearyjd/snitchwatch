@@ -14,6 +14,15 @@ bin=$(cargo test --locked -p snitchwatch-bridge-cli --lib --no-run --message-for
   jq -r 'select(.profile.test == true and .target.kind[0] == "lib") | .executable // empty' | tail -n1)
 [ -x "$bin" ] || { echo "test binary not found" >&2; exit 1; }
 
+# Two tests re-exec this binary as uid 65534, which cannot traverse the
+# runner's home (0750). Run a copy from a world-executable directory.
+pub=$(mktemp -d)
+trap 'rm -rf "$pub"' EXIT
+chmod 755 "$pub"
+cp "$bin" "$pub/tests-bin"
+chmod 755 "$pub/tests-bin"
+bin="$pub/tests-bin"
+
 if [ "$(id -u)" -eq 0 ]; then runner=(); else runner=(sudo -n); fi
 out=$("${runner[@]}" "$bin" --exact "${filters[@]}" --nocapture 2>&1) || { echo "$out"; exit 1; }
 echo "$out"
