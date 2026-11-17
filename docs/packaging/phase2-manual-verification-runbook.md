@@ -6,13 +6,13 @@ flags as "not verifiable in the CI sandbox." Everything else in Phase 2
 passes in CI — this runbook is only for the parts that need a real Bazzite
 host. Run these in order; each one builds on the state left by the previous.
 
-**Flavour (#35, 2026-10-16):** Steps 3 onward verify the **per-user TCP
-bridge** (`127.0.0.1:50051`), which is not deny-safe (a process that binds
-the port first answers for the daemon). The r15 image uses the system bridge's root-only
-socket instead; verify that per
-[`system-bridge-integration.md`](system-bridge-integration.md) and the tower
-list in `docs/superpowers/plans/2026-10-16-r15-A.md` (`ss -xl` shows
+**Flavour (#35):** the system bridge is the only shipped flavour; verify the
+image per [`system-bridge-integration.md`](system-bridge-integration.md) and the
+tower list in `docs/superpowers/plans/2026-10-16-r15-A.md` (`ss -xl` shows
 `/run/snitchwatch/opensnitchd.sock`, nothing listens on `127.0.0.1:50051`).
+Steps 3 onward below drive a bridge **by hand with the dev-only TCP flag**
+(`SNITCHWATCH_DEV_TCP=1`, loopback `127.0.0.1:50051`): useful for exercising the
+daemon dial-in and GUI flows on a dev host, but not deny-safe and not what ships.
 
 **Needs:** a real Bazzite (or Fedora Silverblue/Kinoite-family) host with
 `bluebuild`, `podman`/`buildah`, `flatpak-builder`, and the KDE runtime
@@ -20,7 +20,8 @@ list in `docs/superpowers/plans/2026-10-16-r15-A.md` (`ss -xl` shows
 container without a real bootable rpm-ostree system underneath it.
 
 **Resolved 2026-07-11:** the Flatpak manifest
-(`packaging/flatpak/org.snitchwatch.Snitchwatch.yml`) now packages
+(`packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml`, the only profile
+since #35) packages
 `command: snitchwatch-kirigami` against the `org.kde.Platform` runtime, not
 `snitchwatch-tauri`/`web/` — Kirigami is the settled GUI stack (see this
 repo's `CLAUDE.md` "Settled architecture decisions" #4) and has feature
@@ -44,11 +45,9 @@ bluebuild build packaging/bluebuild/recipe.yml
 **Pass condition:** the image builds without error and produces an OCI
 image with `opensnitchd` installed and enabled by default, plus the
 recipe's `/etc/opensnitchd/default-config.json` (`DefaultAction: allow`,
-`Server.Address: 127.0.0.1:50051`, the per-user flavour's, from
-`packaging/bluebuild/files/system/etc/opensnitchd/default-config.json`). The
-r15 image stages the system overlay on top, which replaces it with
-`DefaultAction: allow` and `unix:opensnitchd.sock` (#35); verify that image
-per `system-bridge-integration.md`.
+`Server.Address: unix:opensnitchd.sock`, the system bridge's root-only socket,
+from `packaging/bluebuild/files/system/etc/opensnitchd/default-config.json`);
+verify the image per `system-bridge-integration.md`.
 
 **Verify the baked config actually landed**, don't just trust the recipe:
 
@@ -74,7 +73,7 @@ python3 flatpak-cargo-generator.py Cargo.lock \
 
 # 2. Build + install locally.
 flatpak run org.flatpak.Builder --user --install --force-clean \
-  build-dir packaging/flatpak/org.snitchwatch.Snitchwatch.yml
+  build-dir packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml
 ```
 
 **Pass condition:** build completes, `flatpak run org.snitchwatch.Snitchwatch`
@@ -91,10 +90,10 @@ flatpak run --command=sh org.snitchwatch.Snitchwatch -c \
 # Flatpak isolation the whole Unix-socket design depends on is broken.
 
 flatpak run --command=sh org.snitchwatch.Snitchwatch -c \
-  'ls -la "$XDG_RUNTIME_DIR/snitchwatch/" 2>&1'
-# Expect this to succeed and show bridge.sock + token (only once Step 3's
-# bridge is already running) — confirms --filesystem=xdg-run/snitchwatch
-# actually crosses the sandbox boundary as designed.
+  'ls -la /run/snitchwatch/ 2>&1'
+# Expect this to succeed and show bridge.sock (only once the system bridge
+# is running; a member of snitchwatch-ui) — confirms the read-only
+# /run/snitchwatch grant crosses the sandbox boundary as designed.
 ```
 
 **If it fails:** a `flatpak-builder` manifest error is usually a missing
@@ -110,21 +109,18 @@ sandbox — check `org.kde.Sdk`'s own environment setup before assuming a
 
 ---
 
-## Step 3 — Live opensnitchd dial-in + bridge systemd unit
+## Step 3 — Live opensnitchd dial-in (dev-only TCP bridge)
 
-Install and start the bridge as its own user service (independent of any
-GUI):
+Run the bridge by hand, in the foreground (there is no packaged per-user unit
+any more, #35). TCP gRPC is dev-only and needs the flag:
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp packaging/systemd/snitchwatch-bridge.service ~/.config/systemd/user/
-# If the binary isn't at /usr/bin/snitchwatch-bridge-cli (e.g. a
-# lightweight/DIY install), override ExecStart first:
-#   systemctl --user edit snitchwatch-bridge.service
-systemctl --user daemon-reload
-systemctl --user enable --now snitchwatch-bridge.service
-systemctl --user status snitchwatch-bridge.service   # should be active (running)
+SNITCHWATCH_DEV_TCP=1 SNITCHWATCH_GRPC_BIND=127.0.0.1:50051 RUST_LOG=info \
+  cargo run -p snitchwatch-bridge-cli
 ```
+
+(Running the bridge replaces a running bridge's sockets and token: issue #34;
+use an isolated `XDG_RUNTIME_DIR` on a host with a live one.)
 
 Start a real `opensnitchd` (per `README.md`'s "Running the bridge against
 real opensnitchd" section — this is the one step in this runbook where a
@@ -175,10 +171,9 @@ traffic. Traffic generation is still useful for judging Step 5/6's
 stats-driven rows (the connection table, traffic graphs), just no longer
 required to keep the tray/diagnostics from false-positiving.
 
-Confirm `opensnitchd`'s `Server.Address` in its `default-config.json` points
-at `127.0.0.1:50051` (matching `SNITCHWATCH_GRPC_BIND` in the systemd unit;
-this step's copied config, not the r15 image's, whose system overlay dials
-the system socket),
+Set `opensnitchd`'s `Server.Address` in this step's copied
+`default-config.json` to `127.0.0.1:50051` (matching `SNITCHWATCH_GRPC_BIND`
+above; the shipped image's config dials the system socket instead),
 then generate real traffic from a fresh process and confirm a pending
 decision actually reaches a connected client:
 
@@ -197,14 +192,15 @@ protocol lets the connection through or blocks it as expected.
 
 ## Step 4 — Closed-window fail-open fix, the actual point of Phase 2
 
-This is the test that proves the systemd `--user` unit decoupling actually
-fixes the problem it was built for — don't skip it even if Step 3 passed,
-since Step 3 doesn't exercise "GUI window closed."
+This is the test that proves the bridge running independently of the GUI
+actually fixes the problem it was built for — don't skip it even if Step 3
+passed, since Step 3 doesn't exercise "GUI window closed." Against the shipped
+system bridge, use `systemctl status snitchwatch-system-bridge.service`; the
+commands below drive the Step 3 dev bridge.
 
 ```bash
-# With snitchwatch-bridge.service still running from Step 3, and the
+# With the bridge still running from Step 3, and the
 # snitchwatch-kirigami GUI window explicitly NOT running:
-systemctl --user status snitchwatch-bridge.service   # confirm still active
 
 TOKEN=$(cat "$XDG_RUNTIME_DIR/snitchwatch/token")
 { printf '%s\n' "$TOKEN"; cat; } | websocat --unix-listen -t \
@@ -217,12 +213,12 @@ with **no GUI process running at all** — proving `opensnitchd`'s
 `DefaultAction` fallback is only reached on a genuine bridge outage,
 not merely because the GUI window was closed. This is the specific
 regression Phase 2 exists to prevent (see the plan doc's "fail-open stance"
-section and the systemd unit's own header comment).
+section and the system unit's own header comment).
 
 **If it fails** (i.e. the connection silently passes through or hangs with
-no pending message): check `systemctl --user status snitchwatch-bridge.service`
-first — if the unit isn't actually running independent of the GUI session
-(e.g. `graphical-session.target` tore it down when a desktop session ended),
+no pending message): check that the bridge process is still running independent of the GUI
+session (for the system bridge: `systemctl status
+snitchwatch-system-bridge.service`); if it was torn down with the GUI,
 that's the regression this step exists to catch, not a websocat/curl
 problem. Also confirm `opensnitchd`'s live `Server.Address` still points at
 the bridge's stable `127.0.0.1:50051` bind and not an ephemeral port from an

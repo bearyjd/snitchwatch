@@ -43,8 +43,10 @@ regen-proto:
 run-bridge:
     RUST_LOG=info cargo run -p snitchwatch-bridge-cli
 
-run-spike endpoint="http://127.0.0.1:50051":
-    RUST_LOG=info cargo run -p snitchwatch-spike -- {{endpoint}}
+# Default: Unix socket $XDG_RUNTIME_DIR/snitchwatch-grpc/spike.sock. Pass a
+# loopback address (e.g. 127.0.0.1:50051) to listen on TCP (dev only).
+run-spike addr="":
+    {{ if addr == "" { "" } else { "SNITCHWATCH_DEV_TCP=1" } }} RUST_LOG=info cargo run -p snitchwatch-spike -- {{addr}}
 
 # Re-run the idempotent rebrand pass over the vendored web/ tree.
 web-rebrand:

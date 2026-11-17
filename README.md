@@ -113,11 +113,15 @@ The bridge prints `GRPC_LISTEN_ADDR=127.0.0.1:NNNNN`,
 `WS_SOCKET_PATH=/run/user/<uid>/snitchwatch/bridge.sock`, and
 `WS_TOKEN_PATH=/run/user/<uid>/snitchwatch/token` to stdout on startup. Set
 opensnitchd's `default-config.json` `Server.Address` field to the bridge's
-`GRPC_LISTEN_ADDR` (e.g. `127.0.0.1:50051`) so the daemon dials in. This TCP
-transport is for development and the per-user flavour only: it is **not
-deny-safe** (any local process that binds the port first answers for the
-daemon, whatever its `DefaultAction`, #35). The packaged image uses the system bridge's root-only
-Unix socket ([`docs/packaging/system-bridge-integration.md`](docs/packaging/system-bridge-integration.md)).
+`GRPC_LISTEN_ADDR` (e.g. `127.0.0.1:50051`) so the daemon dials in. TCP gRPC
+exists **for development only** and needs `SNITCHWATCH_DEV_TCP=1` (loopback
+addresses only): it is **not deny-safe** (any local process that binds the port
+first answers for the daemon, whatever its `DefaultAction`, #35). Without the
+flag the bridge listens on a per-user Unix socket
+(`$XDG_RUNTIME_DIR/snitchwatch-grpc/opensnitchd.sock`) that nothing packaged
+dials. **The system bridge is the only shipped flavour**: the image uses its
+root-only Unix socket
+([`docs/packaging/system-bridge-integration.md`](docs/packaging/system-bridge-integration.md)).
 
 You can poke the WebSocket with `websocat`'s Unix-socket mode, presenting
 the token as the first line so the bridge accepts the connection:
@@ -134,8 +138,10 @@ installed version's exact Unix-socket flag spelling.)
 
 Environment variables:
 
-- `SNITCHWATCH_GRPC_BIND` — gRPC bind address (default `127.0.0.1:0`, a random port;
-  the shipped user unit sets `127.0.0.1:50051`)
+- `SNITCHWATCH_DEV_TCP` — `1` allows loopback TCP gRPC (dev only; also required by
+  the Tauri shell and the spike's TCP mode)
+- `SNITCHWATCH_GRPC_BIND` — gRPC TCP bind address, only with `SNITCHWATCH_DEV_TCP=1`
+  (default `127.0.0.1:0`, a random port; loopback only; an error without the flag)
 - `SNITCHWATCH_WS_SOCKET` — WS Unix domain socket path (default
   `$XDG_RUNTIME_DIR/snitchwatch/bridge.sock`)
 - `RUST_LOG` — tracing filter, e.g. `info`, `snitchwatch_bridge=debug`
@@ -394,35 +400,28 @@ extra trust roots: there is no test hook to switch on in production.
 ## Install on Bazzite (M5 / Phase 2 packaging)
 
 Snitchwatch installs on Bazzite (or any Universal Blue / immutable Fedora)
-host two ways. Both are supported — pick by taste, not by tier:
-
-- **Batteries-included** — a signed custom Bazzite image with `opensnitchd`
-  baked in and enabled from first boot. Recipe:
-  [`packaging/bluebuild/recipe.yml`](packaging/bluebuild/recipe.yml). Build
-  with the [`bluebuild`](https://blue-build.org) CLI.
-- **Lightweight / DIY** — layer `opensnitchd` onto stock Bazzite with
-  `rpm-ostree`. Step-by-step walkthrough:
-  [`docs/packaging/rpm-ostree-layering.md`](docs/packaging/rpm-ostree-layering.md).
-
-In both cases the GUI ships as a Flatpak
-([`packaging/flatpak/org.snitchwatch.Snitchwatch.yml`](packaging/flatpak/org.snitchwatch.Snitchwatch.yml))
-and the bridge runs as a systemd `--user` service
-([`packaging/systemd/snitchwatch-bridge.service`](packaging/systemd/snitchwatch-bridge.service)).
-The Flatpak reaches the host-side bridge over the Phase 1 Unix domain socket
-via `--filesystem=xdg-run/snitchwatch` — it holds **no** network permission
-(`--share=network` is deliberately absent; a Flatpak's private network
-namespace can't reach host loopback anyway, and that grant would open full
-internet access rather than scoped loopback). See
-[`packaging/README.md`](packaging/README.md) for the full architecture.
+host as the **system bridge**, the only shipped flavour (#35): a root-owned,
+socket-activated `snitchwatch-system-bridge.service` that opensnitchd dials over
+a root-only Unix socket, plus the GUI as a Flatpak
+([`packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml`](packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml)).
+The image path is a signed custom Bazzite image with `opensnitchd` baked in
+(recipe: [`packaging/bluebuild/recipe.yml`](packaging/bluebuild/recipe.yml),
+built with the [`bluebuild`](https://blue-build.org) CLI) plus the system
+overlay staged by [`packaging/system/stage.sh`](packaging/system/stage.sh). The
+earlier DIY rpm-ostree layering walkthrough with a per-user bridge is retired;
+[`docs/packaging/rpm-ostree-layering.md`](docs/packaging/rpm-ostree-layering.md)
+is now a pointer. The Flatpak reaches the bridge over a Unix socket and holds
+**no** network permission. See [`packaging/README.md`](packaging/README.md) for
+the full architecture.
 
 ### Pre-built bridge for immutable images
 
 Tagged releases (`v*`) publish the bridge as a sha256-pinned tarball —
-`snitchwatch-bridge-<version>-x86_64.tar.gz` (binary, systemd user unit,
-MANIFEST) — built in a digest-pinned Fedora 45 container and rebuilt byte-identically from a second path before publishing, for a
-bootc/bluebuild image to install at build time and enable with
-`systemctl --global enable snitchwatch-bridge.service`. Contract, install
-snippet and smoke-test assertions:
+`snitchwatch-bridge-<version>-x86_64.tar.gz` (binary and MANIFEST) — built in a
+digest-pinned Fedora 45 container and rebuilt byte-identically from a second
+path before publishing, for a bootc/bluebuild image to install at build time
+alongside the system overlay. Contract, install snippet and smoke-test
+assertions:
 [`docs/packaging/bridge-release-artifact.md`](docs/packaging/bridge-release-artifact.md).
 Build one locally with `just release-bridge` (podman).
 
@@ -430,7 +429,7 @@ Build one locally with `just release-bridge` (podman).
 
 Both packaged daemon configs ship `DefaultAction: allow`, as upstream OpenSnitch
 does ([`packaging/system/opensnitchd-default-config.json`](packaging/system/opensnitchd-default-config.json)
-for the system bridge, and the bluebuild recipe's per-user config). Owner
+for the system bridge, which the bluebuild recipe's config matches). Owner
 decision 2026-10-25: the r15 images shipped `deny`, and with no decision client
 answering, a deny default blocks every new outbound connection that no rule
 covers, which left the system unusable. Prompts and rules still apply; `allow`
@@ -455,10 +454,9 @@ bridge's root-only Unix socket (`unix:opensnitchd.sock`), and in this order:
    changed `DefaultAction` only to its disconnected and error fallbacks; the
    fallback for a connected UI keeps the old value until the daemon restarts.
 
-The per-user bridge's TCP port is not deny-safe
-(#35): a process that binds it first answers for the daemon. The bridge runs as
-its own service so that *closing the GUI window* is not mistaken for *the
-decision channel being down*.
+TCP gRPC (dev only, #35) is not deny-safe: a process that binds the port first
+answers for the daemon. The bridge runs as its own service so that *closing the
+GUI window* is not mistaken for *the decision channel being down*.
 
 ### Coexistence with upstream `opensnitch-ui`
 

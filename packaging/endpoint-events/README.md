@@ -152,7 +152,7 @@ newline), as in [`sample-event.json`](sample-event.json). Sizes:
   never cross the LAN. rsyslog listens on `127.0.0.1` only and does the TLS.
 - **Privileged port.** 514 is below `net.ipv4.ip_unprivileged_port_start`
   (1024 by default), so an unprivileged local process can't bind it first and
-  receive the stream. That is the #35 squatting problem a port like 50051 has.
+  receive the stream. That is the squatting problem a TCP port like 50051 had (#35; TCP gRPC is now dev-only).
   Only root (rsyslog runs as root on Fedora) can bind it.
 - **SELinux.** On Fedora 44's targeted policy TCP 514 is labelled
   `rsh_port_t`, not `syslogd_port_t`, but the policy explicitly allows it:

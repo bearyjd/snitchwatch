@@ -9,10 +9,13 @@ async fn spawned_bridge_publishes_initial_idle_state() {
     // process env here can't race another test.
     let runtime_dir = tempfile::tempdir().expect("tempdir for XDG_RUNTIME_DIR");
     std::env::set_var("XDG_RUNTIME_DIR", runtime_dir.path());
+    // The embed refuses to start without the dev flag (#35).
+    std::env::set_var("SNITCHWATCH_DEV_TCP", "1");
+    std::env::remove_var("SNITCHWATCH_GRPC_BIND");
+    std::env::remove_var("SNITCHWATCH_SYSTEM_BRIDGE");
 
     let cfg = BridgeRuntimeConfig {
         ws_proxy_bind: "127.0.0.1:0".parse().unwrap(),
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
     };
     let runtime = spawn_bridge_runtime(cfg).await.unwrap();
 

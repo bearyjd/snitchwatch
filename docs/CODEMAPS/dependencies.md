@@ -9,7 +9,7 @@
 | `chkrootkit`, `modinfo`, sysfs, `/proc/cmdline` | scanner-privileged | via `SystemFacts` |
 | `pkexec` + polkit | kirigami native path, broker | `packaging/polkit/` |
 | session D-Bus (zbus) | broker, kirigami notifications | `org.snitchwatch.Scanner` |
-| systemd (socket activation, `StateDirectory=`) | system bridge | `packaging/systemd`, `packaging/system` |
+| systemd (socket activation, `StateDirectory=`) | system bridge | `packaging/system` |
 | podman + pinned Fedora 45 image | release build | `packaging/release/pins.env:1` |
 | `rdap.org`, blocklist hosts (HTTPS) | kirigami (opt-in RDAP), bridge fetcher | rustls |
 | Qt6 + KDE Frameworks 6 | snitchwatch-kirigami | system packages |

@@ -9,7 +9,7 @@ Three processes, three trust levels:
 
 | Process                     | Where it runs                    | Packaged as |
 | --------------------------- | --------------------------------- | ----------- |
-| `opensnitchd`               | Host, privileged (root)          | Baked into a bluebuild image **or** rpm-ostree layered |
+| `opensnitchd`               | Host, privileged (root)          | Baked into the bluebuild image (the DIY rpm-ostree path is retired) |
 | `snitchwatch-bridge-cli`    | Host, unprivileged system service (`snitchwatch` account) | system units in `system/` (socket-activated) |
 | `snitchwatch-kirigami` GUI  | Flatpak sandbox, unprivileged    | Flatpak (`flatpak/org.snitchwatch.Snitchwatch.system.yml`) |
 
@@ -23,20 +23,22 @@ decision, 2026-07-11); see
 [`../docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md`](../docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md)'s
 status note for detail.
 
-The GUI reaches the host-side bridge over a **Unix domain socket** under
-`$XDG_RUNTIME_DIR/snitchwatch/`, granted to the sandbox via
-`--filesystem=xdg-run/snitchwatch`. There is deliberately **no
+**The system bridge is the only shipped flavour** (#35): there is no per-user
+bridge unit and no per-user Flatpak profile. The GUI reaches the host-side
+bridge over the **Unix domain socket** `/run/snitchwatch/bridge.sock`, granted
+read-only to the sandbox (`/run/snitchwatch`, `/run/snitchwatch-auth`). There is deliberately **no
 `--share=network`** on the Flatpak: a Flatpak's private network namespace
 cannot reach host loopback anyway, and that permission would grant full
 internet access rather than scoped loopback. See
 [`../docs/superpowers/specs/2026-07-04-flatpak-feasibility-research.md`](../docs/superpowers/specs/2026-07-04-flatpak-feasibility-research.md).
 
-## The two install paths
+## The install path
 
 - **Batteries-included** — a signed custom Bazzite image with `opensnitchd`
-  baked in and enabled from first boot: [`bluebuild/recipe.yml`](bluebuild/recipe.yml).
-- **Lightweight / DIY** — layer `opensnitchd` onto stock Bazzite with
-  `rpm-ostree`: [`../docs/packaging/rpm-ostree-layering.md`](../docs/packaging/rpm-ostree-layering.md).
+  baked in and enabled from first boot: [`bluebuild/recipe.yml`](bluebuild/recipe.yml),
+  plus the system overlay staged by [`system/stage.sh`](system/stage.sh).
+- The earlier **Lightweight / DIY** rpm-ostree layering path (per-user bridge on
+  TCP) is retired: [`../docs/packaging/rpm-ostree-layering.md`](../docs/packaging/rpm-ostree-layering.md).
 
 The system overlay's daemon config
 ([`system/opensnitchd-default-config.json`](system/opensnitchd-default-config.json)):
@@ -169,14 +171,11 @@ opensnitchd dial-in, the closed-window fail-open fix, and the tray-state
 transitions added 2026-07-12), see
 [`../docs/packaging/phase2-manual-verification-runbook.md`](../docs/packaging/phase2-manual-verification-runbook.md).
 
-## System-bridge overlay (pending a new release)
+## System-bridge overlay (the shipped flavour)
 
 [`system/`](system/) is a separate, socket-activated system deployment for
-the dedicated `snitchwatch` account. It is intentionally not substituted for
-the legacy user-service assets above until a bridge release carries the new
-binary contract. See
+the dedicated `snitchwatch` account, and the only flavour that ships (#35). See
 [`../docs/packaging/system-bridge-integration.md`](../docs/packaging/system-bridge-integration.md)
 for the trust boundary, deterministic image staging, desktop-group enrollment,
-and Flatpak migration checks. Use `flatpak/org.snitchwatch.Snitchwatch.system.yml`
-only for that system deployment; it deliberately shares the primary profile's
-app-id and is not coinstallable with it.
+and Flatpak migration checks. `flatpak/org.snitchwatch.Snitchwatch.system.yml`
+is the only Flatpak profile.

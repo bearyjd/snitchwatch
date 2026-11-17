@@ -17,14 +17,15 @@ Help text source: `crates/snitchwatch-bridge-cli/src/cli.rs:61-83`.
 <!-- AUTO-GENERATED: crates/snitchwatch-bridge-cli/src/{config,main,storage,activation,logging}.rs, crates/snitchwatch-bridge/src/auth.rs -->
 | Variable | Read at | Required | Purpose / values / default |
 |---|---|---|---|
-| `SNITCHWATCH_GRPC_BIND` | `crates/snitchwatch-bridge-cli/src/config.rs:40` | no | gRPC bind address (user mode). Default `127.0.0.1:0`; must parse as a socket address or startup fails (`config.rs:41-43`). |
+| `SNITCHWATCH_DEV_TCP` | `crates/snitchwatch-bridge-cli/src/config.rs` | no | Exactly `1` allows loopback TCP gRPC (**dev only**, #35); any other set value is an error before any I/O. Also required by the Tauri shell (it refuses to start without it) and by `snitchwatch-spike` for TCP. Combined with `SNITCHWATCH_SYSTEM_BRIDGE=1` it is an error. Without it the bridge listens on the per-user Unix socket `$XDG_RUNTIME_DIR/snitchwatch-grpc/opensnitchd.sock` (dir 0700, socket 0600; the spike uses `spike.sock` in the same directory) and refuses to start if `XDG_RUNTIME_DIR` is unset. |
+| `SNITCHWATCH_GRPC_BIND` | `crates/snitchwatch-bridge-cli/src/config.rs` | no | gRPC TCP bind address, **only with `SNITCHWATCH_DEV_TCP=1`**; default `127.0.0.1:0`, must be loopback (`0.0.0.0` is refused). Set without the flag it is a hard error naming the flag (a stale unit or script). |
 | `SNITCHWATCH_WS_SOCKET` | `crates/snitchwatch-bridge-cli/src/config.rs:45` | no | WS Unix socket path. Default `$XDG_RUNTIME_DIR/snitchwatch/bridge.sock`. |
-| `SNITCHWATCH_SYSTEM_BRIDGE` | `crates/snitchwatch-bridge-cli/src/main.rs:89` | no | Exactly `1` selects system mode (strict systemd socket activation); any other set value is an error (`main.rs:93`); unset selects user mode. |
+| `SNITCHWATCH_SYSTEM_BRIDGE` | `crates/snitchwatch-bridge-cli/src/main.rs:89` | no | Exactly `1` selects system mode (strict systemd socket activation); any other set value is an error (`main.rs:93`); unset selects the dev/per-user mode (Unix gRPC socket, or loopback TCP with `SNITCHWATCH_DEV_TCP=1`). |
 | `STATE_DIRECTORY` | `crates/snitchwatch-bridge-cli/src/storage.rs:146` | no | Set by systemd `StateDirectory=`; wins over `SNITCHWATCH_STATE_DIR`; empty counts as unset (`storage.rs:166-168`). System mode accepts only `/var/lib/snitchwatch` (`cli.rs:71-73`). |
 | `SNITCHWATCH_STATE_DIR` | `crates/snitchwatch-bridge-cli/src/storage.rs:147` | no | Used when `STATE_DIRECTORY` is unset. With neither, blocklists and profiles are kept in memory only. |
-| `XDG_RUNTIME_DIR` | `crates/snitchwatch-bridge/src/auth.rs:90` | no | Base of the `snitchwatch/` socket and token directory. If unset, falls back to `<OS temp dir>/snitchwatch`. |
+| `XDG_RUNTIME_DIR` | `crates/snitchwatch-bridge/src/auth.rs:90` | no | Base of the `snitchwatch/` socket and token directory (and `snitchwatch-grpc/`). If unset, `auth::runtime_dir` falls back to `<OS temp dir>/snitchwatch` for the WS socket and token: a **known limitation** (shared `/tmp`, the squatting problem again) that only the Tauri shell and the per-user gRPC socket guard against by refusing to start; the shipped system bridge sets its own paths. |
 | `LISTEN_PID`, `LISTEN_FDS`, `LISTEN_FDNAMES` | `crates/snitchwatch-bridge-cli/src/activation.rs:32-34` | system mode only | systemd socket-activation protocol; missing values are an error (`.context("... missing")`). Set by systemd, not by hand. |
-| `RUST_LOG` | `crates/snitchwatch-bridge-cli/src/logging.rs:13` | no | `tracing` EnvFilter; default `info` when unset or unparsable. Shipped user unit sets `RUST_LOG=info` (`packaging/systemd/snitchwatch-bridge.service:40`). |
+| `RUST_LOG` | `crates/snitchwatch-bridge-cli/src/logging.rs:13` | no | `tracing` EnvFilter; default `info` when unset or unparsable. The shipped system unit sets its own value. |
 | `PATH` | `crates/snitchwatch-bridge/src/diagnostics/kernel_probe.rs:19` | no | Searched for `nft` by the kernel probe; unset means "not found". (`scanner-core/src/inspector.rs:127` does the same lookup for `SystemInspector::which`.) |
 <!-- /AUTO-GENERATED -->
 
@@ -32,7 +33,6 @@ Variables fixed by the shipped units (not read from your shell):
 
 | Unit | Sets | Source |
 |---|---|---|
-| user unit | `SNITCHWATCH_GRPC_BIND=127.0.0.1:50051`, `SNITCHWATCH_WS_SOCKET=%t/snitchwatch/bridge.sock`, `RUST_LOG=info` | `packaging/systemd/snitchwatch-bridge.service:33,39,40` |
 | system unit | `SNITCHWATCH_SYSTEM_BRIDGE=1`, `SNITCHWATCH_WS_SOCKET=/run/snitchwatch/bridge.sock`, `SNITCHWATCH_WS_TOKEN_PATH=/run/snitchwatch-auth/token`, `HOME=/var/lib/snitchwatch`, `XDG_STATE_HOME=/var/lib` | `packaging/system/snitchwatch-system-bridge.service:20-24` |
 | system Flatpak | `SNITCHWATCH_SYSTEM_BRIDGE=1` (`--env=`) | `packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml:79` |
 
@@ -102,7 +102,6 @@ lines, sourced by the justfile and scripts).
 | `SW_INSTALL_DEPS` | `build-bridge.sh:247` | `1` runs `install-deps.sh` first. |
 | `SRC_DIR`, `OUT_DIR`, `CARGO_HOME`, `CARGO_TARGET_DIR` | `build-bridge.sh:9-14,76-81` | Defaults: derived from script path, `$SRC_DIR/dist`, `$HOME/.cargo`, `/tmp/sw-target`. |
 | `SW_THROWAWAY_CONTAINER` | `check-install.sh:41` | Must be `1`; guard that the install check runs only in a throwaway container. |
-| `SW_UNIT_FILE` | `verify-unit.sh:27` | Unit file to verify; default `packaging/systemd/snitchwatch-bridge.service`. |
 | `SW_VERIFY_DNF_CACHE` | `packaging/endpoint-events/verify.sh:57` | Optional podman volume name for the dnf cache. |
 | `SNITCHWATCH_BUILD_COMMIT` | `crates/snitchwatch-kirigami/build.rs:238` | Fallback commit id for the About page when git is unavailable; used only if it passes `is_commit_id`. |
 <!-- /AUTO-GENERATED -->
