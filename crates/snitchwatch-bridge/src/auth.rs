@@ -131,6 +131,9 @@ fn write_token_file_as(token: &Token, path: &Path, euid: u32) -> io::Result<()> 
             format!("token file {} is not owned by uid {euid}", path.display()),
         ));
     }
+    // `.mode()` is filtered by the umask; fix the mode through the descriptor
+    // (never by path) so a strict umask cannot leave the token unreadable.
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
     file.write_all(token.as_str().as_bytes())?;
     Ok(())
 }
