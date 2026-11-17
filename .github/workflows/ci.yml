@@ -109,6 +109,11 @@ jobs:
       - name: cargo test (default-members)
         run: cargo test --locked
 
+      # #35: these tests need uid 0 (chown / uid 65534 re-exec) and otherwise
+      # print SKIPPED-ROOT-ONLY and pass; the script fails on any skip.
+      - name: Root-only peer/owner tests (as root, fails on skip)
+        run: scripts/ci-root-tests.sh
+
       - name: Scanner broker private D-Bus integration
         run: dbus-run-session -- cargo test -p scanner-broker private_bus --locked -- --ignored
 
