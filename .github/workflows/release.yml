@@ -18,8 +18,8 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-# Publishes the Snitchwatch bridge (snitchwatch-bridge-cli + its systemd user
-# unit) as a pre-built, sha256-pinned tarball plus a `.sha256` file, so an
+# Publishes the Snitchwatch bridge (snitchwatch-bridge-cli, binary and
+# manifest only) as a pre-built, sha256-pinned tarball plus a `.sha256` file, so an
 # immutable bootc image (bazzite-tower) can fetch a release asset by exact
 # version at image build time, check the pinned hash, and extract it without
 # running scriptlets. The tarball layout, MANIFEST.json schema and download
@@ -290,7 +290,7 @@ jobs:
           fence='```'
           sha_line=$(cat "dist/$TARBALL.sha256")
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
-          Pre-built Snitchwatch bridge (snitchwatch-bridge-cli plus its systemd user unit) for x86_64, built in a digest-pinned Fedora 45 container and rebuilt byte-identically from a second checkout path in the same job; the exact toolchain is recorded in MANIFEST.json.
+          Pre-built Snitchwatch bridge (snitchwatch-bridge-cli, binary and manifest only; the unit ships in the system overlay) for x86_64, built in a digest-pinned Fedora 45 container and rebuilt byte-identically from a second checkout path in the same job; the exact toolchain is recorded in MANIFEST.json.
 
           sha256 (also attached as \`$TARBALL.sha256\`):
 

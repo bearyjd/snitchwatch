@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build snitchwatch-bridge-cli inside the pinned Fedora builder container,
-# stage it with the systemd user unit and license files, pack the
+# stage it with the license files, pack the
 # deterministic release tarball and self-verify it.
 #
 # Contract: docs/superpowers/plans/2026-10-03-bridge-release-artifact.md
@@ -211,8 +211,6 @@ write_thirdparty() {
 stage_files() {
     local stage="$1" licenses="$1/usr/share/licenses/snitchwatch-bridge"
     install -D -m 0755 "$BIN" "$stage/usr/bin/snitchwatch-bridge-cli"
-    install -D -m 0644 "$SRC_DIR/packaging/systemd/snitchwatch-bridge.service" \
-        "$stage/usr/lib/systemd/user/snitchwatch-bridge.service"
     if [[ -f "$SRC_DIR/LICENSE" ]]; then
         install -D -m 0644 "$SRC_DIR/LICENSE" "$licenses/LICENSE"
     fi

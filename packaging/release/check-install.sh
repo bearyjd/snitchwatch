@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Install the bridge release tarball into / of a THROWAWAY container exactly
-# the way the bootc image build consumes it, then check it: SHA256SUMS from /,
-# `systemd-analyze verify --user` on the installed unit, `systemctl --global
-# enable`, the default.target.wants symlink, and `--version`.
+# the way the bootc image build consumes it, then check it: SHA256SUMS from /
+# and `--version`. The tarball is the binary + manifest only (#35): the unit
+# ships in the system overlay (packaging/system/), not here.
 #
 # The tarball is verified against <expected-sha256> (from a trusted source,
 # e.g. build-bridge.sh's SHA256= line) and installed from the tree that
@@ -19,9 +19,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-UNIT_NAME=snitchwatch-bridge.service
-UNIT_PATH="/usr/lib/systemd/user/$UNIT_NAME"
-WANTS_LINK="/etc/systemd/user/default.target.wants/$UNIT_NAME"
 DATA_DIR=usr/share/snitchwatch-bridge
 LICENSE_NAME_RE='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 
@@ -60,7 +57,6 @@ contract_mode() {
     [[ "$path" != *..* ]] || return 1
     case "$path" in
         usr/bin/snitchwatch-bridge-cli) echo 0755 ;;
-        usr/lib/systemd/user/snitchwatch-bridge.service) echo 0644 ;;
         usr/share/licenses/snitchwatch-bridge/*)
             [[ "${path#usr/share/licenses/snitchwatch-bridge/}" =~ $LICENSE_NAME_RE ]] || return 1
             echo 0644
@@ -90,30 +86,10 @@ for entry in json.load(open(sys.argv[1]))["files"]:
     done
 }
 
-check_unit() {
-    local runtime_dir="$1" output rc=0
-    output="$(XDG_RUNTIME_DIR="$runtime_dir" systemd-analyze verify --user "$UNIT_PATH" 2>&1)" || rc=$?
-    if [[ -n "$output" ]]; then printf '%s\n' "$output" >&2; fi
-    [[ "$rc" -eq 0 ]] || die "systemd-analyze verify --user $UNIT_PATH exited $rc"
-    [[ "$output" != *"$UNIT_NAME"* ]] || die "systemd-analyze reported diagnostics for $UNIT_NAME"
-    log "systemd-analyze verify --user: clean"
-}
-
-check_enable() {
-    local state target
-    systemctl --global enable "$UNIT_NAME"
-    state="$(systemctl --global is-enabled "$UNIT_NAME" || true)"
-    [[ "$state" == enabled ]] || die "systemctl --global is-enabled says '$state', want 'enabled'"
-    [[ -L "$WANTS_LINK" ]] || die "$WANTS_LINK is not a symlink"
-    target="$(readlink "$WANTS_LINK")"
-    [[ "$target" == "$UNIT_PATH" ]] || die "$WANTS_LINK -> $target, want $UNIT_PATH"
-    log "systemctl --global enable: $WANTS_LINK -> $target"
-}
-
 check_version() {
     local iso="$1" version="$2" got
     got="$(env -i PATH=/usr/bin:/bin HOME="$iso" XDG_RUNTIME_DIR="$iso" \
-        SNITCHWATCH_WS_SOCKET="$iso/bridge.sock" SNITCHWATCH_GRPC_BIND=127.0.0.1:0 \
+        SNITCHWATCH_WS_SOCKET="$iso/bridge.sock" \
         timeout 5 /usr/bin/snitchwatch-bridge-cli --version)" ||
         die "/usr/bin/snitchwatch-bridge-cli --version failed or timed out"
     [[ "$got" == "snitchwatch-bridge-cli $version" ]] ||
@@ -128,7 +104,7 @@ main() {
 
     local top version
     WORK="$(mktemp -d)"
-    mkdir -m 0700 "$WORK/extract" "$WORK/runtime" "$WORK/iso"
+    mkdir -m 0700 "$WORK/extract" "$WORK/iso"
     # Never install something that fails the artifact contract or the trusted
     # digest; install only what verify itself wrote from the verified bytes.
     python3 "$SCRIPT_DIR/bridge_artifact.py" verify --tarball "$1" --expect-sha256 "$2" \
@@ -139,10 +115,8 @@ main() {
 
     install_tree "$top"
     (cd / && sha256sum -c "/$DATA_DIR/SHA256SUMS") || die "sha256sum -c /$DATA_DIR/SHA256SUMS"
-    check_unit "$WORK/runtime"
-    check_enable
     check_version "$WORK/iso" "$version"
-    log "OK: $(basename "$1") (sha256 $2) installs, verifies and enables cleanly"
+    log "OK: $(basename "$1") (sha256 $2) installs and verifies cleanly"
 }
 
 main "$@"

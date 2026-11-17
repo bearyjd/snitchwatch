@@ -37,16 +37,12 @@ const SOURCE_DATE_EPOCH: u64 = 1_700_000_000;
 const SOURCE_DATE_UTC: &str = "2023-11-14 22:13:20";
 
 const BIN: &str = "usr/bin/snitchwatch-bridge-cli";
-const UNIT: &str = "usr/lib/systemd/user/snitchwatch-bridge.service";
 const LICENSE: &str = "usr/share/licenses/snitchwatch-bridge/LICENSE.fixture";
 const MANIFEST: &str = "usr/share/snitchwatch-bridge/MANIFEST.json";
 const SUMS: &str = "usr/share/snitchwatch-bridge/SHA256SUMS";
-const STAGE_DIRS: [&str; 8] = [
+const STAGE_DIRS: [&str; 5] = [
     "usr",
     "usr/bin",
-    "usr/lib",
-    "usr/lib/systemd",
-    "usr/lib/systemd/user",
     "usr/share",
     "usr/share/licenses",
     "usr/share/licenses/snitchwatch-bridge",
@@ -200,12 +196,7 @@ impl Fixture {
     fn new(bin_mode: u32, file_mode: u32, dir_mode: u32) -> Self {
         let root = tempfile::tempdir().expect("tempdir");
         let stage = root.path().join("stage");
-        let unit = fs::read(workspace_file(
-            "packaging/systemd/snitchwatch-bridge.service",
-        ))
-        .expect("read the real packaging/systemd unit");
         write_file(&stage.join(BIN), FAKE_BINARY, bin_mode);
-        write_file(&stage.join(UNIT), &unit, file_mode);
         write_file(&stage.join(LICENSE), b"fixture license text\n", file_mode);
         for dir in STAGE_DIRS.iter().rev() {
             fs::set_permissions(stage.join(dir), fs::Permissions::from_mode(dir_mode))

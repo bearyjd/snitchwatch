@@ -1,7 +1,8 @@
 # Bridge release artifact (image-baked install)
 
-The Snitchwatch bridge (`snitchwatch-bridge-cli` plus its systemd **user**
-unit) is published as a pre-built, sha256-pinned tarball for immutable images
+The Snitchwatch bridge binary (`snitchwatch-bridge-cli`, binary and manifest
+only: no unit; the system bridge's units ship in the overlay,
+`packaging/system/`, #35) is published as a pre-built, sha256-pinned tarball for immutable images
 (bazzite-tower, Fedora 45 bootc) to install at image build time: fetch a
 release asset by exact version, check a pinned sha256, extract — no package
 scriptlets. This is the consumer contract. Design and decisions:
@@ -27,7 +28,6 @@ and directories are `0755`.
 | Path (relative to the top dir) | Mode | Installs to |
 |---|---|---|
 | `usr/bin/snitchwatch-bridge-cli` | 0755 | `/usr/bin/snitchwatch-bridge-cli` |
-| `usr/lib/systemd/user/snitchwatch-bridge.service` | 0644 | `/usr/lib/systemd/user/snitchwatch-bridge.service` |
 | `usr/share/snitchwatch-bridge/MANIFEST.json` | 0644 | `/usr/share/snitchwatch-bridge/MANIFEST.json` |
 | `usr/share/snitchwatch-bridge/SHA256SUMS` | 0644 | `/usr/share/snitchwatch-bridge/SHA256SUMS` |
 | `usr/share/licenses/snitchwatch-bridge/*` | 0644 | `/usr/share/licenses/snitchwatch-bridge/` |
@@ -61,7 +61,7 @@ checks, **not authentication**: anyone able to replace the tarball can
 regenerate all three. Never fetch the `.sha256` at image-build time and
 compare against it — compare against the hash pinned in your repo.
 
-## The binary and the unit
+## The binary
 
 - `snitchwatch-bridge-cli` is built with `--no-default-features`, i.e. **without
   the embedded web UI**: the vendored `web/` frontend is Objective Development's
@@ -78,12 +78,9 @@ compare against it — compare against the hash pinned in your repo.
   prints usage. Both exit 0 before any I/O (no socket, token, or bind).
   **Without a flag the binary starts a bridge** — never run it bare in an
   image build or smoke test.
-- `snitchwatch-bridge.service` is a user unit: `ExecStart=/usr/bin/snitchwatch-bridge-cli`,
-  binds gRPC on `127.0.0.1:50051` (the address this flavour's opensnitchd
-  config must dial; the system overlay's config dials the system bridge's
-  socket, #35), WS socket + token under `$XDG_RUNTIME_DIR/snitchwatch/`,
-  `WantedBy=default.target`, and `ConditionUser=!@system` so a globally-enabled
-  unit never starts for system accounts (e.g. a display-manager greeter).
+- The tarball ships no unit. The only shipped flavour is the system bridge:
+  `packaging/system/stage.sh` stages its service, sockets and daemon config
+  around this binary (`SNITCHWATCH_SYSTEM_BRIDGE=1`, #35).
 
 ## MANIFEST.json (schema_version 1)
 
@@ -99,7 +96,7 @@ Sorted keys, 2-space indent. Contents independent of the checkout path.
 | `build.command`, `rustflags`, `cargo_lock_sha256` | `cargo build --release --locked -p snitchwatch-bridge-cli --no-default-features`, the path-remap template, the lockfile hash |
 | `upstream.opensnitch_commit` / `opensnitch_tag` / `ui_proto_sha256` | The vendored OpenSnitch protocol the bridge speaks (upstream master `a1353848`, tag label `master-a1353848`; `ui.proto` is unchanged from v1.8.0) |
 | `runtime.needed`, `runtime.glibc_min` | Dynamic dependencies (verified at build time) |
-| `install.*` | The install paths and unit name above |
+| `install.binary` | The install path of the binary |
 | `files[]` | `{path, mode, size, sha256}` for every file except `MANIFEST.json`/`SHA256SUMS` |
 
 ## Installing in an image build
@@ -118,26 +115,17 @@ top="/tmp/sw/snitchwatch-bridge-${SW_VERSION}-x86_64"
 (cd "$top" && sha256sum -c usr/share/snitchwatch-bridge/SHA256SUMS)
 
 install -Dm0755 "$top/usr/bin/snitchwatch-bridge-cli" /usr/bin/snitchwatch-bridge-cli
-install -Dm0644 "$top/usr/lib/systemd/user/snitchwatch-bridge.service" \
-  /usr/lib/systemd/user/snitchwatch-bridge.service
 install -Dm0644 -t /usr/share/snitchwatch-bridge "$top"/usr/share/snitchwatch-bridge/*
 install -Dm0644 -t /usr/share/licenses/snitchwatch-bridge "$top"/usr/share/licenses/snitchwatch-bridge/*
-systemctl --global enable snitchwatch-bridge.service
 ```
 
-`systemctl --global enable` creates
-`/etc/systemd/user/default.target.wants/snitchwatch-bridge.service →
-/usr/lib/systemd/user/snitchwatch-bridge.service`. A user can opt out with
-`systemctl --user mask snitchwatch-bridge.service`.
+Enabling the units is the system overlay's job (`packaging/system/stage.sh`),
+not this install.
 
 ## What an image smoke test should assert
 
 ```bash
 test "$(stat -c '%a %u:%g' /usr/bin/snitchwatch-bridge-cli)" = "755 0:0"
-test "$(stat -c '%a' /usr/lib/systemd/user/snitchwatch-bridge.service)" = 644
-test "$(systemctl --global is-enabled snitchwatch-bridge.service)" = enabled
-test "$(readlink /etc/systemd/user/default.target.wants/snitchwatch-bridge.service)" \
-  = /usr/lib/systemd/user/snitchwatch-bridge.service
 (cd / && sha256sum -c --quiet /usr/share/snitchwatch-bridge/SHA256SUMS)
 test "$(jq -r .version /usr/share/snitchwatch-bridge/MANIFEST.json)" = "$SW_VERSION"
 test "$(jq -r .source.dirty /usr/share/snitchwatch-bridge/MANIFEST.json)" = false
@@ -150,28 +138,18 @@ test "$(jq -r .upstream.opensnitch_tag /usr/share/snitchwatch-bridge/MANIFEST.js
 # be in the rpm database).
 ! ldd /usr/bin/snitchwatch-bridge-cli | grep -q 'not found'
 test "$(/usr/bin/snitchwatch-bridge-cli --version)" = "snitchwatch-bridge-cli $SW_VERSION"   # flag only, never bare
-XDG_RUNTIME_DIR="$(mktemp -d)" systemd-analyze verify --user \
-  /usr/lib/systemd/user/snitchwatch-bridge.service
-grep -qx 'ConditionUser=!@system' /usr/lib/systemd/user/snitchwatch-bridge.service
-# the unit's gRPC bind must be what the daemon dials; allow (shipped) or a deny opt-in
-grep -q 'SNITCHWATCH_GRPC_BIND=127.0.0.1:50051' /usr/lib/systemd/user/snitchwatch-bridge.service
-jq -e '.Server.Address == "127.0.0.1:50051" and (.DefaultAction == "deny" or .DefaultAction == "allow")' \
+# the daemon dials the root-only socket; allow (shipped) or a deny opt-in
+jq -e '.Server.Address == "unix:opensnitchd.sock" and (.DefaultAction == "deny" or .DefaultAction == "allow")' \
   /etc/opensnitchd/default-config.json
 test ! -e /usr/bin/opensnitch-ui   # upstream GUI would fight the bridge for the daemon
 ```
 
-**This per-user TCP flavour is not deny-safe** (owner decision 2026-10-16,
-[#35](https://github.com/bearyjd/snitchwatch/issues/35)). TCP `127.0.0.1:50051` isn't protected against port squatting under either
-`DefaultAction` (#35): any local process that binds the port while no bridge
-holds it (before login, between restarts, a second user) gets the root
-daemon's UI authority, including config changes the daemon saves. `allow` is
-the shipped default (owner decision 2026-10-25); `deny` is an operator opt-in.
-`allow` avoids a network lockout before the per-user bridge starts at login,
-at the cost of failing open whenever no bridge is connected; opting into
-`deny` makes that lockout possible. Protection against squatting needs the
-system flavour's root-only Unix socket: see [system-bridge-integration.md](system-bridge-integration.md).
-Keep the per-user bridge out of images.
-This bridge release does not change the user unit's transport.
+**No per-user flavour ships** (owner decision, [#35](https://github.com/bearyjd/snitchwatch/issues/35)).
+TCP gRPC is a developer-only transport behind `SNITCHWATCH_DEV_TCP=1` and
+nothing packaged sets it. The daemon config dials the root-only
+`unix:opensnitchd.sock`; without the system overlay the daemon finds no UI and
+applies `allow` (owner decision 2026-10-25). Protection against squatting is
+the system flavour's socket: see [system-bridge-integration.md](system-bridge-integration.md).
 
 ## Cutting a release (maintainer)
 
@@ -199,8 +177,8 @@ A `workflow_dispatch` run of `Release` builds and verifies without publishing.
 ```bash
 just release-bridge            # build into dist/ (ALLOW_DIRTY=1 for an uncommitted tree)
 just release-bridge-repro      # build twice from different paths; require identical bytes
-just release-verify <tarball> <sha256>  # host-side hash check first, then verify + install + unit checks in a throwaway Fedora 45 container
-just package-check             # includes the packer/shape tests and a real unit verify
+just release-verify <tarball> <sha256>  # host-side hash check first, then verify + install checks in a throwaway Fedora 45 container
+just package-check             # includes the packer/shape tests
 ```
 
 All three `release-*` recipes run the same `packaging/release/*.sh` scripts as
@@ -209,10 +187,6 @@ the tarball's binary, so it checks the sha256 you pass (your trust anchor:
 your own build's `SHA256=` line, or an attestation-verified download) on the
 host before any container starts, and mounts only temp copies of
 `packaging/release/` and the tarball.
-Don't run `systemd-analyze verify --user` on the shipped unit on a dev machine
-that has its own `~/.config/systemd/user/snitchwatch-bridge.service` — that
-copy (and its drop-ins) shadows the file under test; use `just package-check`
-or `just release-verify` instead.
 
 ## Maintaining the pins
 
@@ -254,10 +228,4 @@ inline Deny would block every app from that host until the firewall restarts.
 
 ## Known limitations
 
-- Concurrent logins of several real users race for `127.0.0.1:50051`; only
-  the first user's bridge binds it, and any local process can bind it first
-  (not deny-safe, #35; use the system flavour).
-- A per-user `~/.config/systemd/user/snitchwatch-bridge.service` (e.g. from the
-  rpm-ostree-layering dev path) overrides the image's unit for that user —
-  remove it to run the image-baked binary.
 - x86_64 only.

@@ -1,7 +1,7 @@
 {
     "Server":
     {
-        "Address":"127.0.0.1:50051",
+        "Address":"unix:opensnitchd.sock",
         "Authentication": {
             "Type": "simple",
             "TLSOptions": {
