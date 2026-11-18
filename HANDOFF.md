@@ -1,20 +1,29 @@
 # Linux App Firewall + Bazzite Security Scanner — Handoff (updated 2026-11-17)
 
-> Start with the 2026-11-17 section below, then 2026-11-16, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
+> Start with the 2026-11-17 (final) section below, then 2026-11-16, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
 
-## 2026-11-17 (latest) — #379 PR 2: the vendored web frontend and the bridge's static routes are gone
+## 2026-11-17 (final) — #35 and #379 done; waiting on the owner for the tower repin
+
+- **Source:** `origin/main` at `c221512b`. #379 shipped as the plan #383 `4b421d34`, PR 1 #387 `e52b7d1f` (Tauri shell, `tauri_smoke`, CI gtk/webkit deps) and PR 2 #388 `c221512b` (`web/`, static routes, `web-ui` feature, `web_smoke`; the bridge serves only the token-gated `/stream`). #379 and #378 are closed. Plan: `docs/superpowers/plans/2026-11-17-379-retire-tauri.md`.
+- **Verified:** `just release-bridge-repro` passes from a clean clone for both code PRs. The shipped binary's executed code is unchanged across the whole series (`.text` identical; the file hash moves only through symbol-name hashes and 15 bytes of panic-location line numbers). The MANIFEST `cargo_lock_sha256` changes (say so in the next release notes); `schema_version` stays 1.
+- **Owner decision:** do NOT repin the tower until the #379 work was done. It is done, so the repin target is `c221512b` (or later). The tower (bazzite-tower-dd) acts only on the owner's own words in its session (a peer-relayed go-ahead is refused, correctly). Its plan: dry-run the repin tool, independent security review of `c9807ebe..<sha>`, draft PR for the pins, policy PR, VM test with the real `RunDeepScan`.
+- **Still open:** (1) the `pkexec` scan proving #361 (`setsid`): needs an image built from >= `626ba4c8` (the host runs `a5032f4d`); repeat `busctl --user call org.snitchwatch.Scanner /org/snitchwatch/Scanner org.snitchwatch.Scanner1 RunDeepScan` after booting it. (2) #35 and #178 until the tower confirms the shipped image config. (3) Optional follow-ups: #384 (wizard starts the dropped per-user unit), #385 (pub API audit), #386 (DevTcp test migration). (4) #356 upstream draft tracked, not filed. (5) Ask the tower to run candidate-gui once before the next cut (Flatpak icon path moved).
+- **Local leftovers:** untracked `tests/web_smoke/node_modules` (needs the owner's OK to `rm -rf`); `.claude/settings.json`, `.trail/*`, `graft/` are the owner's own tooling files, never committed from here.
+- **Resume checklist:** `git fetch`; `gh pr list`; read `.omc/STATE.md`; this section. `vendor/opensnitch` must be at the gitlink `a1353848` (a stale checkout once caused 8 false test failures).
+
+## 2026-11-17 (detail) — #379 PR 2 (#388): the vendored web frontend and the bridge's static routes are gone
 
 - **What:** branch `chore/379-remove-web-frontend` (on top of PR 1) deletes `web/`, `tests/web_smoke`, `web_assets.rs`, the `web-ui` feature and the `rust-embed`/`mime_guess` deps. The bridge serves only the token-gated `/stream`; every other path is a 404 (guard test `only_stream_is_served`). The icon moved to `packaging/icons/snitchwatch.svg` first, with a `packaging_shape` test that every Flatpak `install -D` source exists. `just doctor`, `web-rebrand` and `web-smoke*` went with it (doctor's only check was web_smoke).
 - **Cargo.lock:** removals only (13 packages: rust-embed*, mime_guess, unicase, walkdir, same-file, shellexpand, dirs*, option-ext, redox_users, libredox); no survivor changed version, checksum or deps.
 - **Kept:** legacy `remember` wire compat and its test; `--no-default-features` in `RELEASE_PACKAGE_ARGS` (now a no-op, keeps BUILD_COMMAND stable); `check_no_web_ui` and the `pack_layout.rs` marker test (guard against re-vendoring). `BUILD_INPUTS` lost `web`, so the MANIFEST dirty check no longer covers it.
-- **Open:** run `just release-bridge-repro` and `just release-verify` from a clean clone; ask the tower to run candidate-gui once before the next cut (the Flatpak icon path changed; only the shape test covers it here).
+- **Done since:** `just release-bridge-repro` passed from a clean clone (byte-identical); vs the PR 1 binary `.text` is identical and only 15 bytes of `.rodata` / 39 of `.data.rel.ro` differ (panic-location line numbers). Still ask the tower to run candidate-gui once before the next cut (the Flatpak icon path changed; only the shape test covers it here).
 
-## 2026-11-17 (later) — #379 PR 1: the Tauri shell is retired
+## 2026-11-17 (detail) — #379 PR 1 (#387): the Tauri shell is retired
 
 - **What:** branch `chore/379-remove-tauri` (stacked on the plan PR #383) deletes `crates/snitchwatch-tauri` and `tests/tauri_smoke`, drops the Tauri apt packages from CI (`cargo tree` on default-members shows no webkit/gtk/soup crate; `protobuf-compiler` and `dbus-daemon` stay), the `tauri-*` just recipes, and rewords the docs. No behaviour change in any shipped binary. Job names are unchanged (`candidate-gui.yml` hardcodes them).
 - **Cargo.lock:** removals only, no surviving package changed version or source. The MANIFEST `cargo_lock_sha256` changes, so say so in the next release notes.
 - **Stays:** `SNITCHWATCH_DEV_TCP` (tests use `DevTcp`), the quick-xml audit ignores (0.37.5 via `tauri-winrt-notification` under `notify-rust` remains; the `plist` 0.38.4 path is gone), `web/`, `web_smoke`, the `web-ui` feature (PR 2).
-- **Open:** run `just release-bridge-repro` from a clean clone; PR 2 (delete `web/`, static routes, `web_smoke`; opus security-reviewer pass) is next.
+- **Done since:** `just release-bridge-repro` passed from a clean clone; binary `.text`/`.rodata`/`.data` identical to the pre-change build (only `.strtab` symbol-name hashes differ). PR 2 shipped as #388.
 
 ## 2026-11-17 — #35 merged (TCP gRPC dev-only); release repro verified; pkexec check still open
 
@@ -24,7 +33,7 @@
 - **Verified:** `just release-bridge-repro` and `just release-verify` PASSED on `9d067f48` from a clean clone (local podman; tarball sha256 `24201dd4f789a4d5c8851add63f76a7b7a74db5343d3b34e479b88e51820e531`; not a CI artifact, the tower should rebuild before pinning). The root-only tests run as root in CI (first run found they could not exec from the runner home; fixed).
 - **NOT verified, owner/tower:** the real `pkexec` scan proving #361 (`setsid`). The owner ran `busctl --user call org.snitchwatch.Scanner /org/snitchwatch/Scanner org.snitchwatch.Scanner1 RunDeepScan` on the tower host: status ok, nothing new, but that host runs installed commit `a5032f4d` (image F45.20261105), older than `be4a6cd0` and `626ba4c8`, so setsid was not exercised. To close: tower repins to a commit >= `626ba4c8`, owner boots that image, repeat the same call. (The scan also skipped `file_drift` and `rootkit_signature`: no baseline cache yet, no `chkrootkit` on the host.)
 - **Tower (bazzite-tower-dd):** pins `be4a6cd0`; told `30f72aca`, `9d067f48`, the repro result and the pkexec caveat. A repin needs no verifier change (schema stays 1). The owner has not said to repin yet.
-- **Open / on hold:** #35 and #178 stay open until the tower confirms the shipped image config. #379: retire the Tauri shell (owner decision) needs a plan doc first. #356 upstream draft is tracked, not filed.
+- **Open / on hold:** #35 and #178 stay open until the tower confirms the shipped image config. #379 is done (see the final section). #356 upstream draft is tracked, not filed.
 - **Local hygiene (2026-11-17):** merged branches deleted (remote SHAs kept outside the repo); `r13`..`r16.2-candidate` and `release/bridge-0.1.1` are tower pins, never delete. `vendor/opensnitch` must be at the gitlink `a1353848` for tests and the repro (a stale checkout caused 8 false test failures).
 - **Resume checklist:** `git fetch`; `gh pr list`; read `.omc/STATE.md` (13 lines); this section.
 
