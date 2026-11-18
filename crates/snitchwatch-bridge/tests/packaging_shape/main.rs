@@ -60,7 +60,13 @@ fn project_license_is_declared_consistently() {
     );
     // Crates that don't inherit the workspace field must still match it.
     for rel in ["crates/snitchwatch-kirigami/Cargo.toml"] {
-        for value in cargo_license_values(rel) {
+        let values = cargo_license_values(rel);
+        // An empty list must mean "inherits the workspace field", never "unchecked".
+        assert!(
+            !values.is_empty() || read(rel).contains("license.workspace = true"),
+            "{rel} must declare its license or inherit the workspace one"
+        );
+        for value in values {
             assert_eq!(value, PROJECT_LICENSE, "{rel} license");
         }
     }
