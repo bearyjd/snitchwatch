@@ -493,8 +493,8 @@ client_message! {
         verdict: VerdictAction,
         scope: VerdictScope,
         /// How long the resulting rule should live — see [`VerdictDuration`].
-        /// Optional on the wire: legacy clients (the vendored `web/` frontend
-        /// predates the duration selector) send `remember: bool` instead.
+        /// Optional on the wire: legacy clients (the removed `web/` frontend
+        /// predated the duration selector) sent `remember: bool` instead.
         /// Resolve the effective value via [`effective_verdict_duration`] —
         /// never read this field directly.
         #[serde(default, skip_serializing_if = "Option::is_none")]

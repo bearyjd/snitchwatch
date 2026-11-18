@@ -6,10 +6,6 @@ Cargo.lock.bak
 *.swp
 .DS_Store
 
-tests/web_smoke/node_modules/
-tests/web_smoke/playwright-report/
-tests/web_smoke/test-results/
-
 # Blocklist database written during ad-hoc test runs (in-memory in unit tests)
 **/blocklists.db
 **/blocklists.db-wal

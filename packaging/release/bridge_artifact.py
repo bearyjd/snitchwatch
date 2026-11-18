@@ -73,9 +73,10 @@ SCHEMA_VERSION = 1
 INSTALL = {
     "binary": f"/{BIN_PATH}",
 }
-# --no-default-features drops the `web-ui` feature: the vendored web/ frontend is
-# Objective Development's GPL-2.0-only code and must not ship in this binary
-# (plan decision I). WEB_UI_MARKER is the copyright line every web/ file carries;
+# --no-default-features is a no-op since #379 removed the `web-ui` feature; it is
+# kept so BUILD_COMMAND and the MANIFEST stay unchanged. The vendored web/ frontend
+# (Objective Development, GPL-2.0-only) is gone from the tree, but WEB_UI_MARKER, the
+# copyright line every web/ file carried, stays as a guard against re-vendoring it:
 # verify fails if it appears in the binary at all.
 RELEASE_PACKAGE_ARGS = ("-p", "snitchwatch-bridge-cli", "--no-default-features")
 BUILD_COMMAND = "cargo build --release --locked " + " ".join(RELEASE_PACKAGE_ARGS)
@@ -391,7 +392,7 @@ def release_crate_set(repo: Path) -> set[tuple[str, str]]:
 
     `cargo metadata`'s resolve is feature-unified across the whole workspace, so
     `normal_closure` alone over-includes crates that only another member (the
-    Kirigami shell) or the default `web-ui` feature enables. `cargo tree`
+    Kirigami shell) enables. `cargo tree`
     for exactly the release package and features (RELEASE_PACKAGE_ARGS, the same
     as BUILD_COMMAND) resolves what is actually built."""
     out = run(
@@ -1186,7 +1187,7 @@ def check_contents(
 
 
 def check_no_web_ui(binary_bytes: bytes) -> list[str]:
-    """The release binary must not embed the GPL-2.0-only web/ frontend."""
+    """The release binary must not embed the (removed) GPL-2.0-only web/ frontend."""
     if WEB_UI_MARKER in binary_bytes:
         return [
             "the binary embeds the vendored web/ UI (GPL-2.0-only); release builds must use"

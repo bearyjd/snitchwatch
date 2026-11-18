@@ -64,12 +64,13 @@ compare against it — compare against the hash pinned in your repo.
 ## The binary
 
 - `snitchwatch-bridge-cli` is built with `--no-default-features`, i.e. **without
-  the embedded web UI**: the vendored `web/` frontend is Objective Development's
-  GPL-2.0-only code and can't share an executable with the GPL-3.0/Apache-2.0
-  inputs (plan decision I). The release bridge therefore answers only the
-  token-gated `/stream` WebSocket on its socket; `/`, `/assets/*` and every other
-  path are 404 (the Kirigami GUI never uses them). `verify` rejects a binary that
-  contains the web UI. It is otherwise self-contained (rustls + bundled CA roots,
+  the embedded web UI**. The bridge never serves a web UI since #379 removed
+  the vendored `web/` frontend (Objective Development's GPL-2.0-only code, which
+  could not share an executable with the GPL-3.0/Apache-2.0 inputs, plan
+  decision I); the flag is kept so the build command is unchanged. The bridge
+  answers only the token-gated `/stream` WebSocket on its socket; `/`, `/assets/*`
+  and every other path are 404. `verify` still rejects a binary that contains the
+  old web UI's copyright marker, as a guard against re-vendoring it. It is otherwise self-contained (rustls + bundled CA roots,
   bundled SQLite, no OpenSSL). Its only `NEEDED` libraries are
   `libgcc_s.so.1`, `libm.so.6`, `libc.so.6`, `ld-linux-x86-64.so.2`; it needs
   glibc ≥ 2.34. It is built in

@@ -17,8 +17,8 @@ The Flatpak packages `snitchwatch-kirigami` (Qt6/QML + Kirigami), not
 the former Tauri shell (removed in #379) — Kirigami is the settled GUI stack going forward (see
 this repo's `CLAUDE.md` "Settled architecture decisions" #4) and has reached
 feature parity including its Task 7 safety verification. The Tauri
-shell was removed in #379 (the 2026-07-11 keep-until-release gate was met);
-`web/` is retired separately; see
+shell and the vendored `web/` frontend were removed in #379 (the 2026-07-11
+keep-until-release gate was met); see
 [`../docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md`](../docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md)'s
 status note for detail.
 

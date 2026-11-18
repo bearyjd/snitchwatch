@@ -219,7 +219,7 @@ fn client_set_verdict_parses() {
 
 #[test]
 fn client_set_verdict_parses_legacy_remember_shape() {
-    // The pre-duration wire shape the vendored web/ frontend still sends.
+    // The pre-duration wire shape the removed web/ frontend sent.
     let json = r#"{
         "action": "setVerdict",
         "rowId": "r1",

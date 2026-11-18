@@ -1,22 +1,6 @@
 default:
     @just --list
 
-# Checks for one-time setup steps an agent/dev is likely to hit cold
-# (currently: Playwright browsers for the web smoke suite). Exits non-zero
-# with a fix hint if something's missing; does not modify anything.
-doctor:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    missing=0
-    if [ ! -d tests/web_smoke/node_modules ]; then
-        echo "MISSING: tests/web_smoke/node_modules — run 'just web-smoke-install' before 'just web-smoke'"
-        missing=1
-    fi
-    if [ "$missing" -eq 0 ]; then
-        echo "doctor: all one-time setup steps look done"
-    fi
-    exit "$missing"
-
 build:
     cargo build --workspace
 
@@ -43,19 +27,6 @@ run-bridge:
 # loopback address (e.g. 127.0.0.1:50051) to listen on TCP (dev only).
 run-spike addr="":
     {{ if addr == "" { "" } else { "SNITCHWATCH_DEV_TCP=1" } }} RUST_LOG=info cargo run -p snitchwatch-spike -- {{addr}}
-
-# Re-run the idempotent rebrand pass over the vendored web/ tree.
-web-rebrand:
-    ./web/rebrand.sh
-    @git diff --stat web/
-
-# Run the Playwright smoke tests against a freshly built bridge.
-web-smoke:
-    cd tests/web_smoke && npx playwright test
-
-# Install the Playwright Firefox channel into tests/web_smoke/node_modules.
-web-smoke-install:
-    cd tests/web_smoke && npm install && npx playwright install firefox
 
 # Run the Kirigami shell in dev mode (live bridge + native Qt6/QML window).
 # Requires system Qt6 + KDE Frameworks 6 (Kirigami) dev packages — see

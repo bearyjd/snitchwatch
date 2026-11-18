@@ -54,11 +54,6 @@ headless — see `crates/snitchwatch-kirigami/tests/smoke.rs` for the pattern.
 Whether these actually pass headless in this sandbox has **not** been
 verified — treat a first attempt as exploratory, not "should just work."
 
-The Playwright suite (`tests/web_smoke`) needs a one-time
-`just web-smoke-install` before `just web-smoke` will pass. If it fails with a
-missing-browser error, run the `-install` target first — it is not a code
-regression.
-
 `just package-check` validates packaging artifacts (YAML/JSON/systemd unit
 syntax) without needing a Bazzite host.
 
@@ -168,8 +163,9 @@ after real back-and-forth. Read the source doc before proposing a change.
    0600 files), not TCP loopback, gated by `--filesystem=xdg-run/snitchwatch`.
    A random handshake token (written alongside the socket, mode 0600) must
    be sent as the first WS text frame on `/stream` before the bridge treats
-   a connection as trusted; `/`, `/assets/*`, and the SPA fallback stay
-   unauthenticated (static assets only). See
+   a connection as trusted. `/stream` is the only route the bridge serves;
+   every other path is a 404 (the vendored web frontend and its static
+   routes were removed in #379). See
    `docs/superpowers/specs/2026-07-04-flatpak-feasibility-research.md`.
 4. **GUI stack: Qt6/QML + Kirigami**, replacing the former Tauri
    shell + vendored web frontend (the Tauri crate was retired in #379). Bazzite's default desktop is KDE Plasma,

@@ -322,9 +322,9 @@ fn verify_rejects_a_repacked_tarball_with_a_modified_binary() {
     );
 }
 
-/// Plan decision I: the release binary is built with `--no-default-features`,
-/// so it must not embed the GPL-2.0-only `web/` frontend. A binary carrying the
-/// copyright line every `web/` file has is rejected by plain `verify`.
+/// Plan decision I: the release binary must not embed the GPL-2.0-only `web/`
+/// frontend (removed in #379; this guards against re-vendoring it). A binary
+/// carrying the copyright line every `web/` file had is rejected by plain `verify`.
 #[test]
 fn verify_rejects_a_binary_that_embeds_the_web_ui() {
     let fx = Fixture::standard();

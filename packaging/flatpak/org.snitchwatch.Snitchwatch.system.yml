@@ -20,8 +20,8 @@
 # the shell going forward — it's a native match for Bazzite's default KDE
 # Plasma desktop, it reached feature parity with the old Tauri+web shell,
 # and passed its Task 7 fullscreen-focus safety verification
-# (2026-07-11). `web/` still exists in the repo (retired separately) but is
-# NOT what this manifest packages.
+# (2026-07-11). The vendored `web/` frontend was removed in #379; the
+# icon now lives in `packaging/icons/`.
 #
 # Why no --share=network:
 #   A Flatpak's default sandbox has its own private, isolated network
@@ -131,9 +131,8 @@ modules:
       - install -Dm644 packaging/flatpak/org.snitchwatch.Snitchwatch.metainfo.xml
           /app/share/metainfo/org.snitchwatch.Snitchwatch.metainfo.xml
       - install -Dm644 packaging/icons/snitchwatch.svg /app/share/icons/hicolor/scalable/apps/org.snitchwatch.Snitchwatch.svg
-      # No web/ install step: the Kirigami shell compiles its QML in via a
-      # qrc resource (see crates/snitchwatch-kirigami/build.rs's QmlModule),
-      # it does not serve web/ over HTTP into a webview.
+      # No QML install step: the Kirigami shell compiles its QML in via a
+      # qrc resource (see crates/snitchwatch-kirigami/build.rs's QmlModule).
     sources:
       - type: dir
         path: ../..

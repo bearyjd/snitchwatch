@@ -2,6 +2,13 @@
 
 > Start with the 2026-11-17 section below, then 2026-11-16, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
 
+## 2026-11-17 (latest) — #379 PR 2: the vendored web frontend and the bridge's static routes are gone
+
+- **What:** branch `chore/379-remove-web-frontend` (on top of PR 1) deletes `web/`, `tests/web_smoke`, `web_assets.rs`, the `web-ui` feature and the `rust-embed`/`mime_guess` deps. The bridge serves only the token-gated `/stream`; every other path is a 404 (guard test `only_stream_is_served`). The icon moved to `packaging/icons/snitchwatch.svg` first, with a `packaging_shape` test that every Flatpak `install -D` source exists. `just doctor`, `web-rebrand` and `web-smoke*` went with it (doctor's only check was web_smoke).
+- **Cargo.lock:** removals only (13 packages: rust-embed*, mime_guess, unicase, walkdir, same-file, shellexpand, dirs*, option-ext, redox_users, libredox); no survivor changed version, checksum or deps.
+- **Kept:** legacy `remember` wire compat and its test; `--no-default-features` in `RELEASE_PACKAGE_ARGS` (now a no-op, keeps BUILD_COMMAND stable); `check_no_web_ui` and the `pack_layout.rs` marker test (guard against re-vendoring). `BUILD_INPUTS` lost `web`, so the MANIFEST dirty check no longer covers it.
+- **Open:** run `just release-bridge-repro` and `just release-verify` from a clean clone; ask the tower to run candidate-gui once before the next cut (the Flatpak icon path changed; only the shape test covers it here).
+
 ## 2026-11-17 (later) — #379 PR 1: the Tauri shell is retired
 
 - **What:** branch `chore/379-remove-tauri` (stacked on the plan PR #383) deletes `crates/snitchwatch-tauri` and `tests/tauri_smoke`, drops the Tauri apt packages from CI (`cargo tree` on default-members shows no webkit/gtk/soup crate; `protobuf-compiler` and `dbus-daemon` stay), the `tauri-*` just recipes, and rewords the docs. No behaviour change in any shipped binary. Job names are unchanged (`candidate-gui.yml` hardcodes them).

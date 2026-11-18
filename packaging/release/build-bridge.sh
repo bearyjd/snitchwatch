@@ -33,9 +33,8 @@ ARTIFACT_TOOL="$SCRIPT_DIR/bridge_artifact.py"
 # Recorded in the MANIFEST instead of the real flags: nothing in the artifact
 # may depend on the absolute checkout path (repro-check builds from two).
 RUSTFLAGS_TEMPLATE='--remap-path-prefix=<src>=/snitchwatch --remap-path-prefix=<cargo_home>=/cargo --remap-path-prefix=<target>=/target'
-# Everything the binary is built from. rust-embed embeds EVERY file under web/
-# (git-ignored *.swp/.DS_Store included), so ignored files here are dirty too.
-BUILD_INPUTS=(web crates/snitchwatch-bridge crates/snitchwatch-bridge-cli crates/snitchwatch-proto
+# Everything the binary is built from; a dirty file here makes the build dirty.
+BUILD_INPUTS=(crates/snitchwatch-bridge crates/snitchwatch-bridge-cli crates/snitchwatch-proto
     vendor/opensnitch/proto Cargo.toml Cargo.lock)
 # Each would silently change what the MANIFEST's build command/rustflags say.
 TOOLCHAIN_OVERRIDES=(RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER RUSTC RUSTC_WORKSPACE_WRAPPER
@@ -192,7 +191,8 @@ build_binary() {
     export RUSTFLAGS="--remap-path-prefix=$SRC_DIR=/snitchwatch --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$CARGO_TARGET_DIR=/target"
     log "building snitchwatch-bridge-cli $VERSION @ $GIT_SHA (dirty=$DIRTY," \
         "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH)"
-    # --no-default-features: no embedded web/ UI (GPL-2.0-only; plan decision I).
+    # --no-default-features: kept (a no-op since #379 removed the web-ui feature)
+    # so BUILD_COMMAND and the MANIFEST stay unchanged.
     (cd "$SRC_DIR" && cargo build --release --locked -p snitchwatch-bridge-cli --no-default-features)
     BIN="$CARGO_TARGET_DIR/release/snitchwatch-bridge-cli"
     [[ -f "$BIN" ]] || die "cargo did not produce $BIN"
