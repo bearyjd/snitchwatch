@@ -303,3 +303,51 @@ fn the_deny_opt_in_restarts_the_daemon_and_has_a_way_back() {
         "/etc merge check reads the 0600 config without sudo: {unprivileged:?}"
     );
 }
+
+/// Every `install -D… <src> <dest>` source in the Flatpak manifest must exist
+/// in the tree. A moved or deleted file (the icon once lived under the
+/// removed `web/`) otherwise only fails in a real Flatpak build, which CI
+/// cannot run. `target/` and `bin/` sources are build outputs, not tree files.
+#[test]
+fn flatpak_install_sources_exist_in_the_tree() {
+    let body = read("packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml");
+    // Fold YAML continuation lines (indented more than the `- install` item)
+    // so `install -Dm644 src\n    dest` is read as one command.
+    let mut commands: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("- install -D") {
+            commands.push(trimmed.trim_start_matches("- ").to_string());
+        } else if let Some(last) = commands.last_mut() {
+            if !trimmed.starts_with('-')
+                && !trimmed.starts_with('#')
+                && !trimmed.is_empty()
+                && !last.contains(" /app/")
+            {
+                last.push(' ');
+                last.push_str(trimmed);
+            }
+        }
+    }
+    assert!(
+        commands.len() >= 4,
+        "found too few install commands: {commands:?}"
+    );
+    let mut checked = 0;
+    for command in commands {
+        let src = command
+            .split_whitespace()
+            .skip(1)
+            .find(|t| !t.starts_with('-'))
+            .unwrap_or_else(|| panic!("no source in `{command}`"));
+        if src.starts_with("target/") || src.starts_with("bin/") {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            workspace_file(src).is_file(),
+            "Flatpak manifest installs `{src}`, which is not in the tree"
+        );
+    }
+    assert!(checked >= 3, "checked too few sources: {checked}");
+}
