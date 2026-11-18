@@ -9,8 +9,8 @@ translates between OpenSnitch's gRPC protocol and a Little-Snitch-style
 protocol, with full test coverage and an AskRule round-trip end-to-end test
 against an in-process mock daemon. The native desktop shell is
 **`snitchwatch-kirigami`** (Qt6/QML + Kirigami) — see "Try the Kirigami
-shell" below. The earlier Tauri shell was retired in #379; the vendored
-`web/` frontend is retired separately. Packaging (bluebuild image,
+shell" below. The earlier Tauri shell and the vendored `web/` frontend were
+retired in #379. Packaging (bluebuild image,
 rpm-ostree layering, Flatpak) and the Bazzite security scanner (Component
 B, `scanner-core`/`scanner-cli`/`scanner-privileged`) are also code-complete
 — remaining work is real-hardware verification, tracked in
@@ -38,20 +38,7 @@ just build
 just test                    # full workspace: unit + integration tests
 just test-bridge             # just the bridge crate unit tests
 just check                   # cargo check + clippy -D warnings
-just doctor                  # checks for missing one-time setup steps below
 ```
-
-### Playwright smoke suite (one-time setup)
-
-`tests/web_smoke` is a Playwright suite and needs a one-time browser install
-before it will run — `just web-smoke` will fail with a "missing browser"
-error otherwise, which is a setup gap, not a code regression:
-
-```bash
-just web-smoke-install       # once, before `just web-smoke`
-```
-
-Run `just doctor` to check whether this has already been done.
 
 The headline integration test is `ask_rule_round_trip_full` in
 `tests/bridge_protocol_test.rs`: it spins up an in-process mock
@@ -68,10 +55,9 @@ The bridge is a Rust workspace member that exposes:
   unary handler: the bridge inserts a pending row into its in-memory cache,
   broadcasts it on the WebSocket, awaits the user verdict via a `oneshot`,
   then translates the verdict into a `Rule` reply.
-- **WebSocket+HTTP server** (Unix domain socket) — the front-end (vendored
-  LS-for-Linux UI in M2, the Kirigami shell in M3) connects to `/stream` and
-  exchanges Little Snitch v6 protocol messages with the bridge; `/`,
-  `/assets/*`, and the SPA fallback serve the static frontend. This server
+- **WebSocket server** (Unix domain socket) — the front-end (the Kirigami
+  shell) connects to `/stream` and exchanges Little Snitch v6 protocol
+  messages with the bridge; no other path is served (404). This server
   binds a Unix domain socket under `$XDG_RUNTIME_DIR/snitchwatch/` (mode
   0700 dir, 0600 socket file) rather than TCP loopback — a Flatpak-sandboxed
   GUI gets its own private network namespace and can never reach TCP
@@ -486,6 +472,4 @@ GPL-3.0 OpenSnitch protocol code (`vendor/opensnitch/proto/ui.proto`),
 Apache-2.0 crates (e.g. `prost`, `ring`) and, for the Kirigami shell, Qt6
 under LGPL-3.0 — none of which a GPL-2.0-only program can combine with.
 
-Third-party code keeps its own license: `vendor/opensnitch` is GPL-3.0, and
-the vendored `web/` UI is Objective Development's **GPL-2.0-only** code (see
-[`web/VENDORED.md`](web/VENDORED.md)).
+Third-party code keeps its own license: `vendor/opensnitch` is GPL-3.0.

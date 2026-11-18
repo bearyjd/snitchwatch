@@ -15,7 +15,6 @@ is silent the text says "Not defined in the repo".
 | Qt6 + KDE Frameworks 6 (Kirigami) dev packages | Needed for `kirigami-spike` and `snitchwatch-kirigami`, which are excluded from `default-members`; plain `cargo build`/`cargo check`/`cargo test` (what CI runs) skip them, but `just build`, `just check` and `just test` use `--workspace` (`justfile:24-25,27-28,33-35`) and DO compile them, so they need Qt6/KF6. Without Qt, run the plain cargo commands. Build Kirigami explicitly with `cargo build -p snitchwatch-kirigami` | `CLAUDE.md`; `Cargo.toml:24-36`; `justfile` `kirigami-dev` |
 | Fedora package set known to build and test Kirigami | `git gcc gcc-c++ make protobuf-compiler dbus-daemon xdg-dbus-proxy qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel qt6-qttools-devel plasma-integration kf6-kirigami-devel` | `ci.yml` job `kirigami` |
 | `qmltestrunner-qt6` | Ships in `qt6-qtdeclarative-devel` | `justfile` `qml-test`; `ci.yml` |
-| Playwright (one time) | `just web-smoke-install`; a "missing browser" failure is a setup gap, not a regression. `just doctor` reports what is missing | `README.md` "Playwright smoke suite"; `justfile` `doctor` |
 | podman | Used by the `release-*` and `endpoint-events-verify` recipes | `justfile` |
 | `python3` + PyYAML, `shellcheck` (optional) | `just package-check` | `justfile` `package-check`; `ci.yml` job `package-check` |
 
@@ -25,7 +24,6 @@ is silent the text says "Not defined in the repo".
 | Recipe | What it does |
 |---|---|
 | `default` | Runs `just --list`. |
-| `doctor` | Checks for missing Playwright installs in `tests/web_smoke`; exits non-zero with a fix hint; modifies nothing. |
 | `build` | `cargo build --workspace` |
 | `test` | `cargo test --workspace` |
 | `test-bridge` | `cargo test -p snitchwatch-bridge` |
@@ -34,9 +32,6 @@ is silent the text says "Not defined in the repo".
 | `regen-proto` | `cargo build -p snitchwatch-proto` |
 | `run-bridge` | `RUST_LOG=info cargo run -p snitchwatch-bridge-cli` (starts a real bridge: see Test safety) |
 | `run-spike addr=""` | `cargo run -p snitchwatch-spike` with `RUST_LOG=info`: a Unix socket at `$XDG_RUNTIME_DIR/snitchwatch-grpc/spike.sock`; with an `addr` (loopback only) it sets `SNITCHWATCH_DEV_TCP=1` and listens on TCP. |
-| `web-rebrand` | Run `./web/rebrand.sh`, then `git diff --stat web/`, over the vendored `web/` tree. |
-| `web-smoke` | Run the Playwright smoke tests against a freshly built bridge. |
-| `web-smoke-install` | Install the Playwright Firefox channel into `tests/web_smoke/node_modules`. |
 | `kirigami-dev` | Run the Kirigami shell (needs Qt6 + KF6 dev packages). |
 | `kirigami-build` | Build a release Kirigami shell binary. |
 | `kirigami-screenshots dir="target/screenshots"` | Demo-mode (`SNITCHWATCH_DEMO=1`) offscreen render of the pages to PNGs in `dir`; Basic style, so colours differ slightly from the Flatpak. |
@@ -65,7 +60,6 @@ once; `kirigami-screenshots` is unaffected (demo mode skips the check).
 | Scanner, privileged | `FakeFacts` (the `SystemFacts` trait) in `crates/scanner-privileged/tests/end_to_end.rs` | mirror it; the unit-test mock is not visible to integration tests |
 | Kirigami Rust tests | `crates/snitchwatch-kirigami/tests/*.rs` (headless Qt) | `QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic cargo test -p snitchwatch-kirigami --locked` (as CI) |
 | QML probes | `crates/snitchwatch-kirigami/tests/qml` | `just qml-test` |
-| Playwright | `tests/web_smoke` | `just web-smoke` after the one-time install |
 | Packaging | `just package-check` | see Commands |
 
 Headless Kirigami passing locally in this sandbox "has not been verified"
@@ -131,7 +125,7 @@ Runs on push to `main` and `r16.2-candidate`, and on every pull request.
 | #259 status: `HANDOFF.md:29` lists "#259 (learned/silent tests) is still open". The research note `docs/superpowers/research/2026-11-06-flake-259.md` does not exist on this branch's base (only three `scan-page-flicker`/`title-flicker` notes do) | `HANDOFF.md:29`; `ls docs/superpowers/research` |
 | `history::dormant_tests` (`crates/snitchwatch-bridge/src/history/dormant_tests.rs`, test `primitives_have_no_production_call_sites`) scans every `crates/*/src/**.rs` and fails if a file outside the history owner files mentions the whole identifiers `lifecycle` or `pins` (code only; comments and string literals are stripped) or the types `PinRegistry`, `PinId`, `ReaderGate`, `ReaderPermit`, `AcceptanceSeq`, `Generation` (`dormant_tests.rs:8-19,100-113,120-126,140-163`). Do not use those words as identifiers in other `.rs` sources | that file |
 | Never point a test at a live `opensnitchd`, a real Bazzite host, or `sudo`; use the doubles above. A real-daemon-only behaviour is a gap to flag, not to improvise (`.agent_native/agent_roadmap.md` item 7) | `CLAUDE.md` |
-| Dev flow: TCP gRPC, the test suites and the Playwright smoke suite need `SNITCHWATCH_DEV_TCP=1` (loopback only); the system bridge is the only shipped flavour and there is no per-user unit | `docs/ENV.md`; `CLAUDE.md` |
+| Dev flow: TCP gRPC and the test suites need `SNITCHWATCH_DEV_TCP=1` (loopback only); the system bridge is the only shipped flavour and there is no per-user unit | `docs/ENV.md`; `CLAUDE.md` |
 | `kirigami-screenshots` already isolates `XDG_RUNTIME_DIR` with `mktemp -d` and uses `SNITCHWATCH_DEMO=1` | `justfile` |
 | Single-instance tests use a private `dbus-daemon` reached by an explicit address (`src/single_instance/tests.rs`, `PrivateBus` from `src/notification_signals/bus_tests.rs`); never set `DBUS_SESSION_BUS_ADDRESS` in a lib test or call the guard against the real session bus. Plain `#[test]` only: the blocking zbus API must not run inside a tokio runtime | `crates/snitchwatch-kirigami/src/single_instance.rs` |
 

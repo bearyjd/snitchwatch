@@ -13,7 +13,7 @@ Lib: 246 .rs files (many `*_tests.rs`). CLI orchestration: `crates/snitchwatch-b
 | `resolve_storage` | `crates/snitchwatch-bridge-cli/src/storage.rs:144` |
 
 ## WS protocol
-`ServerMessage` (`ws_messages.rs:49`, tag `action`, camelCase, ~50 variants: Insert/Update/RemoveConnectionRows, SetRules, SetBlocklists, SetProfiles, TrayState, Notice, PromptSlot, DiagnosticsReport ...). `ClientMessage` is macro-generated (`ws_messages.rs:452`) and validated on decode. First frame must equal the token; the bridge replies `Authenticated`. Static `/`, `/assets/*` sit behind cargo feature `web-ui` (default on; off in the release tarball).
+`ServerMessage` (`ws_messages.rs:49`, tag `action`, camelCase, ~50 variants: Insert/Update/RemoveConnectionRows, SetRules, SetBlocklists, SetProfiles, TrayState, Notice, PromptSlot, DiagnosticsReport ...). `ClientMessage` is macro-generated (`ws_messages.rs:452`) and validated on decode. First frame must equal the token; the bridge replies `Authenticated`. `/stream` is the only route served; every other path is a 404 (static routes and the `web-ui` feature were removed in #379).
 
 ## Module map (crates/snitchwatch-bridge/src)
 | Module | Role |

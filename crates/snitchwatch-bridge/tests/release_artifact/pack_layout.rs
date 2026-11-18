@@ -322,9 +322,9 @@ fn verify_rejects_a_repacked_tarball_with_a_modified_binary() {
     );
 }
 
-/// Plan decision I: the release binary is built with `--no-default-features`,
-/// so it must not embed the GPL-2.0-only `web/` frontend. A binary carrying the
-/// copyright line every `web/` file has is rejected by plain `verify`.
+/// Plan decision I: the release binary must not embed the GPL-2.0-only `web/`
+/// frontend (removed in #379; this guards against re-vendoring it). A binary
+/// carrying the copyright line every `web/` file had is rejected by plain `verify`.
 #[test]
 fn verify_rejects_a_binary_that_embeds_the_web_ui() {
     let fx = Fixture::standard();
@@ -332,7 +332,7 @@ fn verify_rejects_a_binary_that_embeds_the_web_ui() {
     bytes.extend_from_slice(b"/* Copyright (C) 2026 Objective Development Software GmbH */");
     write_file(&fx.stage.join(BIN), &bytes, 0o755);
     let tarball = fx.pack_ok("out-webui", &[]);
-    assert_rejected(&tarball, "embeds the vendored web/ UI", "web UI embedded");
+    assert_rejected(&tarball, "embeds the GPL-2.0-only web UI marker", "web UI embedded");
 }
 
 #[test]

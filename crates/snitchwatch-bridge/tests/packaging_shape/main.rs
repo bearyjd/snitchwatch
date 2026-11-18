@@ -79,3 +79,17 @@ fn project_license_is_declared_consistently() {
         "Flatpak metainfo project_license must be {PROJECT_LICENSE}"
     );
 }
+
+/// A re-embedded web UI would need an asset-embedding crate; the bridge serves
+/// only `/stream`, so neither may appear anywhere in the dependency graph.
+#[test]
+fn cargo_lock_has_no_asset_embedding_crate() {
+    let lock = read("Cargo.lock");
+    for krate in ["rust-embed", "include_dir"] {
+        assert!(
+            !lock.contains(&format!("name = \"{krate}\"")),
+            "Cargo.lock contains `{krate}`: a UI bundle is being embedded again; \\
+             the bridge must serve only /stream (#379)"
+        );
+    }
+}

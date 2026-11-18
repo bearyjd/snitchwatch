@@ -41,14 +41,9 @@ immediately actionable with no further human input needed.
    actual GitHub Actions from this environment.
 
 3. **DONE — Document (and script) the one-time Playwright setup** for
-   `tests/web_smoke` and `tests/tauri_smoke` (the latter removed in #379). Added a "Playwright smoke
-   suites (one-time setup)" section to `README.md` pointing at
-   `just web-smoke-install` / `just tauri-smoke-install`, plus a new
-   `just doctor` target that checks for `tests/web_smoke/node_modules` and
-   `tests/tauri_smoke/node_modules` and prints a fix hint (exit 1) if
-   missing. Verified locally: `just doctor` correctly reported
-   `tests/web_smoke/node_modules` present and `tests/tauri_smoke/node_modules`
-   missing in this environment (exit code 1 with the install hint).
+   `tests/web_smoke` and `tests/tauri_smoke` (both suites, the README section
+   and the `just doctor` target were removed in #379 with the web and Tauri
+   frontends).
 
 4. **DONE — Note the `vendor/opensnitch` submodule's expected dirtiness.**
    The one-sentence note in CLAUDE.md was already in place. Additionally

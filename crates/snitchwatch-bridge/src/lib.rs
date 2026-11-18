@@ -39,8 +39,6 @@ pub mod sqlite_file;
 pub(crate) mod state_file;
 pub mod translator;
 pub mod tray_state;
-#[cfg(feature = "web-ui")]
-pub mod web_assets;
 pub mod ws_messages;
 pub mod ws_server;
 

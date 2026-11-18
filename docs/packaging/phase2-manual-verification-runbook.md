@@ -27,7 +27,7 @@ the former Tauri shell — Kirigami is the settled GUI stack (see this
 repo's `CLAUDE.md` "Settled architecture decisions" #4) and has feature
 parity plus a passing Task 7 fullscreen-focus test. The Tauri shell was
 removed in #379 (the owner's 2026-07-11 keep-until-release gate was met by
-r16.x); `web/` is retired separately. Verify the pinned `runtime-version`
+r16.x), and so was the vendored `web/` frontend. Verify the pinned `runtime-version`
 against whatever `org.kde.Platform` release is actually current before
 building (`flatpak remote-info flathub org.kde.Platform`) — it was pinned
 from this repo's environment at the time of writing, not confirmed against

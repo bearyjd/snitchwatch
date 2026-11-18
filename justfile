@@ -1,22 +1,6 @@
 default:
     @just --list
 
-# Checks for one-time setup steps an agent/dev is likely to hit cold
-# (currently: Playwright browsers for the web smoke suite). Exits non-zero
-# with a fix hint if something's missing; does not modify anything.
-doctor:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    missing=0
-    if [ ! -d tests/web_smoke/node_modules ]; then
-        echo "MISSING: tests/web_smoke/node_modules — run 'just web-smoke-install' before 'just web-smoke'"
-        missing=1
-    fi
-    if [ "$missing" -eq 0 ]; then
-        echo "doctor: all one-time setup steps look done"
-    fi
-    exit "$missing"
-
 build:
     cargo build --workspace
 
@@ -43,19 +27,6 @@ run-bridge:
 # loopback address (e.g. 127.0.0.1:50051) to listen on TCP (dev only).
 run-spike addr="":
     {{ if addr == "" { "" } else { "SNITCHWATCH_DEV_TCP=1" } }} RUST_LOG=info cargo run -p snitchwatch-spike -- {{addr}}
-
-# Re-run the idempotent rebrand pass over the vendored web/ tree.
-web-rebrand:
-    ./web/rebrand.sh
-    @git diff --stat web/
-
-# Run the Playwright smoke tests against a freshly built bridge.
-web-smoke:
-    cd tests/web_smoke && npx playwright test
-
-# Install the Playwright Firefox channel into tests/web_smoke/node_modules.
-web-smoke-install:
-    cd tests/web_smoke && npm install && npx playwright install firefox
 
 # Run the Kirigami shell in dev mode (live bridge + native Qt6/QML window).
 # Requires system Qt6 + KDE Frameworks 6 (Kirigami) dev packages — see
@@ -123,8 +94,8 @@ package-check:
     bash -n packaging/ebpf/build-modules.sh
     if command -v shellcheck >/dev/null 2>&1; then shellcheck packaging/release/*.sh packaging/ebpf/build-modules.sh packaging/scanner/stage.sh packaging/endpoint-events/verify.sh scripts/ci-root-tests.sh; else echo "shellcheck not installed — skipped"; fi
     cargo test -p snitchwatch-bridge --test packaging_shape --test release_shape --test release_artifact --test ebpf_modules_shape
-    # The release tarball's feature set (no embedded web UI, decision I) —
-    # nothing else builds it, so lint and test it here.
+    # Mirrors RELEASE_PACKAGE_ARGS (now identical to the default feature set);
+    # kept so the release build command itself stays linted and tested.
     cargo clippy -p snitchwatch-bridge --no-default-features --all-targets --locked -- -D warnings
     cargo clippy -p snitchwatch-bridge-cli --no-default-features --locked -- -D warnings
     cargo test -p snitchwatch-bridge --no-default-features --lib --locked ws_server

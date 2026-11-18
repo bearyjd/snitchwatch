@@ -1,7 +1,7 @@
 # Snitchwatch native desktop shell — Qt6/QML + Kirigami on cxx-qt.
 #
 # Replaced the former `snitchwatch-tauri` shell (removed in #379) and is the
-# only GUI shell; the vendored `web/` frontend is retired separately (see
+# only GUI shell; the vendored `web/` frontend was removed too (see
 # docs/superpowers/plans/2026-11-17-379-retire-tauri.md).
 #
 # Requires system Qt6 + KDE Frameworks 6 (Kirigami) dev packages to build, so —

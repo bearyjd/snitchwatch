@@ -58,8 +58,8 @@ pub enum VerdictScope {
 /// The third option used to read "Until quit", though opensnitchd has no
 /// per-process rule lifetime: "until restart" keeps the rule until the daemon
 /// itself restarts, so Kirigami now labels it for that (its QML token is still
-/// `until_quit`). The vendored web UI keeps its labels as it is: it offers no
-/// duration selector (it sends the legacy `remember` instead).
+/// `until_quit`). Legacy clients (the removed web UI) sent the legacy `remember`
+/// instead of a duration.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VerdictDuration {

@@ -11,7 +11,7 @@ ships only `snitchwatch-bridge-cli`, so this gate fails only on vulnerabilities
 whose (name, version) is actually compiled into the release build — the same
 crate set THIRD-PARTY-LICENSES.md lists (`bridge_artifact.shipped_crates`:
 `cargo tree -p snitchwatch-bridge-cli --no-default-features`, so crates only the
-GUI shells or the `web-ui` feature pull in don't count).
+GUI shells pull in don't count).
 Everything else is printed as informational. Warnings (unmaintained, unsound,
 yanked) never fail the gate. Missing or malformed audit JSON fails closed.
 
