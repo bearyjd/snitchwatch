@@ -2,15 +2,17 @@
 
 > Start with the 2026-11-17 section below, then 2026-11-16, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
 
-## 2026-11-17 — #35 merged (TCP gRPC dev-only), root-only tests now run in CI
+## 2026-11-17 — #35 merged (TCP gRPC dev-only); release repro verified; pkexec check still open
 
-- **Source:** `origin/main` at `9d067f48`. #35 shipped as #371 `5dd20092` (bridge gate), #372 `1cd28896` (drop the per-user unit), #373 `30f72aca` (Tauri/spike/docs), then #375 `a3bee43b` (CI step) and #376 `9d067f48` (MANIFEST stays `schema_version 1`). Plan: `docs/superpowers/plans/2026-11-16-35-tcp-dev-only.md`.
-- **What changed:** TCP gRPC only with `SNITCHWATCH_DEV_TCP=1` (loopback); default is a per-user Unix socket under `$XDG_RUNTIME_DIR/snitchwatch-grpc/` (new `DaemonTransport::UnixUser`, untrusted like TCP); Tauri refuses to start without the flag; the per-user unit and per-user Flatpak profile are deleted; the recipe daemon config is `unix:opensnitchd.sock`, so an image WITHOUT the system overlay has a daemon with no UI that applies `allow`.
-- **CI:** `scripts/ci-root-tests.sh` runs the three root-only tests as root and fails on skip (first run found they could not exec from the runner home; fixed by running a copy).
-- **Tower (bazzite-tower-dd):** told 30f72aca, then 9d067f48; it pins be4a6cd0, repin needs no verifier change. NOT run by anyone: `just release-bridge-repro` (podman) and the real `pkexec` scan.
-- **Open:** #35 stays open until the tower confirms the image config (#178). Dev-only LOWs untracked: Tauri `ws_proxy_bind` loopback check, spike socket chmod cleanup, `auth.rs` `/tmp` symlink chmod. Owner question: keep the Tauri shell at all now that it is dev-only?
-- **Resume checklist:** `git fetch`; `gh pr list`; read `.omc/STATE.md`; this section and 2026-11-16.
-
+- **Source:** `origin/main` at `73677e57` (#377). #35 shipped as #371 `5dd20092`, #372 `1cd28896`, #373 `30f72aca`; then #375 `a3bee43b` (CI runs the root-only tests as root), #376 `9d067f48` (MANIFEST stays `schema_version 1`, owner decision), #377 (this file). Plan: `docs/superpowers/plans/2026-11-16-35-tcp-dev-only.md`.
+- **What changed:** TCP gRPC only with `SNITCHWATCH_DEV_TCP=1` (loopback); default is a per-user Unix socket under `$XDG_RUNTIME_DIR/snitchwatch-grpc/` (new `DaemonTransport::UnixUser`, untrusted like TCP); the Tauri shell refuses to start without the flag; the per-user unit and per-user Flatpak profile are deleted; the recipe daemon config is `unix:opensnitchd.sock`, so an image WITHOUT the system overlay has a daemon with no UI that applies `allow`.
+- **In flight:** #380 (closes #378: Tauri `ws_proxy_bind` loopback check, spike chmod cleanup, token dir/file symlink-safe in `auth.rs`) merges on green CI; only `kirigami` was pending. After it lands, #378 is closed and this section's "dev-only LOWs" are gone.
+- **Verified:** `just release-bridge-repro` and `just release-verify` PASSED on `9d067f48` from a clean clone (local podman; tarball sha256 `24201dd4f789a4d5c8851add63f76a7b7a74db5343d3b34e479b88e51820e531`; not a CI artifact, the tower should rebuild before pinning). The root-only tests run as root in CI (first run found they could not exec from the runner home; fixed).
+- **NOT verified, owner/tower:** the real `pkexec` scan proving #361 (`setsid`). The owner ran `busctl --user call org.snitchwatch.Scanner /org/snitchwatch/Scanner org.snitchwatch.Scanner1 RunDeepScan` on the tower host: status ok, nothing new, but that host runs installed commit `a5032f4d` (image F45.20261105), older than `be4a6cd0` and `626ba4c8`, so setsid was not exercised. To close: tower repins to a commit >= `626ba4c8`, owner boots that image, repeat the same call. (The scan also skipped `file_drift` and `rootkit_signature`: no baseline cache yet, no `chkrootkit` on the host.)
+- **Tower (bazzite-tower-dd):** pins `be4a6cd0`; told `30f72aca`, `9d067f48`, the repro result and the pkexec caveat. A repin needs no verifier change (schema stays 1). The owner has not said to repin yet.
+- **Open / on hold:** #35 and #178 stay open until the tower confirms the shipped image config. #379: retire the Tauri shell (owner decision) needs a plan doc first. #356 upstream draft is tracked, not filed.
+- **Local hygiene (2026-11-17):** merged branches deleted (remote SHAs kept outside the repo); `r13`..`r16.2-candidate` and `release/bridge-0.1.1` are tower pins, never delete. `vendor/opensnitch` must be at the gitlink `a1353848` for tests and the repro (a stale checkout caused 8 false test failures).
+- **Resume checklist:** `git fetch`; `gh pr list`; read `.omc/STATE.md` (13 lines); this section.
 
 ## 2026-11-16 — overnight run 7: #363 closed, #35 awaited owner decisions (superseded by 2026-11-17 above)
 
