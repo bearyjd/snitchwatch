@@ -73,7 +73,10 @@ Options:
   --kernel-headers DIR   kernel headers tree; must resolve to --kernel-dir (default)
   --kernel-ver VER       Makefile KERNEL_VER (required, never defaulted or taken from
                          the running kernel); the kernel trees must match it, so it is the
-                         release of the target image's kernel-devel
+                         release of the target image's kernel-devel. Pass the FULL
+                         release (e.g. 7.3.4-ogc6.1.fc45.x86_64): a bare 7.3.4 would also
+                         accept a stock Fedora 7.3.4-300.fc45 tree, which is not a valid
+                         stand-in for a vendor kernel
   --kernel-arch ARCH     Makefile KERNEL_ARCH (default: uname -m; only x86_64)
   --opensnitch-dir DIR   opensnitch git checkout (default: vendor/opensnitch; never modified)
   --dry-run              run every pin/argument/source check (including the

@@ -643,7 +643,7 @@ fn malformed_pins_are_rejected() {
         let o = run_script(&s, &dry_args(st.to_str().unwrap(), &vendor()), &[]);
         assert!(!o.status.success(), "{k}={v}: {}", text(&o));
         assert!(
-            text(&o).contains(k) || text(&o).contains("KERNEL_VER"),
+            text(&o).contains(k),
             "{k}={v}: {}",
             text(&o)
         );
