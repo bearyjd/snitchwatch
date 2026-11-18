@@ -5,8 +5,8 @@ Usage:
   cargo audit --json > audit.json || true     # non-zero exit when anything is found
   audit_gate.py --repo DIR --audit-json audit.json
 
-`cargo audit` reports on the whole Cargo.lock, which also holds the Tauri and
-Kirigami shells' dependencies (quick-xml, quinn-proto, ...). The release tarball
+`cargo audit` reports on the whole Cargo.lock, which also holds the Kirigami
+shell's dependencies (quick-xml, quinn-proto, ...). The release tarball
 ships only `snitchwatch-bridge-cli`, so this gate fails only on vulnerabilities
 whose (name, version) is actually compiled into the release build — the same
 crate set THIRD-PARTY-LICENSES.md lists (`bridge_artifact.shipped_crates`:

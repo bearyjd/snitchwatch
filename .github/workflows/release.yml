@@ -161,7 +161,7 @@ jobs:
           if-no-files-found: error
 
   # RustSec gate for the shipped binary only. `cargo audit` reports on the
-  # whole Cargo.lock, which also holds the Tauri/Kirigami shells' deps;
+  # whole Cargo.lock, which also holds the Kirigami shell's deps;
   # audit_gate.py fails only on vulnerabilities in the crates the release
   # build actually compiles (`cargo tree -p snitchwatch-bridge-cli
   # --no-default-features`), and fails closed on a missing/malformed report.

@@ -391,7 +391,7 @@ def release_crate_set(repo: Path) -> set[tuple[str, str]]:
 
     `cargo metadata`'s resolve is feature-unified across the whole workspace, so
     `normal_closure` alone over-includes crates that only another member (the
-    Tauri/Kirigami shells) or the default `web-ui` feature enables. `cargo tree`
+    Kirigami shell) or the default `web-ui` feature enables. `cargo tree`
     for exactly the release package and features (RELEASE_PACKAGE_ARGS, the same
     as BUILD_COMMAND) resolves what is actually built."""
     out = run(

@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 # check/test jobs: default-members only (snitchwatch-proto, -spike, -bridge,
-# -bridge-cli, -tauri, scanner-core, scanner-cli, scanner-privileged,
+# -bridge-cli, scanner-core, scanner-cli, scanner-privileged,
 # tests/mock_opensnitchd, tests/integration). Plain `cargo check`/`clippy`/
 # `test` (no `--workspace`), so cargo falls back to `default-members` from
 # Cargo.toml, matching a bare `cargo build`. This gate must never depend on
@@ -54,22 +54,14 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # snitchwatch-tauri is in default-members and its build.rs links against
-      # webkit2gtk/javascriptcoregtk via tauri-build, even for `cargo check`.
       # protobuf-compiler: snitchwatch-proto's build.rs (tonic-build/
       # prost-build) shells out to `protoc` to compile vendor/opensnitch's
       # ui.proto — every default-member depends on snitchwatch-proto, so this
       # is needed here too, not just where gRPC code is directly touched.
-      - name: Install Tauri Linux build dependencies
+      - name: Install Linux build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libjavascriptcoregtk-4.1-dev \
-            libsoup-3.0-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            patchelf \
             protobuf-compiler
 
       - name: cargo check (default-members)
@@ -93,16 +85,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Tauri Linux build dependencies
+      - name: Install Linux build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libjavascriptcoregtk-4.1-dev \
-            libsoup-3.0-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            patchelf \
             protobuf-compiler \
             dbus-daemon
 
@@ -136,10 +122,10 @@ jobs:
       # Fails on any vulnerability not ignored below; warnings (unmaintained,
       # unsound, yanked) are printed but don't fail it. Ignored:
       # - RUSTSEC-2026-0194, RUSTSEC-2026-0195 (quick-xml 0.37.5 via
-      #   tauri-winrt-notification, 0.38.4 via plist): Windows/macOS-only
-      #   dependencies of notify-rust and the Tauri shell, never compiled on
-      #   Linux (`cargo tree -i quick-xml --target all` finds them, the
-      #   host target doesn't). The fix is quick-xml 0.41, a semver bump
+      #   tauri-winrt-notification, a Windows-only dependency of notify-rust
+      #   as used by the Kirigami shell, never compiled on Linux
+      #   (`cargo tree -i quick-xml --target all` finds it, the host target
+      #   doesn't). The fix is quick-xml 0.41, a semver bump
       #   only those crates' upstreams can make. Recheck when they update.
       # The two ignores are global, so prove they still only cover crates
       # Linux never builds (PR #166 L5): every quick-xml in Cargo.lock,
