@@ -51,7 +51,7 @@ class CountryData(unittest.TestCase):
         commands = "\n".join(module["build-commands"])
         for required in ["gzip -dc", "/app/share/snitchwatch/dbip-country-lite.mmdb", "CC-BY-4.0.txt", "ATTRIBUTION.txt", "provenance.json"]:
             self.assertIn(required, commands)
-        for name in ["org.snitchwatch.Snitchwatch.yml", "org.snitchwatch.Snitchwatch.system.yml"]:
+        for name in ["org.snitchwatch.Snitchwatch.system.yml"]:
             manifest = yaml.safe_load((ROOT / "packaging/flatpak" / name).read_text())
             self.assertIn("../geo/dbip-country-lite.json", manifest["modules"])
             self.assertNotIn("--share=network", manifest["finish-args"])

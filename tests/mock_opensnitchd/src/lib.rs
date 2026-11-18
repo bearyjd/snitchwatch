@@ -161,6 +161,33 @@ impl MockOpensnitchd {
         Err(MockError::Connect(last_err.unwrap()))
     }
 
+    /// Dial the bridge's Unix gRPC socket at `path`, retrying like
+    /// [`Self::connect`] until the bridge has bound it.
+    pub async fn connect_unix(path: impl AsRef<std::path::Path>) -> Result<Self, MockError> {
+        let path = path.as_ref().to_path_buf();
+        let endpoint = Endpoint::from_static("http://localhost");
+        let mut last_err = None;
+        for _ in 0..20 {
+            let dial = path.clone();
+            let connector = tower::service_fn(move |_| {
+                let dial = dial.clone();
+                async move {
+                    tokio::net::UnixStream::connect(dial)
+                        .await
+                        .map(hyper_util::rt::TokioIo::new)
+                }
+            });
+            match endpoint.connect_with_connector(connector).await {
+                Ok(channel) => return Ok(Self::from_channel(channel)),
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        }
+        Err(MockError::Connect(last_err.unwrap()))
+    }
+
     pub async fn ping(&mut self, id: u64) -> Result<PingReply, MockError> {
         let reply = self
             .client

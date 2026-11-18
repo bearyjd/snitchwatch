@@ -34,7 +34,7 @@ is silent the text says "Not defined in the repo".
 | `fmt` | `cargo fmt --all` |
 | `regen-proto` | `cargo build -p snitchwatch-proto` |
 | `run-bridge` | `RUST_LOG=info cargo run -p snitchwatch-bridge-cli` (starts a real bridge: see Test safety) |
-| `run-spike endpoint="http://127.0.0.1:50051"` | `cargo run -p snitchwatch-spike -- <endpoint>` with `RUST_LOG=info`. |
+| `run-spike addr=""` | `cargo run -p snitchwatch-spike` with `RUST_LOG=info`: a Unix socket at `$XDG_RUNTIME_DIR/snitchwatch-grpc/spike.sock`; with an `addr` (loopback only) it sets `SNITCHWATCH_DEV_TCP=1` and listens on TCP. |
 | `web-rebrand` | Run `./web/rebrand.sh`, then `git diff --stat web/`, over the vendored `web/` tree. |
 | `web-smoke` | Run the Playwright smoke tests against a freshly built bridge. |
 | `web-smoke-install` | Install the Playwright Firefox channel into `tests/web_smoke/node_modules`. |
@@ -47,7 +47,7 @@ is silent the text says "Not defined in the repo".
 | `kirigami-screenshots dir="target/screenshots"` | Demo-mode (`SNITCHWATCH_DEMO=1`) offscreen render of the pages to PNGs in `dir`; Basic style, so colours differ slightly from the Flatpak. |
 | `qml-test` | `qmltestrunner-qt6` input-routing tests in `crates/snitchwatch-kirigami/tests/qml` (real mouse events via QtTest). |
 | `test-blocklists` | Blocklist unit + e2e suites, offline (fixture fetchers and local TLS servers). |
-| `package-check` | Validates packaging artifacts without a Bazzite host: `packaging/geo/test-country-data.py`, `packaging/scanner/test-staging.py`, `scripts/ebpf/test_measure.py`, `bash -n` on `packaging/scanner/stage.sh` and `packaging/endpoint-events/verify.sh`, YAML/JSON parse, `verify-unit.sh`, shellcheck (skipped if absent), packaging/release shape tests, `--no-default-features` clippy/test of the tarball feature set. |
+| `package-check` | Validates packaging artifacts without a Bazzite host: `packaging/geo/test-country-data.py`, `packaging/scanner/test-staging.py`, `scripts/ebpf/test_measure.py`, `bash -n` on `packaging/scanner/stage.sh` and `packaging/endpoint-events/verify.sh`, YAML/JSON parse, shellcheck (skipped if absent), packaging/release shape tests, `--no-default-features` clippy/test of the tarball feature set. |
 | `endpoint-events-verify` | Real-rsyslog proof of the opt-in endpoint-events recipe; needs rootless podman and Fedora mirrors; not part of `package-check`. |
 | `release-bridge` | Build `dist/snitchwatch-bridge-<version>-x86_64.tar.gz{,.sha256}` in the pinned Fedora 45 container. |
 | `release-bridge-repro` | Build, rebuild from another path, require byte-identical tarballs. |
@@ -136,7 +136,7 @@ Runs on push to `main` and `r16.2-candidate`, and on every pull request.
 | #259 status: `HANDOFF.md:29` lists "#259 (learned/silent tests) is still open". The research note `docs/superpowers/research/2026-11-06-flake-259.md` does not exist on this branch's base (only three `scan-page-flicker`/`title-flicker` notes do) | `HANDOFF.md:29`; `ls docs/superpowers/research` |
 | `history::dormant_tests` (`crates/snitchwatch-bridge/src/history/dormant_tests.rs`, test `primitives_have_no_production_call_sites`) scans every `crates/*/src/**.rs` and fails if a file outside the history owner files mentions the whole identifiers `lifecycle` or `pins` (code only; comments and string literals are stripped) or the types `PinRegistry`, `PinId`, `ReaderGate`, `ReaderPermit`, `AcceptanceSeq`, `Generation` (`dormant_tests.rs:8-19,100-113,120-126,140-163`). Do not use those words as identifiers in other `.rs` sources | that file |
 | Never point a test at a live `opensnitchd`, a real Bazzite host, or `sudo`; use the doubles above. A real-daemon-only behaviour is a gap to flag, not to improvise (`.agent_native/agent_roadmap.md` item 7) | `CLAUDE.md` |
-| `package-check` verifies a renamed copy of the unit so a dev machine's `~/.config/systemd/user/snitchwatch-bridge.service` cannot shadow it | `CLAUDE.md`; `justfile` |
+| Dev flow: TCP gRPC, the Tauri shell and the Playwright smoke suites need `SNITCHWATCH_DEV_TCP=1` (loopback only); the system bridge is the only shipped flavour and there is no per-user unit | `docs/ENV.md`; `CLAUDE.md` |
 | `kirigami-screenshots` already isolates `XDG_RUNTIME_DIR` with `mktemp -d` and uses `SNITCHWATCH_DEMO=1` | `justfile` |
 | Single-instance tests use a private `dbus-daemon` reached by an explicit address (`src/single_instance/tests.rs`, `PrivateBus` from `src/notification_signals/bus_tests.rs`); never set `DBUS_SESSION_BUS_ADDRESS` in a lib test or call the guard against the real session bus. Plain `#[test]` only: the blocking zbus API must not run inside a tokio runtime | `crates/snitchwatch-kirigami/src/single_instance.rs` |
 

@@ -8,7 +8,10 @@
 //!
 //! 1. Binds the WebSocket server on the Unix domain socket at
 //!    `ws_socket_path` and writes a fresh handshake token alongside it.
-//! 2. Binds the gRPC `Ui` server on `grpc_bind` — opensnitchd dials in here.
+//! 2. Binds the gRPC `Ui` server on `grpc_listen` — opensnitchd dials in here.
+//!    The default is a per-user Unix socket; loopback TCP exists only as
+//!    [`GrpcListen::DevTcp`], reached from the CLI only with
+//!    `SNITCHWATCH_DEV_TCP=1` (#35).
 //! 3. Inbound `AskRule` RPCs insert a pending row into the cache, broadcast
 //!    it on the WebSocket, and await a `oneshot<Verdict>` from the WS layer.
 //! 4. Inbound WebSocket `ClientMessage`s go through `upstream::apply`, which
@@ -33,11 +36,15 @@ mod running;
 pub mod storage;
 #[cfg(test)]
 mod test_daemon;
+mod user_socket;
 
-pub use config::{BridgeConfig, GrpcEndpoint};
+pub use config::{
+    reject_dev_tcp_in_system_mode, resolve_grpc_listen, BridgeConfig, GrpcEndpoint, GrpcListen,
+    DEV_TCP_ENV,
+};
 pub use running::RunningBridge;
 
-use activation::RootUnixIncoming;
+use activation::{OwnerUnixIncoming, RootUnixIncoming};
 use profile_storage::is_profile_message;
 
 pub use storage::{
@@ -92,7 +99,7 @@ pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
 /// [`run`] with explicit [`RunOptions`]: `main.rs` passes the resolved state
 /// directory; tests may also inject a blocklist fetcher.
 pub async fn run_with_options(config: BridgeConfig, options: RunOptions) -> Result<RunningBridge> {
-    run_tcp(config, options, ANSWER_TIMEOUT).await
+    run_listening(config, options, ANSWER_TIMEOUT).await
 }
 
 /// [`run`] with a shorter wait before the bridge answers a prompt nobody
@@ -102,25 +109,62 @@ pub async fn run_with_answer_timeout(
     config: BridgeConfig,
     answer_timeout: std::time::Duration,
 ) -> Result<RunningBridge> {
-    run_tcp(config, RunOptions::in_process(), answer_timeout).await
+    run_listening(config, RunOptions::in_process(), answer_timeout).await
 }
 
-async fn run_tcp(
+/// The gate (#35): the listener comes from the typed `grpc_listen`, so TCP
+/// is only reachable by naming `GrpcListen::DevTcp`.
+async fn run_listening(
     config: BridgeConfig,
     options: RunOptions,
     answer_timeout: std::time::Duration,
 ) -> Result<RunningBridge> {
-    let grpc_listener = tokio::net::TcpListener::bind(config.grpc_bind)
+    match config.grpc_listen.clone() {
+        GrpcListen::DevTcp(addr) => run_dev_tcp(config, addr, options, answer_timeout).await,
+        GrpcListen::UserUnix(path) => run_user_unix(config, path, options, answer_timeout).await,
+    }
+}
+
+async fn run_user_unix(
+    config: BridgeConfig,
+    path: PathBuf,
+    options: RunOptions,
+    answer_timeout: std::time::Duration,
+) -> Result<RunningBridge> {
+    let listener = user_socket::bind_user_socket(&path)?;
+    let incoming = OwnerUnixIncoming {
+        listener,
+        owner_uid: unsafe { libc::geteuid() },
+    };
+    run_with_incoming(
+        config,
+        GrpcEndpoint::UserUnix(path),
+        incoming,
+        None,
+        None,
+        options,
+        answer_timeout,
+    )
+    .await
+}
+
+async fn run_dev_tcp(
+    config: BridgeConfig,
+    addr: std::net::SocketAddr,
+    options: RunOptions,
+    answer_timeout: std::time::Duration,
+) -> Result<RunningBridge> {
+    let grpc_listener = tokio::net::TcpListener::bind(addr)
         .await
-        .with_context(|| format!("failed to bind gRPC listener on {}", config.grpc_bind))?;
+        .with_context(|| format!("failed to bind gRPC listener on {addr}"))?;
     let endpoint = GrpcEndpoint::Tcp(grpc_listener.local_addr()?);
     // #35: any local process that binds the port first, or while this
     // bridge is down, gets the daemon's UI authority.
     warn!(
-        addr = %config.grpc_bind,
-        "the daemon connection is TCP, which is not deny-safe: a process that binds the port \
-         first answers for the daemon; use the system bridge's Unix socket \
-         (SNITCHWATCH_SYSTEM_BRIDGE=1)"
+        %addr,
+        "SNITCHWATCH_DEV_TCP=1: the daemon connection is TCP, which is not deny-safe: a \
+         process that binds the port first answers for the daemon. Dev only; the system \
+         bridge's Unix socket (SNITCHWATCH_SYSTEM_BRIDGE=1) is the shipped path"
     );
     run_with_incoming(
         config,
@@ -138,13 +182,8 @@ async fn run_tcp(
 /// or changes permissions on either socket or its parent directory.
 pub async fn run_system(listeners: activation::ActivatedListeners) -> Result<RunningBridge> {
     activation::validate_paths(&listeners)?;
-    let config = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().expect("literal address"),
-        ws_socket_path: PathBuf::from(activation::GUI_SOCKET_PATH),
-        cache_capacity: 10_000,
-    };
     let bridge = run_with_incoming(
-        config,
+        BridgeConfig::system(),
         GrpcEndpoint::Unix(PathBuf::from(activation::GRPC_SOCKET_PATH)),
         RootUnixIncoming(listeners.grpc),
         Some(listeners.gui),
@@ -225,6 +264,7 @@ where
     .with_daemon_transport(match grpc_endpoint {
         GrpcEndpoint::Tcp(_) => DaemonTransport::Tcp,
         GrpcEndpoint::Unix(_) => DaemonTransport::Unix,
+        GrpcEndpoint::UserUnix(_) => DaemonTransport::UnixUser,
     });
     // Taken before the gRPC server starts, so no rules snapshot is missed.
     let rules_synced = ui_service_inner.rules_synced();

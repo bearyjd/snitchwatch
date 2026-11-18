@@ -1,26 +1,13 @@
 use super::*;
 
+/// #35: the per-user bridge unit is gone; only the system units ship.
 #[test]
-fn bridge_user_unit_pins_stable_grpc_bind_and_is_a_user_service() {
-    let body = read("packaging/systemd/snitchwatch-bridge.service");
-    for needle in [
-        "[Service]",
-        "ExecStart=",
-        "snitchwatch-bridge-cli",
-        "SNITCHWATCH_GRPC_BIND=127.0.0.1:50051",
-        "KillSignal=SIGTERM",
-        "WantedBy=default.target",
-    ] {
-        assert!(
-            body.contains(needle),
-            "bridge user unit missing `{needle}`\nbody:\n{body}"
-        );
-    }
-    // It must be a plain user service, not tied to any GUI window lifecycle.
+fn the_per_user_bridge_unit_is_not_shipped() {
     assert!(
-        !body.contains("multi-user.target"),
-        "bridge unit is a --user service; WantedBy should be default.target"
+        !workspace_file("packaging/systemd/snitchwatch-bridge.service").exists(),
+        "the per-user unit is retired (#35)"
     );
+    assert!(!workspace_file("packaging/systemd").exists());
 }
 
 /// Split a systemd unit into `(section header, active lines)` pairs, in file
@@ -62,53 +49,6 @@ fn unit_section_splitter_ignores_comments_and_attributes_lines_to_sections() {
     assert_eq!(section_lines(&sections, "[Service]"), ["B=2"]);
     assert_eq!(section_lines(&sections, "[Install]"), ["D=4"]);
     assert!(section_lines(&sections, "[Missing]").is_empty());
-}
-
-/// The release artifact installs this exact file to
-/// `/usr/lib/systemd/user/` in an immutable image and enables it with
-/// `systemctl --global enable`, so it must not depend on anything under a
-/// user's home and must not start for system accounts.
-#[test]
-fn bridge_user_unit_matches_the_image_baked_contract() {
-    let body = read("packaging/systemd/snitchwatch-bridge.service");
-    let sections = unit_sections(&body);
-
-    let exec_starts: Vec<String> = section_lines(&sections, "[Service]")
-        .into_iter()
-        .filter(|line| line.starts_with("ExecStart"))
-        .collect();
-    assert_eq!(
-        exec_starts,
-        ["ExecStart=/usr/bin/snitchwatch-bridge-cli"],
-        "[Service] must have exactly one ExecStart, at the image-baked path"
-    );
-
-    for (header, lines) in &sections {
-        for line in lines {
-            for forbidden in ["%h", "~", ".local"] {
-                assert!(
-                    !line.contains(forbidden),
-                    "{header} line `{line}` contains `{forbidden}`: an image-baked \
-                     unit must not reference a home directory"
-                );
-            }
-        }
-    }
-
-    assert!(
-        section_lines(&sections, "[Unit]")
-            .iter()
-            .any(|line| line == "ConditionUser=!@system"),
-        "[Unit] must carry `ConditionUser=!@system` so a globally-enabled unit \
-         never starts for system accounts (e.g. a display-manager greeter)\nbody:\n{body}"
-    );
-
-    assert!(
-        section_lines(&sections, "[Install]")
-            .iter()
-            .any(|line| line == "WantedBy=default.target"),
-        "[Install] must carry `WantedBy=default.target`\nbody:\n{body}"
-    );
 }
 
 #[test]

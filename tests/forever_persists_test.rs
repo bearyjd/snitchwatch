@@ -63,9 +63,8 @@ async fn next_server_message(ws: &mut WebSocketStream<UnixStream>) -> ServerMess
 async fn allow_forever_for_an_absolute_path_reaches_the_daemon_as_always() {
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     })
     .await
     .expect("bridge run failed");

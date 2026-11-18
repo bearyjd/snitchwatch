@@ -85,7 +85,10 @@ fn hex_encode(bytes: &[u8]) -> String {
 ///
 /// Defaults to `$XDG_RUNTIME_DIR/snitchwatch`. Falls back to a directory
 /// under the OS temp dir when `XDG_RUNTIME_DIR` isn't set (uncommon on a
-/// real desktop session, but happens in some CI/test environments).
+/// real desktop session, but happens in some CI/test environments; bridge-cli
+/// dev-TCP mode relies on it). That shared directory is safe to use only
+/// because `write_token_file` refuses a symlink, foreign-owned, or non-0700
+/// `snitchwatch` directory.
 pub fn runtime_dir() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(dir) => PathBuf::from(dir).join("snitchwatch"),
@@ -94,14 +97,92 @@ pub fn runtime_dir() -> PathBuf {
 }
 
 /// Write `token` to `path`, creating the parent directory (mode 0700) if
-/// needed and tightening the file itself to mode 0600.
+/// needed. Whatever sits at `path` is removed first and a fresh file is
+/// created exclusively (`O_EXCL | O_NOFOLLOW`) at mode 0600, so a planted
+/// symlink is never written through.
+///
+/// The parent must be a real directory (never a symlink) owned by the
+/// effective uid; it ends up mode 0700. Otherwise nothing is written.
 pub fn write_token_file(token: &Token, path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    write_token_file_as(token, path, unsafe { libc::geteuid() })
+}
+
+fn write_token_file_as(token: &Token, path: &Path, euid: u32) -> io::Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        ensure_private_dir(parent, euid)?;
     }
-    fs::write(path, token.as_str())?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    // Never write through whatever sits at `path`: a symlink (or a file the
+    // loose directory let someone else plant) is removed, then a fresh file is
+    // created exclusively, without following links, already at mode 0600.
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    if file.metadata()?.uid() != euid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("token file {} is not owned by uid {euid}", path.display()),
+        ));
+    }
+    // `.mode()` is filtered by the umask; fix the mode through the descriptor
+    // (never by path) so a strict umask cannot leave the token unreadable.
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    file.write_all(token.as_str().as_bytes())?;
+    Ok(())
+}
+
+/// Create `dir` (0700) if missing, then require it to be a real directory
+/// owned by `euid`, tightening an own-owned directory to exactly 0700.
+/// Ancestors are created normally; only the final component is guarded.
+///
+/// The final component is opened with `O_NOFOLLOW | O_DIRECTORY` and checked
+/// and chmodded through that descriptor, so a symlink planted there is never
+/// followed and nothing behind it is touched. A directory owned by anyone
+/// else is refused rather than repaired. (Unlike `check_socket_dir` in
+/// `snitchwatch-bridge-cli`'s `user_socket.rs`, which only checks, an existing
+/// own-owned directory with a looser mode is tightened: callers have always
+/// pointed the token at pre-existing directories such as a fresh tempdir.
+/// That crate depends on this one, so the two checks stay separate copies.)
+fn ensure_private_dir(dir: &Path, euid: u32) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    if let Some(ancestors) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(ancestors)?;
+    }
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let deny = |msg: String| io::Error::new(io::ErrorKind::PermissionDenied, msg);
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(dir)
+        .map_err(|e| match e.raw_os_error() {
+            Some(libc::ELOOP) | Some(libc::ENOTDIR) => deny(format!(
+                "token directory {} is not a real directory (symlink or file)",
+                dir.display()
+            )),
+            _ => e,
+        })?;
+    let meta = handle.metadata()?;
+    if meta.uid() != euid {
+        return Err(deny(format!(
+            "token directory {} is owned by uid {}, not {euid}",
+            dir.display(),
+            meta.uid()
+        )));
+    }
+    if meta.mode() & 0o7777 != 0o700 {
+        handle.set_permissions(fs::Permissions::from_mode(0o700))?;
+    }
     Ok(())
 }
 
@@ -204,6 +285,101 @@ mod tests {
         assert_eq!(parent_mode, 0o700);
         let file_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(file_mode, 0o600);
+    }
+
+    fn euid() -> u32 {
+        unsafe { libc::geteuid() }
+    }
+
+    #[test]
+    fn a_symlinked_token_dir_is_refused_and_nothing_is_touched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = tmp.path().join("snitchwatch");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let err = write_token_file(&Token::generate(), &link.join("token")).unwrap_err();
+        assert!(err.to_string().contains("not a real directory"), "{err}");
+        assert_eq!(fs::read_dir(&real).unwrap().count(), 0);
+        let mode = fs::metadata(&real).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o755, "target must not be chmodded");
+    }
+
+    #[test]
+    fn a_symlink_planted_at_the_token_path_is_replaced_not_written_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("snitchwatch");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        let victim = tmp.path().join("victim");
+        fs::write(&victim, "precious").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        let path = dir.join("token");
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        write_token_file(&Token::generate(), &path).unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        let victim_mode = fs::metadata(&victim).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(victim_mode, 0o644, "symlink target must not be chmodded");
+        let meta = fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_file(), "token must be a regular file");
+        assert_eq!(meta.permissions().mode() & 0o7777, 0o600);
+    }
+
+    #[test]
+    fn a_token_path_that_is_a_directory_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("token");
+        fs::create_dir(&path).unwrap();
+        assert!(write_token_file(&Token::generate(), &path).is_err());
+    }
+
+    #[test]
+    fn an_own_dir_with_a_loose_mode_is_tightened_to_0700() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("snitchwatch");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        write_token_file(&Token::generate(), &dir.join("token")).unwrap();
+        let mode = fs::metadata(&dir).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn a_dangling_symlink_token_dir_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("snitchwatch");
+        std::os::unix::fs::symlink(tmp.path().join("nowhere"), &link).unwrap();
+        assert!(write_token_file(&Token::generate(), &link.join("token")).is_err());
+        assert!(!tmp.path().join("nowhere").exists());
+    }
+
+    #[test]
+    fn a_token_dir_owned_by_someone_else_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("snitchwatch");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        // Claiming a different euid is the same mismatch as a foreign owner.
+        let err =
+            write_token_file_as(&Token::generate(), &dir.join("token"), euid() + 1).unwrap_err();
+        assert!(err.to_string().contains("owned by uid"), "{err}");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn missing_token_dirs_are_created_0700() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("a").join("b").join("token");
+        write_token_file(&Token::generate(), &path).unwrap();
+        let mode = fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o700);
     }
 
     #[test]

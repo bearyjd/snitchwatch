@@ -29,9 +29,8 @@ const WAIT: Duration = Duration::from_secs(12);
 
 fn config(dir: &Path) -> BridgeConfig {
     BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.join("bridge.sock"))
     }
 }
 

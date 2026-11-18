@@ -210,6 +210,33 @@ async fn tcp_fans_a_command_out_to_every_open_stream() {
     assert_eq!(rx2.try_recv().unwrap().id, pending.id());
 }
 
+/// Security review 2026-11-16 (M1): the per-user socket admits any same-uid
+/// process, so it must behave like TCP, not like the root-only socket.
+#[tokio::test]
+async fn user_unix_fans_a_command_out_to_every_open_stream() {
+    let commands = commands(DaemonTransport::UnixUser);
+    let (s1, mut rx1) = commands.open_stream(None);
+    let (s2, mut rx2) = commands.open_stream(None);
+    commands.on_reply(s1.id(), &hello());
+    commands.on_reply(s2.id(), &hello());
+
+    let pending = commands.send(command()).unwrap();
+
+    assert_eq!(rx1.try_recv().unwrap().id, pending.id());
+    assert_eq!(rx2.try_recv().unwrap().id, pending.id());
+}
+
+#[tokio::test]
+async fn user_unix_refuses_a_leftover_delete_like_tcp() {
+    let commands = commands(DaemonTransport::UnixUser);
+    assert!(matches!(
+        commands.send_leftover_delete(
+            crate::daemon_commands::BlocklistCommand::delete("z00-blocklist:ads:domains").unwrap()
+        ),
+        Err(SendError::NotOnThisTransport)
+    ));
+}
+
 #[tokio::test]
 async fn unix_sends_a_command_only_to_the_current_stream() {
     let commands = commands(DaemonTransport::Unix);

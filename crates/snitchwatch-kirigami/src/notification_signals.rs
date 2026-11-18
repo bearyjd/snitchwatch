@@ -511,17 +511,14 @@ mod tests {
             hints["desktop-entry"],
             zbus::zvariant::Value::from("org.snitchwatch.Snitchwatch")
         );
-        // The desktop entry is the Flatpak's app id, in both manifests.
-        for manifest in [
-            include_str!("../../../packaging/flatpak/org.snitchwatch.Snitchwatch.yml"),
-            include_str!("../../../packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml"),
-        ] {
-            assert!(
-                manifest
-                    .lines()
-                    .any(|line| line == format!("app-id: {DESKTOP_ENTRY}")),
-                "a Flatpak manifest's app-id drifted from DESKTOP_ENTRY"
-            );
-        }
+        // The desktop entry is the Flatpak's app id.
+        let manifest =
+            include_str!("../../../packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml");
+        assert!(
+            manifest
+                .lines()
+                .any(|line| line == format!("app-id: {DESKTOP_ENTRY}")),
+            "the Flatpak manifest's app-id drifted from DESKTOP_ENTRY"
+        );
     }
 }

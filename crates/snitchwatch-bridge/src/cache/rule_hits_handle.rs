@@ -245,7 +245,7 @@ impl RuleHitsHandle {
     /// counters only on the root-only Unix socket (`cache::rule_hits`, N3).
     /// Call before [`Self::attach_file`].
     pub fn set_daemon_transport(&self, transport: DaemonTransport) {
-        lock(&self.inner.state).trust_daemon_counters(transport == DaemonTransport::Unix);
+        lock(&self.inner.state).trust_daemon_counters(transport.peer_is_trusted_daemon());
     }
 
     /// Saves the counts if they changed since the last save. Safe to call

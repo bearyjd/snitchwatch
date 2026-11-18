@@ -4,9 +4,8 @@ use super::*;
 async fn running_bridge_routes_export_privately_and_keeps_mock_ping_responsive() {
     let dir = tempfile::tempdir().unwrap();
     let bridge = crate::run(crate::BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 20,
+        ..crate::BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     })
     .await
     .unwrap();

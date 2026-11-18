@@ -15,9 +15,9 @@ under "Release flow". Source: `HANDOFF.md:12`, "final r16 needs a separate owner
 | Shape | What it is | Source |
 |---|---|---|
 | Batteries-included image | Signed custom Bazzite image with `opensnitchd` baked in and enabled; built with the `bluebuild` CLI | `packaging/bluebuild/recipe.yml`; `packaging/README.md` "The two install paths"; build: `bluebuild build packaging/bluebuild/recipe.yml` (`packaging/README.md` "Build") |
-| rpm-ostree layering (alternative) | Layer `opensnitchd` onto stock Bazzite, install the bridge as a `systemd --user` service, GUI as Flatpak | `docs/packaging/rpm-ostree-layering.md` steps 1-5 |
-| Flatpak GUI | `packaging/flatpak/org.snitchwatch.Snitchwatch.yml`; no `--share=network`; reaches the bridge via `--filesystem=xdg-run/snitchwatch` | `packaging/README.md`; `README.md` "Install on Bazzite" |
-| System-bridge overlay | Socket-activated system service for the `snitchwatch` account, root-only daemon socket; "pending a new release"; uses `org.snitchwatch.Snitchwatch.system.yml`, not coinstallable with the primary profile | `packaging/README.md` "System-bridge overlay"; `docs/packaging/system-bridge-integration.md` |
+| rpm-ostree layering (retired) | The DIY per-user path is gone (#35); the page is a pointer to `stage.sh` + the overlay. The system bridge is the only shipped flavour | `docs/packaging/rpm-ostree-layering.md` |
+| Flatpak GUI | `packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml`; no `--share=network`; reaches the system bridge over its Unix socket | `packaging/README.md`; `README.md` "Install on Bazzite" |
+| System-bridge overlay | Socket-activated system service for the `snitchwatch` account, root-only daemon socket; the only shipped flavour | `packaging/README.md` "System-bridge overlay"; `docs/packaging/system-bridge-integration.md` |
 | Pre-built bridge tarball | Deterministic sha256-pinned tarball for image-baked installs | `docs/packaging/bridge-release-artifact.md` |
 | Staging environment | Not defined in the repo | n/a |
 
@@ -27,13 +27,13 @@ dial-in, closed-window fail-open, tray states, Daemon Health) are in
 
 ## Runtime layout
 
-| Item | User flavour | System flavour | Source |
+| Item | Dev (not shipped) | System flavour (shipped) | Source |
 |---|---|---|---|
 | Socket dir | `$XDG_RUNTIME_DIR/snitchwatch/` (dir 0700, files 0600) | `/run/snitchwatch/` | `README.md` "Architecture"; `CLAUDE.md` "Settled" #3; `crates/snitchwatch-bridge/src/auth.rs:90` |
 | WS socket | `.../bridge.sock` | `/run/snitchwatch/bridge.sock`, root:`snitchwatch-ui` 0660 | `README.md`; `docs/packaging/system-bridge-integration.md:18-22` |
 | Handshake token | `.../token`, 0600; sent as first WS text frame on `/stream` | `/run/snitchwatch-auth/token`, mode 0640 | `README.md`; `crates/snitchwatch-bridge-cli/src/main.rs` header; `docs/packaging/system-bridge-integration.md:24-28` |
-| Daemon to bridge | gRPC TCP `127.0.0.1:50051` (set by the unit; dev/per-user only, not deny-safe, #35) | `/run/snitchwatch/opensnitchd.sock`, root:root 0600; no TCP fallback | `packaging/systemd/snitchwatch-bridge.service:33`; `system-bridge-integration.md:12-16` |
-| Unit | `snitchwatch-bridge.service` (`systemctl --user`) | `snitchwatch-system-bridge.service` + `-grpc.socket` + `-gui.socket` | `packaging/systemd/`, `packaging/system/` |
+| Daemon to bridge | per-user Unix socket `$XDG_RUNTIME_DIR/snitchwatch-grpc/opensnitchd.sock` (nothing packaged dials it); loopback TCP only with `SNITCHWATCH_DEV_TCP=1` (not deny-safe, #35) | `/run/snitchwatch/opensnitchd.sock`, root:root 0600; no TCP fallback | `docs/ENV.md`; `system-bridge-integration.md:12-16` |
+| Unit | none (run `just run-bridge` by hand) | `snitchwatch-system-bridge.service` + `-grpc.socket` + `-gui.socket` | `packaging/system/` |
 | State | `$STATE_DIRECTORY` or `SNITCHWATCH_STATE_DIR`; `blocklists.sqlite3`, `profiles.sqlite3` (0600); none set means in-memory only | `/var/lib/snitchwatch` only | `README.md` "M4"; `cli.rs:71-75` |
 | GUI access (system) | `usermod -aG snitchwatch-ui <user>`, then a new login session | same | `system-bridge-integration.md:18-22` |
 | Crash log (Tauri and Kirigami shells) | `$XDG_STATE_HOME/snitchwatch/crash.log` (default `~/.local/state/snitchwatch/crash.log`) | n/a | `README.md` "Crash log"; Kirigami: `src/main.rs:35`, `src/paths.rs:57-59` |
@@ -74,11 +74,11 @@ other argument (`crates/snitchwatch-bridge-cli/src/cli.rs:49-60`).
 | Check | Command or place | Source |
 |---|---|---|
 | Bridge CLI usage | `snitchwatch-bridge-cli --help` / `--version` (safe: exits before any socket or token) | `cli.rs:49`; `main.rs:1-10` |
-| Bridge running (user) | `systemctl --user is-active snitchwatch-bridge.service` | `rpm-ostree-layering.md` step 5 |
-| Daemon up and dialing | `systemctl is-active opensnitch.service`; `jq` on `/etc/opensnitchd/default-config.json` (`Server.Address`, `DefaultAction`) | `rpm-ostree-layering.md` step 5 |
+| Bridge running (system) | `systemctl is-active snitchwatch-system-bridge.service` | `system-bridge-integration.md:168-172` |
+| Daemon up and dialing | `systemctl is-active opensnitch.service`; `jq` on `/etc/opensnitchd/default-config.json` (`Server.Address`, `DefaultAction`) | `system-bridge-integration.md` |
 | System sockets | `systemctl status snitchwatch-system-bridge-grpc.socket snitchwatch-system-bridge.service`; `ls -l /run/snitchwatch/` | `system-bridge-integration.md:168-172` |
 | Bridge logs | `journalctl -b -u snitchwatch-system-bridge.service -u snitchwatch-system-bridge-grpc.socket` | `system-bridge-integration.md:172` |
-| Bridge up without GUI | closing the GUI window must not stop `snitchwatch-bridge.service` | `rpm-ostree-layering.md` step 5 |
+| Bridge up without GUI | closing the GUI window must not stop `snitchwatch-system-bridge.service` | `system-bridge-integration.md` |
 | Daemon Health page (GUI drawer entry) | four checks: `opensnitchd reachable`, `firewall running`, `eBPF support`, `nftables support`; pass = the status summary reads `Daemon reachable; firewall checks passed` and all four check rows show healthy; absence of the banner is not a pass (`daemon_health_model.rs:12-16,48-65`, `qml/main.qml:440`) | `crates/snitchwatch-kirigami/qml/GlobalDrawer.qml:167`; `phase2-manual-verification-runbook.md:315-335` |
 | Blocklist "Rule installed" is not proof the daemon loaded the hosts | `sudo grep "domains loaded" /var/log/opensnitchd.log` | `README.md` "M4" |
 | Scanner (userspace) | `scanner-cli` prints JSON; exit 0 clean, 1 actionable anomalies, 2 could not run | `crates/scanner-cli/src/main.rs:12-15` |
@@ -95,8 +95,8 @@ Items below are the ones the repo documents.
 | Bridge cannot be restored under `deny` | Set `DefaultAction` back to `allow` with the `jq` snippet, restart `opensnitch.service` | `system-bridge-integration.md:197-210` |
 | Crash-looping bridge | `StartLimitIntervalSec=0`, retries every 2 s; needs the journal and a fix | `system-bridge-integration.md:191-195` |
 | Flatpak GUI cannot see the bridge | A successful TCP connection from inside the sandbox means `--share=network` leaked; the socket under `xdg-run/snitchwatch` should be visible | `phase2-manual-verification-runbook.md:89-97` |
-| Per-user unit shadows the image's unit | Remove `~/.config/systemd/user/snitchwatch-bridge.service` (and drop-ins) | `bridge-release-artifact.md` "Known limitations" |
-| Several users: only the first user's bridge binds `127.0.0.1:50051`; any local process can bind it first | Not deny-safe (#35); use the system flavour | `bridge-release-artifact.md` "Known limitations" |
+| Host still has a per-user unit from an older install; the bridge fails with a `SNITCHWATCH_GRPC_BIND ... dev-only` error | Remove it: `systemctl --user disable --now snitchwatch-bridge.service`; delete `~/.config/systemd/user/snitchwatch-bridge.service` (and `.service.d/` drop-ins), `systemctl --user daemon-reload`; uninstall the old per-user Flatpak profile (`flatpak --user uninstall org.snitchwatch.Snitchwatch`); if `/etc/opensnitchd/default-config.json` has `Server.Address: 127.0.0.1:50051`, restore the image's `unix:opensnitchd.sock` | #35; `docs/packaging/system-bridge-integration.md` |
+| Tauri shell exits with "dev-only ... SNITCHWATCH_DEV_TCP=1" | Intended: its webview proxy on `127.0.0.1:3031` exposes the WS token. Set the flag for development; a desktop install uses the system bridge and the Kirigami GUI | `crates/snitchwatch-tauri/src/bridge_runtime.rs` |
 | Rootless daemon fails with a misleading "kernel might not be compatible" | Shipped config uses `ProcMonitorMethod: ebpf`, which loads under a root daemon; a rootless run fails with that message (issue #6) | `phase2-manual-verification-runbook.md:150-152` |
 | Playwright "missing browser" | Run `just web-smoke-install` / `just tauri-smoke-install`; not a code regression | `README.md` |
 | Launching Snitchwatch only brings the existing window to the front, no second window | Intended: one GUI per session (D-Bus name `org.snitchwatch.Snitchwatch`). If the running copy is wedged, a launch waits about 4.5 s and then starts a second copy (logged as an error). `SNITCHWATCH_ALLOW_MULTIPLE=1` skips the check | `crates/snitchwatch-kirigami/src/single_instance.rs` |

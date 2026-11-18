@@ -32,14 +32,14 @@
 //! withdrawn list comes back only when the daemon reconnects.
 //!
 //! **Delivery, by transport.**
-//! - [`DaemonTransport::Tcp`] (legacy per-user mode, `127.0.0.1`): every
+//! - [`DaemonTransport::Tcp`] (dev-only, behind `SNITCHWATCH_DEV_TCP=1`, `127.0.0.1`): every
 //!   command fans out to every open stream, so a fake local "daemon" can
 //!   never stop the real one from receiving it. `send` reports
 //!   [`SendError::NoDaemon`] only when no stream is open at all, and
 //!   in-flight waiters fail with [`CommandError::StreamClosed`] only when the
 //!   last stream closes.
 //!
-//!   **Residual risk until #35 retires this transport.** Any local process
+//!   **Dev-only residual risk (nothing shipped uses this transport, #35).** Any local process
 //!   can subscribe and send a later HELLO. While its stream is current, the
 //!   Rules page shows *its* list and *its* replies decide command outcomes,
 //!   and a toggle the user makes on one of its forged rows is sent, forged
@@ -54,6 +54,8 @@
 //!   A snapshot over the rule limit is treated like a list: its count
 //!   ("N rules … none are listed") shows only once its own stream says
 //!   HELLO, and goes when that stream closes or stops being current.
+//! - [`DaemonTransport::UnixUser`] (the per-user socket, #35): same as TCP,
+//!   because any same-uid process can connect (security review 2026-11-16).
 //! - [`DaemonTransport::Unix`] (system mode, root-only socket): commands go
 //!   only to the current stream, and its waiters fail when that stream
 //!   closes.
@@ -98,7 +100,19 @@ const LATE_REPLY_GRACE: Duration = Duration::from_secs(30);
 pub enum DaemonTransport {
     #[default]
     Tcp,
+    /// The root-only system socket: every peer is root.
     Unix,
+    /// The per-user socket (#35): admits root and the bridge's own uid, so
+    /// any same-uid process can connect. Behaves like [`Self::Tcp`] wherever
+    /// that differs from [`Self::Unix`] (security review 2026-11-16, M1).
+    UnixUser,
+}
+
+impl DaemonTransport {
+    /// True only where every peer is proven to be the root daemon.
+    pub fn peer_is_trusted_daemon(self) -> bool {
+        self == Self::Unix
+    }
 }
 
 /// The only notification types this bridge ever sends the root daemon. Any
@@ -317,15 +331,12 @@ fn check_sendable(notification: &Notification) -> Result<(), SendError> {
 
 /// The streams `delivery` sends to, or why there are none.
 fn targets(inner: &Inner, delivery: Delivery) -> Result<Vec<StreamId>, SendError> {
-    let targets: Vec<StreamId> = match (inner.transport, delivery) {
-        (DaemonTransport::Tcp, Delivery::Usual) => inner.streams.keys().copied().collect(),
-        (DaemonTransport::Unix, Delivery::Usual) => inner.current.into_iter().collect(),
-        (DaemonTransport::Tcp, Delivery::CommittedStream) => {
-            return Err(SendError::NotOnThisTransport)
-        }
-        (DaemonTransport::Unix, Delivery::CommittedStream) => {
-            inner.committed_by.into_iter().collect()
-        }
+    let trusted = inner.transport.peer_is_trusted_daemon();
+    let targets: Vec<StreamId> = match (trusted, delivery) {
+        (false, Delivery::Usual) => inner.streams.keys().copied().collect(),
+        (true, Delivery::Usual) => inner.current.into_iter().collect(),
+        (false, Delivery::CommittedStream) => return Err(SendError::NotOnThisTransport),
+        (true, Delivery::CommittedStream) => inner.committed_by.into_iter().collect(),
     };
     if targets.is_empty() {
         return Err(SendError::NoDaemon);
@@ -631,9 +642,10 @@ impl DaemonCommands {
         let stream = if curated.is_some() {
             inner.committed_by
         } else {
-            match inner.transport {
-                DaemonTransport::Tcp => None,
-                DaemonTransport::Unix => inner.current,
+            if inner.transport.peer_is_trusted_daemon() {
+                inner.current
+            } else {
+                None
             }
         };
         inner.waiters.insert(
@@ -657,7 +669,7 @@ impl DaemonCommands {
     /// list falls back to may be another local process's: its list is
     /// withdrawn as before.
     fn readopt_for_current(&self, inner: &Inner) -> Option<StreamId> {
-        if inner.transport != DaemonTransport::Unix {
+        if !inner.transport.peer_is_trusted_daemon() {
             return None;
         }
         let next = inner.current?;
@@ -687,17 +699,17 @@ impl DaemonCommands {
                 self.rules.withdraw();
             }
         }
-        let failed: Vec<u64> = match inner.transport {
-            DaemonTransport::Tcp if inner.streams.is_empty() => {
-                inner.waiters.keys().copied().collect()
-            }
-            DaemonTransport::Tcp => Vec::new(),
-            DaemonTransport::Unix => inner
+        let failed: Vec<u64> = if inner.transport.peer_is_trusted_daemon() {
+            inner
                 .waiters
                 .iter()
                 .filter(|(_, waiter)| waiter.stream == Some(stream))
                 .map(|(id, _)| *id)
-                .collect(),
+                .collect()
+        } else if inner.streams.is_empty() {
+            inner.waiters.keys().copied().collect()
+        } else {
+            Vec::new()
         };
         for id in failed {
             if let Some(waiter) = inner.waiters.remove(&id) {

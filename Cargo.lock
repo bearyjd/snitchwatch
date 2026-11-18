@@ -2733,6 +2733,7 @@ dependencies = [
 name = "mock-opensnitchd"
 version = "0.1.1"
 dependencies = [
+ "hyper-util",
  "prost",
  "regex",
  "serde_json",
@@ -2743,6 +2744,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "tower 0.4.13",
 ]
 
 [[package]]
@@ -4744,8 +4746,10 @@ dependencies = [
  "anyhow",
  "async-stream",
  "futures-util",
+ "libc",
  "prost",
  "snitchwatch-proto",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",

@@ -27,9 +27,7 @@ use tracing::warn;
 use crate::blocklists::daemon_sink::{made_by_bridge, BLOCKLIST_COMMAND_TIMEOUT};
 use crate::blocklists::NotInstalled;
 use crate::cache::rules::SharedRulesCache;
-use crate::daemon_commands::{
-    BlocklistCommand, CommandError, DaemonCommands, DaemonTransport, SendError,
-};
+use crate::daemon_commands::{BlocklistCommand, CommandError, DaemonCommands, SendError};
 use crate::rule_name::is_reserved_blocklist_name;
 
 /// What a removal pass did.
@@ -72,7 +70,7 @@ impl LeftoverRules {
     /// committed rule snapshot, sorted, that it could delete; `None` while
     /// that is unknown, and over the legacy TCP connection.
     pub fn names(&self) -> Option<Vec<String>> {
-        if self.commands.transport() == DaemonTransport::Tcp {
+        if !self.commands.transport().peer_is_trusted_daemon() {
             return None;
         }
         let cache = self

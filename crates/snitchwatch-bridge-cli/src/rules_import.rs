@@ -22,7 +22,7 @@
 
 use snitchwatch_bridge::auth::Token;
 use snitchwatch_bridge::cache::rules::{RulesCache, SharedRulesCache};
-use snitchwatch_bridge::daemon_commands::{DaemonCommands, DaemonTransport};
+use snitchwatch_bridge::daemon_commands::DaemonCommands;
 use snitchwatch_bridge::rule_io::{self, ExportUnavailable};
 use snitchwatch_bridge::ws_messages::{ClientMessage, ReplyTo, ServerMessage};
 use snitchwatch_proto::protocol::Rule;
@@ -229,8 +229,8 @@ impl ImportTask {
         Replier::new(reply, self.broadcast.clone())
     }
 
-    fn on_tcp(&self) -> bool {
-        self.commands.transport() == DaemonTransport::Tcp
+    fn untrusted_peer(&self) -> bool {
+        !self.commands.transport().peer_is_trusted_daemon()
     }
 
     async fn export(&self, replier: Replier, request_id: String) {
@@ -238,7 +238,7 @@ impl ImportTask {
             request_id: request_id.clone(),
             reason: reason.to_string(),
         };
-        if self.on_tcp() {
+        if self.untrusted_peer() {
             return replier.send(unavailable(TCP_REFUSED)).await;
         }
         // A copy, so the policy runs without holding the cache lock.
@@ -286,7 +286,7 @@ impl ImportTask {
         &mut self,
         document: serde_json::Value,
     ) -> Result<(String, Vec<rule_io::ImportItem>), &'static str> {
-        if self.on_tcp() {
+        if self.untrusted_peer() {
             return Err(TCP_REFUSED);
         }
         let context = self.commands.policy_context();
@@ -331,7 +331,7 @@ impl ImportTask {
         preview_id: &str,
         include: Vec<String>,
     ) -> Result<(), &'static str> {
-        if self.on_tcp() {
+        if self.untrusted_peer() {
             return Err(TCP_REFUSED);
         }
         if self.running.load(Ordering::SeqCst) {

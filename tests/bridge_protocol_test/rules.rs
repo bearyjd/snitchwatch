@@ -24,9 +24,8 @@ async fn rule_update_and_delete_reach_the_daemon_as_notifications() {
 
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
@@ -190,9 +189,8 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
 
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     })
     .await
     .expect("bridge run failed");

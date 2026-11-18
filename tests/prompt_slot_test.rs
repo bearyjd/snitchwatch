@@ -63,9 +63,8 @@ fn stats(rule_misses: u64, uptime: u64) -> Statistics {
 async fn a_held_ask_is_announced_counted_snapshotted_and_released() {
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: socket_dir.path().join("bridge.sock"),
         cache_capacity: 1024,
+        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
     })
     .await
     .expect("bridge run failed");

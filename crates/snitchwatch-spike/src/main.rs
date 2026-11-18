@@ -16,8 +16,12 @@
 //! allow/deny `Rule`.
 //!
 //! Usage:
-//!     cargo run -p snitchwatch-spike -- [bind_addr]
-//! Default bind address: 0.0.0.0:50051
+//!     cargo run -p snitchwatch-spike
+//!     SNITCHWATCH_DEV_TCP=1 cargo run -p snitchwatch-spike -- [loopback_addr]
+//!
+//! Default: a Unix socket at `$XDG_RUNTIME_DIR/snitchwatch-grpc/spike.sock`
+//! (#35). TCP needs `SNITCHWATCH_DEV_TCP=1` and a loopback address
+//! (default `127.0.0.1:50051`); anything else, including `0.0.0.0`, is refused.
 
 use anyhow::{Context, Result};
 use snitchwatch_proto::protocol::ui_server::{Ui, UiServer};
@@ -25,6 +29,9 @@ use snitchwatch_proto::protocol::{
     Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply, PingReply,
     PingRequest, Rule,
 };
+use std::ffi::OsString;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use tokio_stream::Stream;
 use tonic::transport::Server;
@@ -175,6 +182,97 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+const DEV_TCP_ENV: &str = "SNITCHWATCH_DEV_TCP";
+const DEFAULT_DEV_ADDR: &str = "127.0.0.1:50051";
+
+/// Where the spike listens.
+#[derive(Debug, PartialEq, Eq)]
+enum Listen {
+    Tcp(SocketAddr),
+    Unix(PathBuf),
+}
+
+/// Pure over its inputs so it is unit-testable without touching the env.
+fn resolve_listen(
+    dev_flag: Option<OsString>,
+    addr_arg: Option<String>,
+    xdg_runtime_dir: Option<OsString>,
+) -> Result<Listen> {
+    match dev_flag.as_deref().map(|v| v.to_str()) {
+        None => {}
+        Some(Some("1")) => {
+            let raw = addr_arg.unwrap_or_else(|| DEFAULT_DEV_ADDR.to_string());
+            let addr: SocketAddr = raw
+                .parse()
+                .with_context(|| format!("invalid bind address: {raw}"))?;
+            anyhow::ensure!(
+                addr.ip().is_loopback(),
+                "bind address must be loopback (got {addr}); {DEV_TCP_ENV} never exposes gRPC beyond loopback"
+            );
+            return Ok(Listen::Tcp(addr));
+        }
+        Some(_) => anyhow::bail!("{DEV_TCP_ENV} must be 1 when set"),
+    }
+    if let Some(arg) = addr_arg {
+        anyhow::bail!("TCP address {arg} is dev-only: set {DEV_TCP_ENV}=1 to use it");
+    }
+    let xdg = xdg_runtime_dir
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .with_context(|| {
+            format!("XDG_RUNTIME_DIR must be an absolute path (or set {DEV_TCP_ENV}=1 for loopback TCP)")
+        })?;
+    Ok(Listen::Unix(
+        xdg.join("snitchwatch-grpc").join("spike.sock"),
+    ))
+}
+
+// Small local copy of snitchwatch-bridge-cli's `user_socket` helpers (which
+// are crate-private): depending on the bridge crate just for these would add
+// a heavy edge to a throwaway spike.
+fn bind_unix(path: &Path) -> Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+    bind_unix_with(path, |p| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600))
+    })
+}
+
+/// `chmod_socket` is the final 0600 step, injectable so a failure is testable.
+fn bind_unix_with(
+    path: &Path,
+    chmod_socket: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+    let dir = path.parent().context("socket path has no parent")?;
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).context("cannot create socket directory"),
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    let euid = unsafe { libc::geteuid() };
+    anyhow::ensure!(
+        meta.file_type().is_dir() && meta.uid() == euid && meta.mode() & 0o7777 == 0o700,
+        "{} must be a real directory owned by uid {euid} with mode 0700",
+        dir.display()
+    );
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_socket() => std::fs::remove_file(path)?,
+        Ok(_) => anyhow::bail!("{} exists and is not a socket", path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("cannot stat socket path"),
+    }
+    let listener = std::os::unix::net::UnixListener::bind(path)
+        .with_context(|| format!("cannot bind {}", path.display()))?;
+    if let Err(e) = chmod_socket(path) {
+        // Never leave a socket with an unintended mode behind.
+        let _ = std::fs::remove_file(path);
+        return Err(e).with_context(|| format!("cannot chmod socket {}", path.display()));
+    }
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -184,20 +282,100 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let addr = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "0.0.0.0:50051".to_string());
-    let socket = addr
-        .parse()
-        .with_context(|| format!("invalid bind address: {addr}"))?;
+    let listen = resolve_listen(
+        std::env::var_os(DEV_TCP_ENV),
+        std::env::args().nth(1),
+        std::env::var_os("XDG_RUNTIME_DIR"),
+    )?;
 
-    info!(%addr, "snitchwatch-spike: starting Ui gRPC server (waiting for opensnitchd to dial in)");
+    info!(
+        ?listen,
+        "snitchwatch-spike: starting Ui gRPC server (waiting for opensnitchd to dial in)"
+    );
 
-    Server::builder()
-        .add_service(UiServer::new(SpikeUi))
-        .serve(socket)
-        .await
-        .context("Ui server crashed")?;
+    let server = Server::builder().add_service(UiServer::new(SpikeUi));
+    match listen {
+        Listen::Tcp(addr) => server.serve(addr).await,
+        Listen::Unix(path) => {
+            let listener = tokio::net::UnixListener::from_std(bind_unix(&path)?)?;
+            server
+                .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener))
+                .await
+        }
+    }
+    .context("Ui server crashed")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn os(s: &str) -> Option<OsString> {
+        Some(OsString::from(s))
+    }
+
+    #[test]
+    fn a_failed_final_chmod_removes_the_socket_and_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("snitchwatch-grpc").join("spike.sock");
+        let err = bind_unix_with(&path, |_| Err(std::io::Error::other("boom"))).unwrap_err();
+        assert!(err.to_string().contains("chmod"), "{err}");
+        assert!(!path.exists(), "socket must not be left behind");
+    }
+
+    #[test]
+    fn bind_unix_yields_a_0600_socket() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("snitchwatch-grpc").join("spike.sock");
+        let _l = bind_unix(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
+    }
+
+    #[test]
+    fn default_is_the_spike_socket_under_snitchwatch_grpc() {
+        let got = resolve_listen(None, None, os("/run/user/1000")).unwrap();
+        assert_eq!(
+            got,
+            Listen::Unix("/run/user/1000/snitchwatch-grpc/spike.sock".into())
+        );
+    }
+
+    #[test]
+    fn default_needs_an_absolute_runtime_dir() {
+        assert!(resolve_listen(None, None, None).is_err());
+        assert!(resolve_listen(None, None, os("rel")).is_err());
+    }
+
+    #[test]
+    fn flag_gives_loopback_tcp_default() {
+        let got = resolve_listen(os("1"), None, None).unwrap();
+        assert_eq!(got, Listen::Tcp("127.0.0.1:50051".parse().unwrap()));
+    }
+
+    #[test]
+    fn flag_accepts_an_explicit_loopback_address() {
+        let got = resolve_listen(os("1"), Some("127.0.0.1:0".into()), None).unwrap();
+        assert_eq!(got, Listen::Tcp("127.0.0.1:0".parse().unwrap()));
+    }
+
+    #[test]
+    fn flag_refuses_0_0_0_0_and_garbage() {
+        assert!(resolve_listen(os("1"), Some("0.0.0.0:50051".into()), None).is_err());
+        assert!(resolve_listen(os("1"), Some("nonsense".into()), None).is_err());
+    }
+
+    #[test]
+    fn address_without_the_flag_is_refused_naming_it() {
+        let err =
+            resolve_listen(None, Some("127.0.0.1:50051".into()), os("/run/user/1000")).unwrap_err();
+        assert!(err.to_string().contains("SNITCHWATCH_DEV_TCP=1"), "{err}");
+    }
+
+    #[test]
+    fn non_1_flag_is_refused() {
+        assert!(resolve_listen(os("0"), None, os("/run/user/1000")).is_err());
+    }
 }

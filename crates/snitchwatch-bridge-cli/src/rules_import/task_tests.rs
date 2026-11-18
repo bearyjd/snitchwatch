@@ -141,7 +141,18 @@ async fn export_is_unavailable_until_rules_load_then_lists_them() {
 /// daemon (#35), so nothing is exported, previewed or applied there.
 #[tokio::test]
 async fn import_and_export_are_refused_on_the_tcp_transport() {
-    let daemon = daemon_on(DaemonTransport::Tcp, vec![host_rule("a", "deny")]);
+    import_and_export_are_refused_on(DaemonTransport::Tcp).await;
+}
+
+/// The per-user socket (#35) is untrusted too: same-uid peers can pose as
+/// the daemon.
+#[tokio::test]
+async fn import_and_export_are_refused_on_the_unix_user_transport() {
+    import_and_export_are_refused_on(DaemonTransport::UnixUser).await;
+}
+
+async fn import_and_export_are_refused_on(transport: DaemonTransport) {
+    let daemon = daemon_on(transport, vec![host_rule("a", "deny")]);
     let import = task(&daemon, Duration::from_secs(600));
     let mut rx = daemon.broadcast.subscribe();
 

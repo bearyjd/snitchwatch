@@ -23,7 +23,7 @@ fn verify_rejects_a_group_writable_directory() {
 
 #[test]
 fn verify_rejects_a_member_owned_by_uid_1000() {
-    rejects_header_change("uid1000", UNIT, "uid", 1000, "is owned by (1000, 0,");
+    rejects_header_change("uid1000", LICENSE, "uid", 1000, "is owned by (1000, 0,");
 }
 
 #[test]

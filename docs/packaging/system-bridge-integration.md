@@ -1,11 +1,12 @@
-# System bridge integration (overlay, pending a new release)
+# System bridge integration (the only shipped flavour)
 
-This overlay is the privileged-host deployment of Snitchwatch, and the only
-deny-safe one: the image path from r15 on (owner decision 2026-10-16, #35).
-It is separate from the existing `snitchwatch-bridge.service` **user** unit
-and does not change that release contract. Do not enable both: the legacy
-unit uses TCP `127.0.0.1:50051`, which any local process can bind first, so
-it is not deny-safe; the system bridge is socket-activated only.
+This overlay is the deployment of Snitchwatch, and the only shipped, deny-safe
+one (owner decision 2026-10-16, #35). The earlier per-user
+`snitchwatch-bridge.service` on TCP `127.0.0.1:50051` is gone: any local process
+could bind that port first. TCP gRPC survives only as a dev option behind
+`SNITCHWATCH_DEV_TCP=1`; the system bridge is socket-activated only. A host that
+still has the old per-user unit: see the "Host still has a per-user unit" row in
+[`../RUNBOOK.md`](../RUNBOOK.md).
 
 ## Trust boundary
 
@@ -250,13 +251,11 @@ squattable transport (#35).
 
 ## GUI profile, migration, and verification
 
-Existing releases continue to use the primary
-`packaging/flatpak/org.snitchwatch.Snitchwatch.yml` profile and its per-user
-`xdg-run/snitchwatch` bridge. For the system deployment, build/install the
-alternative `packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml` profile;
-it has the same app-id and therefore replaces rather than coinstalls with the
-legacy profile. It grants read-only `/run/snitchwatch` and
-`/run/snitchwatch-auth`, and sets `SNITCHWATCH_SYSTEM_BRIDGE=1` for the GUI.
+Build/install the
+`packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml` profile, the only
+shipped one (the per-user profile with its `xdg-run/snitchwatch` bridge is gone,
+#35). An older per-user install of the same app-id is replaced by it. It
+grants read-only `/run/snitchwatch` and `/run/snitchwatch-auth`, and sets `SNITCHWATCH_SYSTEM_BRIDGE=1` for the GUI.
 
 The reviewed manifests declare checksum-pinned protoc 29.3 and the Rust SDK
 extension's mold linker, with compiler and debug tooling removed before export.
@@ -283,8 +282,8 @@ must not be able to create or replace either socket path. Do not add
 `--share=network` as a workaround.
 
 This is an overlay until a bridge release packages these files and the daemon
-configuration migration together. The published user-service release remains
-unchanged for existing installations.
+configuration migration together. The bridge release tarball carries only the
+binary and manifest; the units live here in `packaging/system/`.
 
 Broad recommended DNS uses the authenticated ticket and durable consent protocol
 documented in [curated broad opt-in](../bridge/curated-broad-opt-in.md).

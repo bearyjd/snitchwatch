@@ -4,7 +4,7 @@
 use crate::busy::BusyNames;
 use snitchwatch_bridge::cache::rules::{RulesCache, SharedRulesCache};
 use snitchwatch_bridge::curated::{entry_for_rule_name, requested_toggle, toggleable};
-use snitchwatch_bridge::daemon_commands::{DaemonCommands, DaemonTransport};
+use snitchwatch_bridge::daemon_commands::DaemonCommands;
 use snitchwatch_bridge::rule_io::only_enabled_differs;
 use snitchwatch_bridge::rule_name::is_reserved_curated_name;
 use snitchwatch_bridge::rule_policy::{
@@ -76,7 +76,7 @@ pub(super) fn plan(
     busy: &BusyNames,
     curated_inert: bool,
 ) -> Result<Plan, Refusal> {
-    let on_tcp = commands.transport() == DaemonTransport::Tcp;
+    let untrusted_peer = !commands.transport().peer_is_trusted_daemon();
     // The connected daemon's version as of now; `send` checks it again.
     let context = commands.policy_context();
     match command {
@@ -89,21 +89,21 @@ pub(super) fn plan(
             };
             notification(&effect).map(Plan::Send)
         }
-        Command::Add { rule } => plan_add(rule, on_tcp, context, rules, busy),
+        Command::Add { rule } => plan_add(rule, untrusted_peer, context, rules, busy),
         Command::Update { rule_id, rule } => {
-            plan_update(rule_id, rule, on_tcp, curated_inert, context, rules, busy)
+            plan_update(rule_id, rule, untrusted_peer, curated_inert, context, rules, busy)
         }
     }
 }
 
 fn plan_add(
     rule: &serde_json::Value,
-    on_tcp: bool,
+    untrusted_peer: bool,
     context: PolicyContext,
     rules: &SharedRulesCache,
     busy: &BusyNames,
 ) -> Result<Plan, Refusal> {
-    if on_tcp {
+    if untrusted_peer {
         return Err(refusal("rule", TCP_REFUSED));
     }
     let parsed = check_wire_rule_in(rule, PolicyProfile::Editor, context)?;
@@ -119,7 +119,7 @@ fn plan_add(
 fn plan_update(
     rule_id: &str,
     rule: &serde_json::Value,
-    on_tcp: bool,
+    untrusted_peer: bool,
     curated_inert: bool,
     context: PolicyContext,
     rules: &SharedRulesCache,
@@ -150,7 +150,7 @@ fn plan_update(
         }
         return Ok(Plan::Send(change));
     }
-    if on_tcp {
+    if untrusted_peer {
         return Err(refusal("rule", TCP_REFUSED));
     }
     validate_user_rule_in(&new, PolicyProfile::Editor, context)?;

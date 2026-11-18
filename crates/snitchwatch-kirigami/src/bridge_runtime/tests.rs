@@ -267,9 +267,8 @@ async fn disconnect_discards_queued_actions_and_rejects_new_ones() {
 async fn client_loop_forwards_authenticated_snapshot_to_the_qml_feed() {
     let dir = tempfile::tempdir().unwrap();
     let config = snitchwatch_bridge_cli::BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..snitchwatch_bridge_cli::BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     };
     let bridge = snitchwatch_bridge_cli::run(config.clone())
         .await

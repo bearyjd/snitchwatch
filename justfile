@@ -43,8 +43,10 @@ regen-proto:
 run-bridge:
     RUST_LOG=info cargo run -p snitchwatch-bridge-cli
 
-run-spike endpoint="http://127.0.0.1:50051":
-    RUST_LOG=info cargo run -p snitchwatch-spike -- {{endpoint}}
+# Default: Unix socket $XDG_RUNTIME_DIR/snitchwatch-grpc/spike.sock. Pass a
+# loopback address (e.g. 127.0.0.1:50051) to listen on TCP (dev only).
+run-spike addr="":
+    {{ if addr == "" { "" } else { "SNITCHWATCH_DEV_TCP=1" } }} RUST_LOG=info cargo run -p snitchwatch-spike -- {{addr}}
 
 # Re-run the idempotent rebrand pass over the vendored web/ tree.
 web-rebrand:
@@ -129,23 +131,20 @@ test-blocklists:
     cargo test -p snitchwatch-bridge blocklists -- --nocapture
     cargo test -p snitchwatch-bridge --test blocklists_e2e -- --nocapture
 
-# Validate the packaging artifacts without a Bazzite host. Parses the
-# YAML/JSON, really verifies the systemd unit (verify-unit.sh: a renamed copy
-# pointed at a freshly built binary, so a ~/.config drop-in can't shadow it
-# and a failure can't be mistaken for "systemd-analyze missing"), and runs the
-# Rust packaging/release shape tests plus the release-tarball packer tests, and
-# shellchecks the release scripts (skipped when shellcheck isn't installed).
+# Validate the packaging artifacts without a Bazzite host: parse the YAML/JSON,
+# run the Rust packaging/release shape tests and the release-tarball packer
+# tests, and shellcheck the release scripts (skipped when shellcheck isn't
+# installed).
 package-check:
     python3 packaging/geo/test-country-data.py
     bash -n packaging/scanner/stage.sh
     python3 packaging/scanner/test-staging.py
     python3 -I scripts/ebpf/test_measure.py
-    python3 -c "import yaml,sys; yaml.safe_load(open('packaging/bluebuild/recipe.yml')); yaml.safe_load(open('packaging/flatpak/org.snitchwatch.Snitchwatch.yml')); yaml.safe_load(open('.github/workflows/release.yml')); print('YAML ok')"
+    python3 -c "import yaml,sys; yaml.safe_load(open('packaging/bluebuild/recipe.yml')); yaml.safe_load(open('packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml')); yaml.safe_load(open('.github/workflows/release.yml')); print('YAML ok')"
     python3 -c "import json; json.load(open('packaging/bluebuild/files/system/etc/opensnitchd/default-config.json')); json.load(open('packaging/bluebuild/files/system/etc/opensnitchd/rules/000-snitchwatch-bridge-fetch.json')); json.load(open('packaging/system/opensnitchd-default-config.json')); json.load(open('packaging/endpoint-events/opensnitchd-logger.json')); print('JSON ok')"
     bash -n packaging/endpoint-events/verify.sh
     bash -n packaging/ebpf/build-modules.sh
-    bash packaging/release/verify-unit.sh
-    if command -v shellcheck >/dev/null 2>&1; then shellcheck packaging/release/*.sh packaging/ebpf/build-modules.sh packaging/scanner/stage.sh packaging/endpoint-events/verify.sh; else echo "shellcheck not installed — skipped"; fi
+    if command -v shellcheck >/dev/null 2>&1; then shellcheck packaging/release/*.sh packaging/ebpf/build-modules.sh packaging/scanner/stage.sh packaging/endpoint-events/verify.sh scripts/ci-root-tests.sh; else echo "shellcheck not installed — skipped"; fi
     cargo test -p snitchwatch-bridge --test packaging_shape --test release_shape --test release_artifact --test ebpf_modules_shape
     # The release tarball's feature set (no embedded web UI, decision I) —
     # nothing else builds it, so lint and test it here.
@@ -203,8 +202,8 @@ release-bridge-repro:
             /src/packaging/release/repro-check.sh "$(printf "%s\n" "$out" | sed -n "s/^TARBALL=//p")"'
 
 # What runs in the container: MANIFEST/SHA256SUMS/layout checks, ldd,
-# --help/--version, then an install to / + `systemd-analyze verify --user` +
-# `systemctl --global enable`.
+# --help/--version, then an install to / and `--version` from the installed
+# binary.
 #
 # The sha256 argument is the TRUST ANCHOR: take it from your own build output
 # (`SHA256=` at the end of `just release-bridge`) or from a download whose

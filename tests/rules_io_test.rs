@@ -42,9 +42,8 @@ async fn next_action(ws: &mut Ws, action: &str) -> Value {
 async fn import_and_export_are_refused_on_the_tcp_transport() {
     let dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
-        grpc_bind: "127.0.0.1:0".parse().unwrap(),
-        ws_socket_path: dir.path().join("bridge.sock"),
         cache_capacity: 64,
+        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
     })
     .await
     .unwrap();

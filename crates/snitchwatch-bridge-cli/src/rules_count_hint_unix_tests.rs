@@ -38,9 +38,8 @@ async fn start(dir: &std::path::Path, names: &[&str]) -> (RunningBridge, Pinger)
     let grpc_path = dir.join("opensnitchd.sock");
     let bridge = run_with_incoming(
         BridgeConfig {
-            grpc_bind: "127.0.0.1:0".parse().unwrap(),
-            ws_socket_path: dir.join("bridge.sock"),
             cache_capacity: 64,
+            ..BridgeConfig::dev_tcp_for_tests(dir.join("bridge.sock"))
         },
         GrpcEndpoint::Unix(grpc_path.clone()),
         UnixListenerStream::new(UnixListener::bind(&grpc_path).unwrap()),

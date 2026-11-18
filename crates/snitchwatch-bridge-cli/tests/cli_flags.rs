@@ -44,6 +44,7 @@ fn isolated_command(dir: &Path, args: &[&str]) -> Command {
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("SNITCHWATCH_WS_SOCKET", "./bridge.sock")
+        .env("SNITCHWATCH_DEV_TCP", "1")
         .env("SNITCHWATCH_GRPC_BIND", "127.0.0.1:0")
         .env("XDG_RUNTIME_DIR", dir)
         .stdin(Stdio::null())
@@ -154,6 +155,7 @@ fn long_help_prints_usage_without_io() {
 fn system_mode_missing_activation_fails_without_legacy_socket_or_token() {
     let dir = tempfile::tempdir().unwrap();
     let out = isolated_command(dir.path(), &[])
+        .env_remove("SNITCHWATCH_DEV_TCP")
         .env("SNITCHWATCH_SYSTEM_BRIDGE", "1")
         .env(
             "SNITCHWATCH_GRPC_BIND",
@@ -313,4 +315,74 @@ fn no_args_still_starts_the_bridge() {
     let addr: SocketAddr = addr.parse().expect("GRPC_LISTEN_ADDR is a socket address");
     assert!(addr.ip().is_loopback(), "unexpected bind address {addr}");
     assert_ne!(addr.port(), 0, "ephemeral port was not resolved");
+}
+
+#[test]
+fn grpc_bind_without_the_dev_flag_fails_before_any_socket_or_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = isolated_command(dir.path(), &[])
+        .env_remove("SNITCHWATCH_DEV_TCP")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("SNITCHWATCH_DEV_TCP=1"));
+    assert!(!dir.path().join("bridge.sock").exists());
+    assert!(!dir.path().join("token").exists());
+    assert!(!dir.path().join("snitchwatch-grpc").exists());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+}
+
+#[test]
+fn dev_flag_with_a_non_loopback_bind_or_a_bad_value_fails_before_any_io() {
+    let dir = tempfile::tempdir().unwrap();
+    for (flag, bind) in [("1", "0.0.0.0:50051"), ("true", "127.0.0.1:0")] {
+        let out = isolated_command(dir.path(), &[])
+            .env("SNITCHWATCH_DEV_TCP", flag)
+            .env("SNITCHWATCH_GRPC_BIND", bind)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{flag} {bind}");
+        assert!(!dir.path().join("bridge.sock").exists());
+        assert!(!dir.path().join("snitchwatch-grpc").exists());
+    }
+}
+
+#[test]
+fn dev_flag_with_the_system_bridge_fails_before_any_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = isolated_command(dir.path(), &[])
+        .env("SNITCHWATCH_SYSTEM_BRIDGE", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("SNITCHWATCH_DEV_TCP"));
+    assert!(!dir.path().join("bridge.sock").exists());
+}
+
+#[test]
+fn default_start_prints_the_user_grpc_socket_and_never_a_tcp_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = isolated_command(dir.path(), &[]);
+    cmd.env_remove("SNITCHWATCH_DEV_TCP")
+        .env_remove("SNITCHWATCH_GRPC_BIND")
+        .stderr(Stdio::null());
+    let mut child = spawn_command(cmd);
+    let stdout = child.0.stdout.take().expect("stdout was piped");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let lines: Vec<String> = std::iter::from_fn(|| rx.recv_timeout(DEADLINE).ok())
+        .take_while(|line| !line.starts_with("WS_TOKEN_PATH="))
+        .collect();
+    let grpc: Vec<&String> = lines.iter().filter(|l| l.contains("GRPC_")).collect();
+    assert_eq!(grpc.len(), 1, "{lines:?}");
+    let first = grpc[0];
+    let expected = dir.path().join("snitchwatch-grpc/opensnitchd.sock");
+    assert_eq!(*first, format!("GRPC_SOCKET_PATH={}", expected.display()));
+    assert!(expected.exists());
 }

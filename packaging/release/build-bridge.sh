@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build snitchwatch-bridge-cli inside the pinned Fedora builder container,
-# stage it with the systemd user unit and license files, pack the
+# stage it with the license files, pack the
 # deterministic release tarball and self-verify it.
 #
 # Contract: docs/superpowers/plans/2026-10-03-bridge-release-artifact.md
@@ -36,7 +36,7 @@ RUSTFLAGS_TEMPLATE='--remap-path-prefix=<src>=/snitchwatch --remap-path-prefix=<
 # Everything the binary is built from. rust-embed embeds EVERY file under web/
 # (git-ignored *.swp/.DS_Store included), so ignored files here are dirty too.
 BUILD_INPUTS=(web crates/snitchwatch-bridge crates/snitchwatch-bridge-cli crates/snitchwatch-proto
-    vendor/opensnitch/proto Cargo.toml Cargo.lock packaging/systemd)
+    vendor/opensnitch/proto Cargo.toml Cargo.lock)
 # Each would silently change what the MANIFEST's build command/rustflags say.
 TOOLCHAIN_OVERRIDES=(RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER RUSTC RUSTC_WORKSPACE_WRAPPER
     CARGO_BUILD_RUSTC CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
@@ -211,8 +211,6 @@ write_thirdparty() {
 stage_files() {
     local stage="$1" licenses="$1/usr/share/licenses/snitchwatch-bridge"
     install -D -m 0755 "$BIN" "$stage/usr/bin/snitchwatch-bridge-cli"
-    install -D -m 0644 "$SRC_DIR/packaging/systemd/snitchwatch-bridge.service" \
-        "$stage/usr/lib/systemd/user/snitchwatch-bridge.service"
     if [[ -f "$SRC_DIR/LICENSE" ]]; then
         install -D -m 0644 "$SRC_DIR/LICENSE" "$licenses/LICENSE"
     fi

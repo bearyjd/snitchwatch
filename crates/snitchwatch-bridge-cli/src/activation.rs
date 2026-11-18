@@ -144,29 +144,60 @@ impl tokio_stream::Stream for RootUnixIncoming {
     type Item = std::io::Result<UnixStream>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        // Bound each poll so a flood of rejected clients cannot starve shutdown.
-        for _ in 0..32 {
-            match self.0.poll_accept(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Some(Err(error))),
-                Poll::Ready(Ok((stream, _))) => match stream.peer_cred() {
-                    Ok(cred) if cred.uid() == 0 => return Poll::Ready(Some(Ok(stream))),
-                    Ok(cred) => warn!(uid = cred.uid(), "rejected non-root daemon peer"),
-                    Err(error) => {
-                        warn!(%error, "rejected daemon peer with unavailable credentials")
-                    }
-                },
-            }
-        }
-        cx.waker().wake_by_ref();
-        Poll::Pending
+        poll_accept_filtered(&self.0, cx, |uid| uid == 0)
     }
+}
+
+/// The per-user socket's peer policy (#35): uid 0 (opensnitchd) or the
+/// bridge's own uid (dev tools, tests). Every other uid is rejected. The same
+/// uid is not a security boundary on Linux: it could ptrace or replace the
+/// bridge anyway.
+pub(crate) struct OwnerUnixIncoming {
+    pub(crate) listener: UnixListener,
+    pub(crate) owner_uid: u32,
+}
+
+pub(crate) fn owner_peer_allowed(peer_uid: u32, owner_uid: u32) -> bool {
+    peer_uid == 0 || peer_uid == owner_uid
+}
+
+impl tokio_stream::Stream for OwnerUnixIncoming {
+    type Item = std::io::Result<UnixStream>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        let owner_uid = self.owner_uid;
+        poll_accept_filtered(&self.listener, cx, |uid| owner_peer_allowed(uid, owner_uid))
+    }
+}
+
+fn poll_accept_filtered(
+    listener: &UnixListener,
+    cx: &mut TaskContext<'_>,
+    allow: impl Fn(u32) -> bool,
+) -> Poll<Option<std::io::Result<UnixStream>>> {
+    // Bound each poll so a flood of rejected clients cannot starve shutdown.
+    for _ in 0..32 {
+        match listener.poll_accept(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Some(Err(error))),
+            Poll::Ready(Ok((stream, _))) => match stream.peer_cred() {
+                Ok(cred) if allow(cred.uid()) => return Poll::Ready(Some(Ok(stream))),
+                Ok(cred) => warn!(uid = cred.uid(), "rejected unauthorized daemon peer"),
+                Err(error) => {
+                    warn!(%error, "rejected daemon peer with unavailable credentials")
+                }
+            },
+        }
+    }
+    cx.waker().wake_by_ref();
+    Poll::Pending
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::fd::{AsRawFd, IntoRawFd};
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn activation_metadata_is_strict_and_accepts_either_fd_order() {
@@ -233,6 +264,92 @@ mod tests {
             }
         }
         assert!(duplicate_unix_listener(-1).is_err());
+    }
+
+    #[test]
+    fn owner_policy_allows_root_and_the_owner_only() {
+        assert!(owner_peer_allowed(0, 1000));
+        assert!(owner_peer_allowed(1000, 1000));
+        assert!(!owner_peer_allowed(65534, 1000));
+        assert!(!owner_peer_allowed(1001, 1000));
+    }
+
+    #[tokio::test]
+    async fn owner_incoming_accepts_a_same_uid_peer() {
+        use tokio_stream::StreamExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grpc.sock");
+        let owner_uid = unsafe { libc::geteuid() };
+        let mut incoming = OwnerUnixIncoming {
+            listener: UnixListener::bind(&path).unwrap(),
+            owner_uid,
+        };
+        let _peer = UnixStream::connect(&path).await.unwrap();
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(2), incoming.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.peer_cred().unwrap().uid(), owner_uid);
+    }
+
+    #[tokio::test]
+    async fn owner_incoming_drops_a_foreign_uid_peer_and_keeps_accepting() {
+        use std::os::unix::process::CommandExt;
+        use tokio_stream::StreamExt;
+        let euid = unsafe { libc::geteuid() };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grpc.sock");
+        if euid == 0 {
+            // Root peers are always allowed, so the foreign peer is a child
+            // re-exec'd as uid 65534 (the helper is in `lib_tests.rs`); the
+            // bridge "owner" is a third uid.
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+            let mut incoming = OwnerUnixIncoming {
+                listener: UnixListener::bind(&path).unwrap(),
+                owner_uid: 1000,
+            };
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::non_root_daemon_peer_helper",
+                    "--nocapture",
+                ])
+                .env("SNITCHWATCH_TEST_PEER_SOCKET", &path)
+                .uid(65534)
+                .gid(65534)
+                .spawn()
+                .unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(300), incoming.next())
+                    .await
+                    .is_err(),
+                "a foreign-uid peer must not be handed to tonic"
+            );
+            assert!(child.wait().unwrap().success());
+            let _root = UnixStream::connect(&path).await.unwrap();
+            let accepted = tokio::time::timeout(std::time::Duration::from_secs(2), incoming.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(accepted.peer_cred().unwrap().uid(), 0);
+            return;
+        }
+        eprintln!("SKIPPED-ROOT-ONLY: ran the non-root fallback; the uid 65534 re-exec needs root");
+        // The bridge "owner" is some other uid: our own peer is foreign.
+        let mut incoming = OwnerUnixIncoming {
+            listener: UnixListener::bind(&path).unwrap(),
+            owner_uid: euid + 1,
+        };
+        let _foreign = UnixStream::connect(&path).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), incoming.next())
+                .await
+                .is_err(),
+            "a foreign-uid peer must not be handed to tonic"
+        );
     }
 
     #[tokio::test]

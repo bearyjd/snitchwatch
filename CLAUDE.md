@@ -61,10 +61,14 @@ missing-browser error, run the `-install` target first — it is not a code
 regression.
 
 `just package-check` validates packaging artifacts (YAML/JSON/systemd unit
-syntax) without needing a Bazzite host. Its unit check
-(`packaging/release/verify-unit.sh`) verifies a *renamed* copy of the unit,
-because a dev machine's `~/.config/systemd/user/snitchwatch-bridge.service`
-(+ drop-ins) would otherwise shadow the file under test.
+syntax) without needing a Bazzite host.
+
+**The system bridge is the only shipped flavour (#35).** TCP gRPC is dev-only
+behind `SNITCHWATCH_DEV_TCP=1` (loopback only; `SNITCHWATCH_GRPC_BIND` without
+it is an error). The Tauri shell refuses to start without the flag (its webview
+proxy on `127.0.0.1:3031` hands out the WS token); the spike and the dev bridge
+default to a per-user Unix socket under `$XDG_RUNTIME_DIR/snitchwatch-grpc/`.
+There is no per-user systemd unit and no per-user Flatpak profile.
 
 The bridge release tarball (`docs/packaging/bridge-release-artifact.md`) is
 built by `packaging/release/*.sh` inside the digest-pinned Fedora 45 image
