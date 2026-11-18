@@ -94,8 +94,8 @@ package-check:
     bash -n packaging/ebpf/build-modules.sh
     if command -v shellcheck >/dev/null 2>&1; then shellcheck packaging/release/*.sh packaging/ebpf/build-modules.sh packaging/scanner/stage.sh packaging/endpoint-events/verify.sh scripts/ci-root-tests.sh; else echo "shellcheck not installed — skipped"; fi
     cargo test -p snitchwatch-bridge --test packaging_shape --test release_shape --test release_artifact --test ebpf_modules_shape
-    # The release tarball's feature set (no embedded web UI, decision I) —
-    # nothing else builds it, so lint and test it here.
+    # Mirrors RELEASE_PACKAGE_ARGS (now identical to the default feature set);
+    # kept so the release build command itself stays linted and tested.
     cargo clippy -p snitchwatch-bridge --no-default-features --all-targets --locked -- -D warnings
     cargo clippy -p snitchwatch-bridge-cli --no-default-features --locked -- -D warnings
     cargo test -p snitchwatch-bridge --no-default-features --lib --locked ws_server

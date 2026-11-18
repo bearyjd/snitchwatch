@@ -160,8 +160,9 @@ jobs:
           submodules: true
           persist-credentials: false
 
-      # clippy: package-check lints the release tarball's feature set
-      # (--no-default-features, plan decision I), which no other job builds.
+      # clippy: package-check also lints with --no-default-features, mirroring
+      # RELEASE_PACKAGE_ARGS (now the same as the default feature set), so the
+      # release build command stays covered.
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

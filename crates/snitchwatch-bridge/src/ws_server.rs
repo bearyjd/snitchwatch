@@ -15,7 +15,8 @@
 //!
 //! Only `/stream` is served, and it requires the handshake token. There are
 //! no unauthenticated routes: every other path (`/`, `/assets/*`, anything
-//! unknown) is a plain 404.
+//! unknown) is a bodiless 404, and a non-upgrade `GET /stream` or a wrong
+//! method on `/stream` is rejected by axum (4xx / 405) without a token.
 
 use crate::auth::Token;
 use crate::blocklists::BlocklistsManager;
@@ -125,8 +126,9 @@ impl WsServer {
         Ok(listener)
     }
 
-    /// The HTTP surface: only the token-gated `/stream` WebSocket. Every
-    /// other path is a plain 404.
+    /// The HTTP surface: only the token-gated `/stream` WebSocket. Unknown
+    /// paths are a plain 404; a non-upgrade `GET /stream` or other method on
+    /// it is rejected by axum (4xx / 405).
     fn router(state: AppState) -> Router {
         Router::new()
             .route("/stream", get(ws_handler))

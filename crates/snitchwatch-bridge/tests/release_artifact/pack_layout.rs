@@ -332,7 +332,7 @@ fn verify_rejects_a_binary_that_embeds_the_web_ui() {
     bytes.extend_from_slice(b"/* Copyright (C) 2026 Objective Development Software GmbH */");
     write_file(&fx.stage.join(BIN), &bytes, 0o755);
     let tarball = fx.pack_ok("out-webui", &[]);
-    assert_rejected(&tarball, "embeds the vendored web/ UI", "web UI embedded");
+    assert_rejected(&tarball, "embeds the GPL-2.0-only web UI marker", "web UI embedded");
 }
 
 #[test]

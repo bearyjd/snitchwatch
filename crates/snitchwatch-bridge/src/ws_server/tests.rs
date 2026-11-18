@@ -402,31 +402,70 @@ async fn connection_with_correct_token_round_trips() {
     }
 }
 
-/// Only `/stream` is served: `/`, `/assets/*` and an unknown path are all
-/// 404 with no token, so the socket has no unauthenticated routes.
+/// Only `/stream` is served: every other path, with any method, is a
+/// bodiless 404/405, so the socket has no unauthenticated routes and never
+/// echoes the token.
 #[tokio::test]
 async fn only_stream_is_served() {
     use axum::body::to_bytes;
     use axum::http::Request;
     use tower::ServiceExt;
 
-    for uri in ["/", "/assets/x", "/assets/js/app.js", "/some/unknown/route"] {
-        let state = AppState {
-            handles: default_handles(),
-            token: Token::generate(),
-        };
-        let response = WsServer::router(state)
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 404, "{uri} must not be served");
-        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-        assert!(body.is_empty(), "{uri} must serve no content, got {body:?}");
+    let token = Token::generate();
+    let secret = token.as_str().to_owned();
+    for method in ["GET", "HEAD", "POST", "PUT", "OPTIONS"] {
+        for uri in [
+            "/",
+            "/index.html",
+            "/assets/x",
+            "/assets/js/app.js",
+            "/stream/",
+            "/stream/x",
+            "/%2e%2e/etc/passwd",
+            "/x",
+        ] {
+            let state = AppState {
+                handles: default_handles(),
+                token: token.clone(),
+            };
+            let response = WsServer::router(state)
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            assert!(
+                status == 404 || status == 405,
+                "{method} {uri} must not be served, got {status}"
+            );
+            let headers = format!("{:?}", response.headers());
+            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            assert!(body.is_empty(), "{method} {uri} body: {body:?}");
+            assert!(!headers.contains(&secret), "{method} {uri} leaked token");
+        }
+    }
+}
+
+/// Source guard: the router fn builds exactly one route (`/stream`) and no
+/// fallback / static-file service. Scoped to `fn router` so the rest of
+/// `ws_server.rs` cannot trip it; a rename of the fn fails loudly.
+#[test]
+fn router_source_has_exactly_one_route_and_no_fallback() {
+    let src = include_str!("../ws_server.rs");
+    let start = src
+        .find("fn router(")
+        .expect("ws_server.rs must define `fn router(`");
+    let body = &src[start..];
+    let body = &body[..body.find("\n    }\n").expect("end of fn router")];
+    assert_eq!(body.matches(".route(").count(), 1, "router: {body}");
+    assert!(body.contains(".route(\"/stream\""), "router: {body}");
+    for banned in [".fallback", "nest_service", "fallback_service", "ServeDir"] {
+        assert!(!body.contains(banned), "router must not use {banned}");
     }
 }
 

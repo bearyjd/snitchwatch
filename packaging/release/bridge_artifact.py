@@ -1190,8 +1190,8 @@ def check_no_web_ui(binary_bytes: bytes) -> list[str]:
     """The release binary must not embed the (removed) GPL-2.0-only web/ frontend."""
     if WEB_UI_MARKER in binary_bytes:
         return [
-            "the binary embeds the vendored web/ UI (GPL-2.0-only); release builds must use"
-            " --no-default-features"
+            "the binary embeds the GPL-2.0-only web UI marker: web/ (or a UI bundle) was"
+            " re-vendored and embedded; remove it"
         ]
     return []
 
