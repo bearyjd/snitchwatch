@@ -402,69 +402,15 @@ async fn connection_with_correct_token_round_trips() {
     }
 }
 
-#[cfg(feature = "web-ui")]
+/// Only `/stream` is served: `/`, `/assets/*` and an unknown path are all
+/// 404 with no token, so the socket has no unauthenticated routes.
 #[tokio::test]
-async fn server_serves_index_html_at_root_after_handshake_token_gate() {
+async fn only_stream_is_served() {
     use axum::body::to_bytes;
     use axum::http::Request;
     use tower::ServiceExt;
 
-    let handles = default_handles();
-    let state = AppState {
-        handles,
-        token: Token::generate(),
-    };
-
-    let app = WsServer::router(state);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-    assert!(std::str::from_utf8(&body).unwrap().contains("Snitchwatch"));
-}
-
-#[cfg(feature = "web-ui")]
-#[tokio::test]
-async fn server_serves_asset_js_unauthenticated() {
-    use axum::http::Request;
-    use tower::ServiceExt;
-
-    let handles = default_handles();
-    let state = AppState {
-        handles,
-        token: Token::generate(),
-    };
-    let app = WsServer::router(state);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/assets/js/app.js")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 200);
-}
-
-/// The release tarball's build (`--no-default-features`): no embedded
-/// frontend, so the static routes and the SPA fallback are all 404s.
-#[cfg(not(feature = "web-ui"))]
-#[tokio::test]
-async fn without_web_ui_static_routes_are_not_served() {
-    use axum::http::Request;
-    use tower::ServiceExt;
-
-    for uri in ["/", "/assets/js/app.js", "/some/spa/route"] {
+    for uri in ["/", "/assets/x", "/assets/js/app.js", "/some/unknown/route"] {
         let state = AppState {
             handles: default_handles(),
             token: Token::generate(),
@@ -478,11 +424,9 @@ async fn without_web_ui_static_routes_are_not_served() {
             )
             .await
             .unwrap();
-        assert_eq!(
-            response.status(),
-            404,
-            "{uri} must not be served without web-ui"
-        );
+        assert_eq!(response.status(), 404, "{uri} must not be served");
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert!(body.is_empty(), "{uri} must serve no content, got {body:?}");
     }
 }
 

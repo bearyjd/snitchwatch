@@ -89,56 +89,6 @@ fn shell_state_extensions_round_trip_via_json() {
 }
 
 #[test]
-fn legacy_web_dispatcher_ignores_shell_only_wire_extensions() {
-    // The bundled legacy web client has an explicit default branch for
-    // unknown server actions. Keep the extension discriminators absent
-    // from its known-action switch: authenticated native shells consume
-    // them, while old web clients continue their normal message loop.
-    let legacy_dispatcher = include_str!("../../../../web/js/app.js");
-    assert!(legacy_dispatcher.contains("function handleServerCommand(messageArray)"));
-    assert!(
-        legacy_dispatcher.contains("default:\n          console.warn(\"Unknown msg from server\"")
-    );
-
-    for message in [
-        ServerMessage::Authenticated {
-            capabilities: crate::bridge_capabilities::advertised(),
-        },
-        ServerMessage::TrayState {
-            state: TrayState::Idle,
-        },
-        ServerMessage::Notice {
-            notice: Notice::DaemonAway,
-        },
-        ServerMessage::FilterPauseState {
-            paused: false,
-            expires_at_unix_ms: None,
-        },
-        crate::prompt_slot::PromptSlot::default().message(),
-        ServerMessage::RuleHits {
-            since_unix_ms: None,
-            lossy: false,
-            last_gap_unix_ms: None,
-            storage: StorageStatus {
-                persistent: false,
-                reason: None,
-                unreadable: false,
-            },
-            hits: Vec::new(),
-        },
-    ] {
-        let action = serde_json::to_value(message).unwrap()["action"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        assert!(
-            !legacy_dispatcher.contains(&format!("case \"{action}\"")),
-            "legacy web client must treat {action} as an ignorable unknown action"
-        );
-    }
-}
-
-#[test]
 fn connection_row_carries_matched_rule_when_decided() {
     let row = ConnectionRow {
         id: "r1".to_string(),
