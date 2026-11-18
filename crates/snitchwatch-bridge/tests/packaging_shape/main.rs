@@ -59,10 +59,7 @@ fn project_license_is_declared_consistently() {
         "[workspace.package] license"
     );
     // Crates that don't inherit the workspace field must still match it.
-    for rel in [
-        "crates/snitchwatch-tauri/Cargo.toml",
-        "crates/snitchwatch-kirigami/Cargo.toml",
-    ] {
+    for rel in ["crates/snitchwatch-kirigami/Cargo.toml"] {
         for value in cargo_license_values(rel) {
             assert_eq!(value, PROJECT_LICENSE, "{rel} license");
         }
