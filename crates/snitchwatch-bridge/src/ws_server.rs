@@ -1,4 +1,4 @@
-//! WebSocket server for the embedded webview.
+//! WebSocket server for the GUI shell.
 //!
 //! Binds to a Unix domain socket under `$XDG_RUNTIME_DIR/snitchwatch/`
 //! (mode 0700 dir, 0600 socket file) and serves the `/stream` endpoint. The
@@ -13,17 +13,13 @@
 //! socket under `$XDG_RUNTIME_DIR` does via the well-precedented
 //! `--filesystem=xdg-run/<name>` permission.
 //!
-//! Only `/stream` requires the handshake token — `/`, `/assets/*`, and the
-//! SPA fallback only serve static frontend assets (no firewall-rule-writing
-//! messages flow through them), so they stay unauthenticated. Those static
-//! routes exist only with the `web-ui` feature (on by default); without it —
-//! the release tarball's build — every path but `/stream` is a plain 404.
+//! Only `/stream` is served, and it requires the handshake token. There are
+//! no unauthenticated routes: every other path (`/`, `/assets/*`, anything
+//! unknown) is a plain 404.
 
 use crate::auth::Token;
 use crate::blocklists::BlocklistsManager;
 use crate::profiles::ProfilesManager;
-#[cfg(feature = "web-ui")]
-use crate::web_assets::{serve_asset, serve_fallback, serve_index};
 use crate::ws_messages::{ClientMessage, DaemonPolicy, ServerMessage};
 use anyhow::Context;
 use axum::{
@@ -129,18 +125,12 @@ impl WsServer {
         Ok(listener)
     }
 
-    /// The HTTP surface: the token-gated `/stream` WebSocket, plus — only
-    /// with the `web-ui` feature — the embedded static frontend (`/`,
-    /// `/assets/*`, SPA fallback). Without the feature, every other path is a
-    /// plain 404.
+    /// The HTTP surface: only the token-gated `/stream` WebSocket. Every
+    /// other path is a plain 404.
     fn router(state: AppState) -> Router {
-        let app = Router::new().route("/stream", get(ws_handler));
-        #[cfg(feature = "web-ui")]
-        let app = app
-            .route("/", get(serve_index))
-            .route("/assets/*path", get(serve_asset))
-            .fallback(serve_fallback);
-        app.with_state(state)
+        Router::new()
+            .route("/stream", get(ws_handler))
+            .with_state(state)
     }
 
     /// Serve the router over `listener`.
