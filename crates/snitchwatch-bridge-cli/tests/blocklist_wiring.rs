@@ -445,8 +445,8 @@ fn code(source: &str) -> String {
 }
 
 /// The state directory is resolved once, by `main.rs` (per-user) and
-/// `run_system`. `run()` / `run_with_incoming` never read it, so the Tauri
-/// shell and tests can't pick up a stray `STATE_DIRECTORY`.
+/// `run_system`. `run()` / `run_with_incoming` never read it, so tests
+/// can't pick up a stray `STATE_DIRECTORY`.
 #[test]
 fn only_main_and_run_system_resolve_the_state_directory() {
     let lib = code(include_str!("../src/lib.rs"));

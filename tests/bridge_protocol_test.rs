@@ -37,7 +37,7 @@ mod user_unix;
 
 /// Connect to the bridge's `/stream` route over its Unix domain socket and
 /// present the handshake token as the first frame, exactly as a real client
-/// (or `crate::loopback_proxy` on the Tauri shell's behalf) must.
+/// must.
 async fn connect_stream(socket_path: &std::path::Path, token: &str) -> WebSocketStream<UnixStream> {
     let stream = UnixStream::connect(socket_path)
         .await

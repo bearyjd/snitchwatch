@@ -23,12 +23,11 @@ container without a real bootable rpm-ostree system underneath it.
 (`packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml`, the only profile
 since #35) packages
 `command: snitchwatch-kirigami` against the `org.kde.Platform` runtime, not
-`snitchwatch-tauri`/`web/` — Kirigami is the settled GUI stack (see this
+the former Tauri shell — Kirigami is the settled GUI stack (see this
 repo's `CLAUDE.md` "Settled architecture decisions" #4) and has feature
-parity plus a passing Task 7 fullscreen-focus test. `snitchwatch-tauri` and
-`web/` remain in the repo but are intentionally not what this manifest
-builds; they're kept only until this Flatpak's first real packaged release
-ships (owner decision, 2026-07-11). Verify the pinned `runtime-version`
+parity plus a passing Task 7 fullscreen-focus test. The Tauri shell was
+removed in #379 (the owner's 2026-07-11 keep-until-release gate was met by
+r16.x); `web/` is retired separately. Verify the pinned `runtime-version`
 against whatever `org.kde.Platform` release is actually current before
 building (`flatpak remote-info flathub org.kde.Platform`) — it was pinned
 from this repo's environment at the time of writing, not confirmed against

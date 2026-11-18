@@ -1,8 +1,8 @@
 //! Bridge-owned tray state publisher.
 //!
-//! The bridge is the source of truth for what the tray icon should show. The
-//! Tauri shell subscribes to `TrayStatePublisher::subscribe()` and re-renders
-//! on every change. Headless tests can assert transitions without Tauri.
+//! The bridge is the source of truth for what the tray icon should show. In-process
+//! consumers subscribe to `TrayStatePublisher::subscribe()` and re-render on
+//! every change. Headless tests can assert transitions without a GUI.
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

@@ -90,7 +90,7 @@ const RULE_EXPIRY_TICK: Duration = Duration::from_secs(30);
 /// Both the WebSocket server and the gRPC `Ui` server are bound and accepting
 /// connections by the time this returns. opensnitchd can dial in immediately.
 ///
-/// For in-process callers (tests, the Tauri shell): blocklists are never
+/// For in-process callers (tests): blocklists are never
 /// persisted ([`RunOptions::in_process`]).
 pub async fn run(config: BridgeConfig) -> Result<RunningBridge> {
     run_with_options(config, RunOptions::in_process()).await

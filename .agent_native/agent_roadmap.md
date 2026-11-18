@@ -28,7 +28,7 @@ immediately actionable with no further human input needed.
    `cargo check`/`cargo clippy --all-targets -- -D warnings`/`cargo test`,
    scoped to `default-members` (no Qt6 needed) on `ubuntu-latest`, with the
    Tauri Linux build deps (`libwebkit2gtk-4.1-dev` etc.) installed since
-   `snitchwatch-tauri` is a default member. Deliberately does **not** shell
+   `snitchwatch-tauri` was a default member (both removed in #379). Deliberately does **not** shell
    out to `just check`/`just test` verbatim, because those pass `--workspace`
    and would pull in `kirigami-spike`/`snitchwatch-kirigami`, which need
    Qt6/KF6 dev packages not provisioned on the runner and whose CI behavior
@@ -41,7 +41,7 @@ immediately actionable with no further human input needed.
    actual GitHub Actions from this environment.
 
 3. **DONE — Document (and script) the one-time Playwright setup** for
-   `tests/web_smoke` and `tests/tauri_smoke`. Added a "Playwright smoke
+   `tests/web_smoke` and `tests/tauri_smoke` (the latter removed in #379). Added a "Playwright smoke
    suites (one-time setup)" section to `README.md` pointing at
    `just web-smoke-install` / `just tauri-smoke-install`, plus a new
    `just doctor` target that checks for `tests/web_smoke/node_modules` and

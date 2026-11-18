@@ -8,7 +8,7 @@ Pre-alpha Rust workspace. Two independent products live in this one repo:
   this repo owns; the bridge translates to a Little-Snitch-v6-style
   WebSocket protocol for the frontend. Crates: `snitchwatch-proto`,
   `snitchwatch-spike`, `snitchwatch-bridge`, `snitchwatch-bridge-cli`,
-  `snitchwatch-tauri`, `kirigami-spike`, `snitchwatch-kirigami`.
+  `kirigami-spike`, `snitchwatch-kirigami`.
 - **Component B (Bazzite security scanner)** — a separate, unrelated
   userspace/privileged-tier scanner for rpm-ostree/atomic-OS drift
   detection. Crates: `scanner-core`, `scanner-cli`, `scanner-privileged`. It
@@ -54,9 +54,8 @@ headless — see `crates/snitchwatch-kirigami/tests/smoke.rs` for the pattern.
 Whether these actually pass headless in this sandbox has **not** been
 verified — treat a first attempt as exploratory, not "should just work."
 
-Playwright suites (`tests/web_smoke`, `tests/tauri_smoke`) need a one-time
-`just web-smoke-install` / `just tauri-smoke-install` before
-`just web-smoke` / `just tauri-smoke` will pass. If one of these fails with a
+The Playwright suite (`tests/web_smoke`) needs a one-time
+`just web-smoke-install` before `just web-smoke` will pass. If it fails with a
 missing-browser error, run the `-install` target first — it is not a code
 regression.
 
@@ -65,8 +64,8 @@ syntax) without needing a Bazzite host.
 
 **The system bridge is the only shipped flavour (#35).** TCP gRPC is dev-only
 behind `SNITCHWATCH_DEV_TCP=1` (loopback only; `SNITCHWATCH_GRPC_BIND` without
-it is an error). The Tauri shell refuses to start without the flag (its webview
-proxy on `127.0.0.1:3031` hands out the WS token); the spike and the dev bridge
+it is an error). The flag stays after the Tauri shell was retired (#379): the
+test suites and the spike use it. The spike and the dev bridge
 default to a per-user Unix socket under `$XDG_RUNTIME_DIR/snitchwatch-grpc/`.
 There is no per-user systemd unit and no per-user Flatpak profile.
 
@@ -79,9 +78,9 @@ tags and only ever creates **draft** releases. Never run
 `snitchwatch-bridge-cli` without `--help`/`--version` outside an isolated
 `XDG_RUNTIME_DIR`: it starts a bridge and replaces any running bridge's
 socket + token (issue #34's mechanism). The same goes for tests:
-`crates/snitchwatch-tauri/tests/bridge_runtime_starts.rs` used to do exactly
-this on every `cargo test` (found 2026-10-03, now points `XDG_RUNTIME_DIR` at a
-tempdir) — any new test that spawns a bridge must isolate the runtime dir too.
+the former Tauri crate's `bridge_runtime_starts.rs` test (since removed in
+#379) used to do exactly this on every `cargo test` (found 2026-10-03; it was
+changed to point `XDG_RUNTIME_DIR` at a tempdir) — any new test that spawns a bridge must isolate the runtime dir too.
 
 `.github/workflows/ci.yml` runs four jobs on push to `main` and on PRs:
 - `check`/`test` — `cargo check`/`clippy -D warnings`/`test`, **scoped to
@@ -172,15 +171,14 @@ after real back-and-forth. Read the source doc before proposing a change.
    a connection as trusted; `/`, `/assets/*`, and the SPA fallback stay
    unauthenticated (static assets only). See
    `docs/superpowers/specs/2026-07-04-flatpak-feasibility-research.md`.
-4. **GUI stack: Qt6/QML + Kirigami**, replacing the currently-built Tauri
-   shell + vendored web frontend. Bazzite's default desktop is KDE Plasma,
+4. **GUI stack: Qt6/QML + Kirigami**, replacing the former Tauri
+   shell + vendored web frontend (the Tauri crate was retired in #379). Bazzite's default desktop is KDE Plasma,
    not GNOME, so neither the original GTK4/libadwaita spec nor the
-   already-built Tauri shell is native there. `cxx-qt` is the accepted
+   former Tauri shell was native there. `cxx-qt` is the accepted
    Rust↔Qt binding (pre-1.0, KDAB-maintained; issue #770 confirmed not to
    bite this repo's `tests/*` convention — see `crates/kirigami-spike`).
-   This is a large, still-in-progress rewrite (`docs/superpowers/plans/
-   2026-07-04-kirigami-shell-rewrite.md`); the Tauri crate remains in the
-   tree during the migration, not as the long-term target.
+   This was a large rewrite (`docs/superpowers/plans/
+   2026-07-04-kirigami-shell-rewrite.md`); Kirigami is now the only shell.
 5. **Snitchwatch ships `DefaultAction: allow`** (owner decision 2026-10-25),
    the same as `vendor/opensnitch/daemon/data/default-config.json:18`. The r15
    `deny` default left the system unusable when no decision client answered.

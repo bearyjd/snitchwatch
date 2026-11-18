@@ -9,8 +9,8 @@ translates between OpenSnitch's gRPC protocol and a Little-Snitch-style
 protocol, with full test coverage and an AskRule round-trip end-to-end test
 against an in-process mock daemon. The native desktop shell is
 **`snitchwatch-kirigami`** (Qt6/QML + Kirigami) — see "Try the Kirigami
-shell" below; `snitchwatch-tauri`/`web/` are an earlier shell kept in the
-tree only until a packaged release ships. Packaging (bluebuild image,
+shell" below. The earlier Tauri shell was retired in #379; the vendored
+`web/` frontend is retired separately. Packaging (bluebuild image,
 rpm-ostree layering, Flatpak) and the Bazzite security scanner (Component
 B, `scanner-core`/`scanner-cli`/`scanner-privileged`) are also code-complete
 — remaining work is real-hardware verification, tracked in
@@ -41,19 +41,17 @@ just check                   # cargo check + clippy -D warnings
 just doctor                  # checks for missing one-time setup steps below
 ```
 
-### Playwright smoke suites (one-time setup)
+### Playwright smoke suite (one-time setup)
 
-`tests/web_smoke` and `tests/tauri_smoke` are Playwright suites and need a
-one-time browser install before they'll run — `just web-smoke`/
-`just tauri-smoke` will fail with a "missing browser" error otherwise, which
-is a setup gap, not a code regression:
+`tests/web_smoke` is a Playwright suite and needs a one-time browser install
+before it will run — `just web-smoke` will fail with a "missing browser"
+error otherwise, which is a setup gap, not a code regression:
 
 ```bash
 just web-smoke-install       # once, before `just web-smoke`
-just tauri-smoke-install     # once, before `just tauri-smoke`
 ```
 
-Run `just doctor` to check whether these have already been done.
+Run `just doctor` to check whether this has already been done.
 
 The headline integration test is `ask_rule_round_trip_full` in
 `tests/bridge_protocol_test.rs`: it spins up an in-process mock
@@ -71,7 +69,7 @@ The bridge is a Rust workspace member that exposes:
   broadcasts it on the WebSocket, awaits the user verdict via a `oneshot`,
   then translates the verdict into a `Rule` reply.
 - **WebSocket+HTTP server** (Unix domain socket) — the front-end (vendored
-  LS-for-Linux UI in M2, Tauri shell in M3) connects to `/stream` and
+  LS-for-Linux UI in M2, the Kirigami shell in M3) connects to `/stream` and
   exchanges Little Snitch v6 protocol messages with the bridge; `/`,
   `/assets/*`, and the SPA fallback serve the static frontend. This server
   binds a Unix domain socket under `$XDG_RUNTIME_DIR/snitchwatch/` (mode
@@ -138,34 +136,18 @@ installed version's exact Unix-socket flag spelling.)
 
 Environment variables:
 
-- `SNITCHWATCH_DEV_TCP` — `1` allows loopback TCP gRPC (dev only; also required by
-  the Tauri shell and the spike's TCP mode)
+- `SNITCHWATCH_DEV_TCP` — `1` allows loopback TCP gRPC (dev only; used by the test suites
+  and the spike's TCP mode)
 - `SNITCHWATCH_GRPC_BIND` — gRPC TCP bind address, only with `SNITCHWATCH_DEV_TCP=1`
   (default `127.0.0.1:0`, a random port; loopback only; an error without the flag)
 - `SNITCHWATCH_WS_SOCKET` — WS Unix domain socket path (default
   `$XDG_RUNTIME_DIR/snitchwatch/bridge.sock`)
 - `RUST_LOG` — tracing filter, e.g. `info`, `snitchwatch_bridge=debug`
 
-## Try the Tauri shell (earlier shell, kept until Kirigami's release ships)
+## Shell features
 
-For the shell that actually ships, see "Try the Kirigami shell" below. This
-Tauri+`web/` shell remains in the tree and works, but is being retired once
-a packaged Kirigami release ships. After installing the workspace tooling
-(`cargo`, `just`, optional Playwright for the smoke suite):
-
-```bash
-just tauri-dev
-```
-
-A native Snitchwatch window opens. The bridge runs in-process, binding its
-WS+HTTP server on a Unix domain socket (see Architecture above), and a
-small local loopback proxy (`snitchwatch_tauri::loopback_proxy`) bridges
-that socket back to `127.0.0.1:3031` so the webview's `http://` URL keeps
-working unchanged — you can still attach a browser tab there for debugging,
-same as before. The proxy transparently presents the handshake token on the
-webview's behalf, so no separate auth step is needed to use the app. The
-system tray shows the current state — hover for a tooltip, right-click for
-the menu.
+The settings and diagnostics below apply to the Kirigami shell (see "Try the
+Kirigami shell" below). The earlier Tauri shell was retired in #379.
 
 ### Autostart
 
@@ -199,11 +181,11 @@ non-sandboxed install or an explicit network permission grant.
 ## Try the Kirigami shell
 
 `snitchwatch-kirigami` (Qt6/QML + Kirigami, via `cxx-qt`) is the shell that
-actually ships — the Flatpak manifest builds it, not `snitchwatch-tauri`.
-It's a native match for Bazzite's default KDE Plasma desktop and has
-feature parity with the Tauri+`web/` shell above, including the same
+actually ships — the Flatpak manifest builds it. It's the only GUI shell
+(the Tauri shell was retired in #379), a native match for Bazzite's default
+KDE Plasma desktop, with
 autostart/crash-log/RDAP/coexistence-check surfaces (**Settings &
-Diagnostics** page) and the same pending-decision safety behavior
+Diagnostics** page) and pending-decision safety behavior
 (verified to raise/focus over a fullscreen window on a real Plasma
 session).
 
@@ -235,8 +217,8 @@ Flatpak exports and the user's data dirs only, so apps installed from system
 packages show a generic icon there.
 
 Everything else — autostart, crash log, privacy/RDAP opt-in, `opensnitch-ui`
-coexistence — works the same way as documented above for the Tauri shell,
-just reached from this shell's own **Settings & Diagnostics** page instead.
+coexistence — is documented under "Shell features" above and is reached from the
+**Settings & Diagnostics** page.
 
 ## M4 — Subscribe to a blocklist
 
@@ -479,7 +461,6 @@ crates/
 ├── snitchwatch-bridge/      # headless bridge library (cache, translator, ws server, grpc client)
 ├── snitchwatch-bridge-cli/  # thin orchestrator (lib::run + main.rs)
 ├── snitchwatch-kirigami/    # Qt6/QML + Kirigami desktop shell (cxx-qt) — the shell that ships
-├── snitchwatch-tauri/       # earlier Tauri 2 shell — kept until a packaged release ships
 ├── kirigami-spike/          # throwaway cxx-qt feasibility spike (Phase 3a), not shipped
 ├── scanner-core/            # Component B: userspace-tier Bazzite security scanner
 ├── scanner-cli/             # Component B: userspace-tier CLI orchestrator

@@ -23,7 +23,6 @@ tokio 1.40, tonic/tonic-build 0.12, prost 0.13, axum 0.7 (ws), tokio-tungstenite
 | snitchwatch-proto | tonic, prost (+tonic-build) |
 | snitchwatch-bridge | axum, hyper, tower, tokio-tungstenite, tonic, rusqlite, reqwest, ring, zbus, rust-embed (feature `web-ui`) |
 | snitchwatch-bridge-cli | bridge (no default features), proto, tonic, libc |
-| snitchwatch-tauri | tauri 2 (tray-icon), notify-rust, bridge + bridge-cli |
 | snitchwatch-kirigami | cxx =1.0.194, cxx-qt =0.9.1, cxx-qt-lib (qt_full), maxminddb 0.29, dns-lookup 2, notify-rust 4, zbus 5, scanner-broker, bridge, proto |
 | scanner-core / -cli / -privileged | rusqlite, sha2, chrono (core); core (cli); libc, rusqlite, chrono (privileged); none depend on proto |
 | scanner-broker | tokio, zbus 5, libc |
@@ -31,4 +30,4 @@ tokio 1.40, tonic/tonic-build 0.12, prost 0.13, axum 0.7 (ws), tokio-tungstenite
 Unusual: exact-pinned cxx/cxx-qt (pre-1.0), `dns-lookup` (getnameinfo, avoids an async-DNS crate), hand-driven hyper over `UnixListener` (axum 0.7 limit).
 
 ## CI / release / packaging
-`.github/workflows/ci.yml` jobs: `check`, `test` (default members), `audit`, `package-check`, `kirigami` (runs in a `fedora:43` container on an Ubuntu runner, `dnf` Qt6/KF6, headless; `ci.yml:214-239`), `candidate-contract`. `release.yml` (tags `v*`): `build-bridge` and `audit-bridge` (parallel) -> `publish` (`needs` both, `release.yml:200`) (draft only; scripts in `packaging/release/`). `candidate-gui.yml` builds the r16 GUI Flatpak candidate. Image via bluebuild (`packaging/bluebuild/recipe.yml`). Local entry points: `justfile`. Tests: `tests/*.rs`, `tests/mock_opensnitchd`, Playwright in `tests/web_smoke`, `tests/tauri_smoke`.
+`.github/workflows/ci.yml` jobs: `check`, `test` (default members), `audit`, `package-check`, `kirigami` (runs in a `fedora:43` container on an Ubuntu runner, `dnf` Qt6/KF6, headless; `ci.yml:214-239`), `candidate-contract`. `release.yml` (tags `v*`): `build-bridge` and `audit-bridge` (parallel) -> `publish` (`needs` both, `release.yml:200`) (draft only; scripts in `packaging/release/`). `candidate-gui.yml` builds the r16 GUI Flatpak candidate. Image via bluebuild (`packaging/bluebuild/recipe.yml`). Local entry points: `justfile`. Tests: `tests/*.rs`, `tests/mock_opensnitchd`, Playwright in `tests/web_smoke`.
