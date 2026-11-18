@@ -53,7 +53,21 @@ modules:
       - info
       - nftables
       - libnetfilter_queue
-      - https://github.com/evilsocket/opensnitch/releases/download/v1.8.0/opensnitch-1.8.0-1.x86_64.rpm
+
+  # 1b. The daemon RPM runs as root, so it is fetched, sha256-verified
+  #     against the digest pinned here, and only then installed from the
+  #     local file (a bare URL in the module above would trust whatever the
+  #     release endpoint serves). Bump version and digest together:
+  #     sha256sum opensnitch-<ver>-1.x86_64.rpm
+  - type: script
+    snippets:
+      - |
+        set -euo pipefail
+        rpm=/tmp/opensnitch-1.8.0-1.x86_64.rpm
+        curl -fsSL -o "$rpm" https://github.com/evilsocket/opensnitch/releases/download/v1.8.0/opensnitch-1.8.0-1.x86_64.rpm
+        echo "e06e9119daf764e56455b61c319e496274c0274bb53bb94a0ff1ab72967fea7d  $rpm" | sha256sum -c -
+        rpm-ostree install "$rpm"
+        rm -f "$rpm"
 
   # 2. Drop the daemon config into place: it overrides
   #    upstream's config, keeps `DefaultAction: allow` (owner decision

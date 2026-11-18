@@ -76,6 +76,31 @@ fn bluebuild_recipe_installs_and_enables_opensnitchd() {
     );
 }
 
+/// The root daemon RPM must be sha256-pinned and verified before install: a
+/// bare release URL in the rpm-ostree module trusts whatever GitHub serves.
+#[test]
+fn bluebuild_recipe_pins_opensnitch_rpm_sha256() {
+    let body = read("packaging/bluebuild/recipe.yml");
+    let rpm_url = body
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains("opensnitch-") && l.contains(".rpm"))
+        .unwrap_or_else(|| panic!("recipe must reference the opensnitch RPM\n{body}"));
+    assert!(
+        !rpm_url.starts_with("- https://"),
+        "RPM must not be a bare URL in the rpm-ostree install list: {rpm_url}"
+    );
+    assert!(
+        body.contains("sha256sum -c"),
+        "recipe must verify the RPM with `sha256sum -c` before install"
+    );
+    let digest = body
+        .split(|c: char| !c.is_ascii_hexdigit())
+        .find(|w| w.len() == 64)
+        .expect("recipe must pin a 64-hex sha256 digest");
+    assert!(digest.chars().all(|c| !c.is_ascii_uppercase()));
+}
+
 /// Issue #92: the layering guide's commands name the RPM's real unit.
 #[test]
 fn the_layering_guide_names_the_rpms_unit() {
