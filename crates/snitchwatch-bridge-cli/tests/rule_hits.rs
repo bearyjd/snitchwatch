@@ -298,7 +298,7 @@ async fn without_a_usable_state_directory_the_counts_stay_in_memory_and_clients_
         bridge.shutdown();
     }
 
-    // An in-process `run` (tests, the Tauri shell) never persists.
+    // An in-process `run` (tests) never persists.
     let sockets = tempfile::tempdir().unwrap();
     let bridge = run(config(sockets.path())).await.unwrap();
     let mut rx = bridge.broadcast_tx.subscribe();

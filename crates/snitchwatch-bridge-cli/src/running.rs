@@ -18,8 +18,8 @@ pub struct RunningBridge {
     pub ws_socket_path: PathBuf,
     /// Token file path (mode 0600 in legacy mode, 0640 in system mode).
     pub ws_token_path: PathBuf,
-    /// The handshake token itself, so in-process callers (e.g. the Tauri
-    /// shell, tests) don't have to re-read it from disk.
+    /// The handshake token itself, so in-process callers (tests, the CLI)
+    /// don't have to re-read it from disk.
     pub ws_token: Token,
     /// Actual daemon endpoint (TCP in legacy mode, Unix in system mode).
     pub grpc_endpoint: GrpcEndpoint,

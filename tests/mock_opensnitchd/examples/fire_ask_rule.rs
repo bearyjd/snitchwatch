@@ -10,11 +10,10 @@
 //! Usage:
 //!   cargo run -p mock-opensnitchd --example fire_ask_rule -- [bridge_addr]
 //!
-//! `bridge_addr` defaults to `127.0.0.1:50051` (the kirigami shell's default
-//! `SNITCHWATCH_GRPC_BIND`). Run this against an already-running
-//! `snitchwatch-kirigami` binary started with `SNITCHWATCH_DEV_TCP=1`
+//! `bridge_addr` defaults to `127.0.0.1:50051`. Run this against an
+//! already-running `snitchwatch-bridge-cli` started with `SNITCHWATCH_DEV_TCP=1`
 //! (TCP gRPC is dev-only, #35; without the flag the bridge listens on a
-//! per-user Unix socket and this TCP probe cannot reach it).
+//! Unix socket and this TCP probe cannot reach it). Kirigami runs no bridge.
 
 use mock_opensnitchd::MockOpensnitchd;
 use snitchwatch_proto::protocol::Connection;

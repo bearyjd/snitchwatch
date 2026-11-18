@@ -7,7 +7,8 @@
 //! writing untested/unverified binding surface for a shell-chrome feature.
 //! The pragmatic accepted path — explicitly sanctioned by the plan as a
 //! fallback — is `notify-rust`, which is **already a proven workspace
-//! dependency**: `snitchwatch-tauri::notifier` dispatches through it today
+//! dependency**: `snitchwatch-tauri::notifier` dispatched through it (removed in
+//! #379)
 //! (`notify-rust = "4"`, default `z` feature → `zbus` 5.x, both already in
 //! `Cargo.lock`). Reusing it here adds no new supply-chain surface and both
 //! `notify-rust` and raw D-Bus ultimately speak the same

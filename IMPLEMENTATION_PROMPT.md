@@ -1,5 +1,10 @@
 # Implementation Prompt — Snitchwatch (Component A) + Bazzite Security Scanner (Component B)
 
+> **2026-11-17 note (#379):** the Tauri shell and the `tests/tauri_smoke`
+> Playwright suite were retired; Kirigami is the only shell. Phase text below
+> that offers a "Tauri shell (or Kirigami shell)" is historical; read it as
+> Kirigami. See `docs/superpowers/plans/2026-11-17-379-retire-tauri.md`.
+
 Source: `AUDIT.md` (decisions confirmed + independent critique, both resolved
 and carried-forward items). This prompt scopes the next implementation phase
 branch-by-branch, PRP-style. Work the phases **in order** — each one lists

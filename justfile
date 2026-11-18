@@ -2,7 +2,7 @@ default:
     @just --list
 
 # Checks for one-time setup steps an agent/dev is likely to hit cold
-# (currently: Playwright browsers for the two smoke suites). Exits non-zero
+# (currently: Playwright browsers for the web smoke suite). Exits non-zero
 # with a fix hint if something's missing; does not modify anything.
 doctor:
     #!/usr/bin/env bash
@@ -10,10 +10,6 @@ doctor:
     missing=0
     if [ ! -d tests/web_smoke/node_modules ]; then
         echo "MISSING: tests/web_smoke/node_modules — run 'just web-smoke-install' before 'just web-smoke'"
-        missing=1
-    fi
-    if [ ! -d tests/tauri_smoke/node_modules ]; then
-        echo "MISSING: tests/tauri_smoke/node_modules — run 'just tauri-smoke-install' before 'just tauri-smoke'"
         missing=1
     fi
     if [ "$missing" -eq 0 ]; then
@@ -61,17 +57,6 @@ web-smoke:
 web-smoke-install:
     cd tests/web_smoke && npm install && npx playwright install firefox
 
-# Run the Tauri shell in dev mode (live bridge + native window). Kept
-# alongside kirigami-dev until Tauri/web/ are retired (see the
-# kirigami-shell-rewrite plan's status note) — Kirigami is the shell that
-# actually ships.
-tauri-dev:
-    cargo run -p snitchwatch-tauri
-
-# Build a release Tauri bundle (deb/rpm/appimage as configured in tauri.conf.json)
-tauri-build:
-    cargo build -p snitchwatch-tauri --release
-
 # Run the Kirigami shell in dev mode (live bridge + native Qt6/QML window).
 # Requires system Qt6 + KDE Frameworks 6 (Kirigami) dev packages — see
 # CLAUDE.md's "kirigami-spike and snitchwatch-kirigami are excluded from
@@ -115,14 +100,6 @@ kirigami-screenshots dir="target/screenshots":
 qml-test:
     QT_QPA_PLATFORM=offscreen QT_QUICK_CONTROLS_STYLE=Basic QT_FORCE_STDERR_LOGGING=1 \
         qmltestrunner-qt6 -import crates/snitchwatch-kirigami/tests/qml/imports -input crates/snitchwatch-kirigami/tests/qml
-
-# Playwright smoke test for the Tauri shell (requires `npm install` in tests/tauri_smoke first)
-tauri-smoke:
-    cd tests/tauri_smoke && npx playwright test
-
-# One-time install of the Playwright deps
-tauri-smoke-install:
-    cd tests/tauri_smoke && npm install && npx playwright install firefox
 
 # Run only the blocklist test suite. Offline: lists come from fixture
 # fetchers and local TLS servers, never the network (the bridge fetches only

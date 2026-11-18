@@ -12,12 +12,12 @@ Two independent products, one Cargo workspace (`Cargo.toml`: 11 crates + `tests/
      |  grpc_server::UiService -> translator -> cache/rules/profiles/blocklists/curated
      |  ws_server::WsServer  (axum + hyper, Unix socket)
      v   WS /stream, first text frame = handshake token
- GUI: snitchwatch-kirigami (Qt6/QML, cxx-qt) [target]
-      snitchwatch-tauri + web/ [legacy, kept during migration]
+ GUI: snitchwatch-kirigami (Qt6/QML, cxx-qt) [the only shell]
+      web/ [legacy frontend, no consumer; retired separately]
 ```
 - Rule writes go to the daemon as `Notifications` messages; only `ChangeRule`/`DeleteRule` are allowed (`crates/snitchwatch-bridge/src/daemon_commands.rs:108`).
 - `SNITCHWATCH_SYSTEM_BRIDGE=1` selects the systemd-activated system bridge (`crates/snitchwatch-bridge-cli/src/main.rs:89-93`; socket paths `activation.rs:10-12`; `run_system` `lib.rs:139`).
-- Kirigami only connects to a bridge (`crates/snitchwatch-kirigami/src/bridge_runtime.rs`); Tauri embeds one in-process.
+- Kirigami only connects to a bridge (`crates/snitchwatch-kirigami/src/bridge_runtime.rs`); it never starts one.
 
 ## Component B: Bazzite scanner
 ```

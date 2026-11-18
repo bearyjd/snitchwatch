@@ -1,7 +1,7 @@
 //! Bridge-owned desktop notification bus.
 //!
-//! The Tauri shell subscribes to a broadcast::Receiver<Notice> and dispatches
-//! each entry to `notify-rust`. Headless tests use the receiver directly and
+//! In-process consumers subscribe to a broadcast::Receiver<Notice> and dispatch
+//! each entry. Headless tests use the receiver directly and
 //! never touch D-Bus.
 
 use serde::{Deserialize, Serialize};

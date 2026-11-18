@@ -3,7 +3,7 @@
 //!
 //! The state directory is resolved **once**, by [`resolve_storage`], called
 //! only from `main.rs` (per-user bridge) and [`run_system`](crate::run_system).
-//! In-process callers of [`run`](crate::run) (tests, the Tauri shell) never
+//! In-process callers of [`run`](crate::run) (tests) never
 //! read the environment and never persist: [`RunOptions::in_process`].
 //!
 //! A storage problem never stops the bridge, which must stay up to answer
@@ -58,7 +58,7 @@ pub use snitchwatch_bridge::blocklists::PER_USER_REASON;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EphemeralReason {
-    /// An in-process [`run`](crate::run) caller: tests, the Tauri shell.
+    /// An in-process [`run`](crate::run) caller: tests.
     InProcess,
     /// Neither `$STATE_DIRECTORY` nor `SNITCHWATCH_STATE_DIR` is set.
     NotConfigured,

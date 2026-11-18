@@ -3,7 +3,7 @@
 //!
 //! This crate is intentionally headless. It can be exercised against either a
 //! real opensnitchd (via the gRPC client) or `tests/mock_opensnitchd` (an
-//! in-process tonic server). It does not depend on Tauri, WebKitGTK, or any
+//! in-process tonic server). It does not depend on any GUI toolkit or
 //! windowing system.
 
 pub mod accounts;

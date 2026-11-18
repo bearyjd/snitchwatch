@@ -14,12 +14,11 @@ Three processes, three trust levels:
 | `snitchwatch-kirigami` GUI  | Flatpak sandbox, unprivileged    | Flatpak (`flatpak/org.snitchwatch.Snitchwatch.system.yml`) |
 
 The Flatpak packages `snitchwatch-kirigami` (Qt6/QML + Kirigami), not
-`snitchwatch-tauri` — Kirigami is the settled GUI stack going forward (see
+the former Tauri shell (removed in #379) — Kirigami is the settled GUI stack going forward (see
 this repo's `CLAUDE.md` "Settled architecture decisions" #4) and has reached
-feature parity including its Task 7 safety verification. `snitchwatch-tauri`
-and `web/` remain in the repo but are intentionally not what ships here —
-kept until this Flatpak's first real packaged release ships (owner
-decision, 2026-07-11); see
+feature parity including its Task 7 safety verification. The Tauri
+shell was removed in #379 (the 2026-07-11 keep-until-release gate was met);
+`web/` is retired separately; see
 [`../docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md`](../docs/superpowers/plans/2026-07-04-kirigami-shell-rewrite.md)'s
 status note for detail.
 

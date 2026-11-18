@@ -2,6 +2,13 @@
 
 > Start with the 2026-11-17 section below, then 2026-11-16, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
 
+## 2026-11-17 (later) — #379 PR 1: the Tauri shell is retired
+
+- **What:** branch `chore/379-remove-tauri` (stacked on the plan PR #383) deletes `crates/snitchwatch-tauri` and `tests/tauri_smoke`, drops the Tauri apt packages from CI (`cargo tree` on default-members shows no webkit/gtk/soup crate; `protobuf-compiler` and `dbus-daemon` stay), the `tauri-*` just recipes, and rewords the docs. No behaviour change in any shipped binary. Job names are unchanged (`candidate-gui.yml` hardcodes them).
+- **Cargo.lock:** removals only, no surviving package changed version or source. The MANIFEST `cargo_lock_sha256` changes, so say so in the next release notes.
+- **Stays:** `SNITCHWATCH_DEV_TCP` (tests use `DevTcp`), the quick-xml audit ignores (0.37.5 via `tauri-winrt-notification` under `notify-rust` remains; the `plist` 0.38.4 path is gone), `web/`, `web_smoke`, the `web-ui` feature (PR 2).
+- **Open:** run `just release-bridge-repro` from a clean clone; PR 2 (delete `web/`, static routes, `web_smoke`; opus security-reviewer pass) is next.
+
 ## 2026-11-17 — #35 merged (TCP gRPC dev-only); release repro verified; pkexec check still open
 
 - **Source:** `origin/main` at `19c96b4f` (#381; code last changed by #380 `8facb3ce`). #35 shipped as #371 `5dd20092`, #372 `1cd28896`, #373 `30f72aca`; then #375 `a3bee43b` (CI runs the root-only tests as root), #376 `9d067f48` (MANIFEST stays `schema_version 1`, owner decision), #377 and #381 (this file), #380 `8facb3ce` (closes #378: three dev-only hardening fixes). Plan: `docs/superpowers/plans/2026-11-16-35-tcp-dev-only.md`.

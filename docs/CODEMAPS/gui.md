@@ -27,5 +27,5 @@ BridgeFeed, `*Model` types (Connections, Rules, Traffic, Blocklists, Profiles, C
 ### Debug flags
 `SNITCHWATCH_TEXT_TRACE=1` (exactly "1", `src/bridge_bindings.rs:44`) shows `qml/TextTrace.qml`. `SNITCHWATCH_DEMO=1` fake rows, no bridge (`src/demo.rs:14`); `SNITCHWATCH_SCREENSHOT_DIR` (`demo.rs:16`); `SNITCHWATCH_LOG` file logging (`logging.rs`).
 
-## Legacy: snitchwatch-tauri + web/
-Tauri 2 shell (12 .rs): embeds the bridge in-process (`src/bridge_runtime.rs`), proxies loopback TCP to the bridge Unix socket (`src/loopback_proxy.rs`). Frontend `web/` (25 tracked files; vendored GPL-2.0-only code, rebrand via `web/rebrand.sh`). Kept only during the Kirigami migration.
+## Legacy: web/
+The Tauri shell was removed in #379. Frontend `web/` (vendored GPL-2.0-only code, rebrand via `web/rebrand.sh`) has no consumer and is retired separately.
