@@ -4749,6 +4749,7 @@ dependencies = [
  "libc",
  "prost",
  "snitchwatch-proto",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
