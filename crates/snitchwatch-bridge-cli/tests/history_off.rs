@@ -23,7 +23,7 @@ async fn start(mode: BridgeMode, sockets: &Path, state: &Path) -> RunningBridge 
     run_with_options(
         BridgeConfig {
             cache_capacity: 64,
-            ..BridgeConfig::dev_tcp_for_tests(sockets.join("bridge.sock"))
+            ..BridgeConfig::user_unix_for_tests(sockets)
         },
         RunOptions {
             storage: Storage::Persistent(state.to_path_buf()),

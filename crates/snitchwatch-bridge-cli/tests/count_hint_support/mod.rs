@@ -41,7 +41,7 @@ async fn start_in(
     let bridge = run_with_options(
         BridgeConfig {
             cache_capacity: 64,
-            ..BridgeConfig::dev_tcp_for_tests(sockets.path().join("bridge.sock"))
+            ..BridgeConfig::user_unix_for_tests(sockets.path())
         },
         RunOptions {
             storage,
@@ -111,7 +111,7 @@ pub struct Daemon {
 
 impl Daemon {
     pub async fn connect(bridge: &RunningBridge, generation: u64, model: &SharedLoader) -> Self {
-        let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
             .await
             .unwrap();
         let rules = model.lock().unwrap().snapshot();

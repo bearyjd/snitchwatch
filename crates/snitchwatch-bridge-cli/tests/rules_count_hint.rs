@@ -106,7 +106,7 @@ async fn a_command_still_waiting_for_its_reply_never_raises_the_hint() {
     let (_sockets, bridge) = start().await;
     let mut rx = bridge.broadcast_tx.subscribe();
     let model = model(&["100-a", "100-b"]);
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     let rules = model.lock().unwrap().snapshot();

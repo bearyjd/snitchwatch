@@ -6,6 +6,10 @@
 
 - **What:** branch `test/386-user-unix-helper-cli-src` adds `BridgeConfig::user_unix_for_tests(dir)` and `GrpcEndpoint::unix_path()` (both test support), and moves the 7 bridge-cli `src/` unit-test files off `DevTcp`. Kept on TCP: the ephemeral-port test in `lib_tests.rs`. Per-user peers all share connection key `None`; C2 (`bridge-cli/tests`) and C3 (`tests/integration`) are still to do.
 
+## 2026-11-18 - #386 (PR C2): bridge-cli integration tests use the per-user Unix gRPC socket
+
+- **What:** branch `test/386-user-unix-cli-tests` moves 9 `bridge-cli/tests/*.rs` files plus `count_hint_support` and `curated_support` to `user_unix_for_tests` and `connect_unix`; `cli_flags.rs` and `state_dir.rs` stay on TCP. Test count unchanged (298). Mutation: treating `UnixUser` as trusted turns 4 tests red (leftover, `gates.rs`, restart counters, import refusal). The plan expected `rules_count_hint.rs` to go red as well; that was wrong, because the count-hint path never reads the transport, so no coverage was lost. Making `UnixUser` deliver to the current stream only (`daemon_commands.rs:645`) turns nothing red.
+
 ## 2026-11-18 - #385 (PR B): bridge-cli public surface narrowed
 
 - **What:** branch `refactor/385-bridge-cli-pub-surface` drops the unused `RunningBridge::notice_rx`, makes `rule_hits_storage`, `profile_storage` and `storage` private modules, and narrows `set_curated_account_lookups` and `resolve_grpc_listen` to `pub(crate)`. Test hooks that tests reach through `RunningBridge` stay public (`#[doc(hidden)]` on three). Docs on `broadcast_tx`/`inbound_tx`/`tray_rx` and the bridge `notice.rs`/`tray_state.rs` module docs no longer claim Kirigami uses them. No behaviour change.

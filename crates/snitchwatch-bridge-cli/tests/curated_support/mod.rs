@@ -35,7 +35,7 @@ pub async fn start(mode: BridgeMode) -> Setup {
     let bridge = run_with_options(
         BridgeConfig {
             cache_capacity: 64,
-            ..BridgeConfig::dev_tcp_for_tests(sockets.path().join("bridge.sock"))
+            ..BridgeConfig::user_unix_for_tests(sockets.path())
         },
         RunOptions {
             storage: Storage::Persistent(state.clone()),
@@ -70,7 +70,7 @@ pub async fn connect_daemon(
     generation: u64,
     rules: Vec<snitchwatch_proto::protocol::Rule>,
 ) -> (MockOpensnitchd, mpsc::Receiver<Notification>) {
-    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut daemon = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     daemon
@@ -99,7 +99,7 @@ pub async fn connect_model(
     generation: u64,
     model: &SharedLoader,
 ) -> (MockOpensnitchd, mpsc::Receiver<Notification>) {
-    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut daemon = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     let rules = model.lock().unwrap().snapshot();

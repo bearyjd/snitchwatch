@@ -34,7 +34,7 @@ async fn start_on(state: &Path, mode: BridgeMode) -> Bridge {
     let bridge = run_with_options(
         BridgeConfig {
             cache_capacity: 64,
-            ..BridgeConfig::dev_tcp_for_tests(sockets.path().join("bridge.sock"))
+            ..BridgeConfig::user_unix_for_tests(sockets.path())
         },
         RunOptions {
             storage: Storage::Persistent(state.canonicalize().unwrap()),
@@ -72,7 +72,7 @@ fn stray() -> Rule {
 }
 
 async fn connect(bridge: &RunningBridge, snapshot: Vec<Rule>) -> mpsc::Receiver<Notification> {
-    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut daemon = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     daemon

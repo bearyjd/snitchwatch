@@ -60,7 +60,7 @@ async fn start_as(persistent: bool, mode: BridgeMode) -> Setup {
     let bridge = run_with_options(
         BridgeConfig {
             cache_capacity: 64,
-            ..BridgeConfig::dev_tcp_for_tests(sockets.path().join("bridge.sock"))
+            ..BridgeConfig::user_unix_for_tests(sockets.path())
         },
         RunOptions {
             storage,
@@ -85,7 +85,7 @@ async fn connect_daemon(
     bridge: &RunningBridge,
     policy: ListsPolicy,
 ) -> (MockOpensnitchd, mpsc::Receiver<Notification>) {
-    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut daemon = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     daemon.subscribe("mock").await.unwrap();
@@ -234,7 +234,7 @@ async fn unsubscribing_deletes_the_rules_and_a_quick_resubscribe_finds_the_files
 
     let mut setup = start(true).await;
     let (state, bridge, rx) = (setup.state.clone(), &setup.bridge, &mut setup.rx);
-    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut daemon = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     daemon.subscribe("mock").await.unwrap();
@@ -409,7 +409,7 @@ async fn start_on(state: &Path, sockets: &Path) -> RunningBridge {
     run_with_options(
         BridgeConfig {
             cache_capacity: 64,
-            ..BridgeConfig::dev_tcp_for_tests(sockets.join("bridge.sock"))
+            ..BridgeConfig::user_unix_for_tests(sockets)
         },
         RunOptions {
             storage: Storage::Persistent(state.to_path_buf()),
@@ -452,7 +452,7 @@ async fn a_restart_against_an_identical_daemon_snapshot_sends_no_rule() {
     let second_sockets = tempfile::tempdir().unwrap();
     let bridge = start_on(&state, second_sockets.path()).await;
     let mut rx = bridge.broadcast_tx.subscribe();
-    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut daemon = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     daemon

@@ -1,7 +1,7 @@
 //! Issue #73: blocklist rules Snitchwatch made that nothing manages are
 //! counted for the Blocklists page and removed when the user asks, through
 //! the mock daemon, over the Unix socket of a system service (see
-//! `src/leftover_unix_tests.rs`). Over the legacy TCP connection, where any
+//! `src/leftover_unix_tests.rs`). Over the untrusted per-user transport, where any
 //! local process can pose as the daemon, nothing is offered or deleted: these
 //! tests pin that, and that a service managing its rules reports none.
 
@@ -66,7 +66,7 @@ async fn start(storage: Storage, mode: BridgeMode, snapshot: Vec<Rule>) -> Setup
     let bridge = run_with_options(
         BridgeConfig {
             cache_capacity: 64,
-            ..BridgeConfig::dev_tcp_for_tests(sockets.path().join("bridge.sock"))
+            ..BridgeConfig::user_unix_for_tests(sockets.path())
         },
         RunOptions {
             storage,
@@ -77,7 +77,7 @@ async fn start(storage: Storage, mode: BridgeMode, snapshot: Vec<Rule>) -> Setup
     .await
     .unwrap();
     let rx = bridge.broadcast_tx.subscribe();
-    let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut daemon = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     daemon
@@ -125,10 +125,10 @@ fn snapshot() -> Vec<Rule> {
     ]
 }
 
-/// Over TCP the snapshot could be a local process's, and a delete goes to
+/// Over the per-user transport the snapshot could be a local process's, and a delete goes to
 /// every stream: nothing is listed, and a request to remove sends nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn over_the_legacy_tcp_connection_nothing_is_offered_or_deleted() {
+async fn over_the_untrusted_per_user_transport_nothing_is_offered_or_deleted() {
     let state = tempfile::tempdir().unwrap();
     for (storage, mode) in [
         (

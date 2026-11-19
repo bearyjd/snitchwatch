@@ -252,7 +252,7 @@ async fn unreadable_choices_leave_the_firewall_as_it_is() {
     let bridge = run_with_options(
         BridgeConfig {
             cache_capacity: 64,
-            ..BridgeConfig::dev_tcp_for_tests(sockets.path().join("bridge.sock"))
+            ..BridgeConfig::user_unix_for_tests(sockets.path())
         },
         RunOptions {
             storage: Storage::Persistent(state.clone()),
