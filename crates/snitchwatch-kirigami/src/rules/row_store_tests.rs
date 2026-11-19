@@ -449,3 +449,23 @@ fn index_of_finds_the_rules_precedence_position() {
     assert_eq!(s.index_of("z00-blocklist:ads:0001-x.example"), Some(1));
     assert_eq!(s.index_of("nope"), None);
 }
+
+#[test]
+fn source_follows_the_bridge_blocklist_prefixes() {
+    use snitchwatch_bridge::rule_name::{
+        BLOCKLIST_RULE_NAME_PREFIX, LEGACY_BLOCKLIST_RULE_NAME_PREFIX,
+    };
+    for prefix in [
+        BLOCKLIST_RULE_NAME_PREFIX,
+        LEGACY_BLOCKLIST_RULE_NAME_PREFIX,
+    ] {
+        let r = rule(&format!("{prefix}somelist:0001-x.example"), true, "deny");
+        assert_eq!(
+            r.source(),
+            RuleSource::Blocklist {
+                list_id: "somelist".to_string()
+            },
+            "{prefix}"
+        );
+    }
+}

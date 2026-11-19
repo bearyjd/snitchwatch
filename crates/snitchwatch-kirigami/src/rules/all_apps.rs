@@ -16,11 +16,9 @@
 //! an allow — including one for just this host — and other apps are asked.
 
 use super::row_store::{Rule, RulesStore};
-use snitchwatch_bridge::translator::verdict::strip_display_hazards;
-
-/// The description `snitchwatch_bridge::translator::verdict::verdict_to_rule`
-/// gives every interactive prompt rule (since M1.5).
-const INTERACTIVE_VERDICT_DESCRIPTION: &str = "snitchwatch interactive verdict";
+use snitchwatch_bridge::translator::verdict::{
+    strip_display_hazards, INTERACTIVE_VERDICT_DESCRIPTION,
+};
 
 /// Longest destination shown in a hint (`plain_truncated` adds `…`).
 const MAX_TARGET_CHARS: usize = 64;

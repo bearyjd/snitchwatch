@@ -18,17 +18,13 @@ pub mod shadow;
 pub mod state;
 
 use super::row_store::Rule;
-
-/// The packaged rules the bridge installs for itself.
-const PACKAGED_RULE_PREFIX: &str = "000-snitchwatch-";
+use snitchwatch_bridge::rule_name::is_reserved_packaged_name;
 
 /// Rules managed elsewhere (blocklists, the packaged `000-snitchwatch-`
 /// rules, anything the bridge marks read-only): they get no badge or finding,
 /// because the user can't act on them here. They may still shadow a user rule.
 pub fn is_managed(rule: &Rule) -> bool {
-    rule.is_read_only()
-        || rule.is_blocklist_sourced()
-        || rule.name.starts_with(PACKAGED_RULE_PREFIX)
+    rule.is_read_only() || rule.is_blocklist_sourced() || is_reserved_packaged_name(&rule.name)
 }
 
 #[cfg(test)]

@@ -126,3 +126,16 @@ mod any_host_process;
 mod degradation_names;
 mod display;
 mod domain_scope;
+
+/// The GUI classifies prompt rules by this description; it must come from the
+/// one exported constant, not a second literal.
+#[test]
+fn interactive_verdict_rule_description_is_the_exported_constant() {
+    let rule = once_rule(
+        Verdict::Allow,
+        VerdictScope::ThisHost,
+        &sample_connection(),
+        0,
+    );
+    assert_eq!(rule.description, INTERACTIVE_VERDICT_DESCRIPTION);
+}

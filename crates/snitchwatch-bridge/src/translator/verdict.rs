@@ -204,6 +204,10 @@ pub fn is_answer_name(name: &str) -> bool {
         .any(|verdict| name.starts_with(&answer_name_prefix(verdict)))
 }
 
+/// The description [`verdict_to_rule`] gives every interactive prompt rule.
+/// The GUI recognises prompt rules by it, so it is exported, not repeated.
+pub const INTERACTIVE_VERDICT_DESCRIPTION: &str = "snitchwatch interactive verdict";
+
 /// The `AskRule` reply for an interactive verdict.
 ///
 /// Issue #44: a remembered rule (any duration but `Once`) must be bound to an
@@ -250,7 +254,7 @@ fn build_rule(
     Rule {
         created: now_secs,
         name: rule_name_for(verdict, host, conn.dst_port as u16, &conn.process_path),
-        description: "snitchwatch interactive verdict".to_string(),
+        description: INTERACTIVE_VERDICT_DESCRIPTION.to_string(),
         enabled: true,
         precedence: false,
         nolog: false,
