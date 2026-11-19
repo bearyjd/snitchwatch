@@ -8,7 +8,7 @@
 
 ## 2026-11-18 - #386 (PR C2): bridge-cli integration tests use the per-user Unix gRPC socket
 
-- **What:** branch `test/386-user-unix-cli-tests` moves 9 `bridge-cli/tests/*.rs` files plus `count_hint_support` and `curated_support` to `user_unix_for_tests` and `connect_unix`; `cli_flags.rs` and `state_dir.rs` stay on TCP. Test count unchanged (298). Mutation: treating `UnixUser` as trusted turns 4 tests red (leftover, `gates.rs`, restart counters, import refusal). The plan expected `rules_count_hint.rs` to go red as well; that was wrong, because the count-hint path never reads the transport, so no coverage was lost. Making `UnixUser` deliver to the current stream only (`daemon_commands.rs:645`) turns nothing red.
+- **What:** branch `test/386-user-unix-cli-tests` moves 10 `bridge-cli/tests/*.rs` files (plus `count_hint_support` and `curated_support`) to `user_unix_for_tests` and `connect_unix`; their WS socket now sits at `<dir>/snitchwatch/bridge.sock` (no test hard-codes the old path); `cli_flags.rs` and `state_dir.rs` stay on TCP. Test count unchanged (298). Mutation: treating `UnixUser` as trusted turns 4 tests red (leftover, `gates.rs`, restart counters, import refusal). The plan expected `rules_count_hint.rs` to go red as well; that was wrong, because the count-hint code (`rules_count*.rs`) never reads the transport, so no coverage was lost. Fan-out on `UnixUser` is covered only by the `snitchwatch-bridge` unit tests (8 go red under that mutation), since these tests use a single mock. Making `UnixUser` deliver to the current stream only (`daemon_commands.rs:645`) turns nothing red.
 
 ## 2026-11-18 - #385 (PR B): bridge-cli public surface narrowed
 
