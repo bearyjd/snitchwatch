@@ -318,11 +318,7 @@ fn version_ping(daemon_version: &str, from: ConnKey) -> Request<PingRequest> {
         Some(PeerKey::Unix(id)) => {
             request
                 .extensions_mut()
-                .insert(crate::daemon_peer::UnixPeerInfo {
-                    id,
-                    uid: 0,
-                    pid: None,
-                });
+                .insert(crate::daemon_peer::UnixPeerInfo::for_tests(id));
         }
         None => {}
     }

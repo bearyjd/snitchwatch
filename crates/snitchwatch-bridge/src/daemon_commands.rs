@@ -83,12 +83,14 @@ use tracing::{info, warn};
 /// Which daemon connection a `Subscribe` or a `Notifications` stream came
 /// from, by transport:
 /// - TCP (legacy mode): `Some(PeerKey::Tcp(peer address))`.
-/// - Unix sockets: `Some(PeerKey::Unix(id))` once the accept path attaches a
-///   [`UnixPeerInfo`](crate::daemon_peer::UnixPeerInfo) to each connection
-///   (#391). Until it does, nothing builds one, so every Unix peer is `None`.
-/// - `None`: no connection info (in-process `Request::new` calls, tests, and
-///   today every Unix peer). `None` is one shared key; every system-mode peer
-///   is root (`RootUnixIncoming`).
+/// - Per-user Unix socket: `Some(PeerKey::Unix(id))`, a server-assigned id per
+///   accepted connection ([`UnixPeerInfo`](crate::daemon_peer::UnixPeerInfo),
+///   #391), as separate as TCP peers.
+/// - `None`: no connection info (in-process `Request::new` calls, tests) and
+///   every peer of the system (root-only) socket. `None` is one shared key
+///   there on purpose: a daemon redial may send Subscribe on one connection
+///   and HELLO on the next, which keeps the rule list only if they share a
+///   key. Every system-mode peer is root (`RootUnixIncoming`).
 pub type ConnKey = Option<PeerKey>;
 
 /// One daemon connection. Two keys are the same connection only if equal.

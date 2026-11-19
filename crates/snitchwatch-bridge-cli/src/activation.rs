@@ -1,11 +1,14 @@
 //! Strict systemd socket-activation loader for the system bridge mode.
 use anyhow::{bail, Context, Result};
+use snitchwatch_bridge::daemon_peer::UnixPeerInfo;
 use std::collections::HashMap;
 use std::os::fd::{FromRawFd, RawFd};
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::unix::UCred;
 use tokio::net::{UnixListener, UnixStream};
-use tracing::warn;
+use tracing::{debug, warn};
 
 pub const GRPC_SOCKET_PATH: &str = "/run/snitchwatch/opensnitchd.sock";
 pub const GUI_SOCKET_PATH: &str = "/run/snitchwatch/bridge.sock";
@@ -141,10 +144,16 @@ fn duplicate_unix_listener(fd: RawFd) -> Result<UnixListener> {
 pub(crate) struct RootUnixIncoming(pub(crate) UnixListener);
 
 impl tokio_stream::Stream for RootUnixIncoming {
+    // Plain `UnixStream`, on purpose (#391): every system-socket connection
+    // keeps the shared `None` key. The daemon's redial can send Subscribe on
+    // one connection and HELLO on the next, and the rule list survives that
+    // only because both share a key (plan 2026-11-19-391, section 3). Every
+    // peer here is root, so this loses nothing in security.
     type Item = std::io::Result<UnixStream>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
         poll_accept_filtered(&self.0, cx, |uid| uid == 0)
+            .map(|ready| ready.map(|accepted| accepted.map(|(stream, _)| stream)))
     }
 }
 
@@ -162,11 +171,80 @@ pub(crate) fn owner_peer_allowed(peer_uid: u32, owner_uid: u32) -> bool {
 }
 
 impl tokio_stream::Stream for OwnerUnixIncoming {
-    type Item = std::io::Result<UnixStream>;
+    type Item = std::io::Result<UnixPeerStream>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
         let owner_uid = self.owner_uid;
-        poll_accept_filtered(&self.listener, cx, |uid| owner_peer_allowed(uid, owner_uid))
+        poll_accept_filtered(&self.listener, cx, |uid| owner_peer_allowed(uid, owner_uid)).map(
+            |ready| {
+                ready.map(|accepted| {
+                    accepted.map(|(stream, cred)| {
+                        // After the uid check; the id is the server's, never the peer's.
+                        let info = UnixPeerInfo::accept(cred.uid(), cred.pid());
+                        debug!(id = info.id(), uid = info.uid(), pid = ?info.pid(), "accepted daemon peer");
+                        UnixPeerStream { inner: stream, info }
+                    })
+                })
+            },
+        )
+    }
+}
+
+/// An accepted per-user-socket connection carrying its [`UnixPeerInfo`], which
+/// tonic copies into every request's extensions (#391).
+pub(crate) struct UnixPeerStream {
+    inner: UnixStream,
+    info: UnixPeerInfo,
+}
+
+impl tonic::transport::server::Connected for UnixPeerStream {
+    type ConnectInfo = UnixPeerInfo;
+
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.info
+    }
+}
+
+impl AsyncRead for UnixPeerStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for UnixPeerStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
     }
 }
 
@@ -174,14 +252,14 @@ fn poll_accept_filtered(
     listener: &UnixListener,
     cx: &mut TaskContext<'_>,
     allow: impl Fn(u32) -> bool,
-) -> Poll<Option<std::io::Result<UnixStream>>> {
+) -> Poll<Option<std::io::Result<(UnixStream, UCred)>>> {
     // Bound each poll so a flood of rejected clients cannot starve shutdown.
     for _ in 0..32 {
         match listener.poll_accept(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Some(Err(error))),
             Poll::Ready(Ok((stream, _))) => match stream.peer_cred() {
-                Ok(cred) if allow(cred.uid()) => return Poll::Ready(Some(Ok(stream))),
+                Ok(cred) if allow(cred.uid()) => return Poll::Ready(Some(Ok((stream, cred)))),
                 Ok(cred) => warn!(uid = cred.uid(), "rejected unauthorized daemon peer"),
                 Err(error) => {
                     warn!(%error, "rejected daemon peer with unavailable credentials")
@@ -290,7 +368,51 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(accepted.peer_cred().unwrap().uid(), owner_uid);
+        assert_eq!(accepted.info.uid(), owner_uid);
+    }
+
+    /// Each accepted per-user connection gets its own, increasing id (#391).
+    #[tokio::test]
+    async fn owner_incoming_gives_each_connection_its_own_increasing_id() {
+        use tokio_stream::StreamExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grpc.sock");
+        let mut incoming = OwnerUnixIncoming {
+            listener: UnixListener::bind(&path).unwrap(),
+            owner_uid: unsafe { libc::geteuid() },
+        };
+        let _peers = [
+            UnixStream::connect(&path).await.unwrap(),
+            UnixStream::connect(&path).await.unwrap(),
+            UnixStream::connect(&path).await.unwrap(),
+        ];
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let accepted = incoming.next().await.unwrap().unwrap();
+            ids.push(tonic::transport::server::Connected::connect_info(&accepted).id());
+        }
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "{ids:?}");
+    }
+
+    /// The system socket's stream is a plain `UnixStream`: its connect info is
+    /// tonic's `UdsConnectInfo`, never a `UnixPeerInfo`, so its peers keep the
+    /// shared `None` key (#391).
+    #[test]
+    fn root_incoming_yields_a_plain_unix_stream() {
+        fn item<S, T>(_: &S) -> std::marker::PhantomData<T>
+        where
+            S: tokio_stream::Stream<Item = std::io::Result<T>>,
+        {
+            std::marker::PhantomData
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        let incoming = RootUnixIncoming(UnixListener::bind(dir.path().join("s.sock")).unwrap());
+        let _: std::marker::PhantomData<UnixStream> = item(&incoming);
     }
 
     #[tokio::test]
@@ -334,7 +456,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            assert_eq!(accepted.peer_cred().unwrap().uid(), 0);
+            assert_eq!(accepted.info.uid(), 0);
             return;
         }
         eprintln!("SKIPPED-ROOT-ONLY: ran the non-root fallback; the uid 65534 re-exec needs root");
