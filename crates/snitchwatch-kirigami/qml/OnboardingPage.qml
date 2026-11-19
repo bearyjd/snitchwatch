@@ -1,15 +1,11 @@
 // First-run onboarding wizard (Task 12).
 //
-// Maps from `crate::wizard`'s `DaemonState` (a near-verbatim port of
-// `snitchwatch-tauri::wizard`) + implied `web/js/onboarding.js`. Design
-// decision recorded here per the plan: a single state-driven Kirigami.Page
-// (not a four-page StackView) — the four states share almost all of their
-// layout, so one page with state-conditional content avoided duplicating it
-// four times.
+// A single state-driven Kirigami.Page: `connected` (page hidden) or
+// `unreachableRetrying`. It only observes the authenticated bridge connection
+// and cannot fix an unreachable bridge, so it offers no service control.
 //
-// All daemon-detection/action logic lives in Rust (`WizardController`,
-// wrapping the Qt-free `wizard.rs` port); this page only displays state and
-// wires up its actions.
+// All detection logic lives in Rust (`WizardController`, wrapping the Qt-free
+// `wizard.rs`); this page only displays state and wires up Retry/Continue.
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as Controls
@@ -51,7 +47,7 @@ Kirigami.Page {
         target: page.controller
         function onStateChanged() {
             // Reset the backoff once we leave the retrying state, so a fresh
-            // bout of retrying (e.g. after "Start daemon" fails again later)
+            // bout of retrying (e.g. after the bridge drops again later)
             // starts from the short interval again.
             if (page.controller.state !== "unreachableRetrying") {
                 page.retryDelayMs = 5000;
@@ -76,8 +72,6 @@ Kirigami.Page {
             Layout.preferredHeight: Kirigami.Units.iconSizes.huge
             source: {
                 switch (page.controller ? page.controller.state : "") {
-                case "unitMissing": return "edit-download";
-                case "unitInactive": return "media-playback-start";
                 case "unreachableRetrying": return "view-refresh";
                 default: return "security-high";
                 }
@@ -92,8 +86,6 @@ Kirigami.Page {
             textFormat: Text.PlainText
             text: {
                 switch (page.controller ? page.controller.state : "") {
-                case "unitMissing": return "Daemon not installed";
-                case "unitInactive": return "Daemon not running";
                 case "unreachableRetrying": return "Waiting for the bridge";
                 default: return "Checking bridge connection…";
                 }
@@ -115,10 +107,10 @@ Kirigami.Page {
             wrapMode: Text.WordWrap
             horizontalAlignment: Text.AlignHCenter
             opacity: 0.75
-            visible: page.controller && page.controller.state === "unitMissing"
-            text: "See docs/packaging/rpm-ostree-layering.md to layer the OpenSnitch " +
-                  "daemon onto a stock Bazzite/Fedora image (rpm-ostree install " +
-                  "opensnitch), or use the bluebuild batteries-included image instead."
+            visible: page.controller && page.controller.state === "unreachableRetrying"
+            text: "Setup and recovery steps: docs/packaging/system-bridge-integration.md " +
+                  "(\"Missing socket, and console recovery\"). After connecting, Daemon " +
+                  "Health shows the OpenSnitch daemon's status."
         }
 
         SelectableText {
@@ -140,14 +132,6 @@ Kirigami.Page {
             Layout.alignment: Qt.AlignHCenter
             spacing: Kirigami.Units.smallSpacing
 
-            GuardedButton {
-                text: "Start daemon"
-                icon.name: "media-playback-start"
-                visible: page.controller && (page.controller.state === "unitInactive"
-                         || page.controller.state === "unreachableRetrying")
-                enabled: page.controller && !page.controller.busy
-                onClicked: page.controller.startUnit()
-            }
             RoundedButton {
                 text: "Retry"
                 icon.name: "view-refresh"

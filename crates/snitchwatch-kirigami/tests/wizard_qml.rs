@@ -6,17 +6,15 @@
 //!   * the cxx-qt wrapper registers as a QML type under `com.snitchwatch.shell`
 //!     and instantiates (a null root object would mean the type failed to
 //!     register or compile), and
-//!   * `probe()` observes the no-client state without aborting, and the
-//!     explicit `startUnit()` action is registered without starting a real
-//!     system service from a test, and
+//!   * `probe()` observes the no-client state without aborting, and
 //!   * `OnboardingPage.qml` loads against a real `WizardController` and its
 //!     buttons/timer bind without throwing.
 //!
 //! It intentionally does NOT assert the resolved `state`/`detail` content:
-//! both invokables complete asynchronously off the Qt thread, and a thrown JS
+//! the state is read from the live bridge connection, and a thrown JS
 //! error in `Component.onCompleted` does not null the root object anyway, so
 //! QML-side asserts on timing-dependent state wouldn't be load-bearing here.
-//! Bridge connection-state and service-command behavior are covered
+//! Bridge connection-state behavior are covered
 //! exhaustively and Qt-free by `wizard`'s own unit tests, which is what
 //! Task 12's acceptance criterion calls for. Run headless with
 //! `QT_QPA_PLATFORM=offscreen`.
@@ -58,9 +56,6 @@ QtObject {
 
     Component.onCompleted: {
         controller.probe();
-        if (typeof controller.startUnit !== "function") {
-            throw new Error("startUnit is not registered");
-        }
 
         const component = Qt.createComponent("qrc:/qt/qml/com/snitchwatch/shell/qml/OnboardingPage.qml");
         if (component.status === Component.Ready) {

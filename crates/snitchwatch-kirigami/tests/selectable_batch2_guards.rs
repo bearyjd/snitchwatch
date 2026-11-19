@@ -78,9 +78,9 @@ const WRAPS: &[(&str, &[(&str, &str)])] = &[
     (
         "OnboardingPage.qml",
         &[
-            ("Daemon not installed", "Text.WordWrap"),
+            ("Waiting for the bridge", "Text.WordWrap"),
             ("wizardDetail", "Text.WordWrap"),
-            ("See docs/packaging/rpm-ostree-layering.md", "Text.WordWrap"),
+            ("Setup and recovery steps", "Text.WordWrap"),
             ("Retrying automatically", "Text.WordWrap"),
         ],
     ),
@@ -127,7 +127,7 @@ const WRAPS: &[(&str, &[(&str, &str)])] = &[
 
 /// (file, [(marker unique to one converted Heading block, its exact level)]).
 const LEVELS: &[(&str, &[(&str, u32)])] = &[
-    ("OnboardingPage.qml", &[("Daemon not installed", 2)]),
+    ("OnboardingPage.qml", &[("Waiting for the bridge", 2)]),
     (
         "SilentModeChoice.qml",
         &[("When a program wants the network", 2)],
