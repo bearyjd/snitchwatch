@@ -7,7 +7,7 @@ async fn pause_request_without_an_authenticated_gui_is_ignored() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     };
     let mut bridge = run(cfg).await.expect("run failed");
 
@@ -57,7 +57,7 @@ fn unix_ms_now() -> u64 {
 async fn test_bridge(dir: &tempfile::TempDir) -> RunningBridge {
     run(BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     })
     .await
     .expect("run failed")

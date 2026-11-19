@@ -1,7 +1,7 @@
 //! Issue #73 through a whole bridge on the system service's transport: the
 //! daemon dials a Unix socket, its rule snapshot is what the page counts, and
 //! a request from the page deletes only the rules Snitchwatch made. (Over the
-//! legacy TCP connection nothing is offered; `tests/blocklist_leftovers.rs`.)
+//! untrusted per-user connection nothing is offered; `tests/blocklist_leftovers.rs`.)
 //! The root-only peer check of the real socket is not in play here, so this
 //! runs without root.
 
@@ -77,7 +77,7 @@ async fn rules_nothing_manages_are_counted_with_their_cause_and_removable() {
     let grpc_path = dir.path().join("opensnitchd.sock");
     let config = BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     };
     let options = RunOptions {
         storage: Storage::Ephemeral(EphemeralReason::NotConfigured),

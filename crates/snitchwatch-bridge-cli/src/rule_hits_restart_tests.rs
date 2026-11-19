@@ -3,8 +3,8 @@
 //! starts on the same state directory, and the daemon (`mock_opensnitchd`,
 //! keeping its counters) dials it again. On the system bridge's transport (a
 //! Unix socket; the root-only peer check of the real socket is not in play)
-//! that restart is judged from the daemon's counters; over TCP it is always a
-//! gap.
+//! that restart is judged from the daemon's counters; over the per-user Unix
+//! socket (an untrusted peer) it is always a gap.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -65,13 +65,18 @@ struct Run {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Transport {
     Unix,
-    Tcp,
+    /// The per-user Unix socket: the peer is not proven root.
+    UserUnix,
 }
 
 fn config(dir: &Path, n: u32) -> BridgeConfig {
+    // One runtime dir per bridge; the bridge creates only the socket
+    // directories below it.
+    let runtime = dir.join(format!("b{n}"));
+    std::fs::create_dir_all(&runtime).unwrap();
     BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.join(format!("bridge{n}.sock")))
+        ..BridgeConfig::user_unix_for_tests(&runtime)
     }
 }
 
@@ -88,7 +93,7 @@ async fn start_with(transport: Transport, dir: &Path, state: &Path, n: u32, hell
         blocklist_fetcher: None,
         mode: match transport {
             Transport::Unix => BridgeMode::System,
-            Transport::Tcp => BridgeMode::User,
+            Transport::UserUnix => BridgeMode::User,
         },
     };
     let (bridge, mut daemon) = match transport {
@@ -118,10 +123,10 @@ async fn start_with(transport: Transport, dir: &Path, state: &Path, n: u32, hell
                 .unwrap();
             (bridge, MockOpensnitchd::from_channel(channel))
         }
-        Transport::Tcp => {
+        Transport::UserUnix => {
             let bridge = run_with_options(config(dir, n), options).await.unwrap();
-            let addr = bridge.grpc_endpoint.tcp_addr().unwrap();
-            let daemon = MockOpensnitchd::connect(addr).await.unwrap();
+            let path = bridge.grpc_endpoint.unix_path().unwrap();
+            let daemon = MockOpensnitchd::connect_unix(path).await.unwrap();
             (bridge, daemon)
         }
     };
@@ -280,12 +285,12 @@ async fn a_reboot_after_a_clean_stop_is_no_gap_on_the_unix_socket() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_bridge_restart_over_tcp_is_a_gap() {
+async fn a_bridge_restart_over_the_per_user_socket_is_a_gap() {
     let (dir, state) = dirs();
     let daemon = DaemonRun::started_secs_ago(100);
-    first_run(Transport::Tcp, dir.path(), &state, &daemon).await;
+    first_run(Transport::UserUnix, dir.path(), &state, &daemon).await;
 
-    let mut run = start(Transport::Tcp, dir.path(), &state, 2).await;
+    let mut run = start(Transport::UserUnix, dir.path(), &state, 2).await;
     run.daemon
         .ping_with_stats(2, daemon.stats(9, 2))
         .await

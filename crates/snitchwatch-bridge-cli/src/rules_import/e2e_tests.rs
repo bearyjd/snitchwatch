@@ -2,7 +2,7 @@
 //! one import runs on: `MockOpensnitchd` ↔ a real bridge ↔ WebSocket GUIs.
 //! What reaches the daemon is checked on the mock's notification stream:
 //! `CHANGE_RULE` only, one rule each. (`tests/rules_io_test.rs` covers the
-//! refusal on the legacy TCP transport.)
+//! refusal on the untrusted per-user socket.)
 //!
 //! The daemon's socket accepts any peer here: `RootUnixIncoming` would
 //! refuse a test that doesn't run as root.
@@ -121,7 +121,7 @@ async fn setup(rules: Vec<Rule>) -> Setup {
     let bridge = run_with_incoming(
         BridgeConfig {
             cache_capacity: 64,
-            ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+            ..BridgeConfig::user_unix_for_tests(dir.path())
         },
         GrpcEndpoint::Unix(grpc_path.clone()),
         AnyPeer(UnixListener::bind(&grpc_path).unwrap()),

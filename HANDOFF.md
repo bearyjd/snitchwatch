@@ -2,6 +2,10 @@
 
 > Start with the 2026-11-17 (final) section below, then 2026-11-16, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
 
+## 2026-11-18 - #386 (PR C1): bridge-cli unit tests use the per-user Unix gRPC socket
+
+- **What:** branch `test/386-user-unix-helper-cli-src` adds `BridgeConfig::user_unix_for_tests(dir)` and `GrpcEndpoint::unix_path()` (both test support), and moves the 7 bridge-cli `src/` unit-test files off `DevTcp`. Kept on TCP: the ephemeral-port test in `lib_tests.rs`. Per-user peers all share connection key `None`; C2 (`bridge-cli/tests`) and C3 (`tests/integration`) are still to do.
+
 ## 2026-11-18 - #385 (PR B): bridge-cli public surface narrowed
 
 - **What:** branch `refactor/385-bridge-cli-pub-surface` drops the unused `RunningBridge::notice_rx`, makes `rule_hits_storage`, `profile_storage` and `storage` private modules, and narrows `set_curated_account_lookups` and `resolve_grpc_listen` to `pub(crate)`. Test hooks that tests reach through `RunningBridge` stay public (`#[doc(hidden)]` on three). Docs on `broadcast_tx`/`inbound_tx`/`tray_rx` and the bridge `notice.rs`/`tray_state.rs` module docs no longer claim Kirigami uses them. No behaviour change.
