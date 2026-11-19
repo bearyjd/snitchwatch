@@ -90,15 +90,9 @@ pub(super) fn plan(
             notification(&effect).map(Plan::Send)
         }
         Command::Add { rule } => plan_add(rule, untrusted_peer, context, rules, busy),
-        Command::Update { rule_id, rule } => plan_update(
-            rule_id,
-            rule,
-            untrusted_peer,
-            curated_inert,
-            context,
-            rules,
-            busy,
-        ),
+        Command::Update { rule_id, rule } => {
+            plan_update(rule_id, rule, untrusted_peer, curated_inert, context, rules, busy)
+        }
     }
 }
 

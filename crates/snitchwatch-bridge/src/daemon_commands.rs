@@ -30,10 +30,12 @@
 //! socket a redialled daemon's old and new streams saying HELLO in either
 //! order don't leave the new stream without a list; later than that, a
 //! withdrawn list comes back only when the daemon reconnects.
-//! That relies on the Unix sockets' streams sharing one key (`None`, see
-//! [`ConnKey`]); per-connection `PeerKey::Unix` ids (#391) would separate
-//! them, as TCP's addresses do. Which socket gets them is decided by
-//! `cache/rules_unix_peer_tests.rs`.
+//! That relies on the trusted system Unix socket's streams sharing one key
+//! (`None`, see [`ConnKey`]): `RootUnixIncoming` attaches no id on purpose,
+//! because a redial can send Subscribe on one connection and HELLO on the
+//! next (`cache/rules_unix_peer_tests.rs`). Per-user (`UnixUser`)
+//! connections have per-connection `PeerKey::Unix` ids (#391), as TCP's
+//! addresses separate them.
 //!
 //! **Delivery, by transport.**
 //! - [`DaemonTransport::Tcp`] (dev-only, behind `SNITCHWATCH_DEV_TCP=1`, `127.0.0.1`): every

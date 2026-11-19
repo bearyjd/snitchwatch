@@ -1,8 +1,9 @@
 //! Which daemon connection a gRPC request came from (#391).
 //!
 //! tonic fills a request's extensions from the accepted connection's
-//! `Connected::connect_info()`. TCP gives `TcpConnectInfo`; a Unix socket
-//! carries a [`UnixPeerInfo`] once the accept path attaches one. The id is
+//! `Connected::connect_info()`. TCP gives `TcpConnectInfo`; the per-user
+//! Unix socket carries a [`UnixPeerInfo`], which `OwnerUnixIncoming` attaches
+//! at accept; the system socket does not, so its peers have no info. The id is
 //! assigned by the server at accept and never comes from the peer.
 
 use crate::daemon_commands::{ConnKey, PeerKey};
