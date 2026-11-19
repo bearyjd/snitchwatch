@@ -4,9 +4,9 @@
 
 ## 2026-11-18 - #386 (PR C3): tests/integration runs on the per-user Unix gRPC socket
 
-- **What:** branch `test/386-user-unix-integration` moves the 13 `tests/integration` files (8 root `tests/*_test.rs` + 5 `bridge_protocol_test/*.rs`) from `DevTcp` to `user_unix_for_tests`/`connect_unix`. `gui_lifecycle.rs` dials with a raw `UiClient` over a Unix connector (adds dev-deps `tower`, `hyper-util` to the integration package) so its tonic `Status` assertions stay identical. `rules_io_test` is now named for the untrusted per-user transport. Test count unchanged (29).
+- **What:** branch `test/386-user-unix-integration` moves the 13 `tests/integration` files (8 root `tests/*_test.rs` + 5 `bridge_protocol_test/*.rs`) from `DevTcp` to `user_unix_for_tests`/`connect_unix`. `gui_lifecycle.rs` dials with a raw `UiClient` through `MockOpensnitchd::unix_channel` (the channel `connect_unix` builds, now exposed; no new dev-deps, so `Cargo.lock` and the release MANIFEST `cargo_lock_sha256` are unchanged) so its tonic `Status` assertions stay identical. `rules_io_test` is now named for the untrusted per-user transport. Test count unchanged (29).
 - **Trust sensitivity:** only `rules_io` goes red when `peer_is_trusted_daemon` is true for `UnixUser`; the rest are single-mock and do not read the transport.
-- **#386 stops here:** the optional Kirigami batch (C4) is skipped on purpose. The TCP keep-set stays: the `lib_tests` ephemeral-port test, `cli_flags`/`state_dir`, the spike and the examples (`fire_ask_rule`, `live_rule_change`).
+- **#386 stops here:** the optional Kirigami batch (C4) is skipped on purpose. The TCP keep-set stays: the `lib_tests` ephemeral-port test, `cli_flags`/`state_dir`, the spike and the examples (`fire_ask_rule`, `live_rule_change`), and the Kirigami tests `live_loop.rs`/`rule_hits_live.rs`/`bridge_runtime/tests.rs` (still `dev_tcp_for_tests`; they need a local Qt run).
 
 ## 2026-11-18 - #386 (PR C1): bridge-cli unit tests use the per-user Unix gRPC socket
 
