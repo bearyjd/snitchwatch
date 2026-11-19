@@ -5,7 +5,6 @@ use snitchwatch_bridge::auth::Token;
 use snitchwatch_bridge::blocklists::worker::BlocklistTasks;
 use snitchwatch_bridge::cache::rule_hits_handle::RuleHitsHandle;
 use snitchwatch_bridge::curated::manager::CuratedDefaults;
-use snitchwatch_bridge::notice::Notice;
 use snitchwatch_bridge::tray_state::TrayState;
 use snitchwatch_bridge::ws_messages::{ClientMessage, ServerMessage};
 use std::path::PathBuf;
@@ -23,21 +22,19 @@ pub struct RunningBridge {
     pub ws_token: Token,
     /// Actual daemon endpoint (TCP in legacy mode, Unix in system mode).
     pub grpc_endpoint: GrpcEndpoint,
-    /// Outbound `ServerMessage` broadcast sender. In-process consumers (the
-    /// native Kirigami shell) call `.subscribe()` here to receive the exact
-    /// stream the WebSocket server fans out to browser clients — no WS
-    /// round-trip to ourselves. The WS server keeps using its own clone of this
-    /// same sender, so both consumption paths stay in lockstep.
+    /// Outbound `ServerMessage` broadcast sender. Tests call `.subscribe()`
+    /// here to see what the WebSocket server fans out. The WS server keeps
+    /// using its own clone of this same sender.
     pub broadcast_tx: broadcast::Sender<ServerMessage>,
-    /// Inbound `ClientMessage` sender. In-process consumers push UI-origin
-    /// messages here — the same channel the WebSocket server feeds — so they
-    /// flow through the identical `upstream::apply` pump (verdict resolution,
-    /// rule effects). This is the in-process equivalent of a WS client frame.
+    /// Inbound `ClientMessage` sender. Tests and the `live_rule_change`
+    /// example push UI-origin messages here — the same channel the WebSocket
+    /// server feeds — so they flow through the identical `upstream::apply`
+    /// pump (verdict resolution, rule effects), like a WS client frame.
     pub inbound_tx: mpsc::Sender<ClientMessage>,
-    /// Receiver for tray icon state changes published by the bridge.
+    /// Test observation point for the bridge's tray state; external shells
+    /// receive it as a `ServerMessage` via `relays.rs`.
+    #[doc(hidden)]
     pub tray_rx: watch::Receiver<TrayState>,
-    /// Receiver for desktop notifications published by the bridge.
-    pub notice_rx: broadcast::Receiver<Notice>,
     /// See [`RunningBridge::daemon_stream_ready`].
     pub(crate) daemon_stream_ready: watch::Receiver<u64>,
     /// Authenticated GUI sessions. The WS server registers each client after
@@ -86,6 +83,7 @@ impl RunningBridge {
     /// item 38): none until set, so every account is unknown and nothing
     /// pinned to one is installed. Only [`run_system`] sets the host's
     /// account database (#157); tests set a fake.
+    #[doc(hidden)]
     pub fn set_curated_uid_lookup(&self, lookup: snitchwatch_bridge::accounts::UidLookup) {
         self.curated.set_uid_lookup(lookup);
     }
@@ -93,7 +91,7 @@ impl RunningBridge {
     /// [`Self::set_curated_uid_lookup`] with each uid found looked back up
     /// with `names`: a uid whose own name isn't the account's is
     /// unconfirmed (security review M1).
-    pub fn set_curated_account_lookups(
+    pub(crate) fn set_curated_account_lookups(
         &self,
         lookup: snitchwatch_bridge::accounts::UidLookup,
         names: snitchwatch_bridge::accounts::AccountLookup,

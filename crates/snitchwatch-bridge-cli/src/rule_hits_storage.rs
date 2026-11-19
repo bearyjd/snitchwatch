@@ -16,7 +16,7 @@ use snitchwatch_bridge::cache::rule_hits_handle::RuleHitsHandle;
 use crate::storage::Storage;
 
 /// The saved counts' file name inside the state directory.
-pub const RULE_HITS_FILE: &str = "rule_hits.json";
+pub(crate) const RULE_HITS_FILE: &str = "rule_hits.json";
 
 /// Points `hits` at `storage`: restores what an earlier run saved, or, with
 /// no usable state directory, records why the counts stay in memory.

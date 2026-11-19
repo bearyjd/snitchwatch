@@ -25,22 +25,21 @@ mod config;
 pub mod curated_storage;
 pub mod logging;
 mod profile_actions;
-pub mod profile_storage;
+mod profile_storage;
 mod relays;
 mod replier;
 mod rule_commands;
 mod rule_effect;
-pub mod rule_hits_storage;
+mod rule_hits_storage;
 mod rules_import;
 mod running;
-pub mod storage;
+mod storage;
 #[cfg(test)]
 mod test_daemon;
 mod user_socket;
 
 pub use config::{
-    reject_dev_tcp_in_system_mode, resolve_grpc_listen, BridgeConfig, GrpcEndpoint, GrpcListen,
-    DEV_TCP_ENV,
+    reject_dev_tcp_in_system_mode, BridgeConfig, GrpcEndpoint, GrpcListen, DEV_TCP_ENV,
 };
 pub use running::RunningBridge;
 
@@ -105,6 +104,7 @@ pub async fn run_with_options(config: BridgeConfig, options: RunOptions) -> Resu
 /// [`run`] with a shorter wait before the bridge answers a prompt nobody
 /// answers (`snitchwatch_bridge::deferred_answers`), for tests that watch
 /// one time out.
+#[doc(hidden)]
 pub async fn run_with_answer_timeout(
     config: BridgeConfig,
     answer_timeout: std::time::Duration,
@@ -387,7 +387,6 @@ where
 
     // --- gRPC Ui server -----------------------------------------------------
     let tray_rx = tray_pub.subscribe();
-    let notice_rx = notice_bus.subscribe();
 
     // Subscribe before spawning the relays (see `relays::spawn_tray_and_notice_relays`).
     relays::spawn_tray_and_notice_relays(&tray_pub, &notice_bus, &broadcast_tx);
@@ -702,7 +701,6 @@ where
         broadcast_tx,
         inbound_tx,
         tray_rx,
-        notice_rx,
         daemon_stream_ready,
         #[cfg(test)]
         client_presence,

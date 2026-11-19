@@ -49,9 +49,9 @@ use tracing::{error, info, warn};
 
 /// The only state directory the system bridge accepts (`StateDirectory=` of
 /// `snitchwatch-system-bridge.service`).
-pub const SYSTEM_STATE_DIR: &str = "/var/lib/snitchwatch";
+pub(crate) const SYSTEM_STATE_DIR: &str = "/var/lib/snitchwatch";
 /// The blocklist database's file name inside the state directory.
-pub const BLOCKLIST_DB_FILE: &str = "blocklists.sqlite3";
+pub(crate) const BLOCKLIST_DB_FILE: &str = "blocklists.sqlite3";
 /// Why a per-user bridge installs no blocklist rule (defined with the other
 /// blocklist reasons, which GUIs key warnings on).
 pub use snitchwatch_bridge::blocklists::PER_USER_REASON;
@@ -112,7 +112,7 @@ pub enum BridgeMode {
     /// A manual (dev) start; there is no per-user unit since #35.
     User,
     /// `snitchwatch-system-bridge.service`: must resolve to
-    /// [`SYSTEM_STATE_DIR`].
+    /// `SYSTEM_STATE_DIR`.
     System,
 }
 
@@ -167,7 +167,7 @@ pub fn resolve_storage(mode: BridgeMode) -> Storage {
 /// systemd's `StateDirectory=`) wins over `SNITCHWATCH_STATE_DIR`; an empty
 /// value counts as unset. The path is canonicalized (`/home` is a symlink to
 /// `/var/home` on Bazzite, and PR B's daemon rules need a byte-stable path).
-pub fn resolve_storage_from(
+pub(crate) fn resolve_storage_from(
     state_directory: Option<OsString>,
     snitchwatch_state_dir: Option<OsString>,
     mode: BridgeMode,
