@@ -24,7 +24,7 @@ status.
 ## Building
 
 Requires: a Rust toolchain (no minimum version is declared in `Cargo.toml`; CI uses
-the stable toolchain and release builds pin rustc 1.99.1 in
+the stable toolchain and release builds pin rustc 1.100.0 in
 `packaging/release/pins.env`) and a protobuf compiler (`protoc`).
 
 ```bash
