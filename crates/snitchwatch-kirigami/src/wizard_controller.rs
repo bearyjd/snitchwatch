@@ -1,19 +1,15 @@
 //! Onboarding observes the existing authenticated GUI bridge connection.
 //! Probing is a quick local state read; daemon liveness comes separately
-//! from the diagnostics feed. Explicit service-start actions run off the
-//! UI thread and use normal systemd authorization.
+//! from the diagnostics feed. The GUI never starts or stops services.
 
 use core::pin::Pin;
-use cxx_qt::Threading;
 use cxx_qt_lib::QString;
 
-use crate::wizard::{start_unit_via_systemctl, state_from_authenticated_bridge, DaemonState};
+use crate::wizard::{state_from_authenticated_bridge, DaemonState};
 
 fn state_name(state: DaemonState) -> &'static str {
     match state {
         DaemonState::Connected => "connected",
-        DaemonState::UnitMissing => "unitMissing",
-        DaemonState::UnitInactive => "unitInactive",
         DaemonState::UnreachableRetrying => "unreachableRetrying",
     }
 }
@@ -21,16 +17,11 @@ fn state_name(state: DaemonState) -> &'static str {
 fn state_detail(state: DaemonState) -> &'static str {
     match state {
         DaemonState::Connected => "Connected to the Snitchwatch bridge.",
-        DaemonState::UnitMissing => {
-            "The system OpenSnitch service isn't installed. See the Snitchwatch \
-             system bridge integration guide to install the host services."
-        }
-        DaemonState::UnitInactive => {
-            "The daemon service is installed but not running. Start it to continue."
-        }
         DaemonState::UnreachableRetrying => {
-            "Waiting for the Snitchwatch bridge. Check the service setup and \
-             GUI access permissions. The client retries automatically."
+            "Can't reach the Snitchwatch system bridge. It runs as a system \
+             service; this app can't start it. Check that your account is in the \
+             snitchwatch-ui group (log out and back in after adding it) and that \
+             the bridge sockets are running. The client retries automatically."
         }
     }
 }
@@ -46,10 +37,9 @@ pub mod qobject {
         /// First-run onboarding wizard surface, bound by `OnboardingPage.qml`.
         #[qobject]
         #[qml_element]
-        /// One of `connected` / `unitMissing` / `unitInactive` /
-        /// `unreachableRetrying`, mirroring [`super::DaemonState`] (Task 12).
+        /// One of `connected` / `unreachableRetrying`, mirroring [`super::DaemonState`] (Task 12).
         #[qproperty(QString, state)]
-        /// True while a `probe()`/`startUnit()` call is in flight.
+        /// True while a `probe()` call is in flight.
         #[qproperty(bool, busy)]
         /// Human-readable detail/error text for the current state.
         #[qproperty(QString, detail)]
@@ -61,17 +51,7 @@ pub mod qobject {
         /// button/backoff timer.
         #[qinvokable]
         fn probe(self: Pin<&mut WizardController>);
-
-        /// `systemctl --system start opensnitch.service`, wired to
-        /// the `UnitInactive` state's "Start daemon" CTA. Re-probes on
-        /// completion (success or failure) so `state`/`detail` reflect the
-        /// outcome.
-        #[qinvokable]
-        #[cxx_name = "startUnit"]
-        fn start_unit(self: Pin<&mut WizardController>);
     }
-
-    impl cxx_qt::Threading for WizardController {}
 }
 
 /// Rust-side state for [`qobject::WizardController`].
@@ -107,19 +87,6 @@ impl qobject::WizardController {
             crate::bridge_runtime::handles().is_some_and(|handles| handles.is_connected());
         self.apply_probe_result(state_from_authenticated_bridge(connected));
     }
-
-    fn start_unit(mut self: Pin<&mut Self>) {
-        self.as_mut().set_busy(true);
-        let qt_thread = self.qt_thread();
-
-        std::thread::spawn(move || {
-            let outcome = start_unit_via_systemctl();
-            let _ = qt_thread.queue(move |qobject| match outcome {
-                Ok(()) => qobject.probe(),
-                Err(message) => qobject.apply_probe_error(&message),
-            });
-        });
-    }
 }
 
 impl qobject::WizardController {
@@ -129,15 +96,6 @@ impl qobject::WizardController {
     fn apply_probe_result(mut self: Pin<&mut Self>, state: DaemonState) {
         self.as_mut().set_state(QString::from(state_name(state)));
         self.as_mut().set_detail(QString::from(state_detail(state)));
-        self.as_mut().set_busy(false);
-    }
-
-    /// Surface an action failure (e.g. `systemctl` missing/non-zero exit, or
-    /// authorization being denied) without changing `state` — the
-    /// wizard stays on whatever state it was showing, just with an updated
-    /// detail line.
-    fn apply_probe_error(mut self: Pin<&mut Self>, message: &str) {
-        self.as_mut().set_detail(QString::from(message));
         self.as_mut().set_busy(false);
     }
 }

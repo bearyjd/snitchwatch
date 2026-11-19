@@ -6,8 +6,7 @@
 //!
 //! Both underlying operations are plain `std::fs` calls (`crate::autostart`,
 //! `crate::crash_log`) with no bridge/network dependency, but disk I/O still
-//! runs on a scratch thread and reports back via `CxxQtThread::queue` (the
-//! same pattern `WizardController` uses for its `systemctl` calls) so a slow
+//! runs on a scratch thread and reports back via `CxxQtThread::queue`, so a slow
 //! or unavailable filesystem (e.g. a networked home directory) never blocks
 //! the Qt thread. Every failure path sets `autostartError`/`crashLogText` to a
 //! human-readable message rather than panicking.

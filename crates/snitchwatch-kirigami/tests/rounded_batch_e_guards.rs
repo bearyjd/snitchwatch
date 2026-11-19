@@ -72,8 +72,7 @@ fn remaining_plain_controls_are_exactly_the_documented_ones() {
         );
         // A plain button is never swapped for the held-key wrapper.
         let guarded = code.matches("GuardedButton {").count();
-        let expect_guarded =
-            usize::from(*name == "LearningReviewPage.qml" || *name == "OnboardingPage.qml");
+        let expect_guarded = usize::from(*name == "LearningReviewPage.qml");
         assert_eq!(guarded, expect_guarded, "{name}: GuardedButton count");
     }
 }

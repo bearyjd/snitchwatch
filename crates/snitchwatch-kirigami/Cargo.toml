@@ -59,7 +59,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = { workspace = true }
 anyhow = "1"
-which = "6"
 notify-rust = "4"
 # Our own pending notifications: sent and listened to on one connection,
 # trusting only the notification server (`notification_signals`). The same
