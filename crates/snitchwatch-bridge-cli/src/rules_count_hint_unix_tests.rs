@@ -1,6 +1,6 @@
 //! Issue #65 (the Rules page hint when the daemon's rule count disagrees)
 //! through a whole bridge on the system service's transport, a Unix socket;
-//! `tests/rules_count_hint.rs` covers the per-user socket. The daemon's rule loader is the
+//! `tests/rules_count_hint.rs` covers the untrusted transport. The daemon's rule loader is the
 //! shared model of `mock_opensnitchd`, and it reports its `NumRules()` in
 //! every ping. The root-only peer check of the real socket is not in play
 //! here, so this runs without root.

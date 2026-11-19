@@ -657,6 +657,8 @@ fn run_system_sets_the_hosts_account_lookup() {
 
 #[tokio::test]
 async fn user_unix_for_tests_bridge_creates_a_0700_grpc_dir_and_dialable_socket() {
+    // Under the normal umask the dir is 0700 even without an explicit chmod; the chmod is
+    // guarded by `user_socket::tests::a_strict_umask_still_yields_a_0700_directory`.
     let dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig::user_unix_for_tests(dir.path()))
         .await

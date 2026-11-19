@@ -1,7 +1,7 @@
 //! Issue #73 through a whole bridge on the system service's transport: the
 //! daemon dials a Unix socket, its rule snapshot is what the page counts, and
-//! a request from the page deletes only the rules Snitchwatch made. (Over the
-//! untrusted per-user connection nothing is offered; `tests/blocklist_leftovers.rs`.)
+//! a request from the page deletes only the rules Snitchwatch made. (Over an
+//! untrusted transport nothing is offered; `tests/blocklist_leftovers.rs`.)
 //! The root-only peer check of the real socket is not in play here, so this
 //! runs without root.
 
