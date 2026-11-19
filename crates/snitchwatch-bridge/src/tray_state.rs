@@ -1,8 +1,9 @@
 //! Bridge-owned tray state publisher.
 //!
-//! The bridge is the source of truth for what the tray icon should show. `snitchwatch-bridge-cli`'s
-//! relays forward these to WS clients as `ServerMessage`s; tests subscribe to
-//! `TrayStatePublisher::subscribe()` directly, without a GUI.
+//! The bridge is the source of truth for what the tray icon should show.
+//! `snitchwatch-bridge-cli`'s relays forward these to WS clients as
+//! `ServerMessage`s; tests subscribe to `TrayStatePublisher::subscribe()`
+//! directly, without a GUI.
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;

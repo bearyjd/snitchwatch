@@ -36,8 +36,8 @@ pub(crate) async fn announce_pause_state(
     let _ = broadcast_tx.send(filter_pause.state().to_message());
 }
 
-/// External shells receive the same tray and desktop-notice inputs as
-/// in-process shells. These are additive WebSocket actions, so older
+/// WS clients (the Kirigami shell among them) receive the tray and
+/// desktop-notice inputs. These are additive WebSocket actions, so older
 /// clients remain compatible by ignoring actions they do not understand.
 /// Subscribe before spawning the pumps; snapshots cover the current
 /// tray value for a client that connects after a state transition.
@@ -124,7 +124,7 @@ pub(crate) fn spawn_pause_tasks(
 /// `snitchwatch_bridge::blocklists::spawn_event_pump`: the manager owns no
 /// knowledge of the WS wire format, so this is where its internal
 /// `ProfileEvent`s become the typed `ServerMessage`s every consumer (WS
-/// clients, the in-process Kirigami shell) sees.
+/// clients, including the Kirigami shell) sees.
 pub(crate) fn spawn_profile_event_relay(
     profiles_mgr: &Arc<ProfilesManager>,
     broadcast_tx: &broadcast::Sender<ServerMessage>,

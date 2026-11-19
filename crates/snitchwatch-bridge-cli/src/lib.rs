@@ -39,8 +39,7 @@ mod test_daemon;
 mod user_socket;
 
 pub use config::{
-    reject_dev_tcp_in_system_mode, BridgeConfig, GrpcEndpoint, GrpcListen,
-    DEV_TCP_ENV,
+    reject_dev_tcp_in_system_mode, BridgeConfig, GrpcEndpoint, GrpcListen, DEV_TCP_ENV,
 };
 pub use running::RunningBridge;
 

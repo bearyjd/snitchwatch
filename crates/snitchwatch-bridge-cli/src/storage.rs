@@ -112,7 +112,7 @@ pub enum BridgeMode {
     /// A manual (dev) start; there is no per-user unit since #35.
     User,
     /// `snitchwatch-system-bridge.service`: must resolve to
-    /// [`SYSTEM_STATE_DIR`].
+    /// `SYSTEM_STATE_DIR`.
     System,
 }
 
