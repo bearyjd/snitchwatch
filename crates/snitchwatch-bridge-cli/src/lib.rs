@@ -343,6 +343,8 @@ where
         auth::write_token_file(&token, &ws_token_path).context("failed to write token file")?;
     }
 
+    #[cfg(test)]
+    let daemon_version = ui_service_inner.daemon_version_handle();
     let ws_handles = WsHandles {
         broadcast: broadcast_tx.clone(),
         presence: client_presence.clone(),
@@ -704,6 +706,8 @@ where
         daemon_stream_ready,
         #[cfg(test)]
         client_presence,
+        #[cfg(test)]
+        daemon_version,
         ws_shutdown_tx: Some(ws_shutdown_tx),
         grpc_shutdown_tx: Some(grpc_shutdown_tx),
         watchdog_handle,
@@ -734,3 +738,6 @@ mod rule_hits_restart_tests;
 
 #[cfg(test)]
 mod rules_count_hint_unix_tests;
+
+#[cfg(test)]
+mod unix_peer_key_tests;

@@ -1,21 +1,63 @@
 //! Which daemon connection a gRPC request came from (#391).
 //!
 //! tonic fills a request's extensions from the accepted connection's
-//! `Connected::connect_info()`. TCP gives `TcpConnectInfo`; a Unix socket
-//! carries a [`UnixPeerInfo`] once the accept path attaches one. The id is
+//! `Connected::connect_info()`. TCP gives `TcpConnectInfo`; the per-user
+//! Unix socket carries a [`UnixPeerInfo`], which `OwnerUnixIncoming` attaches
+//! at accept; the system socket does not, so its peers have no info. The id is
 //! assigned by the server at accept and never comes from the peer.
 
 use crate::daemon_commands::{ConnKey, PeerKey};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tonic::Request;
 
-/// Connection info for one accepted Unix-socket daemon connection.
+/// Connection info for one accepted Unix-socket daemon connection. Fields
+/// are private: the only constructor takes the id from a process-wide counter,
+/// so no caller can choose one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnixPeerInfo {
-    /// Process-wide monotonic connection id; the only field a decision reads.
-    pub id: u64,
-    /// Peer credentials at accept, for log fields only.
-    pub uid: u32,
-    pub pid: Option<i32>,
+    id: u64,
+    uid: u32,
+    pid: Option<i32>,
+}
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+impl UnixPeerInfo {
+    /// Info for a connection accepted just now, with the next id (1, 2, ...).
+    /// Call it only after the peer passed the uid check, so a rejected client
+    /// consumes no id. `uid` and `pid` are for logs only.
+    pub fn accept(uid: u32, pid: Option<i32>) -> Self {
+        Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+            uid,
+            pid,
+        }
+    }
+
+    /// A fixed id, for tests that stand in for the accept path.
+    #[cfg(test)]
+    pub(crate) fn for_tests(id: u64) -> Self {
+        Self {
+            id,
+            uid: 0,
+            pid: None,
+        }
+    }
+
+    /// The connection id: the only field a decision reads.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Peer uid at accept. Log fields only; never a key, never trust.
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// Peer pid at accept, when known. Log fields only.
+    pub fn pid(&self) -> Option<i32> {
+        self.pid
+    }
 }
 
 /// The [`ConnKey`] of the connection `req` arrived on. `TcpConnectInfo` wins
@@ -27,7 +69,7 @@ pub fn conn_key<T>(req: &Request<T>) -> ConnKey {
     }
     req.extensions()
         .get::<UnixPeerInfo>()
-        .map(|info| PeerKey::Unix(info.id))
+        .map(|info| PeerKey::Unix(info.id()))
 }
 
 #[cfg(test)]
@@ -44,11 +86,29 @@ mod tests {
     }
 
     fn unix(id: u64) -> UnixPeerInfo {
-        UnixPeerInfo {
-            id,
-            uid: 0,
-            pid: None,
-        }
+        UnixPeerInfo::for_tests(id)
+    }
+
+    #[test]
+    fn accepted_ids_are_unique_and_increasing_across_threads() {
+        let mut ids: Vec<u64> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    (0..100)
+                        .map(|_| UnixPeerInfo::accept(0, None).id())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+        let before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "ids must be unique");
+        let a = UnixPeerInfo::accept(0, None).id();
+        assert!(UnixPeerInfo::accept(0, None).id() > a);
     }
 
     #[test]

@@ -30,10 +30,12 @@
 //! socket a redialled daemon's old and new streams saying HELLO in either
 //! order don't leave the new stream without a list; later than that, a
 //! withdrawn list comes back only when the daemon reconnects.
-//! That relies on the Unix sockets' streams sharing one key (`None`, see
-//! [`ConnKey`]); per-connection `PeerKey::Unix` ids (#391) would separate
-//! them, as TCP's addresses do. Which socket gets them is decided by
-//! `cache/rules_unix_peer_tests.rs`.
+//! That relies on the trusted system Unix socket's streams sharing one key
+//! (`None`, see [`ConnKey`]): `RootUnixIncoming` attaches no id on purpose,
+//! because a redial can send Subscribe on one connection and HELLO on the
+//! next (`cache/rules_unix_peer_tests.rs`). Per-user (`UnixUser`)
+//! connections have per-connection `PeerKey::Unix` ids (#391), as TCP's
+//! addresses separate them.
 //!
 //! **Delivery, by transport.**
 //! - [`DaemonTransport::Tcp`] (dev-only, behind `SNITCHWATCH_DEV_TCP=1`, `127.0.0.1`): every
@@ -83,12 +85,14 @@ use tracing::{info, warn};
 /// Which daemon connection a `Subscribe` or a `Notifications` stream came
 /// from, by transport:
 /// - TCP (legacy mode): `Some(PeerKey::Tcp(peer address))`.
-/// - Unix sockets: `Some(PeerKey::Unix(id))` once the accept path attaches a
-///   [`UnixPeerInfo`](crate::daemon_peer::UnixPeerInfo) to each connection
-///   (#391). Until it does, nothing builds one, so every Unix peer is `None`.
-/// - `None`: no connection info (in-process `Request::new` calls, tests, and
-///   today every Unix peer). `None` is one shared key; every system-mode peer
-///   is root (`RootUnixIncoming`).
+/// - Per-user Unix socket: `Some(PeerKey::Unix(id))`, a server-assigned id per
+///   accepted connection ([`UnixPeerInfo`](crate::daemon_peer::UnixPeerInfo),
+///   #391), as separate as TCP peers.
+/// - `None`: no connection info (in-process `Request::new` calls, tests) and
+///   every peer of the system (root-only) socket. `None` is one shared key
+///   there on purpose: a daemon redial may send Subscribe on one connection
+///   and HELLO on the next, which keeps the rule list only if they share a
+///   key. Every system-mode peer is root (`RootUnixIncoming`).
 pub type ConnKey = Option<PeerKey>;
 
 /// One daemon connection. Two keys are the same connection only if equal.

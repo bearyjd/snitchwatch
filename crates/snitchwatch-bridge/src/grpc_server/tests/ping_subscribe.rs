@@ -318,11 +318,7 @@ fn version_ping(daemon_version: &str, from: ConnKey) -> Request<PingRequest> {
         Some(PeerKey::Unix(id)) => {
             request
                 .extensions_mut()
-                .insert(crate::daemon_peer::UnixPeerInfo {
-                    id,
-                    uid: 0,
-                    pid: None,
-                });
+                .insert(crate::daemon_peer::UnixPeerInfo::for_tests(id));
         }
         None => {}
     }
@@ -397,7 +393,7 @@ async fn only_the_stream_holders_ping_sets_the_daemon_version() {
 
 /// The Unix twin of the TCP test above (#391): a second Unix connection
 /// (another id) pinging "1.8.0" can't lower the holder's known 1.9. The ids
-/// are injected through `UnixPeerInfo`, as the accept path will (PR 2).
+/// are injected through `UnixPeerInfo`, as the accept path does.
 #[tokio::test]
 async fn only_the_stream_holders_ping_sets_the_daemon_version_on_unix() {
     let daemon = unix_peer(1);
