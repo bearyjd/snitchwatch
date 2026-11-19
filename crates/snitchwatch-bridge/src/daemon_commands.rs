@@ -30,6 +30,10 @@
 //! socket a redialled daemon's old and new streams saying HELLO in either
 //! order don't leave the new stream without a list; later than that, a
 //! withdrawn list comes back only when the daemon reconnects.
+//! That relies on the Unix sockets' streams sharing one key (`None`, see
+//! [`ConnKey`]); per-connection `PeerKey::Unix` ids (#391) would separate
+//! them, as TCP's addresses do. Which socket gets them is decided by
+//! `cache/rules_unix_peer_tests.rs`.
 //!
 //! **Delivery, by transport.**
 //! - [`DaemonTransport::Tcp`] (dev-only, behind `SNITCHWATCH_DEV_TCP=1`, `127.0.0.1`): every
@@ -77,11 +81,25 @@ use tokio::time::Instant;
 use tracing::{info, warn};
 
 /// Which daemon connection a `Subscribe` or a `Notifications` stream came
-/// from: the TCP peer address in legacy mode, `None` on the Unix socket
-/// (tonic's `UdsConnectInfo` has no remote address) and for in-process
-/// `Request::new` calls. `None` is one shared key; every system-mode peer is
-/// root (`RootUnixIncoming`).
-pub type ConnKey = Option<SocketAddr>;
+/// from, by transport:
+/// - TCP (legacy mode): `Some(PeerKey::Tcp(peer address))`.
+/// - Unix sockets: `Some(PeerKey::Unix(id))` once the accept path attaches a
+///   [`UnixPeerInfo`](crate::daemon_peer::UnixPeerInfo) to each connection
+///   (#391). Until it does, nothing builds one, so every Unix peer is `None`.
+/// - `None`: no connection info (in-process `Request::new` calls, tests, and
+///   today every Unix peer). `None` is one shared key; every system-mode peer
+///   is root (`RootUnixIncoming`).
+pub type ConnKey = Option<PeerKey>;
+
+/// One daemon connection. Two keys are the same connection only if equal.
+/// Note for log readers: keys are logged with `?` (e.g. `version_gate.rs`), so
+/// the output changed from `Some(127.0.0.1:4000)` to `Some(Tcp(127.0.0.1:4000))`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PeerKey {
+    Tcp(SocketAddr),
+    /// Server-assigned at accept, process-wide monotonic; never from the peer.
+    Unix(u64),
+}
 
 /// Identifies one open `Notifications` stream.
 pub type StreamId = u64;
@@ -185,7 +203,8 @@ pub enum CommandError {
 /// the lock or be built anywhere else. [`RulesSync::commit`] requires one.
 ///
 /// ```compile_fail
-/// // Only `DaemonCommands::on_reply` can say a stream is current.
+/// // Only `DaemonCommands::on_reply` can say a stream is current. (`conn`
+/// // is a `ConnKey`: `None` here means "no connection info".)
 /// let _ = snitchwatch_bridge::daemon_commands::BecameCurrent {
 ///     stream: 1,
 ///     conn: None,

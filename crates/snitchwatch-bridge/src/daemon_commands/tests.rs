@@ -69,7 +69,7 @@ fn ok(id: u64) -> NotificationReply {
 }
 
 fn addr(port: u16) -> ConnKey {
-    Some(SocketAddr::from(([127, 0, 0, 1], port)))
+    Some(PeerKey::Tcp(SocketAddr::from(([127, 0, 0, 1], port))))
 }
 
 fn waiter_count(commands: &DaemonCommands) -> usize {

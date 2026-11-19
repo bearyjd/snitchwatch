@@ -284,7 +284,7 @@ impl UiService {
 #[tonic::async_trait]
 impl Ui for UiService {
     async fn ping(&self, request: Request<PingRequest>) -> Result<Response<PingReply>, Status> {
-        let peer = request.remote_addr();
+        let peer = crate::daemon_peer::conn_key(&request);
         let req = request.into_inner();
         let id = req.id;
 
@@ -531,7 +531,7 @@ impl Ui for UiService {
         // capturing it after the await (#115).
         let receipt = self.rules.receive();
         self.liveness.touch();
-        let conn = request.remote_addr();
+        let conn = crate::daemon_peer::conn_key(&request);
         let cfg = request.into_inner();
         // `cfg.version` is the daemon host's kernel release
         // (`core.GetKernelVersion()`, `daemon/ui/notifications.go`), not
@@ -638,7 +638,9 @@ impl Ui for UiService {
         // forever — see `StreamGuard`'s doc comment.
         let guard = StreamGuard::open(self.liveness.clone());
         // Registered before the reply loop, so HELLO can't race it; dropped on loop end/unwind.
-        let (registration, mut rx) = self.commands.open_stream(request.remote_addr());
+        let (registration, mut rx) = self
+            .commands
+            .open_stream(crate::daemon_peer::conn_key(&request));
         let service = self.clone();
         let mut inbound = request.into_inner();
         tokio::spawn(async move {

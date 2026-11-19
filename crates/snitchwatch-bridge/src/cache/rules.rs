@@ -598,3 +598,7 @@ mod accounts_tests;
 #[cfg(test)]
 #[path = "rules_staging_tests.rs"]
 mod staging_tests;
+
+#[cfg(test)]
+#[path = "rules_unix_peer_tests.rs"]
+mod unix_peer_tests;

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::cache::rule_hits_handle::RuleHitsHandle;
-use crate::daemon_commands::ConnKey;
+use crate::daemon_commands::{ConnKey, PeerKey};
 use crate::rule_wire::{rule_from_wire, rule_to_wire};
 use snitchwatch_proto::protocol::Operator;
 use tokio::sync::broadcast;
@@ -289,7 +289,10 @@ fn apply_confirmed_upserts_changes_and_removes_deletes() {
 }
 
 fn key(port: u16) -> ConnKey {
-    Some(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+    Some(PeerKey::Tcp(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        port,
+    ))))
 }
 
 /// A stream adopts its key's latest snapshot once; another stream of the

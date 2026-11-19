@@ -74,8 +74,9 @@ impl Drop for BatchGuard {
 /// Per-connection `ClientConfig.rules` awaiting that connection's HELLO.
 /// A snapshot stays staged after a stream adopts it, until the next one for
 /// its key or [`PENDING_SNAPSHOT_TTL`]: another stream of the same key may
-/// still say HELLO (PR #106 review OQ1). On the Unix socket every stream
-/// shares one key, so a redialled daemon's old and new streams may both say
+/// still say HELLO (PR #106 review OQ1). While Unix streams carry no
+/// connection info (today: every Unix stream's key is `None`, #391) they
+/// share one key, so a redialled daemon's old and new streams may both say
 /// HELLO after the new one subscribed, in either order. Each adopts the new
 /// stream's snapshot once, and when the stream holding the list closes, the
 /// stream that falls back to current holds it if it adopted the same
@@ -124,7 +125,7 @@ impl PendingSnapshots {
     /// Keep only `key`'s latest snapshot, evicting stale entries and then the
     /// oldest key past the cap. Latest by arrival: a `Subscribe` that waited
     /// (on account names) while a newer one of its key staged is dropped
-    /// (#115: on the Unix socket every stream shares one key).
+    /// (#115: Unix streams without connection info share the `None` key).
     pub(crate) fn stage_received(
         &mut self,
         key: ConnKey,

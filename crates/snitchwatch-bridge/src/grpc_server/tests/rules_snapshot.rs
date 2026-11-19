@@ -199,8 +199,12 @@ async fn an_oversized_snapshot_is_counted_only_for_its_own_stream() {
     use crate::cache::rules::MAX_SNAPSHOT_RULES;
     let (svc, _cache, mut rx) = rules_service(DaemonTransport::Tcp);
     let (a, b) = (
-        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 1001))),
-        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 1002))),
+        Some(crate::daemon_commands::PeerKey::Tcp(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 1001)),
+        )),
+        Some(crate::daemon_commands::PeerKey::Tcp(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 1002)),
+        )),
     );
     svc.rules
         .stage(a, vec![daemon_rule("x"); MAX_SNAPSHOT_RULES + 1]);
@@ -321,7 +325,9 @@ async fn a_subscribe_whose_connection_never_says_hello_never_replaces_the_cache(
         .unwrap();
 
     // Another connection's HELLO must not adopt it.
-    let other = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 9)));
+    let other = Some(crate::daemon_commands::PeerKey::Tcp(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
+    ));
     let (stream, _outbound) = svc.daemon_commands().open_stream(other);
     svc.daemon_commands().on_reply(stream.id(), &hello());
 
@@ -338,8 +344,12 @@ async fn a_subscribe_whose_connection_never_says_hello_never_replaces_the_cache(
 async fn a_closing_tcp_holder_withdraws_the_list_instead_of_handing_it_to_the_other_stream() {
     let (svc, _cache, mut rx) = rules_service(DaemonTransport::Tcp);
     let (a, b) = (
-        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 1001))),
-        Some(std::net::SocketAddr::from(([127, 0, 0, 1], 1002))),
+        Some(crate::daemon_commands::PeerKey::Tcp(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 1001)),
+        )),
+        Some(crate::daemon_commands::PeerKey::Tcp(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 1002)),
+        )),
     );
     svc.rules.stage(a, vec![daemon_rule("from-a")]);
     svc.rules.stage(b, vec![daemon_rule("from-b")]);
