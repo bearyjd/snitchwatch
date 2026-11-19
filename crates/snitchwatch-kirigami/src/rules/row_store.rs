@@ -25,21 +25,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use snitchwatch_bridge::blocklists::materializer::list_of_rule_name;
 use snitchwatch_bridge::rule_name::{is_reserved_curated_name, is_reserved_profile_name};
 use snitchwatch_bridge::ws_messages::ServerMessage;
-
-/// The `z00-blocklist:<list_id>:<kind>` filename band a subscribed
-/// blocklist's deny rules fall in (see
-/// `snitchwatch_bridge::blocklists::materializer::list_rule_name`).
-const BLOCKLIST_RULE_NAME_PREFIX: &str = "z00-blocklist:";
-
-/// The legacy `900-blocklist:` band emitted by pre-migration builds. Still
-/// recognized so that, during a migration window, a not-yet-purged old-band
-/// deny surfaced by a stale daemon renders in the Rules tab as blocklist-
-/// sourced (grouped/muted) rather than masquerading as a user rule. Once the
-/// bridge has refreshed every subscription these no longer exist; see the
-/// migration note in `snitchwatch_bridge::blocklists::materializer`.
-const LEGACY_BLOCKLIST_RULE_NAME_PREFIX: &str = "900-blocklist:";
 
 /// [`Rule::normalized_action`] for an action the daemon doesn't recognise.
 pub const UNRECOGNISED_ACTION: &str = "unrecognised";
@@ -161,16 +149,12 @@ impl Rule {
 
     /// Classify this rule's source by its `name` prefix. Recognizes both the
     /// current `z00-blocklist:` band and the legacy `900-blocklist:` band (see
-    /// [`LEGACY_BLOCKLIST_RULE_NAME_PREFIX`]) so migration-window rules still
-    /// group correctly.
+    /// `snitchwatch_bridge::rule_name`) so migration-window rules still group
+    /// correctly.
     pub fn source(&self) -> RuleSource {
-        let rest = self
-            .name
-            .strip_prefix(BLOCKLIST_RULE_NAME_PREFIX)
-            .or_else(|| self.name.strip_prefix(LEGACY_BLOCKLIST_RULE_NAME_PREFIX));
-        match rest {
-            Some(rest) => RuleSource::Blocklist {
-                list_id: rest.split(':').next().unwrap_or("").to_string(),
+        match list_of_rule_name(&self.name) {
+            Some(list_id) => RuleSource::Blocklist {
+                list_id: list_id.to_string(),
             },
             None if is_reserved_profile_name(&self.name) => RuleSource::Profile,
             None if is_reserved_curated_name(&self.name) && self.toggleable == Some(true) => {
