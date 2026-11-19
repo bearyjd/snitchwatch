@@ -5,12 +5,12 @@ async fn running_bridge_routes_export_privately_and_keeps_mock_ping_responsive()
     let dir = tempfile::tempdir().unwrap();
     let bridge = crate::run(crate::BridgeConfig {
         cache_capacity: 20,
-        ..crate::BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..crate::BridgeConfig::user_unix_for_tests(dir.path())
     })
     .await
     .unwrap();
     let mut daemon =
-        mock_opensnitchd::MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        mock_opensnitchd::MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
             .await
             .unwrap();
     let mut broadcast = bridge.broadcast_tx.subscribe();

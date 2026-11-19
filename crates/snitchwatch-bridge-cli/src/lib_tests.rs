@@ -244,7 +244,8 @@ async fn activated_unix_ask_rule_roundtrip_preserves_socket_ownership_and_modes(
     let token_path = auth_dir.join("token");
     let config = BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(gui_path.clone())
+        ws_socket_path: gui_path.clone(),
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     };
     let bridge = run_with_incoming(
         config,
@@ -384,7 +385,7 @@ async fn exposes_in_process_broadcast_and_inbound_handles() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     };
     let bridge = run(cfg).await.expect("run failed");
 
@@ -418,7 +419,7 @@ async fn verdict_broadcasts_an_updated_non_pending_row() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     };
     let bridge = run(cfg).await.expect("run failed");
     let mut rx = bridge.broadcast_tx.subscribe();
@@ -441,8 +442,8 @@ async fn verdict_broadcasts_an_updated_non_pending_row() {
     let _gui_session = bridge.client_presence.authenticated_session();
 
     // The mock daemon connects before anything is timed.
-    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
-    let mut daemon = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+    let grpc_path = bridge.grpc_endpoint.unix_path().unwrap();
+    let mut daemon = MockOpensnitchd::connect_unix(grpc_path).await.unwrap();
     let mut ask = tokio::spawn(async move {
         daemon
             .ask_rule(Connection {
@@ -514,7 +515,7 @@ async fn request_snapshot_rebroadcasts_bridge_owned_state() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     };
     let bridge = run(cfg).await.expect("run failed");
     let mut rx = bridge.broadcast_tx.subscribe();
@@ -567,7 +568,7 @@ async fn synthetic_connection_activity_is_rebroadcast_as_traffic_events() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     };
     let bridge = run(cfg).await.expect("run failed");
     let mut rx = bridge.broadcast_tx.subscribe();
@@ -652,4 +653,25 @@ fn run_system_sets_the_hosts_account_lookup() {
         1,
         "the host's account lookup is set somewhere other than run_system"
     );
+}
+
+#[tokio::test]
+async fn user_unix_for_tests_bridge_creates_a_0700_grpc_dir_and_dialable_socket() {
+    // Under the normal umask the dir is 0700 even without an explicit chmod; the chmod is
+    // guarded by `user_socket::tests::a_strict_umask_still_yields_a_0700_directory`.
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = run(BridgeConfig::user_unix_for_tests(dir.path()))
+        .await
+        .expect("run failed");
+    let socket = bridge.grpc_endpoint.unix_path().expect("unix endpoint");
+    assert_eq!(
+        socket,
+        dir.path().join("snitchwatch-grpc").join("opensnitchd.sock")
+    );
+    let mode = std::fs::metadata(socket.parent().unwrap()).unwrap().mode();
+    assert_eq!(mode & 0o7777, 0o700);
+    MockOpensnitchd::connect_unix(socket)
+        .await
+        .expect("dial per-user socket");
+    bridge.shutdown();
 }
