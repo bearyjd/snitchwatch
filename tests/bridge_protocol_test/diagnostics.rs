@@ -5,15 +5,15 @@ async fn diagnostics_report_reflects_firewall_down_after_subscribe() {
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
+    let grpc_path = bridge.grpc_endpoint.unix_path().unwrap().to_path_buf();
     let subscribe_handle = tokio::spawn(async move {
-        let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+        let mut mock = MockOpensnitchd::connect_unix(&grpc_path).await.unwrap();
         mock.subscribe_with_config(snitchwatch_proto::protocol::ClientConfig {
             id: 1,
             name: "mock".to_string(),
@@ -65,7 +65,7 @@ async fn diagnostics_report_reflects_firewall_down_after_subscribe() {
 /// still claim the daemon reachable.
 ///
 /// Uses real wall-clock sleeps (not a paused tokio clock): this test spins
-/// up real TCP/Unix-socket IO end to end, and tokio's paused-clock
+/// up real Unix-socket IO end to end, and tokio's paused-clock
 /// auto-advance can fire a connect timeout before real IO completes when
 /// mixed with genuine sockets — see the sibling test's identical choice.
 #[tokio::test]
@@ -73,7 +73,7 @@ async fn idle_daemon_with_open_notifications_stream_stays_reachable() {
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     };
     let mut bridge = run(cfg).await.expect("bridge run failed");
 
@@ -82,7 +82,7 @@ async fn idle_daemon_with_open_notifications_stream_stays_reachable() {
     // Mock opensnitchd connects and opens the Notifications stream, but
     // never calls ping() — exactly the idle-but-connected shape observed
     // live from a real daemon.
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     let (_reply_tx, _count_rx) = mock.open_notifications().await.unwrap();
@@ -152,11 +152,11 @@ async fn notifications_stream_close_triggers_down_transition_within_one_tick() {
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     };
     let mut bridge = run(cfg).await.expect("bridge run failed");
 
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     let (reply_tx, _count_rx) = mock.open_notifications().await.unwrap();
@@ -219,13 +219,13 @@ async fn generic_alert_fails_ebpf_check_persists_across_subscribe_clears_on_rech
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
 
@@ -356,11 +356,11 @@ async fn ebpf_fallback_alert_is_reported_as_process_monitor_not_a_failure() {
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     };
     let bridge = run(cfg).await.expect("bridge run failed");
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
 
@@ -456,11 +456,11 @@ async fn resubscribe_without_a_new_alert_pushes_a_report_without_the_fallback() 
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     };
     let bridge = run(cfg).await.expect("bridge run failed");
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
 

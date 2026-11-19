@@ -20,12 +20,12 @@ async fn turn_on_source_network_rule(
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     })
     .await
     .expect("bridge run failed");
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap()
         .with_version(version);
@@ -159,7 +159,7 @@ async fn daemon_policy_follows_a_daemon_that_subscribes_after_the_gui() {
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     })
     .await
     .expect("bridge run failed");
@@ -169,7 +169,7 @@ async fn daemon_policy_follows_a_daemon_that_subscribes_after_the_gui() {
     };
     assert!(!before.refuse_source_network);
     assert_eq!(before.daemon_version, None);
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap()
         .with_version("1.9.0");

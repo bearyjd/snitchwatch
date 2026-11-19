@@ -1,5 +1,5 @@
-//! Rule export/import on the legacy per-user TCP transport (roadmap P2.7,
-//! review M5): any local process can pose as the daemon there (#35), so a
+//! Rule export/import on the untrusted per-user transport (roadmap P2.7,
+//! review M5): any same-uid process can pose as the daemon there (#35), so a
 //! GUI's export, preview and apply are all refused, end to end, and nothing
 //! reaches the daemon. The flows themselves run on the system (Unix)
 //! transport in bridge-cli's `rules_import::e2e_tests`.
@@ -39,11 +39,11 @@ async fn next_action(ws: &mut Ws, action: &str) -> Value {
 }
 
 #[tokio::test]
-async fn import_and_export_are_refused_on_the_tcp_transport() {
+async fn import_and_export_are_refused_on_the_untrusted_per_user_transport() {
     let dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     })
     .await
     .unwrap();
@@ -56,7 +56,7 @@ async fn import_and_export_are_refused_on_the_tcp_transport() {
         .unwrap();
     assert_eq!(next_json(&mut ws).await["action"], "authenticated");
 
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     mock.subscribe_with_config(ClientConfig {

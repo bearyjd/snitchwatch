@@ -83,15 +83,15 @@ async fn default_applied_events_reach_the_gui_as_default_decided_rows_without_a_
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     })
     .await
     .expect("bridge run failed");
     let (mut ws, ack) = connect(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
     assert_eq!(ack["action"], "authenticated");
 
-    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
-    let mut daemon = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+    let grpc_path = bridge.grpc_endpoint.unix_path().unwrap().to_path_buf();
+    let mut daemon = MockOpensnitchd::connect_unix(&grpc_path).await.unwrap();
     const S: i64 = 1_000_000_000;
 
     // The baseline: one rule hit and one default-applied allow.
