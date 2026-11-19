@@ -43,6 +43,9 @@ pub struct RunningBridge {
     /// that leaves the bridge permanently "attended".
     #[cfg(test)]
     pub(crate) client_presence: snitchwatch_bridge::client_presence::ClientPresence,
+    /// The version the daemon's pings reported, as the rule checks read it.
+    #[cfg(test)]
+    pub(crate) daemon_version: snitchwatch_bridge::daemon_config::SharedDaemonVersion,
     pub(crate) ws_shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) grpc_shutdown_tx: Option<oneshot::Sender<()>>,
     /// The daemon-down watchdog task (`daemon_watchdog::run`). It has no
