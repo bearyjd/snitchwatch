@@ -30,7 +30,7 @@ const WAIT: Duration = Duration::from_secs(12);
 fn config(dir: &Path) -> BridgeConfig {
     BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir)
     }
 }
 
@@ -125,7 +125,7 @@ struct Daemon {
 
 impl Daemon {
     async fn connect(bridge: &RunningBridge, rules: &[&str]) -> Self {
-        let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
             .await
             .unwrap();
         mock.subscribe_with_config(ClientConfig {

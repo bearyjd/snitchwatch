@@ -227,7 +227,7 @@ async fn a_five_minute_answer_over_a_disabled_rule_is_held_back_while_it_is_list
 }
 
 /// M1: an add the daemon stored and then refused (its rules directory won't
-/// take the file). Over TCP the bridge sends no `AddRule` (#35); the
+/// take the file). Over the per-user transport the bridge sends no `AddRule` (#35); the
 /// recommended rules install with the same `CHANGE_RULE`, which is what the
 /// tower r12 setup (an immutable file) refuses after storing the rule.
 #[tokio::test]

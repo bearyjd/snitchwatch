@@ -75,7 +75,7 @@ impl BlocklistFetch for GatedFetcher {
 fn config(dir: &Path) -> BridgeConfig {
     BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir)
     }
 }
 
@@ -371,9 +371,9 @@ async fn a_slow_fetch_never_stalls_a_verdict() {
         .await
         .expect("the subscribe never started its fetch");
 
-    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
+    let grpc_path = bridge.grpc_endpoint.unix_path().unwrap().to_path_buf();
     let ask = tokio::spawn(async move {
-        let mut daemon = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+        let mut daemon = MockOpensnitchd::connect_unix(&grpc_path).await.unwrap();
         daemon
             .ask_rule(Connection {
                 protocol: "tcp".into(),

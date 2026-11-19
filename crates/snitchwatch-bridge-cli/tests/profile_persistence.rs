@@ -29,7 +29,7 @@ const PROFILE_DB: &str = "profiles.sqlite3";
 fn config(dir: &Path) -> BridgeConfig {
     BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir)
     }
 }
 
