@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon_commands::{ConnKey, PeerKey};
 
 #[tokio::test]
 async fn ping_round_trips_id() {
@@ -295,9 +296,9 @@ async fn only_a_ping_that_changes_the_daemon_version_triggers_a_recheck() {
     assert_eq!(*changed.borrow_and_update(), 2, "1.9 -> 1.8");
 }
 
-/// A `ping` carrying `daemon_version` as if from TCP peer `from` (`None`:
-/// no address, like the Unix socket).
-fn version_ping(daemon_version: &str, from: Option<std::net::SocketAddr>) -> Request<PingRequest> {
+/// A `ping` carrying `daemon_version` as if from connection `from` (`None`:
+/// no connection info).
+fn version_ping(daemon_version: &str, from: ConnKey) -> Request<PingRequest> {
     let mut request = Request::new(PingRequest {
         id: 1,
         stats: Some(snitchwatch_proto::protocol::Statistics {
@@ -305,13 +306,34 @@ fn version_ping(daemon_version: &str, from: Option<std::net::SocketAddr>) -> Req
             ..Default::default()
         }),
     });
+    match from {
+        Some(PeerKey::Tcp(addr)) => {
+            request
+                .extensions_mut()
+                .insert(tonic::transport::server::TcpConnectInfo {
+                    local_addr: None,
+                    remote_addr: Some(addr),
+                });
+        }
+        Some(PeerKey::Unix(id)) => {
+            request
+                .extensions_mut()
+                .insert(crate::daemon_peer::UnixPeerInfo {
+                    id,
+                    uid: 0,
+                    pid: None,
+                });
+        }
+        None => {}
+    }
     request
-        .extensions_mut()
-        .insert(tonic::transport::server::TcpConnectInfo {
-            local_addr: None,
-            remote_addr: from,
-        });
-    request
+}
+
+fn tcp_peer(port: u16) -> ConnKey {
+    Some(PeerKey::Tcp(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        port,
+    ))))
 }
 
 fn plain_service() -> UiService {
@@ -335,8 +357,8 @@ fn hello_reply() -> NotificationReply {
 /// second local TCP peer pinging "1.8.0" can't lower a known 1.9.
 #[tokio::test]
 async fn only_the_stream_holders_ping_sets_the_daemon_version() {
-    let daemon = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 40001)));
-    let other = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 40002)));
+    let daemon = tcp_peer(40001);
+    let other = tcp_peer(40002);
     let service = plain_service();
     let mut changed = service.daemon_version_changed();
     let (stream, _rx) = service.daemon_commands().open_stream(daemon);
@@ -369,10 +391,10 @@ async fn only_the_stream_holders_ping_sets_the_daemon_version() {
     assert_eq!(*changed.borrow_and_update(), 2);
 }
 
-/// On the Unix socket neither side has an address, so the holder's (any
-/// root peer's) `ping` is taken.
+/// An in-process request (no connection info, key `None`) is taken when the
+/// stream has no connection info either.
 #[tokio::test]
-async fn a_ping_without_an_address_sets_the_version_when_the_stream_has_none() {
+async fn a_ping_without_connection_info_sets_the_version_when_the_stream_has_none() {
     let service = plain_service();
     let (stream, _rx) = service.daemon_commands().open_stream(None);
     assert!(service
@@ -389,7 +411,7 @@ async fn a_ping_without_an_address_sets_the_version_when_the_stream_has_none() {
 /// comes back as another version isn't judged by the old one.
 #[tokio::test]
 async fn the_daemon_version_is_forgotten_when_the_last_current_stream_closes() {
-    let daemon = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 40001)));
+    let daemon = tcp_peer(40001);
     let service = plain_service();
     let (first, _rx1) = service.daemon_commands().open_stream(daemon);
     let (second, _rx2) = service.daemon_commands().open_stream(daemon);

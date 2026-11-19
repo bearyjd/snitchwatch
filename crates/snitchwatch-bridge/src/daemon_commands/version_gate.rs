@@ -28,8 +28,10 @@ impl DaemonCommands {
     /// [`SharedDaemonVersion::observe`], whose return this is) only when
     /// `peer` is the connection of the current `Notifications` stream, or
     /// when no stream is current. A second TCP peer pinging another version
-    /// therefore can't move a known one. On the Unix socket both keys are
-    /// `None` (every peer is root), so its pings are always taken. Checked
+    /// therefore can't move a known one. While a Unix connection has no key
+    /// (both keys `None`, as today on the Unix sockets) its pings are always
+    /// taken; with per-connection `PeerKey::Unix` ids they would be separated
+    /// like TCP peers. Checked
     /// under the streams lock, so a stream can't become current in between.
     pub fn observe_daemon_version(&self, peer: ConnKey, version: Option<DaemonVersion>) -> bool {
         let inner = lock(&self.inner);

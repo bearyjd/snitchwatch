@@ -61,7 +61,9 @@ fn synced() -> (
     let (tx, _) = broadcast::channel(64);
     let rules = RulesSync::new(tx);
     let commands = DaemonCommands::new(DaemonTransport::Tcp, rules.clone());
-    let key = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 1)));
+    let key = Some(crate::daemon_commands::PeerKey::Tcp(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 1)),
+    ));
     rules.stage(key, vec![rule("a"), rule("b")]);
     let (stream, outbound) = commands.open_stream(key);
     commands.on_reply(stream.id(), &hello());
@@ -120,7 +122,9 @@ async fn a_late_refused_delete_within_the_grace_period_still_unlists_the_rule() 
 async fn a_refusal_from_a_stream_that_is_not_current_is_ignored() {
     let (commands, rules, stream, _outbound) = synced();
     let pending = commands.send(delete("a")).unwrap();
-    let (other, _rx) = commands.open_stream(Some(std::net::SocketAddr::from(([127, 0, 0, 1], 2))));
+    let (other, _rx) = commands.open_stream(Some(crate::daemon_commands::PeerKey::Tcp(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 2)),
+    )));
     commands.on_reply(other.id(), &refused(pending.id()));
     assert_eq!(listed(&rules), vec!["a", "b"]);
     drop(stream);
