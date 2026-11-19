@@ -33,6 +33,13 @@ impl GrpcEndpoint {
             Self::Unix(_) | Self::UserUnix(_) => None,
         }
     }
+
+    pub fn unix_path(&self) -> Option<&Path> {
+        match self {
+            Self::Unix(path) | Self::UserUnix(path) => Some(path),
+            Self::Tcp(_) => None,
+        }
+    }
 }
 
 /// Where the bridge's gRPC `Ui` server listens. TCP is only reachable by
@@ -86,6 +93,24 @@ impl BridgeConfig {
         Self {
             grpc_listen: GrpcListen::DevTcp(SocketAddr::from(([127, 0, 0, 1], 0))),
             ws_socket_path,
+            cache_capacity: 10_000,
+        }
+    }
+
+    /// The per-user Unix gRPC socket under `dir` (a fresh tempdir): the shape
+    /// `from_env` resolves for `XDG_RUNTIME_DIR=dir`, built without reading
+    /// or setting the environment. Test support only.
+    #[doc(hidden)]
+    pub fn user_unix_for_tests(dir: &Path) -> Self {
+        let grpc_path = dir.join(USER_GRPC_DIR).join(USER_GRPC_SOCKET);
+        debug_assert!(
+            grpc_path.as_os_str().len() < 108,
+            "gRPC socket path exceeds sun_path: {}",
+            grpc_path.display()
+        );
+        Self {
+            grpc_listen: GrpcListen::UserUnix(grpc_path),
+            ws_socket_path: dir.join("snitchwatch").join("bridge.sock"),
             cache_capacity: 10_000,
         }
     }
@@ -176,6 +201,47 @@ mod tests {
 
     fn os(s: &str) -> Option<OsString> {
         Some(OsString::from(s))
+    }
+
+    #[test]
+    fn user_unix_for_tests_matches_the_from_env_shape_under_dir() {
+        let dir = Path::new("/tmp/sw-x");
+        let cfg = BridgeConfig::user_unix_for_tests(dir);
+        // Same path `from_env` resolves for XDG_RUNTIME_DIR=dir.
+        let resolved =
+            resolve_grpc_listen(None, None, Some(dir.as_os_str().to_owned()), None).unwrap();
+        assert_eq!(cfg.grpc_listen, resolved);
+        assert_eq!(
+            cfg.grpc_listen,
+            GrpcListen::UserUnix(dir.join("snitchwatch-grpc").join("opensnitchd.sock"))
+        );
+        assert_eq!(
+            cfg.ws_socket_path,
+            dir.join("snitchwatch").join("bridge.sock")
+        );
+        assert_eq!(cfg.cache_capacity, 10_000);
+    }
+
+    #[test]
+    fn user_unix_for_tests_grpc_path_fits_sun_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let GrpcListen::UserUnix(path) = BridgeConfig::user_unix_for_tests(dir.path()).grpc_listen
+        else {
+            panic!("not a UserUnix listener");
+        };
+        assert!(path.as_os_str().len() < 108, "{}", path.display());
+    }
+
+    #[test]
+    fn unix_path_is_some_for_both_unix_flavours_and_none_for_tcp() {
+        let p = PathBuf::from("/run/x/opensnitchd.sock");
+        assert_eq!(GrpcEndpoint::Unix(p.clone()).unix_path(), Some(p.as_path()));
+        assert_eq!(
+            GrpcEndpoint::UserUnix(p.clone()).unix_path(),
+            Some(p.as_path())
+        );
+        let tcp = GrpcEndpoint::Tcp(SocketAddr::from(([127, 0, 0, 1], 1)));
+        assert_eq!(tcp.unix_path(), None);
     }
 
     #[test]

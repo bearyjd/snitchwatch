@@ -653,3 +653,22 @@ fn run_system_sets_the_hosts_account_lookup() {
         "the host's account lookup is set somewhere other than run_system"
     );
 }
+
+#[tokio::test]
+async fn user_unix_for_tests_bridge_creates_a_0700_grpc_dir_and_dialable_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let bridge = run(BridgeConfig::user_unix_for_tests(dir.path()))
+        .await
+        .expect("run failed");
+    let socket = bridge.grpc_endpoint.unix_path().expect("unix endpoint");
+    assert_eq!(
+        socket,
+        dir.path().join("snitchwatch-grpc").join("opensnitchd.sock")
+    );
+    let mode = std::fs::metadata(socket.parent().unwrap()).unwrap().mode();
+    assert_eq!(mode & 0o7777, 0o700);
+    MockOpensnitchd::connect_unix(socket)
+        .await
+        .expect("dial per-user socket");
+    bridge.shutdown();
+}
