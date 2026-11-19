@@ -101,12 +101,12 @@ impl Fixture {
         let bridge = BridgeGuard(Some(
             run(BridgeConfig {
                 cache_capacity: capacity,
-                ..BridgeConfig::dev_tcp_for_tests(directory.path().join("bridge.sock"))
+                ..BridgeConfig::user_unix_for_tests(directory.path())
             })
             .await
             .expect("mock bridge startup failed"),
         ));
-        let mut daemon = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+        let mut daemon = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
             .await
             .unwrap();
         daemon

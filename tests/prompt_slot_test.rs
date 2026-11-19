@@ -64,7 +64,7 @@ async fn a_held_ask_is_announced_counted_snapshotted_and_released() {
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     })
     .await
     .expect("bridge run failed");
@@ -78,9 +78,10 @@ async fn a_held_ask_is_announced_counted_snapshotted_and_released() {
         "{ack}"
     );
 
-    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
+    let grpc_path = bridge.grpc_endpoint.unix_path().unwrap().to_path_buf();
+    let ask_path = grpc_path.clone();
     let ask = tokio::spawn(async move {
-        let mut daemon = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+        let mut daemon = MockOpensnitchd::connect_unix(&ask_path).await.unwrap();
         daemon
             .ask_rule(Connection {
                 protocol: "tcp".into(),
@@ -108,7 +109,7 @@ async fn a_held_ask_is_announced_counted_snapshotted_and_released() {
     assert_eq!(held["defaultedAtLeast"], Value::Null);
 
     // The daemon keeps pinging while the prompt is open.
-    let mut pinger = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+    let mut pinger = MockOpensnitchd::connect_unix(&grpc_path).await.unwrap();
     pinger.ping_with_stats(1, stats(100, 500)).await.unwrap();
     pinger.ping_with_stats(2, stats(104, 510)).await.unwrap();
     assert_eq!(

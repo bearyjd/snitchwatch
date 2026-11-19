@@ -62,15 +62,15 @@ async fn a_remembered_answer_for_a_kernel_connection_is_answered_once_and_explai
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     })
     .await
     .expect("bridge run failed");
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
+    let grpc_path = bridge.grpc_endpoint.unix_path().unwrap().to_path_buf();
     let ask = tokio::spawn(async move {
-        let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+        let mut mock = MockOpensnitchd::connect_unix(&grpc_path).await.unwrap();
         mock.ask_rule(Connection {
             protocol: "tcp".into(),
             dst_host: "example.com".into(),

@@ -2,6 +2,12 @@
 
 > Start with the 2026-11-17 (final) section below, then 2026-11-16, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
 
+## 2026-11-18 - #386 (PR C3): tests/integration runs on the per-user Unix gRPC socket
+
+- **What:** branch `test/386-user-unix-integration` moves the 13 `tests/integration` files (8 root `tests/*_test.rs` + 5 `bridge_protocol_test/*.rs`) from `DevTcp` to `user_unix_for_tests`/`connect_unix`. `gui_lifecycle.rs` dials with a raw `UiClient` through `MockOpensnitchd::unix_channel` (the channel `connect_unix` builds, now exposed; no new dev-deps, so `Cargo.lock` and the release MANIFEST `cargo_lock_sha256` are unchanged) so its tonic `Status` assertions stay identical. `rules_io_test` is now named for the untrusted per-user transport. Test count unchanged (29).
+- **Trust sensitivity:** only `rules_io` goes red when `peer_is_trusted_daemon` is true for `UnixUser`; the rest are single-mock and do not read the transport.
+- **#386 stops here:** the optional Kirigami batch (C4) is skipped on purpose. The TCP keep-set stays: the `lib_tests` ephemeral-port test, `cli_flags`/`state_dir`, the spike and the examples (`fire_ask_rule`, `live_rule_change`), and the Kirigami tests `live_loop.rs`/`rule_hits_live.rs`/`bridge_runtime/tests.rs` (still `dev_tcp_for_tests`; they need a local Qt run).
+
 ## 2026-11-18 - #386 (PR C1): bridge-cli unit tests use the per-user Unix gRPC socket
 
 - **What:** branch `test/386-user-unix-helper-cli-src` adds `BridgeConfig::user_unix_for_tests(dir)` and `GrpcEndpoint::unix_path()` (both test support), and moves the 7 bridge-cli `src/` unit-test files off `DevTcp`. Kept on TCP: the ephemeral-port test in `lib_tests.rs`. Per-user peers all share connection key `None`; C2 (`bridge-cli/tests`) and C3 (`tests/integration`) are still to do.

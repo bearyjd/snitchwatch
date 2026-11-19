@@ -164,6 +164,13 @@ impl MockOpensnitchd {
     /// Dial the bridge's Unix gRPC socket at `path`, retrying like
     /// [`Self::connect`] until the bridge has bound it.
     pub async fn connect_unix(path: impl AsRef<std::path::Path>) -> Result<Self, MockError> {
+        Ok(Self::from_channel(Self::unix_channel(path).await?))
+    }
+
+    /// The raw gRPC channel to the bridge's Unix socket at `path` (same
+    /// retry as [`Self::connect_unix`]), for tests that speak `UiClient`
+    /// directly instead of through the mock daemon.
+    pub async fn unix_channel(path: impl AsRef<std::path::Path>) -> Result<Channel, MockError> {
         let path = path.as_ref().to_path_buf();
         let endpoint = Endpoint::from_static("http://localhost");
         let mut last_err = None;
@@ -178,7 +185,7 @@ impl MockOpensnitchd {
                 }
             });
             match endpoint.connect_with_connector(connector).await {
-                Ok(channel) => return Ok(Self::from_channel(channel)),
+                Ok(channel) => return Ok(channel),
                 Err(e) => {
                     last_err = Some(e);
                     tokio::time::sleep(Duration::from_millis(50)).await;

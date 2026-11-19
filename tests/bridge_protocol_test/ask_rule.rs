@@ -9,7 +9,7 @@ async fn ask_rule_round_trip_unary() {
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
@@ -18,9 +18,9 @@ async fn ask_rule_round_trip_unary() {
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
     // 3. Spawn an opensnitchd mock client and fire AskRule in the background.
-    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
+    let grpc_path = bridge.grpc_endpoint.unix_path().unwrap().to_path_buf();
     let ask_handle = tokio::spawn(async move {
-        let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+        let mut mock = MockOpensnitchd::connect_unix(&grpc_path).await.unwrap();
         mock.ask_rule(Connection {
             protocol: "tcp".into(),
             dst_host: "example.com".into(),
@@ -106,15 +106,15 @@ async fn deny_round_trip_unary() {
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
+    let grpc_path = bridge.grpc_endpoint.unix_path().unwrap().to_path_buf();
     let ask_handle = tokio::spawn(async move {
-        let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+        let mut mock = MockOpensnitchd::connect_unix(&grpc_path).await.unwrap();
         mock.ask_rule(Connection {
             protocol: "udp".into(),
             dst_host: "tracker.bad".into(),
@@ -171,16 +171,16 @@ async fn ask_rule_round_trip_inline_deny_until_restart() {
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     })
     .await
     .expect("bridge run failed");
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
+    let grpc_path = bridge.grpc_endpoint.unix_path().unwrap().to_path_buf();
     // A synced rule list, as the daemon sends before it asks: a remembered
     // answer is announced only to one (PR #106 review H1).
-    let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+    let mut mock = MockOpensnitchd::connect_unix(&grpc_path).await.unwrap();
     mock.subscribe("mock").await.unwrap();
     let (_reply_tx, _notifications) = mock.open_notifications().await.unwrap();
     let mut ready = bridge.daemon_stream_ready();

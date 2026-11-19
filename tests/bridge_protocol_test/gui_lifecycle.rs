@@ -1,21 +1,24 @@
 use super::*;
 
+async fn connect_grpc_unix(path: std::path::PathBuf) -> tonic::transport::Channel {
+    mock_opensnitchd::MockOpensnitchd::unix_channel(path)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn no_gui_ask_is_unavailable_despite_internal_bridge_consumers() {
     let dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     })
     .await
     .unwrap();
     let mut observer = bridge.broadcast_tx.subscribe();
-    let mut client = snitchwatch_proto::protocol::ui_client::UiClient::connect(format!(
-        "http://{}",
-        bridge.grpc_endpoint.tcp_addr().unwrap()
-    ))
-    .await
-    .unwrap();
+    let mut client = snitchwatch_proto::protocol::ui_client::UiClient::new(
+        connect_grpc_unix(bridge.grpc_endpoint.unix_path().unwrap().to_path_buf()).await,
+    );
     let status = tokio::time::timeout(
         Duration::from_secs(2),
         client.ask_rule(Connection::default()),
@@ -39,18 +42,15 @@ async fn last_real_gui_disconnect_removes_prompt_and_rejects_late_persistent_ver
     let dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     })
     .await
     .unwrap();
     let mut observer = bridge.broadcast_tx.subscribe();
     let mut gui = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
-    let mut client = snitchwatch_proto::protocol::ui_client::UiClient::connect(format!(
-        "http://{}",
-        bridge.grpc_endpoint.tcp_addr().unwrap()
-    ))
-    .await
-    .unwrap();
+    let mut client = snitchwatch_proto::protocol::ui_client::UiClient::new(
+        connect_grpc_unix(bridge.grpc_endpoint.unix_path().unwrap().to_path_buf()).await,
+    );
     let ask = tokio::spawn(async move {
         client
             .ask_rule(Connection {
@@ -146,12 +146,12 @@ async fn ask_rule_deadline_removes_row_for_silent_gui_and_rejects_late_verdict()
     let dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(dir.path())
     })
     .await
     .unwrap();
     let mut gui = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     let ask = tokio::spawn(async move {

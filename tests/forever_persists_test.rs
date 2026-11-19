@@ -64,14 +64,14 @@ async fn allow_forever_for_an_absolute_path_reaches_the_daemon_as_always() {
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 1024,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     })
     .await
     .expect("bridge run failed");
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
 
-    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
-    let mut mock = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+    let grpc_path = bridge.grpc_endpoint.unix_path().unwrap().to_path_buf();
+    let mut mock = MockOpensnitchd::connect_unix(&grpc_path).await.unwrap();
     mock.subscribe("mock").await.unwrap();
     let (_reply_tx, _notifications) = mock.open_notifications().await.unwrap();
     let mut ready = bridge.daemon_stream_ready();

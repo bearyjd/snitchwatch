@@ -55,13 +55,13 @@ async fn boot(
     RunningBridge,
     WebSocketStream<UnixStream>,
     tempfile::TempDir,
-    std::net::SocketAddr,
+    std::path::PathBuf,
 ) {
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run_with_answer_timeout(
         BridgeConfig {
             cache_capacity: 1024,
-            ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+            ..BridgeConfig::user_unix_for_tests(socket_dir.path())
         },
         answer_timeout,
     )
@@ -83,8 +83,8 @@ async fn boot(
             .contains(&json!("decideLater")),
         "{ack}"
     );
-    let grpc_addr = bridge.grpc_endpoint.tcp_addr().unwrap();
-    MockOpensnitchd::connect(grpc_addr)
+    let grpc_path = bridge.grpc_endpoint.unix_path().unwrap().to_path_buf();
+    MockOpensnitchd::connect_unix(&grpc_path)
         .await
         .unwrap()
         .subscribe_with_config(ClientConfig {
@@ -94,11 +94,11 @@ async fn boot(
         })
         .await
         .unwrap();
-    (bridge, ws, socket_dir, grpc_addr)
+    (bridge, ws, socket_dir, grpc_path)
 }
 
 fn ask(
-    grpc_addr: std::net::SocketAddr,
+    grpc_path: std::path::PathBuf,
     process_path: &str,
 ) -> tokio::task::JoinHandle<Result<snitchwatch_proto::protocol::Rule, MockError>> {
     let conn = Connection {
@@ -110,7 +110,7 @@ fn ask(
         ..Default::default()
     };
     tokio::spawn(async move {
-        let mut daemon = MockOpensnitchd::connect(grpc_addr).await.unwrap();
+        let mut daemon = MockOpensnitchd::connect_unix(&grpc_path).await.unwrap();
         daemon.ask_rule(conn).await
     })
 }
@@ -124,9 +124,9 @@ fn now_ms() -> i64 {
 
 #[tokio::test]
 async fn an_unanswered_ask_gets_no_answer_and_its_row_says_so() {
-    let (bridge, mut ws, _dir, grpc_addr) = boot(ANSWER_TIMEOUT).await;
+    let (bridge, mut ws, _dir, grpc_path) = boot(ANSWER_TIMEOUT).await;
     let before = now_ms();
-    let held = ask(grpc_addr, "/usr/bin/background-agent");
+    let held = ask(grpc_path, "/usr/bin/background-agent");
     let inserted = frames_until(&mut ws, "insertConnectionRows").await;
     let row = &inserted.last().unwrap()["rows"][0];
     assert_eq!(row["action"], Value::Null, "the Ask is waiting");
@@ -174,8 +174,8 @@ async fn an_unanswered_ask_gets_no_answer_and_its_row_says_so() {
 
 #[tokio::test]
 async fn decide_later_blocks_the_program_for_five_minutes_at_once() {
-    let (bridge, mut ws, _dir, grpc_addr) = boot(LONG_ANSWER_TIMEOUT).await;
-    let held = ask(grpc_addr, "/usr/bin/background-agent");
+    let (bridge, mut ws, _dir, grpc_path) = boot(LONG_ANSWER_TIMEOUT).await;
+    let held = ask(grpc_path, "/usr/bin/background-agent");
     let inserted = frames_until(&mut ws, "insertConnectionRows").await;
     let row_id = inserted.last().unwrap()["rows"][0]["id"]
         .as_str()

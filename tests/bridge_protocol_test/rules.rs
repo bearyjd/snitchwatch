@@ -25,13 +25,13 @@ async fn rule_update_and_delete_reach_the_daemon_as_notifications() {
     let socket_dir = tempfile::tempdir().unwrap();
     let cfg = BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     };
     let bridge = run(cfg).await.expect("bridge run failed");
 
     // The stream must be open *before* the effect is sent: the bridge
     // broadcasts to whoever is subscribed and replays nothing.
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
     // The rule exists on the daemon: a GUI may only change a rule the
@@ -190,12 +190,12 @@ async fn daemon_rules_reach_the_gui_and_follow_confirmed_commands() {
     let socket_dir = tempfile::tempdir().unwrap();
     let bridge = run(BridgeConfig {
         cache_capacity: 64,
-        ..BridgeConfig::dev_tcp_for_tests(socket_dir.path().join("bridge.sock"))
+        ..BridgeConfig::user_unix_for_tests(socket_dir.path())
     })
     .await
     .expect("bridge run failed");
     let mut ws = connect_stream(&bridge.ws_socket_path, bridge.ws_token.as_str()).await;
-    let mut mock = MockOpensnitchd::connect(bridge.grpc_endpoint.tcp_addr().unwrap())
+    let mut mock = MockOpensnitchd::connect_unix(bridge.grpc_endpoint.unix_path().unwrap())
         .await
         .unwrap();
 
