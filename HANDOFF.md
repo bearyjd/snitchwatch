@@ -2,6 +2,13 @@
 
 > Start with the 2026-11-17 (final) section below, then 2026-11-16, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
 
+## 2026-11-18 — #384: the onboarding page no longer offers to start the daemon
+
+- **What:** branch `fix/384-onboarding-no-service-control` (on the plan PR #390). Removed the "Start daemon" action (`start_unit_via_systemctl`, `startUnit`, `apply_probe_error`), the dead `UnitMissing`/`UnitInactive` states, and the `which` dependency from `snitchwatch-kirigami`. The page now has `connected` and `unreachableRetrying` only, with Retry and Continue anyway, a detail that says the app cannot start the system bridge (check `snitchwatch-ui` membership and the sockets), and a pointer to `docs/packaging/system-bridge-integration.md`. The issue's premise was stale: the code ran `systemctl --system start opensnitch.service`, which never fixed an unreachable bridge and cannot run in the shipped Flatpak.
+- **Guards:** `tests/onboarding_no_service_control.rs` (no `systemctl`/`startUnit`/`rpm-ostree-layering` in the page or `wizard*.rs`); the keyboard probe asserts the itinerary `Retry, Continue anyway, Start here` and zero `systemctl` calls (PATH stub kept).
+- **Cargo.lock:** drops `which 6.0.3` and its only dependants (`home`, `rustix 0.38.44`, `linux-raw-sys 0.4.15`, `winsafe`); `which 8.0.4` stays (another member). The MANIFEST `cargo_lock_sha256` changes: say so in the next release notes.
+- **Not covered:** `just kirigami-screenshots` does not render `OnboardingPage` (its `onboarding-groups` shots are the curated-groups page).
+
 ## 2026-11-17 (final) — #35 and #379 done; waiting on the owner for the tower repin
 
 - **Source:** `origin/main` at `c221512b`. #379 shipped as the plan #383 `4b421d34`, PR 1 #387 `e52b7d1f` (Tauri shell, `tauri_smoke`, CI gtk/webkit deps) and PR 2 #388 `c221512b` (`web/`, static routes, `web-ui` feature, `web_smoke`; the bridge serves only the token-gated `/stream`). #379 and #378 are closed. Plan: `docs/superpowers/plans/2026-11-17-379-retire-tauri.md`.
