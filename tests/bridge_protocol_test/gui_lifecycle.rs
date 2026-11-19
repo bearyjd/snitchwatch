@@ -1,15 +1,7 @@
 use super::*;
 
 async fn connect_grpc_unix(path: std::path::PathBuf) -> tonic::transport::Channel {
-    tonic::transport::Endpoint::from_static("http://localhost")
-        .connect_with_connector(tower::service_fn(move |_| {
-            let path = path.clone();
-            async move {
-                tokio::net::UnixStream::connect(path)
-                    .await
-                    .map(hyper_util::rt::TokioIo::new)
-            }
-        }))
+    mock_opensnitchd::MockOpensnitchd::unix_channel(path)
         .await
         .unwrap()
 }

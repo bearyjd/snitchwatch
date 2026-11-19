@@ -2639,7 +2639,6 @@ name = "snitchwatch-integration-tests"
 version = "0.1.1"
 dependencies = [
  "futures-util",
- "hyper-util",
  "mock-opensnitchd",
  "serde_json",
  "snitchwatch-bridge",
@@ -2649,7 +2648,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tonic",
- "tower 0.4.13",
  "tracing-subscriber",
 ]
 
