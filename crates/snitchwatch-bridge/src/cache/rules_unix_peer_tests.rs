@@ -101,10 +101,7 @@ fn system_redial_old_hello_after_new_hello_then_old_closing_keeps_a_list() {
     commands.on_reply(new.id(), &hello());
     commands.on_reply(old.id(), &hello());
     drop(old);
-    assert!(
-        !lock(&sync.cache).is_unknown(),
-        "the new stream holds a list"
-    );
+    assert_eq!(listed(&sync), vec!["new"], "the new stream holds its list");
     drop(new);
 }
 
@@ -130,11 +127,24 @@ fn system_redial_closing_the_newer_stream_falls_back_with_a_list() {
 /// the list is withdrawn), so it is `#[ignore]`d: it is the case that argues
 /// for keeping the system socket's shared key (decision for PR 2).
 #[test]
-#[ignore = "#391 system-socket characterization: see the run result in the plan/PR body"]
+#[ignore = "#391: Subscribe on conn 1, HELLO on conn 2 => no snapshot for conn 2, the list is withdrawn (empty instead of [\"a\"]); the system socket keeps the shared None key because of this"]
 fn known_failing_system_subscribe_on_one_connection_and_hello_on_another_gets_the_list() {
     let (sync, commands) = system();
     sync.stage(OLD, vec![rule("a")]);
     let (stream, _rx) = commands.open_stream(NEW);
+    commands.on_reply(stream.id(), &hello());
+    assert_eq!(listed(&sync), vec!["a"]);
+    drop(stream);
+}
+
+/// The same split under the shared key, which is what the system socket does
+/// today (every peer is `None`): the list comes through. A change that gives
+/// system-socket peers distinct keys breaks this test.
+#[test]
+fn system_subscribe_on_one_connection_and_hello_on_another_gets_the_list_under_the_shared_key() {
+    let (sync, commands) = system();
+    sync.stage(None, vec![rule("a")]);
+    let (stream, _rx) = commands.open_stream(None);
     commands.on_reply(stream.id(), &hello());
     assert_eq!(listed(&sync), vec!["a"]);
     drop(stream);

@@ -92,6 +92,8 @@ use tracing::{info, warn};
 pub type ConnKey = Option<PeerKey>;
 
 /// One daemon connection. Two keys are the same connection only if equal.
+/// Note for log readers: keys are logged with `?` (e.g. `version_gate.rs`), so
+/// the output changed from `Some(127.0.0.1:4000)` to `Some(Tcp(127.0.0.1:4000))`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PeerKey {
     Tcp(SocketAddr),
