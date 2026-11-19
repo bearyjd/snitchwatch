@@ -307,20 +307,22 @@ Window {
             probe.expectItinerary("traffic", ["Start here"]);
             probe.sweep("traffic");
         } },
-        // Onboarding: Start daemon runs systemctl only on a fresh press.
+        // Onboarding cannot fix an unreachable bridge, so it offers no service
+        // control: Retry only re-reads the connection, and no systemctl runs.
         { gate: () => "", run: () => { probe.mount(onboardC); } },
-        { gate: () => (probe.pageReady() === "" && !wizard.busy) ? "" : "the onboarding page and its probe",
-          run: () => { wizard.state = "unitInactive"; } },
-        { gate: () => probe.byAccName("Start daemon") ? probe.pageReady() : "Start daemon shown", run: () => {
-            probe.expectItinerary("onboarding", ["Start daemon", "Retry", "Continue anyway", "Start here"]);
-            probe.sweepNamed("onboarding", ["Start daemon", "Retry", "Continue anyway"]);
+        { gate: () => (probe.pageReady() === "" && !wizard.busy && wizard.state === "unreachableRetrying")
+              ? "" : "the onboarding page in its unreachableRetrying state",
+          run: () => {
+            probe.expectItinerary("onboarding", ["Retry", "Continue anyway", "Start here"]);
+            probe.expect(!probe.byAccName("Start daemon"), "onboarding still offers Start daemon");
+            probe.sweepNamed("onboarding", ["Retry", "Continue anyway"]);
             probe.expect(probe.tabTo("Continue anyway"), "cannot Tab to Continue anyway");
             for (const k of [Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape]) tc.keyClick(k);
             probe.expect(!probe.dismissed, "Return, Enter or Escape dismissed onboarding");
-            probe.exercise("Start daemon", () => wizard.busy + "|" + probe.systemctlCalls());
+            probe.exercise("Retry", () => String(wizard.busy));
         } },
-        { gate: () => probe.systemctlCalls() >= 1 ? "" : "the fake systemctl call", run: () => {
-            probe.expect(probe.systemctlCalls() === 1, "Start daemon ran systemctl " + probe.systemctlCalls() + " times");
+        { gate: () => wizard.busy ? "the retry probe to settle" : "", run: () => {
+            probe.expect(probe.systemctlCalls() === 0, "onboarding ran systemctl " + probe.systemctlCalls() + " times");
         } },
         // the silent-mode choice: nothing is saved until Continue.
         { gate: () => "", run: () => { probe.mount(silentC); } },
