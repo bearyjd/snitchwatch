@@ -29,3 +29,79 @@ pub fn conn_key<T>(req: &Request<T>) -> ConnKey {
         .get::<UnixPeerInfo>()
         .map(|info| PeerKey::Unix(info.id))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+    use tonic::transport::server::TcpConnectInfo;
+
+    fn tcp(port: u16) -> TcpConnectInfo {
+        TcpConnectInfo {
+            local_addr: None,
+            remote_addr: Some(SocketAddr::from(([127, 0, 0, 1], port))),
+        }
+    }
+
+    fn unix(id: u64) -> UnixPeerInfo {
+        UnixPeerInfo {
+            id,
+            uid: 0,
+            pid: None,
+        }
+    }
+
+    #[test]
+    fn tcp_info_gives_the_peer_address() {
+        let mut req = Request::new(());
+        req.extensions_mut().insert(tcp(4000));
+        assert_eq!(
+            conn_key(&req),
+            Some(PeerKey::Tcp(SocketAddr::from(([127, 0, 0, 1], 4000))))
+        );
+    }
+
+    #[test]
+    fn unix_info_gives_the_connection_id() {
+        let mut req = Request::new(());
+        req.extensions_mut().insert(unix(7));
+        assert_eq!(conn_key(&req), Some(PeerKey::Unix(7)));
+    }
+
+    #[test]
+    fn no_connection_info_gives_none() {
+        assert_eq!(conn_key(&Request::new(())), None);
+    }
+
+    #[test]
+    fn tcp_info_without_an_address_gives_none() {
+        let mut req = Request::new(());
+        req.extensions_mut().insert(TcpConnectInfo {
+            local_addr: None,
+            remote_addr: None,
+        });
+        assert_eq!(conn_key(&req), None);
+    }
+
+    #[test]
+    fn tcp_wins_when_both_are_present() {
+        let mut req = Request::new(());
+        req.extensions_mut().insert(unix(1));
+        req.extensions_mut().insert(tcp(4001));
+        assert!(matches!(conn_key(&req), Some(PeerKey::Tcp(_))));
+    }
+
+    #[test]
+    fn peer_keys_of_different_connections_differ() {
+        assert_ne!(Some(PeerKey::Unix(1)), Some(PeerKey::Unix(2)));
+        assert_ne!(Some(PeerKey::Unix(1)), None);
+        assert_ne!(
+            PeerKey::Tcp(SocketAddr::from(([127, 0, 0, 1], 1))),
+            PeerKey::Tcp(SocketAddr::from(([127, 0, 0, 1], 2)))
+        );
+        assert_ne!(
+            PeerKey::Unix(1),
+            PeerKey::Tcp(SocketAddr::from(([127, 0, 0, 1], 1)))
+        );
+    }
+}

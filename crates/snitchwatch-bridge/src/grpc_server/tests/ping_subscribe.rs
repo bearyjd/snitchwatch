@@ -329,6 +329,10 @@ fn version_ping(daemon_version: &str, from: ConnKey) -> Request<PingRequest> {
     request
 }
 
+fn unix_peer(id: u64) -> ConnKey {
+    Some(PeerKey::Unix(id))
+}
+
 fn tcp_peer(port: u16) -> ConnKey {
     Some(PeerKey::Tcp(std::net::SocketAddr::from((
         [127, 0, 0, 1],
@@ -359,6 +363,45 @@ fn hello_reply() -> NotificationReply {
 async fn only_the_stream_holders_ping_sets_the_daemon_version() {
     let daemon = tcp_peer(40001);
     let other = tcp_peer(40002);
+    let service = plain_service();
+    let mut changed = service.daemon_version_changed();
+    let (stream, _rx) = service.daemon_commands().open_stream(daemon);
+    assert!(service
+        .daemon_commands()
+        .on_reply(stream.id(), &hello_reply()));
+
+    service.ping(version_ping("1.9.0", daemon)).await.unwrap();
+    assert_eq!(
+        service.daemon_version_handle().get(),
+        Some(crate::daemon_config::DaemonVersion::new(1, 9))
+    );
+    assert_eq!(*changed.borrow_and_update(), 1);
+
+    for from in [other, None] {
+        service.ping(version_ping("1.8.0", from)).await.unwrap();
+        assert_eq!(
+            service.daemon_version_handle().get(),
+            Some(crate::daemon_config::DaemonVersion::new(1, 9)),
+            "{from:?}"
+        );
+        assert!(!changed.has_changed().unwrap(), "{from:?}");
+    }
+
+    service.ping(version_ping("1.8.0", daemon)).await.unwrap();
+    assert_eq!(
+        service.daemon_version_handle().get(),
+        Some(crate::daemon_config::DaemonVersion::new(1, 8))
+    );
+    assert_eq!(*changed.borrow_and_update(), 2);
+}
+
+/// The Unix twin of the TCP test above (#391): a second Unix connection
+/// (another id) pinging "1.8.0" can't lower the holder's known 1.9. The ids
+/// are injected through `UnixPeerInfo`, as the accept path will (PR 2).
+#[tokio::test]
+async fn only_the_stream_holders_ping_sets_the_daemon_version_on_unix() {
+    let daemon = unix_peer(1);
+    let other = unix_peer(2);
     let service = plain_service();
     let mut changed = service.daemon_version_changed();
     let (stream, _rx) = service.daemon_commands().open_stream(daemon);
