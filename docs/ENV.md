@@ -89,7 +89,7 @@ lines, sourced by the justfile and scripts).
 | Variable | Where | Value / meaning |
 |---|---|---|
 | `SW_BUILDER_IMAGE` | `pins.env:1` | `registry.fedoraproject.org/fedora:45@sha256:ea0998f4...`; must equal `container.image` in `release.yml` (`docs/packaging/bridge-release-artifact.md` "Maintaining the pins"). |
-| `SW_RUST_VERSION` | `pins.env:2` | `1.99.1`; the build dies if the builder's rustc differs (`build-bridge.sh:103`). |
+| `SW_RUST_VERSION` | `pins.env:2` | `1.100.0`; the build dies if the builder's rustc differs (`build-bridge.sh:103`). |
 | `SW_PROTOC_VERSION` | `pins.env:3` | `33.5` (`build-bridge.sh:108`). |
 | `SW_ARCH` | `pins.env:4` | `x86_64`. |
 | `SW_OPENSNITCH_COMMIT` | `pins.env:5` | Must equal the `vendor/opensnitch` gitlink and checked-out HEAD (`build-bridge.sh:119,123`). |
