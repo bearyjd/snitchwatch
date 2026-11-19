@@ -1,8 +1,8 @@
 //! Bridge-owned desktop notification bus.
 //!
-//! In-process consumers subscribe to a broadcast::Receiver<Notice> and dispatch
-//! each entry. Headless tests use the receiver directly and
-//! never touch D-Bus.
+//! `snitchwatch-bridge-cli`'s relays forward these to WS clients as
+//! `ServerMessage`s; tests subscribe to the broadcast::Receiver<Notice>
+//! directly and never touch D-Bus.
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;

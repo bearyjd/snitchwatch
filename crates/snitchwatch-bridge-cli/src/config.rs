@@ -104,7 +104,7 @@ impl BridgeConfig {
 
 /// Pure over its inputs (no environment access) so it is unit-testable
 /// without `set_var`. See `docs/superpowers/plans/2026-11-16-35-tcp-dev-only.md`.
-pub fn resolve_grpc_listen(
+pub(crate) fn resolve_grpc_listen(
     dev_flag: Option<OsString>,
     grpc_bind: Option<OsString>,
     xdg_runtime_dir: Option<OsString>,

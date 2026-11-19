@@ -2,6 +2,10 @@
 
 > Start with the 2026-11-17 (final) section below, then 2026-11-16, then 2026-11-15, then 2026-11-14, then 2026-11-08, 2026-11-07 (the 2026-11-01 section is superseded where they differ). The working handoff for agents is the untracked, gitignored `.omc/STATE.md` (same machine only); this file is the durable summary. Earlier sections are## 2026-11-16 — #363 closed (keyboard probe flakes); #35 waits for owner decisions; r16.3 plan and tower brief on main
 
+## 2026-11-18 - #385 (PR B): bridge-cli public surface narrowed
+
+- **What:** branch `refactor/385-bridge-cli-pub-surface` drops the unused `RunningBridge::notice_rx`, makes `rule_hits_storage`, `profile_storage` and `storage` private modules, and narrows `set_curated_account_lookups` and `resolve_grpc_listen` to `pub(crate)`. Test hooks that tests reach through `RunningBridge` stay public (`#[doc(hidden)]` on three). Docs on `broadcast_tx`/`inbound_tx`/`tray_rx` and the bridge `notice.rs`/`tray_state.rs` module docs no longer claim Kirigami uses them. No behaviour change.
+
 ## 2026-11-17 (final) — #35 and #379 done; waiting on the owner for the tower repin
 
 - **Source:** `origin/main` at `c221512b`. #379 shipped as the plan #383 `4b421d34`, PR 1 #387 `e52b7d1f` (Tauri shell, `tauri_smoke`, CI gtk/webkit deps) and PR 2 #388 `c221512b` (`web/`, static routes, `web-ui` feature, `web_smoke`; the bridge serves only the token-gated `/stream`). #379 and #378 are closed. Plan: `docs/superpowers/plans/2026-11-17-379-retire-tauri.md`.

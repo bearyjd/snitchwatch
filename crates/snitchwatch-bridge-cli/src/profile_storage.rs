@@ -41,21 +41,21 @@ use tracing::{error, info};
 use crate::storage::{BridgeMode, DaemonRules, EphemeralReason, Storage};
 
 /// Why a system bridge whose saved profiles can't be read changes none.
-pub const UNREADABLE_REASON: &str = "Snitchwatch can't read its saved profiles (profiles.sqlite3 \
+pub(crate) const UNREADABLE_REASON: &str = "Snitchwatch can't read its saved profiles (profiles.sqlite3 \
      in its state folder), so it changes no profile rules: rules it installed earlier were left \
      in place. Fix or move that file, then restart Snitchwatch's background service.";
 
 /// Why a system bridge with nowhere to save profiles changes none.
-pub const NOWHERE_REASON: &str = "Snitchwatch has no place to save profiles here, so it changes \
+pub(crate) const NOWHERE_REASON: &str = "Snitchwatch has no place to save profiles here, so it changes \
      no profile rules: rules it installed earlier were left in place.";
 
 /// Why a per-user bridge applies no profile rules.
-pub const PER_USER_REASON: &str = "Profiles are applied to the firewall only by the \
+pub(crate) const PER_USER_REASON: &str = "Profiles are applied to the firewall only by the \
      system-wide Snitchwatch service; in this per-user setup another program could pose as the \
      firewall service.";
 
 /// The profile database's file name inside the state directory.
-pub const PROFILE_DB_FILE: &str = "profiles.sqlite3";
+pub(crate) const PROFILE_DB_FILE: &str = "profiles.sqlite3";
 
 /// The bridge's profile manager: persisted in `<state>/profiles.sqlite3`
 /// when its store opened `Persistent` (in memory otherwise), and applying
