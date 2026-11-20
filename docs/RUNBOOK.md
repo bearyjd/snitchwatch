@@ -92,6 +92,9 @@ polkit-gated scan; the rule-2 base-tree pass is not implemented, so a clean scan
 still lists `file_drift_base_tree` under `skipped` (plan Open Question 1). Plan:
 `docs/superpowers/plans/2026-11-19-privileged-file-drift.md`.
 
+`scripts/file-drift-evidence.sh` (read-only, run as root on the host) captures the evidence for
+Q1-Q3 below into one directory; bring back its `summary.txt`.
+
 - [ ] Run a scan on a Bazzite host via the broker (`busctl --user call
   org.snitchwatch.Scanner ... RunDeepScan`, as in `HANDOFF.md:80`).
 - [ ] Record the `rpm -Va --nomtime --noscripts --nodeps` wall time, output size and
