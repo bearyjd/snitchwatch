@@ -1,5 +1,7 @@
 # Snitchwatch — Kirigami Shell Rewrite (Phase 3a + 3b) Implementation Plan
 
+> **Phase 3a GO (2026-07-04):** all four spike tasks passed (crates/kirigami-spike, 7fb46a5a); go/no-go per docs/superpowers/specs/2026-07-04-cxx-qt-feasibility-research.md. The spike crate is named `kirigami-spike`, not `cxx-qt-spike` as the Part A tasks below say.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > **STATUS 2026-07-05 — Phase 3b COMPLETE (plus Little-Snitch parity features beyond this plan's scope).**
@@ -87,54 +89,57 @@ a separate `crates/cxx-qt-spike/` scratch crate once its job is done.
 
 **Files:** `crates/cxx-qt-spike/` (new, throwaway crate)
 
-- [ ] Build a minimal `#[qobject]` with one `#[qproperty(i32, counter)]` and
+- [x] Build a minimal `#[qobject]` with one `#[qproperty(i32, counter)]` and
       a `#[qsignal] fn counter_changed()`.
-- [ ] From a `qinvokable` constructor/init method, grab `self.qt_thread()`,
+- [x] From a `qinvokable` constructor/init method, grab `self.qt_thread()`,
       `tokio::spawn` a task that sleeps 500ms in a loop and calls
       `qt_thread.queue(|qobject| { qobject.set_counter(...); })`.
-- [ ] A trivial QML `Text` bound to `counter` visibly updates without user
+- [x] A trivial QML `Text` bound to `counter` visibly updates without user
       interaction.
-- [ ] **Pass condition:** the counter updates on its own, driven from a
+- [x] **Pass condition:** the counter updates on its own, driven from a
       background Tokio task, with no QML-initiated call triggering it.
       This is the exact shape the bridge's WS-driven state (new
       connections, pending `AskRule`, tray state) needs.
+  > Evidence (annotated 2026-11-19): `crates/kirigami-spike/src/cxxqt_object.rs` (`qt_thread().queue` from a background thread). The spike exposed `count`/`running` properties and a `connectionAdded` signal over list rows rather than a `counter`; same shape.
 
 ### Task 2: Spike — `QAbstractListModel`-backed QML list
 
 **Files:** `crates/cxx-qt-spike/` (same throwaway crate)
 
-- [ ] Build a `#[qobject]` with `#[base = QAbstractListModel]` per the
+- [x] Build a `#[qobject]` with `#[base = QAbstractListModel]` per the
       `custom_base_class` pattern from the CXX-Qt book, seeded with 3 toy
       rows (e.g. `{process, host, port}` tuples).
-- [ ] Expose it to QML as a property (raw-pointer handling, per the
+- [x] Expose it to QML as a property (raw-pointer handling, per the
       research doc's §5 note) and bind a `ListView` to it.
-- [ ] Add a `qinvokable` that appends a 4th row at runtime; confirm the
+- [x] Add a `qinvokable` that appends a 4th row at runtime; confirm the
       `ListView` updates live.
-- [ ] **Pass condition:** a QML `ListView` renders and live-updates against
+- [x] **Pass condition:** a QML `ListView` renders and live-updates against
       a Rust-owned list model. This is the direct precursor to the
       Connections table (Task 14) — the single most complex API surface
       identified in the feasibility research.
+  > Evidence (annotated 2026-11-19): `crates/kirigami-spike/src/cxxqt_object.rs` (`#[base = QAbstractListModel]`, `append_row` qinvokable).
 
 ### Task 3: Spike — clean workspace build alongside existing `build.rs` crates
 
 **Files:** `Cargo.toml` (workspace root, temporarily add the spike crate)
 
-- [ ] Add `crates/cxx-qt-spike` to the workspace `members`.
-- [ ] Run `cargo build --workspace` and confirm `snitchwatch-proto`'s
+- [x] Add `crates/cxx-qt-spike` to the workspace `members`.
+- [x] Run `cargo build --workspace` and confirm `snitchwatch-proto`'s
       `tonic-build` codegen and `snitchwatch-tauri`'s `tauri_build::build()`
       both still succeed alongside the new crate's `cxx-qt-build` codegen.
-- [ ] **Pass condition:** `cargo build --workspace` succeeds with zero
+- [x] **Pass condition:** `cargo build --workspace` succeeds with zero
       changes needed to any other crate's `build.rs`.
+  > Evidence (annotated 2026-11-19): `7fb46a5a`'s workspace build. The `snitchwatch-tauri` co-build named above is historical; the Tauri crate was retired in #379.
 
 ### Task 4: Spike — does GitHub issue #770 (integration-test linking) bite here?
 
 **Files:** `crates/cxx-qt-spike/tests/` (new, mirrors the workspace-root
 `tests/*` convention used by `tests/bridge_protocol_test.rs` etc.)
 
-- [ ] Add a `tests/spike_smoke.rs` integration test to the spike crate that
+- [x] Add a `tests/spike_smoke.rs` integration test to the spike crate that
       references the `#[qobject]` type from Task 1 or 2.
-- [ ] Run `cargo test -p cxx-qt-spike`.
-- [ ] **Record the result either way:**
+- [x] Run `cargo test -p cxx-qt-spike`.
+- [x] **Record the result either way:**
   - If it links and passes cleanly: issue #770 doesn't apply to this setup;
     Phase 3b can use the same `tests/*` convention as the rest of the repo
     for the new crate.
@@ -144,6 +149,7 @@ a separate `crates/cxx-qt-spike/` scratch crate once its job is done.
     (`#[cfg(test)] mod tests` inside `src/`) instead of the workspace-root
     `tests/*` pattern. Record which outcome occurred in this plan's
     tracking (edit this file's checkbox annotations) before Part B starts.
+  > Evidence (annotated 2026-11-19): `crates/kirigami-spike/tests/link_770.rs` passed (the plan's `tests/spike_smoke.rs` is named `link_770.rs`), so #770 does not bite; recorded in `7fb46a5a`'s message.
 
 **End of Part A gate.** If any of Tasks 1–3 fail outright (not just "needs
 a workaround" — actually fails to work at all), **stop and escalate to the

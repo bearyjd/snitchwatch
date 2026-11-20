@@ -207,6 +207,15 @@ specific to Component A's interactive-firewall use case; it has no
 bearing on Component B (the scanner doesn't touch opensnitchd's config or
 depend on its default action at all).
 
+> **Shipped design (2026-11-19):** `DefaultAction: allow` (settled decision
+> #5); the bridge ships as the **system bridge** only (#35), with TCP
+> `127.0.0.1:50051` dev-only behind `SNITCHWATCH_DEV_TCP=1`; there is no
+> per-user `systemctl --user snitchwatch-bridge` unit; the GUI is
+> `snitchwatch-kirigami` (Tauri retired #379). See
+> `docs/packaging/system-bridge-integration.md`. The TCP-bind, `systemctl
+> --user` unit, and "Tauri GUI window" acceptance criteria below are
+> superseded by this.
+
 **Acceptance criteria:**
 - Bluebuild recipe builds an image (CI or local) with opensnitchd present
   and enabled, `Server.Address` pre-configured to match the bridge's
