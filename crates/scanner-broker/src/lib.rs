@@ -23,6 +23,7 @@ pub const SCANNER: &str = "/usr/libexec/snitchwatch-scanner-privileged";
 pub const MAX_REPORT: usize = 4 * 1024 * 1024;
 const MAX_ERROR: usize = 64 * 1024;
 const SCAN_TIMEOUT: Duration = Duration::from_secs(600);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(605);
 // Matches the privileged watchdog's single atomic diagnostic write. A signal
 // alone cannot distinguish its deadline from an unrelated kill or OOM event.
 const WATCHDOG_TIMEOUT_MARKER: &[u8] = b"\nSNITCHWATCH_SCANNER_WATCHDOG_TIMEOUT\n";
@@ -291,7 +292,7 @@ impl Broker {
 pub async fn request_scan() -> Reply {
     let result: zbus::Result<Reply> = async {
         let connection = zbus::connection::Builder::session()?
-            .method_timeout(Duration::from_secs(605))
+            .method_timeout(REQUEST_TIMEOUT)
             .build()
             .await?;
         let proxy = zbus::Proxy::new(&connection, BUS_NAME, OBJECT_PATH, INTERFACE).await?;
@@ -309,6 +310,22 @@ pub async fn request_scan() -> Reply {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn real_producer_report_is_accepted() {
+        let fixture = include_str!("../../scanner-privileged/tests/fixtures/report.json");
+        assert_eq!(validate_report(fixture.into()).0, "ok");
+    }
+
+    #[test]
+    fn watchdog_marker_and_timeout_order_match_the_scanner() {
+        assert_eq!(
+            WATCHDOG_TIMEOUT_MARKER,
+            scanner_privileged::command::WATCHDOG_TIMEOUT_MARKER
+        );
+        let watchdog = scanner_privileged::command::SCAN_WATCHDOG;
+        assert!(watchdog < SCAN_TIMEOUT && SCAN_TIMEOUT < REQUEST_TIMEOUT);
+    }
     const REPORT: &str = r#"{"scan_id":1,"new":[],"still_outstanding":[],"resolved":[],"informational":[],"skipped":[]}"#;
     // A parallel spawn can inherit another fixture's writable fd until exec,
     // causing ETXTBSY even after std::fs::write closes the original fd.

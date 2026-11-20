@@ -168,14 +168,7 @@ fn print_report(report: &ScanReport) {
 }
 
 fn print_json(report: &ScanReport) {
-    let value = serde_json::json!({
-        "scan_id": report.scan_id,
-        "new": report.reconciled.new.iter().map(|f| serde_json::json!({"path": f.path, "detail": f.detail})).collect::<Vec<_>>(),
-        "still_outstanding": report.reconciled.still_outstanding.iter().map(|f| serde_json::json!({"path": f.path, "detail": f.detail})).collect::<Vec<_>>(),
-        "resolved": report.reconciled.resolved.iter().map(|f| serde_json::json!({"path": f.path})).collect::<Vec<_>>(),
-        "informational": report.informational.iter().map(|f| serde_json::json!({"path": f.path, "detail": f.detail})).collect::<Vec<_>>(),
-        "skipped": report.skipped.iter().map(|s| serde_json::json!({"check": s.check, "reason": s.reason})).collect::<Vec<_>>(),
-    });
+    let value = scanner_privileged::scan::report_json(report);
     println!(
         "{}",
         serde_json::to_string_pretty(&value).unwrap_or_default()

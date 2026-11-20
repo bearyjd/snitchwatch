@@ -27,6 +27,24 @@ pub struct ScanReport {
     pub skipped: Vec<SkippedCheck>,
 }
 
+/// Wire form of `--json` output. `scanner-broker::Report` and the Kirigami
+/// scanner summary consume it; `tests/report_contract.rs` pins the shape.
+pub fn report_json(report: &ScanReport) -> serde_json::Value {
+    let pairs = |v: &[crate::store::ReconciledFinding]| {
+        v.iter()
+            .map(|f| serde_json::json!({"path": f.path, "detail": f.detail}))
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "scan_id": report.scan_id,
+        "new": pairs(&report.reconciled.new),
+        "still_outstanding": pairs(&report.reconciled.still_outstanding),
+        "resolved": report.reconciled.resolved.iter().map(|f| serde_json::json!({"path": f.path})).collect::<Vec<_>>(),
+        "informational": report.informational.iter().map(|f| serde_json::json!({"path": f.path, "detail": f.detail})).collect::<Vec<_>>(),
+        "skipped": report.skipped.iter().map(|s| serde_json::json!({"check": s.check, "reason": s.reason})).collect::<Vec<_>>(),
+    })
+}
+
 /// Run the ordered privileged-tier scan against `facts`, persisting results
 /// to `store`. `deployment_checksum` tags the scan run (from
 /// `rpm-ostree status --json`; caller supplies it).

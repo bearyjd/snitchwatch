@@ -1,0 +1,8 @@
+{
+  "scan_id": 7,
+  "new": [{"path": "/usr/bin/sudo", "detail": "checksum changed"}],
+  "still_outstanding": [{"path": "kargs", "detail": "unexpected karg"}],
+  "resolved": [{"path": "/usr/bin/old"}],
+  "informational": [{"path": "secureboot", "detail": "enabled"}],
+  "skipped": [{"check": "rootkit", "reason": "chkrootkit not installed"}]
+}
