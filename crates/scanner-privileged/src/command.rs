@@ -549,17 +549,55 @@ fn resolve(program: &str) -> io::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(program))
 }
 
+/// The one `rpm` verify argv the exit allowance applies to. `--noscripts`
+/// keeps `%verifyscript` of (possibly attacker-layered) packages from running
+/// as root; `--nomtime` quiets OSTree's normalized mtimes; `--nodeps` drops
+/// dependency lines that are not file drift.
+pub const RPM_VERIFY_ARGS: [&str; 4] = ["-Va", "--nomtime", "--noscripts", "--nodeps"];
+/// `rpm -qf` query format for the owning package name.
+pub const OWNER_QUERYFORMAT: &str = "%{NAME}\n";
+
+/// Which non-zero exits of a primitive are data rather than failure.
+#[derive(Debug, PartialEq, Eq)]
+enum Allow {
+    /// Only exit 0 is success.
+    Strict,
+    /// `rpm -qf`: exit 1 with exactly this "not owned" stdout.
+    NotOwned(String),
+    /// `rpm -Va`: a non-zero normal exit, empty stderr, and at least one
+    /// parseable verify line on stdout (drift found).
+    VerifyDrift,
+}
+
+fn allowance(program: &str, args: &[&str]) -> Allow {
+    let not_owned =
+        |path: &str| Allow::NotOwned(format!("file {path} is not owned by any package\n"));
+    match (program, args) {
+        ("rpm", a) if a == RPM_VERIFY_ARGS => Allow::VerifyDrift,
+        ("rpm", ["-qf", path]) => not_owned(path),
+        ("rpm", ["-qf", "--queryformat", fmt, path]) if *fmt == OWNER_QUERYFORMAT => {
+            not_owned(path)
+        }
+        _ => Allow::Strict,
+    }
+}
+
+/// Whole-scan watchdog: the privileged scan is killed after this long.
+pub const SCAN_WATCHDOG: Duration = Duration::from_secs(540);
+
 pub fn run(program: &str, args: &[&str]) -> io::Result<String> {
+    run_with_deadline(program, args, PRIMITIVE_DEADLINE)
+}
+
+pub(crate) const PRIMITIVE_DEADLINE: Duration = Duration::from_secs(300);
+
+/// [`run`] with a caller-chosen deadline for this one primitive.
+pub fn run_with_deadline(program: &str, args: &[&str], deadline: Duration) -> io::Result<String> {
     let path = resolve(program)?;
-    let not_owned = if program == "rpm" && args.len() == 2 && args[0] == "-qf" {
-        Some(format!("file {} is not owned by any package\n", args[1]))
-    } else {
-        None
-    };
-    capture(
+    capture_allowing(
         Command::new(path).args(args),
-        Duration::from_secs(300),
-        not_owned.as_deref(),
+        deadline,
+        allowance(program, args),
     )
 }
 
@@ -591,11 +629,17 @@ fn drain(pipe: &mut impl Read, bytes: &mut Vec<u8>, limit: usize) -> io::Result<
     }
 }
 
+#[cfg(test)]
 fn capture(
     command: &mut Command,
     timeout: Duration,
     not_owned: Option<&str>,
 ) -> io::Result<String> {
+    let allow = not_owned.map_or(Allow::Strict, |s| Allow::NotOwned(s.to_string()));
+    capture_allowing(command, timeout, allow)
+}
+
+fn capture_allowing(command: &mut Command, timeout: Duration, allow: Allow) -> io::Result<String> {
     refuse_privileged_binary(std::path::Path::new(command.get_program()))?;
     command
         .env_clear()
@@ -726,11 +770,9 @@ fn capture(
         }
         if unsafe { status.si_pid() } != 0 && out_done && err_done {
             let code = unsafe { status.si_status() };
-            let unowned = status.si_code == libc::CLD_EXITED
-                && code == 1
-                && not_owned.is_some_and(|expected| out == expected.as_bytes())
-                && err.is_empty();
-            if !(status.si_code == libc::CLD_EXITED && code == 0) && !unowned {
+            let exited = status.si_code == libc::CLD_EXITED;
+            let accepted = exited && code == 0 || exit_allowed(&allow, exited, code, &out, &err);
+            if !accepted {
                 return Err(io::Error::other(format!(
                     "system primitive failed: code {} status {code}",
                     status.si_code
@@ -753,6 +795,26 @@ fn capture(
     }
 }
 
+fn has_verify_line(stdout: &str) -> bool {
+    !scanner_core::rpmverify::failing_entries(stdout)
+        .failures
+        .is_empty()
+}
+
+/// Whether a non-zero exit is data under `allow` (see [`Allow`]).
+fn exit_allowed(allow: &Allow, exited: bool, code: i32, out: &[u8], err: &[u8]) -> bool {
+    match allow {
+        Allow::NotOwned(expected) => {
+            exited && code == 1 && out == expected.as_bytes() && err.is_empty()
+        }
+        Allow::VerifyDrift => {
+            // Any stderr means rpm hit errors: the stdout may be partial.
+            exited && err.is_empty() && has_verify_line(&String::from_utf8_lossy(out))
+        }
+        Allow::Strict => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -760,6 +822,7 @@ mod tests {
     use crate::containment::test_fixtures::scanner_fixture::ScannerFixture;
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     mod exit_tests;
+    mod verify_exit_tests;
     fn fixture(script: &str) -> io::Result<String> {
         capture(
             Command::new("/usr/bin/sh").args(["-c", script]),

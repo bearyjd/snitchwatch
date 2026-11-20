@@ -84,6 +84,35 @@ other argument (`crates/snitchwatch-bridge-cli/src/cli.rs:49-60`).
 | Scanner (userspace) | `scanner-cli` prints JSON; exit 0 clean, 1 actionable anomalies, 2 could not run | `crates/scanner-cli/src/main.rs:12-15` |
 | Scanner (privileged) | binary `snitchwatch-scanner-privileged`, broker `snitchwatch-scanner-broker`; no usage text read in this pass | `crates/scanner-privileged/Cargo.toml:17-18`; `crates/scanner-broker/Cargo.toml:7-8` |
 
+## Scanner (privileged) `file_drift`: real-host checklist
+
+Manual, owner-run, not blocking merge (same boundary as the Phase 6 plan). The
+check runs `rpm -Va --nomtime --noscripts --nodeps` inside the existing on-demand
+polkit-gated scan; the rule-2 base-tree pass is not implemented, so a clean scan
+still lists `file_drift_base_tree` under `skipped` (plan Open Question 1). Plan:
+`docs/superpowers/plans/2026-11-19-privileged-file-drift.md`.
+
+- [ ] Run a scan on a Bazzite host via the broker (`busctl --user call
+  org.snitchwatch.Scanner ... RunDeepScan`, as in `HANDOFF.md:80`).
+- [ ] Record the `rpm -Va --nomtime --noscripts --nodeps` wall time, output size and
+  exit code with drift in 0, 1 and 2+ packages. This pins the exit-code
+  semantics the runner assumes (any non-zero normal exit with at least one
+  parseable verify line counts as drift). Compare the wall time with
+  `FILE_DRIFT_BUDGET` (180 s, provisional; Q2).
+- [ ] Record the real format of `rpm-ostree status --json` `packages` /
+  `requested-packages` entries: plain names or NEVRAs.
+- [ ] Confirm an untouched image produces no flood of `T`/`M`/`missing` lines and no
+  `file_drift_unparsed` or aggregate `/` finding (Q3: is `--nomtime` enough, or do
+  `--excludedocs`/`%ghost`/`/usr/etc` paths also flood?).
+- [ ] Layer a package, edit one of its files, confirm exactly one anomaly naming
+  `layered_pkg:<name>`; restore the file and confirm it resolves on the next scan.
+- [ ] Confirm the report `skipped` list shows `file_drift_base_tree` and not
+  `file_drift`.
+- [ ] Capture stderr of a plain `rpm -Va --nomtime --noscripts --nodeps` on a clean image.
+  The runner rejects any non-zero `rpm -Va` run that wrote to stderr (it cannot tell a
+  partial run from a full one), so routine rpmdb notices would skip `file_drift` on every
+  scan. If stderr is not empty, decide on an allowlist of known-benign lines.
+
 ## Common issues
 
 Items below are the ones the repo documents.

@@ -25,6 +25,10 @@ struct FakeFacts {
     secure_boot: bool,
     chkrootkit: Option<String>,
     chkrootkit_output: String,
+    rpm_verify: Option<String>,
+    rpm_verify_io_error: bool,
+    owners: HashMap<String, String>,
+    deployment_json: Option<String>,
 }
 
 impl SystemFacts for FakeFacts {
@@ -58,6 +62,30 @@ impl SystemFacts for FakeFacts {
     fn run_chkrootkit(&self, _program: &str) -> Result<String> {
         Ok(self.chkrootkit_output.clone())
     }
+    fn rpm_verify_all(&self) -> Result<String> {
+        if self.rpm_verify_io_error {
+            return Err(ScanError::Io {
+                path: "rpm".to_string(),
+                source: std::io::Error::other("rpmdb locked"),
+            });
+        }
+        self.rpm_verify
+            .clone()
+            .ok_or_else(|| ScanError::PrimitiveUnavailable("fake: no rpm".to_string()))
+    }
+    fn file_owner(&self, path: &str) -> Result<Option<String>> {
+        Ok(self.owners.get(path).cloned())
+    }
+    fn deployment_status_json(&self) -> Result<String> {
+        self.deployment_json
+            .clone()
+            .ok_or_else(|| ScanError::PrimitiveUnavailable("fake: no rpm-ostree".to_string()))
+    }
+    fn base_tree_drift(&self) -> Result<Vec<String>> {
+        Err(ScanError::PrimitiveUnavailable(
+            "fake: no base tree".to_string(),
+        ))
+    }
 }
 
 fn healthy_facts() -> FakeFacts {
@@ -73,6 +101,112 @@ fn healthy_facts() -> FakeFacts {
         secure_boot: true,
         ..Default::default()
     }
+}
+
+const DEPLOY: &str =
+    r#"{"deployments":[{"booted":true,"checksum":"abc","packages":["opensnitch"]}]}"#;
+const TAMPERED: &str = "..5......    /usr/bin/opensnitchd\n";
+const TAMPERED_PATH: &str = "/usr/bin/opensnitchd";
+
+/// Live-shaped: rpm and rpm-ostree answer, the base-tree primitive is
+/// unavailable (plan OQ1), exactly as `LiveSystem` behaves today.
+fn drift_facts(rpm_verify: &str) -> FakeFacts {
+    FakeFacts {
+        rpm_verify: Some(rpm_verify.to_string()),
+        deployment_json: Some(DEPLOY.to_string()),
+        owners: [(TAMPERED_PATH.to_string(), "opensnitch".to_string())]
+            .into_iter()
+            .collect(),
+        ..healthy_facts()
+    }
+}
+
+#[test]
+fn file_drift_is_new_then_still_then_resolved_with_base_tree_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
+
+    let r1 = run_privileged_scan(&drift_facts(TAMPERED), &store, "dep-abc").unwrap();
+    let finding = r1.reconciled.new.iter().find(|f| f.path == TAMPERED_PATH);
+    assert!(finding.is_some_and(|f| f.detail.contains("layered_pkg:opensnitch")));
+    assert!(!r1.skipped.iter().any(|s| s.check == "file_drift"));
+    assert!(r1.skipped.iter().any(|s| s.check == "file_drift_base_tree"));
+
+    let r2 = run_privileged_scan(&drift_facts(TAMPERED), &store, "dep-abc").unwrap();
+    assert!(r2.reconciled.new.is_empty());
+    assert!(r2
+        .reconciled
+        .still_outstanding
+        .iter()
+        .any(|f| f.path == TAMPERED_PATH));
+
+    // Restored: resolves even though the base-tree pass is unavailable.
+    let r3 = run_privileged_scan(&drift_facts(""), &store, "dep-abc").unwrap();
+    assert!(r3
+        .reconciled
+        .resolved
+        .iter()
+        .any(|f| f.path == TAMPERED_PATH));
+    assert!(r3.skipped.iter().any(|s| s.check == "file_drift_base_tree"));
+}
+
+#[test]
+fn a_truncated_run_never_resolves_findings_past_the_cap() {
+    use scanner_privileged::checks::file_drift::MAX_DRIFT_PATHS;
+    let dir = tempfile::tempdir().unwrap();
+    let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
+    let late = "/usr/lib/late";
+    let r1 = run_privileged_scan(&drift_facts("missing     /usr/lib/late\n"), &store, "d").unwrap();
+    assert!(r1.reconciled.new.iter().any(|f| f.path == late));
+
+    // Scan 2: more than the cap of other anomalies, `late` is past the cap.
+    let mut verify: String = (0..=MAX_DRIFT_PATHS)
+        .map(|i| format!("missing     /usr/lib/g{i}\n"))
+        .collect();
+    verify.push_str("missing     /usr/lib/late\n");
+    let r2 = run_privileged_scan(&drift_facts(&verify), &store, "d").unwrap();
+    assert!(
+        r2.reconciled.resolved.is_empty(),
+        "{:?}",
+        r2.reconciled.resolved
+    );
+    assert!(r2
+        .skipped
+        .iter()
+        .any(|s| s.check == "file_drift_incomplete"));
+
+    // Scan 3: complete and clean -> now it may resolve.
+    let r3 = run_privileged_scan(&drift_facts(""), &store, "d").unwrap();
+    assert!(r3.reconciled.resolved.iter().any(|f| f.path == late));
+}
+
+#[test]
+fn a_failed_rpm_primitive_skips_file_drift_without_aborting_the_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
+    let r1 = run_privileged_scan(&drift_facts(TAMPERED), &store, "dep-abc").unwrap();
+    assert!(r1.reconciled.new.iter().any(|f| f.path == TAMPERED_PATH));
+
+    let mut broken = drift_facts(TAMPERED);
+    broken.rpm_verify_io_error = true;
+    broken.proc_modules.push_str("rk_hidden 1 0 - Live 0x0\n");
+    broken.committed_kargs = String::new();
+    let r2 = run_privileged_scan(&broken, &store, "dep-abc").unwrap();
+    let skip = r2.skipped.iter().find(|s| s.check == "file_drift");
+    assert!(
+        skip.is_some_and(|s| s.reason.contains("rpmdb locked")),
+        "{:?}",
+        r2.skipped
+    );
+    // The cheaper checks still ran and reported.
+    assert!(r2
+        .reconciled
+        .new
+        .iter()
+        .any(|f| f.path == "module:rk_hidden"));
+    assert!(r2.reconciled.new.iter().any(|f| f.path == "kargs:quiet"));
+    // A failed check never resolves its earlier finding.
+    assert!(r2.reconciled.resolved.is_empty(), "{:?}", r2.reconciled);
 }
 
 #[test]
@@ -110,6 +244,31 @@ fn full_scan_diffs_new_still_and_resolved_across_runs() {
         .resolved
         .iter()
         .any(|f| f.path == "module:rk_hidden"));
+}
+
+#[test]
+fn a_skipped_check_does_not_resolve_its_earlier_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
+    let lkm = "rootkit:chkrootkit:lkm";
+
+    // Scan 1: chkrootkit reports an infection.
+    let mut infected = healthy_facts();
+    infected.chkrootkit = Some("/usr/sbin/chkrootkit".to_string());
+    infected.chkrootkit_output = "Checking 'lkm'... INFECTED\n".to_string();
+    let r1 = run_privileged_scan(&infected, &store, "dep-abc").unwrap();
+    assert!(r1.reconciled.new.iter().any(|f| f.path == lkm));
+
+    // Scan 2: chkrootkit is gone (skipped) -> the finding must stay open.
+    let r2 = run_privileged_scan(&healthy_facts(), &store, "dep-abc").unwrap();
+    assert!(r2.skipped.iter().any(|s| s.check == "rootkit_signature"));
+    assert!(r2.reconciled.resolved.is_empty(), "{:?}", r2.reconciled);
+
+    // Scan 3: chkrootkit runs and is clean -> now it resolves.
+    let mut clean = healthy_facts();
+    clean.chkrootkit = Some("/usr/sbin/chkrootkit".to_string());
+    let r3 = run_privileged_scan(&clean, &store, "dep-abc").unwrap();
+    assert!(r3.reconciled.resolved.iter().any(|f| f.path == lkm));
 }
 
 #[test]

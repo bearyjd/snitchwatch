@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 libc = "0.2"
+scanner-core = { path = "../scanner-core" }
 thiserror = { workspace = true }
 rusqlite = { workspace = true }
 chrono = { workspace = true }

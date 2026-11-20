@@ -40,29 +40,114 @@ pub fn layered_match_for(verify_output: &str, path: &Path) -> LayeredMatch {
     }
 }
 
-/// Extract the path component from one `rpm -V` line, or `None` for blank /
-/// unparseable lines. The path is the last whitespace-delimited token —
-/// rpm-verify paths are absolute and don't contain spaces in practice, and
-/// the leading columns (attributes + optional file-type char, or the
-/// `missing`/`prelink` tokens) never do.
-fn parse_verify_line(line: &str) -> Option<&str> {
-    let line = line.trim();
-    if line.is_empty() {
+/// Parse one `rpm -V` line into a failure, or `None` for blank/unparseable
+/// lines. Layout: an attribute field (9 attribute chars or `missing`), an
+/// optional single-character file-type marker (`c`, `d`, `g`, `l`, `r`), then
+/// the path, which is **everything after** those columns and may contain
+/// spaces (a last-token parse would fail open on such a path).
+fn parse_failure(line: &str) -> Option<VerifyFailure> {
+    let rest = line.trim_start();
+    let (attrs, rest) = rest.split_once(char::is_whitespace)?;
+    let missing = attrs == "missing";
+    if !missing && !is_attr_field(attrs) {
         return None;
     }
-    let last = line.split_whitespace().next_back()?;
-    // A well-formed rpm -V line's path is absolute.
-    if last.starts_with('/') {
-        Some(last)
-    } else {
-        None
-    }
+    let rest = rest.trim_start();
+    let path = match rest.split_once(char::is_whitespace) {
+        Some((marker, tail)) if marker.len() == 1 && !marker.starts_with('/') => tail.trim_start(),
+        _ => rest,
+    };
+    path.starts_with('/').then(|| VerifyFailure {
+        path: path.to_string(),
+        attrs: attrs.to_string(),
+        missing,
+    })
+}
+
+/// The attribute field is 9 characters, each `.`, `?` or a letter/digit.
+fn is_attr_field(s: &str) -> bool {
+    s.len() == 9
+        && s.chars()
+            .all(|c| c == '.' || c == '?' || c.is_ascii_alphanumeric())
+}
+
+fn parse_verify_line(line: &str) -> Option<String> {
+    parse_failure(line).map(|f| f.path)
+}
+
+/// One failing line of `rpm -V` output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyFailure {
+    pub path: String,
+    pub attrs: String,
+    pub missing: bool,
+}
+
+/// Parsed `rpm -V`/`rpm -Va` output: failing files plus the count of
+/// non-blank lines that yielded no absolute path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VerifyReport {
+    pub failures: Vec<VerifyFailure>,
+    pub unparsed: usize,
+}
+
+/// Parse every failing entry of `rpm -V` output. Non-blank lines that do not
+/// yield an absolute path are counted in `unparsed`, never dropped silently.
+pub fn failing_entries(output: &str) -> VerifyReport {
+    output.lines().filter(|l| !l.trim().is_empty()).fold(
+        VerifyReport::default(),
+        |mut acc, line| {
+            match parse_failure(line) {
+                Some(f) => acc.failures.push(f),
+                None => acc.unparsed += 1,
+            }
+            acc
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn path_with_space_is_not_reported_clean() {
+        let out = "S.5....T.  c /usr/share/a b.conf\n";
+        assert!(!path_verifies_clean(
+            out,
+            &PathBuf::from("/usr/share/a b.conf")
+        ));
+    }
+
+    #[test]
+    fn failing_entries_keep_full_paths_and_missing_marker() {
+        let out = "S.5....T.  c /etc/my app.conf\nmissing     /usr/bin/gone x\nmissing   c /etc/gone.conf\n..5......    /usr/lib/a b/c\n";
+        let r = failing_entries(out);
+        assert_eq!(r.unparsed, 0);
+        let got: Vec<(&str, &str, bool)> = r
+            .failures
+            .iter()
+            .map(|f| (f.path.as_str(), f.attrs.as_str(), f.missing))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("/etc/my app.conf", "S.5....T.", false),
+                ("/usr/bin/gone x", "missing", true),
+                ("/etc/gone.conf", "missing", true),
+                ("/usr/lib/a b/c", "..5......", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn garbage_line_is_counted_not_returned() {
+        let out = "error: rpmdb open failed\n\nS.5....T.    /usr/bin/x\nnot a verify line\n";
+        let r = failing_entries(out);
+        assert_eq!(r.failures.len(), 1);
+        assert_eq!(r.unparsed, 2);
+    }
 
     const SAMPLE: &str = "\
 S.5....T.  c /etc/opensnitchd/default-config.json

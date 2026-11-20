@@ -29,7 +29,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::{Result, ScanError};
-use crate::model::{Classification, Finding};
+use crate::model::{CheckType, Classification, Finding};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS scan_runs (
@@ -135,7 +135,17 @@ impl ScanStore {
     /// Reconcile this scan's anomalous findings against the prior open set,
     /// implementing the baseline spec's new/still-outstanding/resolved diff
     /// (§4). Non-anomalous findings are ignored here (not persisted).
-    pub fn reconcile(&self, scan_id: i64, findings: &[Finding]) -> Result<ReconcileReport> {
+    ///
+    /// Only prior open findings whose `check_type` is in `completed` may be
+    /// resolved: a skipped or failed check says nothing about its earlier
+    /// findings, so they stay open (a row with an unknown `check_type` is
+    /// never resolved either).
+    pub fn reconcile(
+        &self,
+        scan_id: i64,
+        findings: &[Finding],
+        completed: &[CheckType],
+    ) -> Result<ReconcileReport> {
         let anomalies: Vec<&Finding> = findings
             .iter()
             .filter(|f| f.classification == Classification::Anomalous)
@@ -144,18 +154,18 @@ impl ScanStore {
         let conn = self.lock()?;
         let tx = conn.unchecked_transaction()?;
 
-        // Prior still-open findings, keyed by path.
-        let mut prior_open: HashMap<String, i64> = HashMap::new();
+        // Prior still-open findings, keyed by path, with their check type.
+        let mut prior_open: HashMap<String, Option<CheckType>> = HashMap::new();
         {
             let mut stmt = tx.prepare(
-                "SELECT finding_id, path FROM findings WHERE resolved_at_scan_id IS NULL",
+                "SELECT path, check_type FROM findings WHERE resolved_at_scan_id IS NULL",
             )?;
             let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(1)?, row.get::<_, i64>(0)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
             for row in rows {
-                let (path, id) = row?;
-                prior_open.insert(path, id);
+                let (path, check_type) = row?;
+                prior_open.insert(path, CheckType::from_db(&check_type));
             }
         }
 
@@ -198,9 +208,10 @@ impl ScanStore {
             }
         }
 
-        // Prior open findings absent now → resolved.
-        for path in prior_open.keys() {
-            if !current_paths.contains(path.as_str()) {
+        // Prior open findings of a completed check, absent now → resolved.
+        for (path, check_type) in &prior_open {
+            let completed_check = check_type.is_some_and(|c| completed.contains(&c));
+            if completed_check && !current_paths.contains(path.as_str()) {
                 tx.execute(
                     "UPDATE findings SET resolved_at_scan_id = ?1 \
                      WHERE path = ?2 AND resolved_at_scan_id IS NULL",
@@ -247,7 +258,13 @@ impl ScanStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CheckType;
+    const ALL: [CheckType; 5] = [
+        CheckType::FileDrift,
+        CheckType::KargsDrift,
+        CheckType::ModuleAnomaly,
+        CheckType::LockdownState,
+        CheckType::RootkitSignature,
+    ];
 
     fn anomaly(path: &str) -> Finding {
         Finding::anomalous(CheckType::ModuleAnomaly, path, "detail")
@@ -258,7 +275,7 @@ mod tests {
         let store = ScanStore::open_in_memory().unwrap();
         let scan = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
         let report = store
-            .reconcile(scan, &[anomaly("module:a"), anomaly("module:b")])
+            .reconcile(scan, &[anomaly("module:a"), anomaly("module:b")], &ALL)
             .unwrap();
         assert_eq!(report.new.len(), 2);
         assert!(report.still_outstanding.is_empty());
@@ -269,10 +286,10 @@ mod tests {
     fn persisting_finding_still_outstanding_next_scan() {
         let store = ScanStore::open_in_memory().unwrap();
         let s1 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
-        store.reconcile(s1, &[anomaly("module:a")]).unwrap();
+        store.reconcile(s1, &[anomaly("module:a")], &ALL).unwrap();
 
         let s2 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
-        let report = store.reconcile(s2, &[anomaly("module:a")]).unwrap();
+        let report = store.reconcile(s2, &[anomaly("module:a")], &ALL).unwrap();
         assert!(report.new.is_empty());
         assert_eq!(report.still_outstanding.len(), 1);
         assert!(report.resolved.is_empty());
@@ -282,16 +299,16 @@ mod tests {
     fn finding_gone_next_scan_is_resolved() {
         let store = ScanStore::open_in_memory().unwrap();
         let s1 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
-        store.reconcile(s1, &[anomaly("module:a")]).unwrap();
+        store.reconcile(s1, &[anomaly("module:a")], &ALL).unwrap();
 
         let s2 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
-        let report = store.reconcile(s2, &[]).unwrap();
+        let report = store.reconcile(s2, &[], &ALL).unwrap();
         assert_eq!(report.resolved.len(), 1);
         assert_eq!(report.resolved[0].path, "module:a");
 
         // A resolved finding does not re-resolve on the following scan.
         let s3 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
-        let report3 = store.reconcile(s3, &[]).unwrap();
+        let report3 = store.reconcile(s3, &[], &ALL).unwrap();
         assert!(report3.resolved.is_empty());
     }
 
@@ -299,12 +316,56 @@ mod tests {
     fn reappearing_finding_is_new_again_after_resolution() {
         let store = ScanStore::open_in_memory().unwrap();
         let s1 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
-        store.reconcile(s1, &[anomaly("module:a")]).unwrap();
+        store.reconcile(s1, &[anomaly("module:a")], &ALL).unwrap();
         let s2 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
-        store.reconcile(s2, &[]).unwrap(); // resolved
+        store.reconcile(s2, &[], &ALL).unwrap(); // resolved
         let s3 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
-        let report = store.reconcile(s3, &[anomaly("module:a")]).unwrap();
+        let report = store.reconcile(s3, &[anomaly("module:a")], &ALL).unwrap();
         assert_eq!(report.new.len(), 1);
+    }
+
+    fn typed(check: CheckType, path: &str) -> Finding {
+        Finding::anomalous(check, path, "detail")
+    }
+
+    #[test]
+    fn skipped_checks_never_resolve_their_findings() {
+        let store = ScanStore::open_in_memory().unwrap();
+        let s1 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
+        let both = [
+            typed(CheckType::FileDrift, "/usr/bin/x"),
+            typed(CheckType::RootkitSignature, "rootkit:chkrootkit:lkm"),
+        ];
+        assert_eq!(store.reconcile(s1, &both, &ALL).unwrap().new.len(), 2);
+
+        // Scan 2: both checks skipped (nothing completed, nothing found).
+        let s2 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
+        let r2 = store.reconcile(s2, &[], &[]).unwrap();
+        assert!(r2.resolved.is_empty(), "skipped checks resolved: {r2:?}");
+
+        // Scan 2b: only file_drift completed -> only it may resolve.
+        let s2b = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
+        let r2b = store.reconcile(s2b, &[], &[CheckType::FileDrift]).unwrap();
+        assert_eq!(r2b.resolved.len(), 1);
+        assert_eq!(r2b.resolved[0].path, "/usr/bin/x");
+
+        // Scan 3: both completed and clean -> the rest resolves.
+        let s3 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
+        let r3 = store.reconcile(s3, &[], &ALL).unwrap();
+        assert_eq!(r3.resolved.len(), 1);
+        assert_eq!(r3.resolved[0].path, "rootkit:chkrootkit:lkm");
+    }
+
+    #[test]
+    fn a_skipped_check_still_bumps_findings_it_did_report() {
+        let store = ScanStore::open_in_memory().unwrap();
+        let s1 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
+        let f = [typed(CheckType::FileDrift, "/usr/bin/x")];
+        store.reconcile(s1, &f, &ALL).unwrap();
+        let s2 = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
+        let r = store.reconcile(s2, &f, &[]).unwrap();
+        assert_eq!(r.still_outstanding.len(), 1);
+        assert!(r.new.is_empty());
     }
 
     #[test]
@@ -312,7 +373,7 @@ mod tests {
         let store = ScanStore::open_in_memory().unwrap();
         let scan = store.start_scan("dep1", TIER_PRIVILEGED).unwrap();
         let info = Finding::informational(CheckType::LockdownState, "lockdown:kernel", "none");
-        let report = store.reconcile(scan, &[info]).unwrap();
+        let report = store.reconcile(scan, &[info], &ALL).unwrap();
         assert!(report.new.is_empty());
     }
 
