@@ -114,13 +114,24 @@ impl DeploymentState {
     }
 }
 
-/// Name component of `name-version-release[.arch]`: drop the last two `-` segments.
+/// Name component of `name-version-release[.arch]`: drop the last two `-` segments, but
+/// only when they look like a version (optionally `epoch:`-prefixed) and a release, i.e.
+/// both start with a digit. A bare hyphenated name such as `libfoo-2-devel` or
+/// `xorg-x11-server` is returned unchanged.
 fn nevra_name(nevra: &str) -> &str {
     let mut parts = nevra.rsplitn(3, '-');
     match (parts.next(), parts.next(), parts.next()) {
-        (Some(_), Some(_), Some(name)) => name,
+        (Some(release), Some(version), Some(name))
+            if starts_with_digit(release) && starts_with_digit(version) =>
+        {
+            name
+        }
         _ => nevra,
     }
+}
+
+fn starts_with_digit(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -204,5 +215,22 @@ mod tests {
         d.layered_packages = vec!["opensnitch-1.6.0-1.fc40".into()];
         assert!(d.has_layered_package("opensnitch")); // NEVRA form
         assert!(!d.has_layered_package("opensnitch-1.6.0"));
+    }
+
+    #[test]
+    fn hyphenated_bare_names_are_not_truncated() {
+        let mut d = parse_status_json(STOCK_JSON).unwrap();
+        d.layered_packages = vec!["libfoo-2-devel".into(), "xorg-x11-server".into()];
+        assert!(d.has_layered_package("libfoo-2-devel"));
+        assert!(!d.has_layered_package("libfoo"));
+        assert!(!d.has_layered_package("xorg"));
+    }
+
+    #[test]
+    fn nevra_forms_with_epoch_arch_and_hyphenated_names() {
+        assert_eq!(nevra_name("foo-1:2.0-1.fc40"), "foo");
+        assert_eq!(nevra_name("foo-1.0-1.fc40.x86_64"), "foo");
+        assert_eq!(nevra_name("libfoo-2-devel-1.0-1.fc40"), "libfoo-2-devel");
+        assert_eq!(nevra_name("plain"), "plain");
     }
 }

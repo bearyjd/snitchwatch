@@ -163,7 +163,21 @@ fn assert_one_violation(tmp: &tempfile::TempDir) {
 
 #[test]
 fn repo_tree_has_no_persistent_service() {
-    let v = audit(&repo_root());
+    let root = repo_root();
+    // A renamed or moved directory would make `files_under` return nothing and the audit
+    // pass vacuously, so pin that the known inputs are really there.
+    assert!(
+        root.join("packaging/scanner/org.snitchwatch.Scanner.service")
+            .is_file(),
+        "audited D-Bus activation file moved: update this guard"
+    );
+    let mut sources = Vec::new();
+    files_under(&root.join("crates/scanner-privileged/src"), &mut sources);
+    assert!(
+        sources.iter().any(|p| ext(p) == "rs"),
+        "no scanner-privileged sources found to audit"
+    );
+    let v = audit(&root);
     assert!(v.is_empty(), "persistent-service violations: {v:#?}");
 }
 
