@@ -191,7 +191,12 @@ impl CuratedStore {
     pub fn keeping(&self, id: &str) -> Option<ClientMessage> {
         self.entries
             .iter()
-            .any(|e| e.id == id && !e.broad && e.id != "dns-resolved" && self.can_keep(e))
+            .any(|e| {
+                e.id == id
+                    && !e.broad
+                    && e.id != snitchwatch_bridge::curated::DNS_RESOLVED_ID
+                    && self.can_keep(e)
+            })
             .then(|| ClientMessage::SetCuratedDefaults {
                 ids: vec![id.to_string()],
                 on: true,
@@ -204,10 +209,10 @@ impl CuratedStore {
     /// The request turning `id` on or off; `None` while the bridge hasn't
     /// offered them or changes none, or for an id it didn't list.
     pub fn request(&self, id: &str, on: bool) -> Option<ClientMessage> {
-        let known = self
-            .entries
-            .iter()
-            .any(|e| e.id == id && (!on || (!e.broad && e.id != "dns-resolved")));
+        let known = self.entries.iter().any(|e| {
+            e.id == id
+                && (!on || (!e.broad && e.id != snitchwatch_bridge::curated::DNS_RESOLVED_ID))
+        });
         (self.usable() && known).then(|| ClientMessage::SetCuratedDefaults {
             ids: vec![id.to_string()],
             on,
@@ -258,7 +263,7 @@ impl CuratedStore {
 
 /// Whether "Turn all on/off" asks for `entry`.
 fn asks_for(entry: &CuratedDefaultSummary, on: bool) -> bool {
-    if on && (entry.broad || entry.id == "dns-resolved") {
+    if on && (entry.broad || entry.id == snitchwatch_bridge::curated::DNS_RESOLVED_ID) {
         return false;
     }
     entry.on != on

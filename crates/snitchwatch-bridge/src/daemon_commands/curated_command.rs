@@ -476,7 +476,7 @@ mod tests {
     async fn generic_curated_send_refuses_even_authorized_broad_constructors() {
         let dns = entries()
             .iter()
-            .find(|entry| entry.id == "dns-resolved")
+            .find(|entry| entry.id == crate::curated::DNS_RESOLVED_ID)
             .unwrap();
         let mut disabled = dns.rule_as(Some(990));
         disabled.enabled = false;
@@ -500,7 +500,7 @@ mod tests {
     async fn guarded_broad_dispatch_refuses_changed_generation_snapshot_and_deletion_markers() {
         let dns = entries()
             .iter()
-            .find(|entry| entry.id == "dns-resolved")
+            .find(|entry| entry.id == crate::curated::DNS_RESOLVED_ID)
             .unwrap();
         let (commands, mut rx, stream) = connected(vec![]);
         let generation = *commands.stream_ready().borrow();
@@ -623,7 +623,7 @@ mod tests {
     async fn guarded_tcp_reply_cannot_be_forged_by_a_new_current_peer() {
         let dns = entries()
             .iter()
-            .find(|entry| entry.id == "dns-resolved")
+            .find(|entry| entry.id == crate::curated::DNS_RESOLVED_ID)
             .unwrap();
         let sync = crate::cache::rules::RulesSync::new(tokio::sync::broadcast::channel(8).0);
         let commands = DaemonCommands::new(DaemonTransport::Tcp, sync.clone());

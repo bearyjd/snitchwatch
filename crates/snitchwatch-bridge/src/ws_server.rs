@@ -376,7 +376,7 @@ async fn pump_authenticated<S, R>(
                             let _ = reply_to.try_send(ServerMessage::CuratedDefaultsRequestResult {
                                 request_id: Some(request_id),
                                 results: vec![crate::ws_messages::CuratedRequestResult {
-                                    id: "dns-resolved".to_owned(),
+                                    id: crate::curated::DNS_RESOLVED_ID.to_owned(),
                                     outcome: crate::ws_messages::CuratedRequestOutcome::InvalidIntent,
                                     reason: "Invalid curated opt-in request".to_owned(),
                                     choice_accepted: Some(false),

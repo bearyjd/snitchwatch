@@ -44,6 +44,10 @@ use crate::translator::process_binding::is_bindable_process_path;
 
 const DATA: &str = include_str!("../../data/curated-defaults-v1.json");
 
+/// The id of the one broad curated entry: the system resolver's DNS. The
+/// single source for every production comparison against it.
+pub const DNS_RESOLVED_ID: &str = "dns-resolved";
+
 /// The `description` of every curated rule.
 pub const DESCRIPTION: &str = "snitchwatch curated default v1";
 

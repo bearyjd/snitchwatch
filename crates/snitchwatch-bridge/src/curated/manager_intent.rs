@@ -76,7 +76,8 @@ impl CuratedDefaults {
                 let state = lock(&self.inner.state);
                 let outcome = match context.as_ref().map(IntentContext::admit) {
                     Some(Ok(mut admission))
-                        if valid_request_id(&request_id) && id == "dns-resolved" =>
+                        if valid_request_id(&request_id)
+                            && id == crate::curated::DNS_RESOLVED_ID =>
                     {
                         admission.cancel(&request_id, &id);
                         Outcome::ChoiceAccepted
@@ -235,7 +236,7 @@ impl CuratedDefaults {
             let context = context.as_ref().ok_or(IntentError::InvalidIntent)?;
             let mut admission = context.admit()?;
             admission.invalidate();
-            if !valid_request_id(&request_id) || id != "dns-resolved" {
+            if !valid_request_id(&request_id) || id != crate::curated::DNS_RESOLVED_ID {
                 return Err(IntentError::InvalidIntent);
             }
             if state.inert.is_some()
@@ -298,7 +299,7 @@ impl CuratedDefaults {
             let context = context.as_ref().ok_or(IntentError::InvalidIntent)?;
             let mut admission = context.admit()?;
             if !valid_request_id(&request_id)
-                || id != "dns-resolved"
+                || id != crate::curated::DNS_RESOLVED_ID
                 || keeping != (purpose == Purpose::Keep)
             {
                 admission.invalidate();
