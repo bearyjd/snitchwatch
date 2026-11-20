@@ -564,8 +564,8 @@ enum Allow {
     Strict,
     /// `rpm -qf`: exit 1 with exactly this "not owned" stdout.
     NotOwned(String),
-    /// `rpm -Va`: a non-zero normal exit with at least one parseable verify
-    /// line on stdout (drift found).
+    /// `rpm -Va`: a non-zero normal exit, empty stderr, and at least one
+    /// parseable verify line on stdout (drift found).
     VerifyDrift,
 }
 
@@ -582,11 +582,14 @@ fn allowance(program: &str, args: &[&str]) -> Allow {
     }
 }
 
+/// Whole-scan watchdog: the privileged scan is killed after this long.
+pub const SCAN_WATCHDOG: Duration = Duration::from_secs(540);
+
 pub fn run(program: &str, args: &[&str]) -> io::Result<String> {
     run_with_deadline(program, args, PRIMITIVE_DEADLINE)
 }
 
-const PRIMITIVE_DEADLINE: Duration = Duration::from_secs(300);
+pub(crate) const PRIMITIVE_DEADLINE: Duration = Duration::from_secs(300);
 
 /// [`run`] with a caller-chosen deadline for this one primitive.
 pub fn run_with_deadline(program: &str, args: &[&str], deadline: Duration) -> io::Result<String> {
@@ -804,7 +807,10 @@ fn exit_allowed(allow: &Allow, exited: bool, code: i32, out: &[u8], err: &[u8]) 
         Allow::NotOwned(expected) => {
             exited && code == 1 && out == expected.as_bytes() && err.is_empty()
         }
-        Allow::VerifyDrift => exited && has_verify_line(&String::from_utf8_lossy(out)),
+        Allow::VerifyDrift => {
+            // Any stderr means rpm hit errors: the stdout may be partial.
+            exited && err.is_empty() && has_verify_line(&String::from_utf8_lossy(out))
+        }
         Allow::Strict => false,
     }
 }

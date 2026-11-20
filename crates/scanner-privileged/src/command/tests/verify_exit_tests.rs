@@ -91,3 +91,10 @@ fn owner_query_not_owned_is_data_for_both_argv_shapes() {
     let other = allowance("rpm", &["-qf", "--queryformat", "%{VERSION}", "/x"]);
     assert_eq!(other, Allow::Strict);
 }
+
+#[test]
+fn partial_verify_with_stderr_errors_is_not_accepted_as_a_full_result() {
+    let _lock = serial();
+    let script = format!("printf '{DRIFT}'; echo 'error: cannot open Packages index' >&2; exit 1");
+    assert!(verify(&script, selected_for_verify()).is_err());
+}
