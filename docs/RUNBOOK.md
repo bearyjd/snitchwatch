@@ -108,6 +108,10 @@ still lists `file_drift_base_tree` under `skipped` (plan Open Question 1). Plan:
   `layered_pkg:<name>`; restore the file and confirm it resolves on the next scan.
 - [ ] Confirm the report `skipped` list shows `file_drift_base_tree` and not
   `file_drift`.
+- [ ] Capture stderr of a plain `rpm -Va --nomtime --noscripts --nodeps` on a clean image.
+  The runner rejects any non-zero `rpm -Va` run that wrote to stderr (it cannot tell a
+  partial run from a full one), so routine rpmdb notices would skip `file_drift` on every
+  scan. If stderr is not empty, decide on an allowlist of known-benign lines.
 
 ## Common issues
 
