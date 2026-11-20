@@ -425,17 +425,23 @@ four scans against one open `ScanStore`. Don't duplicate it. Add the seams it mi
      - (d) the §2 cached hash baseline in `baseline.db` (an in-process walk, which needs extra
        hardening).
    - Related: baseline-spec stop-and-ask #2 (cache ownership split).
+   - **Still open (2026-11-19):** `base_tree_drift` returns `PrimitiveUnavailable` and the check is reported partial (`file_drift_base_tree` under `skipped`); no ostree/composefs/baseline.db primitive is implemented.
 2. **Time budget.** Proposed `FILE_DRIFT_BUDGET = 180 s` out of the 540 s watchdog. Is that the
    right split, given chkrootkit runs last and is also slow? Needs the real-host timing from Task 6.
+   - **Decided 2026-11-19 (owner: "defaults"):** keep `FILE_DRIFT_BUDGET = 180 s` as a named, provisional constant; revisit with the Task 6 real-host timing.
 3. **`--nomtime` and `missing` noise on OSTree.** Is `--nomtime` sufficient, or do
    `--excludedocs`/`%ghost`/`/usr/etc` paths also flood `rpm -Va` on a stock Bazzite image? Only a
    real host answers this; the parser and cap make the failure visible, not silent.
+   - **Still open (2026-11-19):** `--nomtime` kept as planned; needs a real host (Task 6 checklist in `docs/RUNBOOK.md`).
 4. **Exit code on a skipped `file_drift`.** Should a failed/partial file-drift check make the
    scanner exit non-zero, and the broker/GUI show it as a degraded scan, or stay as a `skipped` entry
    with exit 0/2 as for chkrootkit today?
+   - **Decided 2026-11-19 (owner: "defaults"):** a skipped or partial `file_drift` stays a `skipped` entry; no forced non-zero exit.
 5. **Aggregate-over-cap representation.** Is a single `path = "/"` aggregate finding acceptable for
    more than `MAX_DRIFT_PATHS` failures, or should the scan instead refuse with "too much drift:
    inspect manually"?
+   - **Decided 2026-11-19 (owner: "defaults"):** over `MAX_DRIFT_PATHS` (500) emit the single `path = "/"` aggregate finding and do not refuse the scan; its detail states the total count and that only the first 500 are listed.
 6. **Resolution semantics.** Task 3 changes resolution so that only completed checks resolve.
    Whether resolved findings should need explicit acknowledgment remains baseline-spec stop-and-ask
    #3. Unchanged here, cited, not re-litigated.
+   - **Still open (2026-11-19):** unchanged.
