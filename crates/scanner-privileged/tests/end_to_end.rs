@@ -151,6 +151,36 @@ fn file_drift_is_new_then_still_then_resolved_with_base_tree_partial() {
 }
 
 #[test]
+fn a_truncated_run_never_resolves_findings_past_the_cap() {
+    use scanner_privileged::checks::file_drift::MAX_DRIFT_PATHS;
+    let dir = tempfile::tempdir().unwrap();
+    let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
+    let late = "/usr/lib/late";
+    let r1 = run_privileged_scan(&drift_facts("missing     /usr/lib/late\n"), &store, "d").unwrap();
+    assert!(r1.reconciled.new.iter().any(|f| f.path == late));
+
+    // Scan 2: more than the cap of other anomalies, `late` is past the cap.
+    let mut verify: String = (0..=MAX_DRIFT_PATHS)
+        .map(|i| format!("missing     /usr/lib/g{i}\n"))
+        .collect();
+    verify.push_str("missing     /usr/lib/late\n");
+    let r2 = run_privileged_scan(&drift_facts(&verify), &store, "d").unwrap();
+    assert!(
+        r2.reconciled.resolved.is_empty(),
+        "{:?}",
+        r2.reconciled.resolved
+    );
+    assert!(r2
+        .skipped
+        .iter()
+        .any(|s| s.check == "file_drift_incomplete"));
+
+    // Scan 3: complete and clean -> now it may resolve.
+    let r3 = run_privileged_scan(&drift_facts(""), &store, "d").unwrap();
+    assert!(r3.reconciled.resolved.iter().any(|f| f.path == late));
+}
+
+#[test]
 fn a_failed_rpm_primitive_skips_file_drift_without_aborting_the_scan() {
     let dir = tempfile::tempdir().unwrap();
     let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();

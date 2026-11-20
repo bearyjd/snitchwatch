@@ -20,6 +20,15 @@ use crate::model::{CheckType, Finding};
 /// to be revisited with real-host timing (plan Task 6).
 pub const FILE_DRIFT_BUDGET: Duration = Duration::from_secs(180);
 
+// Worst case: the file_drift budget, one owner lookup overshooting it, and a
+// last slow primitive (chkrootkit) must all fit inside the scan watchdog.
+const _: () = assert!(
+    FILE_DRIFT_BUDGET.as_secs()
+        + crate::facts::FILE_OWNER_DEADLINE.as_secs()
+        + crate::command::PRIMITIVE_DEADLINE.as_secs()
+        < crate::command::SCAN_WATCHDOG.as_secs()
+);
+
 /// Cap on listed failing paths; bounds memory and `rpm -qf` spawns.
 pub const MAX_DRIFT_PATHS: usize = 500;
 
@@ -31,6 +40,10 @@ pub struct FileDriftOutcome {
     pub base_tree_unavailable: Option<String>,
     /// `rpm -Va` lines that yielded no absolute path (never silently dropped).
     pub unparsed_lines: usize,
+    /// Set when the run did not classify every candidate (over the cap, budget
+    /// overrun, failed lookup). Findings so far are kept, but nothing may be
+    /// resolved on the strength of an incomplete run.
+    pub incomplete: Option<String>,
 }
 
 /// One path to classify: an `rpm -Va` failure, or a base-tree difference.
@@ -45,8 +58,10 @@ pub fn run_file_drift(facts: &dyn SystemFacts) -> Result<FileDriftOutcome> {
     run_file_drift_within(facts, FILE_DRIFT_BUDGET)
 }
 
-/// [`run_file_drift`] with an explicit budget (a test seam). Exceeding it is
-/// an error, never a clean pass.
+/// [`run_file_drift`] with an explicit budget (a test seam). Every candidate
+/// is classified first and only anomalous findings are capped, so noise cannot
+/// crowd real anomalies out. A budget overrun or failed lookup keeps the
+/// findings built so far and marks the outcome `incomplete`, never clean.
 pub fn run_file_drift_within(
     facts: &dyn SystemFacts,
     budget: Duration,
@@ -59,37 +74,42 @@ pub fn run_file_drift_within(
         Err(ScanError::PrimitiveUnavailable(reason)) => (Vec::new(), Some(reason)),
         Err(e) => return Err(e),
     };
-    let candidates = candidates(&report.failures, base_paths);
-    let total = candidates.len();
-    let mut findings = Vec::new();
-    for candidate in candidates.iter().take(MAX_DRIFT_PATHS) {
+    let mut anomalies = Vec::new();
+    let mut incomplete = None;
+    for candidate in candidates(&report.failures, base_paths) {
         if started.elapsed() >= budget {
-            return Err(budget_error(budget));
+            incomplete = Some(format!(
+                "file_drift budget of {}s exceeded",
+                budget.as_secs()
+            ));
+            break;
         }
-        findings.extend(assess(facts, &deployment, candidate)?);
+        match assess(facts, &deployment, &candidate) {
+            Ok(finding) => anomalies.extend(finding),
+            Err(e) => {
+                incomplete = Some(format!("{}: {e}", candidate.path));
+                break;
+            }
+        }
     }
+    let total = anomalies.len();
     if total > MAX_DRIFT_PATHS {
-        findings.push(Finding::anomalous(
+        anomalies.truncate(MAX_DRIFT_PATHS);
+        anomalies.push(Finding::anomalous(
             CheckType::FileDrift,
             "/",
             format!("{total} paths failed rpm -Va; only the first {MAX_DRIFT_PATHS} are listed"),
         ));
+        incomplete.get_or_insert_with(|| {
+            format!("{total} anomalous paths; only the first {MAX_DRIFT_PATHS} are listed")
+        });
     }
     Ok(FileDriftOutcome {
-        findings,
+        findings: anomalies,
         base_tree_unavailable,
         unparsed_lines: report.unparsed,
+        incomplete,
     })
-}
-
-fn budget_error(budget: Duration) -> ScanError {
-    ScanError::Io {
-        path: "file_drift".to_string(),
-        source: io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("file_drift budget of {}s exceeded", budget.as_secs()),
-        ),
-    }
 }
 
 fn read_deployment(facts: &dyn SystemFacts) -> Result<DeploymentState> {
@@ -132,6 +152,12 @@ fn assess(
     if under_any(path, MUTABLE_PREFIXES) {
         return Ok(None);
     }
+    // Rule 4 vouches for the path whatever its owner: skip the `rpm -qf` spawn.
+    if under_any(path, DYNAMIC_ALLOWLIST_PREFIXES) {
+        return Ok(None);
+    }
+    // A missing file has no on-disk owner to ask, so a missing layered file
+    // reports plain "missing" (it is anomalous either way).
     let owner = if candidate.missing {
         None
     } else {
@@ -149,7 +175,7 @@ fn assess(
         } else {
             LayeredMatch::Clean
         }),
-        on_dynamic_allowlist: under_any(path, DYNAMIC_ALLOWLIST_PREFIXES),
+        on_dynamic_allowlist: false,
     };
     let detail = detail_for(candidate, owner.as_deref(), layered);
     Ok(drift_finding(
@@ -205,7 +231,7 @@ fn escape_untrusted(text: &str) -> String {
 }
 
 fn is_bidi_format(c: char) -> bool {
-    matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}' | '\u{2029}' | '\u{61c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
 #[cfg(test)]
@@ -314,6 +340,7 @@ mod tests {
             .expect("aggregate");
         assert!(agg.detail.contains(&n.to_string()), "{}", agg.detail);
         assert!(agg.detail.contains("first 500"), "{}", agg.detail);
+        assert!(o.incomplete.is_some());
         assert!(!paths(&o).contains(&format!("/usr/lib/f{}", n - 1).as_str()));
     }
 
@@ -325,6 +352,7 @@ mod tests {
         let o = run_file_drift(&facts(&verify)).unwrap();
         assert_eq!(o.findings.len(), MAX_DRIFT_PATHS);
         assert!(o.findings.iter().all(|f| f.path != "/"));
+        assert_eq!(o.incomplete, None);
     }
 
     #[test]
@@ -358,8 +386,60 @@ mod tests {
     }
 
     #[test]
-    fn an_exceeded_budget_is_an_error_not_a_clean_pass() {
+    fn an_exceeded_budget_keeps_findings_and_marks_the_run_incomplete() {
         let f = facts("..5......    /usr/bin/b\n").with_owner("/usr/bin/b", "bash");
-        assert!(run_file_drift_within(&f, Duration::ZERO).is_err());
+        let o = run_file_drift_within(&f, Duration::ZERO).unwrap();
+        assert!(o.findings.is_empty());
+        assert!(o.incomplete.is_some_and(|r| r.contains("budget")));
+    }
+
+    #[test]
+    fn a_failed_owner_lookup_keeps_earlier_findings_and_marks_incomplete() {
+        let f = facts("..5......    /usr/bin/a\n..5......    /usr/bin/b\n")
+            .with_owner_error("/usr/bin/b");
+        let o = run_file_drift(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/a"]);
+        assert!(o.incomplete.is_some_and(|r| r.contains("/usr/bin/b")));
+    }
+
+    #[test]
+    fn noise_does_not_crowd_real_anomalies_out_of_the_cap() {
+        let verify: String = (0..600)
+            .map(|i| format!("..5......    /var/log/n{i}\n..5......  c /etc/n{i}.conf\n"))
+            .chain(
+                [
+                    "..5......    /usr/bin/a\n",
+                    "..5......    /usr/bin/b\n",
+                    "..5......    /usr/bin/c\n",
+                ]
+                .map(String::from),
+            )
+            .collect();
+        let o = run_file_drift(&facts(&verify)).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/a", "/usr/bin/b", "/usr/bin/c"]);
+        assert_eq!(o.incomplete, None);
+    }
+
+    #[test]
+    fn expected_paths_never_cost_an_owner_lookup() {
+        // A lookup on this /etc path would fail; rule 4 needs no owner.
+        let f = facts("..5......  c /etc/boom.conf\n..5......    /var/log/boom\n")
+            .with_owner_error("/etc/boom.conf")
+            .with_owner_error("/var/log/boom");
+        let o = run_file_drift(&f).unwrap();
+        assert!(o.findings.is_empty());
+        assert_eq!(o.incomplete, None);
+    }
+
+    #[test]
+    fn unicode_line_and_zero_width_separators_are_escaped() {
+        for c in [
+            '\u{2028}', '\u{2029}', '\u{61c}', '\u{200b}', '\u{200c}', '\u{200d}',
+        ] {
+            let verify = format!("missing     /usr/bin/a{c}b\n");
+            let o = run_file_drift(&facts(&verify)).unwrap();
+            let text = &o.findings[0].path;
+            assert!(!text.contains(c), "{c:?} survived: {text:?}");
+        }
     }
 }

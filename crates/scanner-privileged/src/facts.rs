@@ -72,9 +72,9 @@ pub trait SystemFacts {
     fn base_tree_drift(&self) -> Result<Vec<String>>;
 }
 
-/// Deadline of the one `rpm -Va` primitive; also the whole file_drift
-/// budget (see `checks::file_drift::FILE_DRIFT_BUDGET`).
-const FILE_OWNER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+/// Deadline of one `rpm -qf` owner lookup (the check as a whole is bounded by
+/// `checks::file_drift::FILE_DRIFT_BUDGET`; a lookup may overshoot it once).
+pub(crate) const FILE_OWNER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Production [`SystemFacts`]: reads real sysfs/procfs paths and shells out
 /// to `rpm-ostree`, `modinfo`, `rpm`, `mokutil`, `chkrootkit`.
@@ -303,6 +303,7 @@ pub mod testing {
         chkrootkit_output: Option<String>,
         rpm_verify: Option<String>,
         owners: HashMap<String, String>,
+        owner_errors: HashSet<String>,
         deployment_json: Option<String>,
         base_tree_drift: Option<Vec<String>>,
     }
@@ -368,6 +369,11 @@ pub mod testing {
         }
         pub fn with_owner(mut self, path: impl Into<String>, pkg: impl Into<String>) -> Self {
             self.owners.insert(path.into(), pkg.into());
+            self
+        }
+        /// `file_owner(path)` fails with an I/O error (a hung/failed `rpm -qf`).
+        pub fn with_owner_error(mut self, path: impl Into<String>) -> Self {
+            self.owner_errors.insert(path.into());
             self
         }
         pub fn with_deployment_json(mut self, v: impl Into<String>) -> Self {
@@ -438,6 +444,12 @@ pub mod testing {
                 .ok_or_else(|| Self::unavailable("rpm_verify_all"))
         }
         fn file_owner(&self, path: &str) -> Result<Option<String>> {
+            if self.owner_errors.contains(path) {
+                return Err(ScanError::Io {
+                    path: path.to_string(),
+                    source: std::io::Error::other("synthetic rpm -qf failure"),
+                });
+            }
             Ok(self.owners.get(path).cloned())
         }
         fn deployment_status_json(&self) -> Result<String> {

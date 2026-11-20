@@ -140,6 +140,13 @@ fn run_file_drift_step(
         }
     };
     anomalies.extend(outcome.findings);
+    let incomplete = outcome.incomplete.is_some();
+    if let Some(reason) = outcome.incomplete {
+        skipped.push(SkippedCheck {
+            check: "file_drift_incomplete",
+            reason: format!("{reason}; prior file_drift findings kept open"),
+        });
+    }
     if let Some(reason) = outcome.base_tree_unavailable {
         skipped.push(SkippedCheck {
             check: "file_drift_base_tree",
@@ -154,7 +161,7 @@ fn run_file_drift_step(
                 outcome.unparsed_lines
             ),
         });
-    } else {
+    } else if !incomplete {
         completed.push(CheckType::FileDrift);
     }
 }

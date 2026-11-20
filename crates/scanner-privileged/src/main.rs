@@ -59,7 +59,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>, elevated: bool) -> an
 /// A root scan cannot be killed by its unprivileged broker. Bound its entire
 /// process group here as well, including hung checks that inherit that group.
 fn start_privileged_watchdog() -> anyhow::Result<()> {
-    start_privileged_watchdog_after(std::time::Duration::from_secs(540))
+    start_privileged_watchdog_after(scanner_privileged::command::SCAN_WATCHDOG)
 }
 
 /// Own session first, so a same-session process cannot `setpgid` itself into
