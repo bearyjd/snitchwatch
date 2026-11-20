@@ -58,6 +58,22 @@ impl SystemFacts for FakeFacts {
     fn run_chkrootkit(&self, _program: &str) -> Result<String> {
         Ok(self.chkrootkit_output.clone())
     }
+    fn rpm_verify_all(&self) -> Result<String> {
+        Err(ScanError::PrimitiveUnavailable("fake: no rpm".to_string()))
+    }
+    fn file_owner(&self, _path: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    fn deployment_status_json(&self) -> Result<String> {
+        Err(ScanError::PrimitiveUnavailable(
+            "fake: no rpm-ostree".to_string(),
+        ))
+    }
+    fn base_tree_drift(&self) -> Result<Vec<String>> {
+        Err(ScanError::PrimitiveUnavailable(
+            "fake: no base tree".to_string(),
+        ))
+    }
 }
 
 fn healthy_facts() -> FakeFacts {

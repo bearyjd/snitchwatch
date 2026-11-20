@@ -47,7 +47,7 @@ pub enum Provenance {
 }
 
 /// True if `path` is under any of `prefixes`.
-fn under_any(path: &Path, prefixes: &[&str]) -> bool {
+pub fn under_any(path: &Path, prefixes: &[&str]) -> bool {
     let s = path.to_string_lossy();
     prefixes
         .iter()

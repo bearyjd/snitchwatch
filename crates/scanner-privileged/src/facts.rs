@@ -52,7 +52,29 @@ pub trait SystemFacts {
     /// Run `chkrootkit` and return its stdout. Only called when
     /// [`chkrootkit_path`](Self::chkrootkit_path) returned `Some`.
     fn run_chkrootkit(&self, program: &str) -> Result<String>;
+
+    /// Output of one fixed `rpm -Va --nomtime --noscripts --nodeps`: a line
+    /// per file failing verification. Drift is data, not an error (see
+    /// `command::run`'s exit allowance).
+    fn rpm_verify_all(&self) -> Result<String>;
+
+    /// Name of the package owning `path` (an absolute path), or `None` when
+    /// no package owns it.
+    fn file_owner(&self, path: &str) -> Result<Option<String>>;
+
+    /// Raw `rpm-ostree status --json`.
+    fn deployment_status_json(&self) -> Result<String>;
+
+    /// Paths under `/usr` that differ from, or are absent from, the booted
+    /// base commit (baseline spec rule 2 / unowned files). Live
+    /// implementation is plan Open Question 1: until then
+    /// `PrimitiveUnavailable`, which reports the check as partial.
+    fn base_tree_drift(&self) -> Result<Vec<String>>;
 }
+
+/// Deadline of the one `rpm -Va` primitive; also the whole file_drift
+/// budget (see `checks::file_drift::FILE_DRIFT_BUDGET`).
+const FILE_OWNER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Production [`SystemFacts`]: reads real sysfs/procfs paths and shells out
 /// to `rpm-ostree`, `modinfo`, `rpm`, `mokutil`, `chkrootkit`.
@@ -84,16 +106,23 @@ impl LiveSystem {
     /// Run `program args...`, returning stdout on success. A missing binary
     /// maps to `PrimitiveUnavailable` so the caller can skip cleanly.
     fn run(program: &str, args: &[&str]) -> Result<String> {
-        crate::command::run(program, args).map_err(|source| {
-            if source.kind() == std::io::ErrorKind::NotFound {
-                ScanError::PrimitiveUnavailable(format!("{program} not installed"))
-            } else {
-                ScanError::Io {
-                    path: program.to_string(),
-                    source,
-                }
+        crate::command::run(program, args).map_err(|source| Self::run_error(program, source))
+    }
+
+    fn run_within(program: &str, args: &[&str], deadline: std::time::Duration) -> Result<String> {
+        crate::command::run_with_deadline(program, args, deadline)
+            .map_err(|source| Self::run_error(program, source))
+    }
+
+    fn run_error(program: &str, source: std::io::Error) -> ScanError {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            ScanError::PrimitiveUnavailable(format!("{program} not installed"))
+        } else {
+            ScanError::Io {
+                path: program.to_string(),
+                source,
             }
-        })
+        }
     }
 
     fn which(program: &str) -> Option<String> {
@@ -173,6 +202,46 @@ impl SystemFacts for LiveSystem {
         // `-q` = quiet: print only infected/warning lines.
         Self::run(program, &["-q"])
     }
+
+    fn rpm_verify_all(&self) -> Result<String> {
+        let budget = crate::checks::file_drift::FILE_DRIFT_BUDGET;
+        Self::run_within("rpm", &crate::command::RPM_VERIFY_ARGS, budget)
+    }
+
+    fn file_owner(&self, path: &str) -> Result<Option<String>> {
+        if !path.starts_with('/') {
+            return Err(ScanError::Io {
+                path: path.to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "owner lookup needs an absolute path",
+                ),
+            });
+        }
+        let args = [
+            "-qf",
+            "--queryformat",
+            crate::command::OWNER_QUERYFORMAT,
+            path,
+        ];
+        let out = Self::run_within("rpm", &args, FILE_OWNER_DEADLINE)?;
+        let name = out.lines().next().unwrap_or("").trim();
+        if name.is_empty() || name.contains("not owned by any package") {
+            Ok(None)
+        } else {
+            Ok(Some(name.to_string()))
+        }
+    }
+
+    fn deployment_status_json(&self) -> Result<String> {
+        Self::run("rpm-ostree", &["status", "--json"])
+    }
+
+    fn base_tree_drift(&self) -> Result<Vec<String>> {
+        Err(ScanError::PrimitiveUnavailable(
+            "base-tree check not implemented: see plan OQ1".to_string(),
+        ))
+    }
 }
 
 /// Parse `/sys/kernel/security/lockdown`'s bracketed-active format,
@@ -232,6 +301,10 @@ pub mod testing {
         secure_boot: Option<bool>,
         chkrootkit: Option<String>,
         chkrootkit_output: Option<String>,
+        rpm_verify: Option<String>,
+        owners: HashMap<String, String>,
+        deployment_json: Option<String>,
+        base_tree_drift: Option<Vec<String>>,
     }
 
     impl SyntheticFacts {
@@ -289,6 +362,27 @@ pub mod testing {
             self
         }
 
+        pub fn with_rpm_verify(mut self, v: impl Into<String>) -> Self {
+            self.rpm_verify = Some(v.into());
+            self
+        }
+        pub fn with_owner(mut self, path: impl Into<String>, pkg: impl Into<String>) -> Self {
+            self.owners.insert(path.into(), pkg.into());
+            self
+        }
+        pub fn with_deployment_json(mut self, v: impl Into<String>) -> Self {
+            self.deployment_json = Some(v.into());
+            self
+        }
+        pub fn with_base_tree_drift<I, S>(mut self, paths: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<String>,
+        {
+            self.base_tree_drift = Some(paths.into_iter().map(Into::into).collect());
+            self
+        }
+
         fn unavailable(what: &str) -> ScanError {
             ScanError::PrimitiveUnavailable(format!("synthetic: {what} not configured"))
         }
@@ -337,6 +431,24 @@ pub mod testing {
             self.chkrootkit_output
                 .clone()
                 .ok_or_else(|| Self::unavailable("chkrootkit_output"))
+        }
+        fn rpm_verify_all(&self) -> Result<String> {
+            self.rpm_verify
+                .clone()
+                .ok_or_else(|| Self::unavailable("rpm_verify_all"))
+        }
+        fn file_owner(&self, path: &str) -> Result<Option<String>> {
+            Ok(self.owners.get(path).cloned())
+        }
+        fn deployment_status_json(&self) -> Result<String> {
+            self.deployment_json
+                .clone()
+                .ok_or_else(|| Self::unavailable("deployment_status_json"))
+        }
+        fn base_tree_drift(&self) -> Result<Vec<String>> {
+            self.base_tree_drift
+                .clone()
+                .ok_or_else(|| Self::unavailable("base_tree_drift"))
         }
     }
 }
