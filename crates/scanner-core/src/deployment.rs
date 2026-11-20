@@ -104,12 +104,22 @@ pub fn probe_deployment(sys: &dyn SystemInspector) -> Result<DeploymentState, De
 }
 
 impl DeploymentState {
-    /// True if `pkg_name` is among the layered packages (prefix match on the
-    /// NEVRA name component, so `firefox` matches `firefox-128.0-1.fc40`).
+    /// True if `pkg_name` is among the layered packages. Entries are either a bare name
+    /// (`opensnitch`) or a NEVRA (`opensnitch-1.6.0-1.fc40`); a NEVRA matches on its name
+    /// component only, so layered `python3-foo` does not make `python3` look layered.
     pub fn has_layered_package(&self, pkg_name: &str) -> bool {
         self.layered_packages
             .iter()
-            .any(|p| p == pkg_name || p.starts_with(&format!("{pkg_name}-")))
+            .any(|p| p == pkg_name || nevra_name(p) == pkg_name)
+    }
+}
+
+/// Name component of `name-version-release[.arch]`: drop the last two `-` segments.
+fn nevra_name(nevra: &str) -> &str {
+    let mut parts = nevra.rsplitn(3, '-');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(_), Some(_), Some(name)) => name,
+        _ => nevra,
     }
 }
 
@@ -182,5 +192,17 @@ mod tests {
         let sys = MockInspector::new().with_stdout("rpm-ostree", &["status", "--json"], STOCK_JSON);
         let d = probe_deployment(&sys).unwrap();
         assert_eq!(d.checksum, "stockcommit0000");
+    }
+
+    #[test]
+    fn layered_match_uses_nevra_name_not_prefix() {
+        let mut d = parse_status_json(STOCK_JSON).unwrap();
+        d.layered_packages = vec!["python3-foo-1.0-1.fc40".into(), "opensnitch".into()];
+        assert!(!d.has_layered_package("python3"));
+        assert!(d.has_layered_package("python3-foo"));
+        assert!(d.has_layered_package("opensnitch")); // exact bare name
+        d.layered_packages = vec!["opensnitch-1.6.0-1.fc40".into()];
+        assert!(d.has_layered_package("opensnitch")); // NEVRA form
+        assert!(!d.has_layered_package("opensnitch-1.6.0"));
     }
 }
