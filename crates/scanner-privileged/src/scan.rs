@@ -9,7 +9,7 @@
 //! `SkippedCheck` and the scan continues — a degraded scan is visibly
 //! degraded, never silently "all clear".
 
-use crate::checks::{kargs, lockdown, modules, rootkit};
+use crate::checks::{file_drift, kargs, lockdown, modules, rootkit};
 use crate::error::{Result, ScanError};
 use crate::facts::SystemFacts;
 use crate::model::{CheckType, Classification, Finding, SkippedCheck};
@@ -43,15 +43,10 @@ pub fn run_privileged_scan(
     // Checks that ran to completion; only these may resolve prior findings.
     let mut completed: Vec<CheckType> = Vec::new();
 
-    // 1. File-integrity/drift check — specified by the baseline design doc and
-    //    owned by the shared baseline cache (baseline.db), which is Phase 5's
-    //    sibling-branch work not yet merged here. Recorded as deferred so the
-    //    ordering/integration point is explicit and not silently dropped.
-    skipped.push(SkippedCheck {
-        check: "file_drift",
-        reason: "delegated to shared baseline cache (baseline.db); lands when Phase 5 merges"
-            .to_string(),
-    });
+    // 1. File-integrity/drift check (rpm -Va, classified per baseline spec §1).
+    //    A failed primitive is a visible skip, never an abort: the cheaper
+    //    checks below must still run (privileged spec §3).
+    run_file_drift_step(facts, &mut anomalies, &mut skipped, &mut completed);
 
     // 2. Kargs drift (cheap).
     match run_kargs(facts) {
@@ -117,6 +112,51 @@ pub fn run_privileged_scan(
         informational,
         skipped,
     })
+}
+
+/// Run the file-drift check. It counts as completed (so its earlier findings
+/// may resolve) once `rpm -Va` was read and understood, even while the
+/// base-tree pass is unavailable (plan, interim rule: until plan OQ1 no
+/// base-tree finding can exist to be wrongly resolved). Lines `rpm -Va` printed
+/// that were not understood fail closed: reported, and nothing resolves.
+fn run_file_drift_step(
+    facts: &dyn SystemFacts,
+    anomalies: &mut Vec<Finding>,
+    skipped: &mut Vec<SkippedCheck>,
+    completed: &mut Vec<CheckType>,
+) {
+    let outcome = match file_drift::run_file_drift(facts) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let reason = match error {
+                ScanError::PrimitiveUnavailable(reason) => reason,
+                other => other.to_string(),
+            };
+            skipped.push(SkippedCheck {
+                check: "file_drift",
+                reason,
+            });
+            return;
+        }
+    };
+    anomalies.extend(outcome.findings);
+    if let Some(reason) = outcome.base_tree_unavailable {
+        skipped.push(SkippedCheck {
+            check: "file_drift_base_tree",
+            reason,
+        });
+    }
+    if outcome.unparsed_lines > 0 {
+        skipped.push(SkippedCheck {
+            check: "file_drift_unparsed",
+            reason: format!(
+                "{} rpm -Va output lines were not understood; prior file_drift findings kept open",
+                outcome.unparsed_lines
+            ),
+        });
+    } else {
+        completed.push(CheckType::FileDrift);
+    }
 }
 
 fn run_kargs(facts: &dyn SystemFacts) -> Result<Vec<Finding>> {
@@ -203,7 +243,7 @@ mod tests {
         assert!(report.reconciled.new.is_empty());
         // Two informational state findings (secure boot + lockdown).
         assert_eq!(report.informational.len(), 2);
-        // file_drift + chkrootkit (not installed) skipped.
+        // file_drift (rpm/rpm-ostree unconfigured here) + chkrootkit skipped.
         let skipped: Vec<_> = report.skipped.iter().map(|s| s.check).collect();
         assert!(skipped.contains(&"file_drift"));
         assert!(skipped.contains(&"rootkit_signature"));
@@ -273,5 +313,27 @@ mod tests {
         let store = ScanStore::open_in_memory().unwrap();
         let report = run_privileged_scan(&facts, &store, "dep1").unwrap();
         assert!(report.skipped.iter().any(|s| s.check == "kargs_drift"));
+    }
+
+    const DEPLOY: &str = r#"{"deployments":[{"booted":true,"checksum":"c","packages":[]}]}"#;
+
+    fn drift_facts(verify: &str) -> SyntheticFacts {
+        base_facts()
+            .with_deployment_json(DEPLOY)
+            .with_rpm_verify(verify)
+            .with_owner("/usr/bin/bash", "bash")
+    }
+
+    #[test]
+    fn not_understood_rpm_output_fails_closed_and_resolves_nothing() {
+        let store = ScanStore::open_in_memory().unwrap();
+        let tampered = drift_facts("S.5....T.    /usr/bin/bash\n");
+        let r1 = run_privileged_scan(&tampered, &store, "dep1").unwrap();
+        assert!(r1.reconciled.new.iter().any(|f| f.path == "/usr/bin/bash"));
+        assert!(!r1.skipped.iter().any(|s| s.check == "file_drift"));
+
+        let r2 = run_privileged_scan(&drift_facts("error: odd\n"), &store, "dep1").unwrap();
+        assert!(r2.skipped.iter().any(|s| s.check == "file_drift_unparsed"));
+        assert!(r2.reconciled.resolved.is_empty(), "{:?}", r2.reconciled);
     }
 }

@@ -399,6 +399,11 @@ mod tests {
         }
     }
     #[test]
+    fn accepts_file_drift_findings_and_the_base_tree_skip() {
+        let report = r#"{"scan_id":2,"new":[{"path":"/usr/bin/x","detail":"rpm -V mismatch [..5......] vs base_pkg:bash"}],"still_outstanding":[],"resolved":[],"informational":[],"skipped":[{"check":"file_drift_base_tree","reason":"base-tree check not implemented: see plan OQ1"}]}"#;
+        assert_eq!(validate_report(report.to_string()).0, "ok");
+    }
+    #[test]
     fn rejects_overlap_and_exits_only_when_idle() {
         let broker = Broker::default();
         let first = broker.begin().unwrap();
