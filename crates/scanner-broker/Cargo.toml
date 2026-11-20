@@ -16,4 +16,5 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 libc = "0.2"
 
 [dev-dependencies]
+scanner-privileged = { path = "../scanner-privileged" }
 tempfile = { workspace = true }

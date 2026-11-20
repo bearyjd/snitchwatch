@@ -195,6 +195,19 @@ mod tests {
     }
 
     #[test]
+    fn summary_parses_the_real_producer_fixture() {
+        let fixture = include_str!("../../scanner-privileged/tests/fixtures/report.json");
+        assert_eq!(
+            summarize(&ok(fixture), "09:05"),
+            (
+                SummaryKind::Findings,
+                "Last scan: 09:05, scan #7: 1 new, 1 still outstanding, 1 resolved, 1 informational, 1 skipped"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
     fn local_time_is_hh_mm() {
         let t = local_hhmm();
         assert!(t.len() == 5 && t.as_bytes()[2] == b':', "{t}");
