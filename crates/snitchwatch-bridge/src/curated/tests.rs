@@ -397,3 +397,12 @@ fn a_case_insensitive_port_condition_is_refused() {
         assert!(check_curated_rule(&rule).is_err(), "{}", entry.id);
     }
 }
+
+#[test]
+fn the_dns_id_constant_matches_the_data_file_entry() {
+    let dns = entries()
+        .iter()
+        .find(|entry| entry.broad())
+        .expect("the one broad entry");
+    assert_eq!(dns.id, DNS_RESOLVED_ID);
+}

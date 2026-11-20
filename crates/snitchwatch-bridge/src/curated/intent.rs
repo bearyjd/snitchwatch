@@ -100,7 +100,10 @@ impl IntentAdmission<'_> {
         revision: u64,
     ) -> Result<String, IntentError> {
         self.invalidate();
-        if !valid_request_id(request_id) || id != "dns-resolved" || !valid_ticket(fingerprint) {
+        if !valid_request_id(request_id)
+            || id != crate::curated::DNS_RESOLVED_ID
+            || !valid_ticket(fingerprint)
+        {
             return Err(IntentError::InvalidIntent);
         }
         let mut bytes = [0u8; 32];
@@ -136,7 +139,7 @@ impl IntentAdmission<'_> {
         let pending = self.0.pending.take().ok_or(IntentError::StaleIntent)?;
         if !valid_request_id(request_id)
             || !valid_ticket(ticket)
-            || id != "dns-resolved"
+            || id != crate::curated::DNS_RESOLVED_ID
             || consent != CONSENT_VERSION
         {
             return Err(IntentError::InvalidIntent);

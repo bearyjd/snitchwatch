@@ -217,7 +217,7 @@ impl ModernIntentDto {
                 request_id,
                 id,
                 purpose,
-            } if valid_request_id(&request_id) && id == "dns-resolved" => {
+            } if valid_request_id(&request_id) && id == crate::curated::DNS_RESOLVED_ID => {
                 ClientMessage::PrepareCuratedBroadOptIn {
                     request_id,
                     id,
@@ -265,7 +265,7 @@ impl ModernIntentDto {
                 }
             }
             Self::CancelCuratedBroadOptIn { request_id, id }
-                if valid_request_id(&request_id) && id == "dns-resolved" =>
+                if valid_request_id(&request_id) && id == crate::curated::DNS_RESOLVED_ID =>
             {
                 ClientMessage::CancelCuratedBroadOptIn {
                     request_id,
@@ -281,7 +281,7 @@ impl ModernIntentDto {
 
 fn valid_submission(request_id: &str, id: &str, ticket: &str, consent: &str) -> bool {
     valid_request_id(request_id)
-        && id == "dns-resolved"
+        && id == crate::curated::DNS_RESOLVED_ID
         && crate::curated::intent::valid_ticket(ticket)
         && consent == crate::curated::intent::CONSENT_VERSION
 }
