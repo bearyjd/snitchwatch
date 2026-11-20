@@ -12,7 +12,7 @@
 use crate::checks::{kargs, lockdown, modules, rootkit};
 use crate::error::{Result, ScanError};
 use crate::facts::SystemFacts;
-use crate::model::{Classification, Finding, SkippedCheck};
+use crate::model::{CheckType, Classification, Finding, SkippedCheck};
 use crate::store::{ReconcileReport, ScanStore, TIER_PRIVILEGED};
 
 /// Full result of one privileged-tier invocation.
@@ -40,6 +40,8 @@ pub fn run_privileged_scan(
     let mut anomalies: Vec<Finding> = Vec::new();
     let mut informational: Vec<Finding> = Vec::new();
     let mut skipped: Vec<SkippedCheck> = Vec::new();
+    // Checks that ran to completion; only these may resolve prior findings.
+    let mut completed: Vec<CheckType> = Vec::new();
 
     // 1. File-integrity/drift check — specified by the baseline design doc and
     //    owned by the shared baseline cache (baseline.db), which is Phase 5's
@@ -53,7 +55,10 @@ pub fn run_privileged_scan(
 
     // 2. Kargs drift (cheap).
     match run_kargs(facts) {
-        Ok(mut f) => anomalies.append(&mut f),
+        Ok(mut f) => {
+            anomalies.append(&mut f);
+            completed.push(CheckType::KargsDrift);
+        }
         Err(ScanError::PrimitiveUnavailable(reason)) => skipped.push(SkippedCheck {
             check: "kargs_drift",
             reason,
@@ -63,7 +68,10 @@ pub fn run_privileged_scan(
 
     // 3. Loaded-module audit (cheap).
     match modules::audit_modules(facts) {
-        Ok(mut f) => anomalies.append(&mut f),
+        Ok(mut f) => {
+            anomalies.append(&mut f);
+            completed.push(CheckType::ModuleAnomaly);
+        }
         Err(ScanError::PrimitiveUnavailable(reason)) => skipped.push(SkippedCheck {
             check: "module_anomaly",
             reason,
@@ -73,17 +81,22 @@ pub fn run_privileged_scan(
 
     // 4. Secure Boot / lockdown state (cheap). Transition detection reads and
     //    updates the state_snapshots table.
-    run_state_checks(
+    if run_state_checks(
         facts,
         store,
         &mut anomalies,
         &mut informational,
         &mut skipped,
-    )?;
+    )? {
+        completed.push(CheckType::LockdownState);
+    }
 
     // 5. chkrootkit (slowest — last).
     match rootkit::scan_rootkits(facts) {
-        Ok(rootkit::RootkitOutcome::Scanned(mut f)) => anomalies.append(&mut f),
+        Ok(rootkit::RootkitOutcome::Scanned(mut f)) => {
+            anomalies.append(&mut f);
+            completed.push(CheckType::RootkitSignature);
+        }
         Ok(rootkit::RootkitOutcome::Skipped { reason }) => skipped.push(SkippedCheck {
             check: "rootkit_signature",
             reason,
@@ -95,7 +108,7 @@ pub fn run_privileged_scan(
         Err(e) => return Err(e),
     }
 
-    let reconciled = store.reconcile(scan_id, &anomalies)?;
+    let reconciled = store.reconcile(scan_id, &anomalies, &completed)?;
     store.finish_scan(scan_id)?;
 
     Ok(ScanReport {
@@ -115,14 +128,16 @@ fn run_kargs(facts: &dyn SystemFacts) -> Result<Vec<Finding>> {
 /// Secure Boot + lockdown transition checks. Anomalous transitions go to
 /// `anomalies`; the current-state informational findings go to
 /// `informational`. Each dimension is independent: an unavailable primitive
-/// for one (e.g. `mokutil` absent) skips only that dimension.
+/// for one (e.g. `mokutil` absent) skips only that dimension. Returns whether
+/// both dimensions ran, i.e. whether `LockdownState` findings may resolve.
 fn run_state_checks(
     facts: &dyn SystemFacts,
     store: &ScanStore,
     anomalies: &mut Vec<Finding>,
     informational: &mut Vec<Finding>,
     skipped: &mut Vec<SkippedCheck>,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut ran = 0;
     // Secure Boot.
     match facts.secure_boot_enabled() {
         Ok(enabled) => {
@@ -130,6 +145,7 @@ fn run_state_checks(
             let eval = lockdown::eval_secure_boot(prior.as_deref(), enabled);
             store.set_state_snapshot(eval.snapshot_key, &eval.new_value)?;
             route(eval.finding, anomalies, informational);
+            ran += 1;
         }
         Err(ScanError::PrimitiveUnavailable(reason)) => skipped.push(SkippedCheck {
             check: "secure_boot",
@@ -145,6 +161,7 @@ fn run_state_checks(
             let eval = lockdown::eval_lockdown(prior.as_deref(), &state);
             store.set_state_snapshot(eval.snapshot_key, &eval.new_value)?;
             route(eval.finding, anomalies, informational);
+            ran += 1;
         }
         Err(ScanError::PrimitiveUnavailable(reason)) => skipped.push(SkippedCheck {
             check: "lockdown",
@@ -153,7 +170,7 @@ fn run_state_checks(
         Err(e) => return Err(e),
     }
 
-    Ok(())
+    Ok(ran == 2)
 }
 
 fn route(finding: Finding, anomalies: &mut Vec<Finding>, informational: &mut Vec<Finding>) {

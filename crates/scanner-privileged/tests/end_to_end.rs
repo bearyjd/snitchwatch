@@ -113,6 +113,31 @@ fn full_scan_diffs_new_still_and_resolved_across_runs() {
 }
 
 #[test]
+fn a_skipped_check_does_not_resolve_its_earlier_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
+    let lkm = "rootkit:chkrootkit:lkm";
+
+    // Scan 1: chkrootkit reports an infection.
+    let mut infected = healthy_facts();
+    infected.chkrootkit = Some("/usr/sbin/chkrootkit".to_string());
+    infected.chkrootkit_output = "Checking 'lkm'... INFECTED\n".to_string();
+    let r1 = run_privileged_scan(&infected, &store, "dep-abc").unwrap();
+    assert!(r1.reconciled.new.iter().any(|f| f.path == lkm));
+
+    // Scan 2: chkrootkit is gone (skipped) -> the finding must stay open.
+    let r2 = run_privileged_scan(&healthy_facts(), &store, "dep-abc").unwrap();
+    assert!(r2.skipped.iter().any(|s| s.check == "rootkit_signature"));
+    assert!(r2.reconciled.resolved.is_empty(), "{:?}", r2.reconciled);
+
+    // Scan 3: chkrootkit runs and is clean -> now it resolves.
+    let mut clean = healthy_facts();
+    clean.chkrootkit = Some("/usr/sbin/chkrootkit".to_string());
+    let r3 = run_privileged_scan(&clean, &store, "dep-abc").unwrap();
+    assert!(r3.reconciled.resolved.iter().any(|f| f.path == lkm));
+}
+
+#[test]
 fn secure_boot_transition_flagged_only_on_change() {
     let dir = tempfile::tempdir().unwrap();
     let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
