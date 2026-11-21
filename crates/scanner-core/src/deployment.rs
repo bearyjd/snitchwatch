@@ -53,6 +53,8 @@ struct RawDeployment {
     packages: Vec<String>,
     #[serde(rename = "requested-packages", default)]
     requested_packages: Vec<String>,
+    #[serde(rename = "requested-local-packages", default)]
+    requested_local_packages: Vec<String>,
 }
 
 /// Parse `rpm-ostree status --json` output, extracting the booted
@@ -74,13 +76,20 @@ pub fn parse_status_json(json: &str) -> Result<DeploymentState, DeployError> {
     // otherwise the deployment checksum *is* the base commit.
     let base_checksum = booted.base_checksum.unwrap_or_else(|| checksum.clone());
 
-    // Prefer the resolved `packages` list; fall back to requested if that's
-    // all rpm-ostree surfaced.
-    let layered_packages = if booted.packages.is_empty() {
-        booted.requested_packages
-    } else {
-        booted.packages
-    };
+    // Union of resolved, requested and locally-installed package lists, in
+    // first-occurrence order. Label-only: file_drift compares against the booted
+    // commit, which already contains layered content.
+    let mut layered_packages: Vec<String> = Vec::new();
+    for p in booted
+        .packages
+        .into_iter()
+        .chain(booted.requested_packages)
+        .chain(booted.requested_local_packages)
+    {
+        if !layered_packages.contains(&p) {
+            layered_packages.push(p);
+        }
+    }
 
     Ok(DeploymentState {
         checksum,
@@ -166,7 +175,7 @@ mod tests {
         let d = parse_status_json(LAYERED_JSON).unwrap();
         assert_eq!(d.checksum, "aaa111deploychecksum");
         assert_eq!(d.base_checksum, "bbb222basecommit");
-        assert_eq!(d.layered_packages.len(), 2);
+        assert_eq!(d.layered_packages.len(), 4); // union: 2 NEVRA + 2 bare names
         assert!(d.has_layered_package("opensnitch"));
         assert!(d.has_layered_package("chkrootkit"));
         assert!(!d.has_layered_package("firefox"));
@@ -203,6 +212,30 @@ mod tests {
         let sys = MockInspector::new().with_stdout("rpm-ostree", &["status", "--json"], STOCK_JSON);
         let d = probe_deployment(&sys).unwrap();
         assert_eq!(d.checksum, "stockcommit0000");
+    }
+
+    #[test]
+    fn requested_local_packages_count_as_layered() {
+        let json = r#"{ "deployments": [ { "booted": true, "checksum": "c1",
+          "requested-local-packages": ["cowsay-1.2.3-1.fc45.x86_64"] } ] }"#;
+        let d = parse_status_json(json).unwrap();
+        assert!(d.has_layered_package("cowsay"));
+        assert!(!d.has_layered_package("cow"));
+    }
+
+    #[test]
+    fn layered_lists_are_unioned_without_duplicates() {
+        let json = r#"{ "deployments": [ { "booted": true, "checksum": "c1",
+          "packages": ["a"], "requested-packages": ["a", "b"] } ] }"#;
+        let d = parse_status_json(json).unwrap();
+        assert_eq!(d.layered_packages, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn stock_json_with_all_lists_empty_has_no_layered_packages() {
+        let json = r#"{ "deployments": [ { "booted": true, "checksum": "c1",
+          "packages": [], "requested-packages": [], "requested-local-packages": [] } ] }"#;
+        assert!(parse_status_json(json).unwrap().layered_packages.is_empty());
     }
 
     #[test]
