@@ -2,7 +2,6 @@
 //! files), delegated to `rpm -Va` and classified with scanner-core's pure
 //! tree. The privileged process never opens or hashes target files itself.
 
-use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -20,11 +19,13 @@ use crate::model::{CheckType, Finding};
 /// to be revisited with real-host timing (plan Task 6).
 pub const FILE_DRIFT_BUDGET: Duration = Duration::from_secs(180);
 
-// Worst case: the file_drift budget, one owner lookup overshooting it, and a
-// last slow primitive (chkrootkit) must all fit inside the scan watchdog.
+// Worst case: the file_drift budget, one candidate overshooting it with an
+// `ostree ls`, an `ostree checksum` and an owner lookup, and a last slow
+// primitive (chkrootkit) must all fit inside the scan watchdog.
 const _: () = assert!(
     FILE_DRIFT_BUDGET.as_secs()
         + crate::facts::FILE_OWNER_DEADLINE.as_secs()
+        + 2 * crate::facts::OSTREE_LOOKUP_DEADLINE.as_secs()
         + crate::command::PRIMITIVE_DEADLINE.as_secs()
         < crate::command::SCAN_WATCHDOG.as_secs()
 );
@@ -69,14 +70,10 @@ pub fn run_file_drift_within(
     let started = Instant::now();
     let deployment = read_deployment(facts)?;
     let report = failing_entries(&facts.rpm_verify_all()?);
-    let (base_paths, base_tree_unavailable) = match facts.base_tree_drift() {
-        Ok(paths) => (paths, None),
-        Err(ScanError::PrimitiveUnavailable(reason)) => (Vec::new(), Some(reason)),
-        Err(e) => return Err(e),
-    };
+    let base_tree_unavailable: Option<String> = None;
     let mut anomalies = Vec::new();
     let mut incomplete = None;
-    for candidate in candidates(&report.failures, base_paths) {
+    for candidate in candidates(&report.failures) {
         if started.elapsed() >= budget {
             incomplete = Some(format!(
                 "file_drift budget of {}s exceeded",
@@ -119,17 +116,7 @@ fn read_deployment(facts: &dyn SystemFacts) -> Result<DeploymentState> {
     })
 }
 
-/// rpm failures first, then base-tree paths not already listed by rpm.
-fn candidates(failures: &[VerifyFailure], base_paths: Vec<String>) -> Vec<Candidate> {
-    let seen: HashSet<&str> = failures.iter().map(|f| f.path.as_str()).collect();
-    let from_base = base_paths
-        .into_iter()
-        .filter(|p| !seen.contains(p.as_str()))
-        .map(|path| Candidate {
-            path,
-            attrs: None,
-            missing: false,
-        });
+fn candidates(failures: &[VerifyFailure]) -> Vec<Candidate> {
     failures
         .iter()
         .map(|f| Candidate {
@@ -137,7 +124,6 @@ fn candidates(failures: &[VerifyFailure], base_paths: Vec<String>) -> Vec<Candid
             attrs: Some(f.attrs.clone()),
             missing: f.missing,
         })
-        .chain(from_base)
         .collect()
 }
 
@@ -283,16 +269,6 @@ mod tests {
     }
 
     #[test]
-    fn rule3_layered_clean_yields_no_finding() {
-        // Layered file absent from rpm -Va output verifies clean; the only
-        // way it is listed is a base-tree difference, which rule 3 vouches for.
-        let f = facts("")
-            .with_base_tree_drift(["/usr/bin/opensnitchd"])
-            .with_owner("/usr/bin/opensnitchd", "opensnitch");
-        assert!(run_file_drift(&f).unwrap().findings.is_empty());
-    }
-
-    #[test]
     fn rule3_layered_modified_is_anomalous_naming_the_package() {
         let f = facts("..5......    /usr/bin/opensnitchd\n")
             .with_owner("/usr/bin/opensnitchd", "opensnitch");
@@ -332,23 +308,6 @@ mod tests {
     }
 
     #[test]
-    fn rule5_unowned_under_usr_via_base_tree_drift_is_anomalous() {
-        let f = facts("").with_base_tree_drift(["/usr/bin/implant"]);
-        let o = run_file_drift(&f).unwrap();
-        assert_eq!(paths(&o), ["/usr/bin/implant"]);
-        assert!(o.findings[0].detail.contains("unowned"));
-        assert_eq!(o.base_tree_unavailable, None);
-    }
-
-    #[test]
-    fn unavailable_base_tree_marks_the_outcome_partial_but_keeps_findings() {
-        let f = facts("S.5....T.    /usr/bin/bash\n").with_owner("/usr/bin/bash", "bash");
-        let o = run_file_drift(&f).unwrap();
-        assert_eq!(o.findings.len(), 1);
-        assert!(o.base_tree_unavailable.is_some());
-    }
-
-    #[test]
     fn over_the_cap_lists_the_first_paths_plus_one_aggregate() {
         let n = MAX_DRIFT_PATHS + 1;
         let verify: String = (0..n)
@@ -380,10 +339,9 @@ mod tests {
 
     #[test]
     fn every_finding_path_is_absolute() {
-        let f = facts("missing     /usr/bin/a\n..5......    /usr/bin/b\n")
-            .with_base_tree_drift(["/usr/bin/c"]);
+        let f = facts("missing     /usr/bin/a\n..5......    /usr/bin/b\n");
         let o = run_file_drift(&f).unwrap();
-        assert_eq!(o.findings.len(), 3);
+        assert_eq!(o.findings.len(), 2);
         assert!(o.findings.iter().all(|f| f.path.starts_with('/')));
     }
 

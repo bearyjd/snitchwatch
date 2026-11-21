@@ -27,6 +27,13 @@ pub fn is_commit_hex(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// A path that may be handed to `ostree`: absolute and free of control
+/// characters (`rpm -Va` output is line-based, so such a path was already
+/// mangled and cannot be trusted to name the real file).
+pub fn lookup_path_ok(path: &str) -> bool {
+    path.starts_with('/') && !path.chars().any(char::is_control)
+}
+
 /// Parse the one line `ostree ls -d -C <commit> <requested>` prints:
 /// `MODE UID GID SIZE CHECKSUM [DIRMETA] PATH[ -> TARGET]`. The path must be
 /// exactly the requested one, so a child listing, a path split by a newline or
@@ -189,6 +196,21 @@ mod tests {
         assert!(parse_checksum(&format!("{A}\n{B}\n")).is_err());
         assert!(parse_checksum("").is_err());
         assert!(parse_checksum(&format!("{}\n", &A[..63])).is_err());
+    }
+
+    #[test]
+    fn only_absolute_paths_without_control_characters_may_be_looked_up() {
+        assert!(lookup_path_ok("/usr/bin/a b"));
+        for bad in [
+            "usr/bin/a",
+            "-x",
+            "",
+            "/usr/a\nb",
+            "/usr/a\rb",
+            "/usr/\u{1b}[0m",
+        ] {
+            assert!(!lookup_path_ok(bad), "{bad:?}");
+        }
     }
 
     #[test]

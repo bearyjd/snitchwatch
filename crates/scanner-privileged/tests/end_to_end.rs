@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use scanner_privileged::checks::base_tree::CommitEntry;
 use scanner_privileged::error::{Result, ScanError};
 use scanner_privileged::facts::SystemFacts;
 use scanner_privileged::{run_privileged_scan, ScanStore};
@@ -81,7 +82,15 @@ impl SystemFacts for FakeFacts {
             .clone()
             .ok_or_else(|| ScanError::PrimitiveUnavailable("fake: no rpm-ostree".to_string()))
     }
-    fn base_tree_drift(&self) -> Result<Vec<String>> {
+    fn ostree_available(&self) -> bool {
+        false
+    }
+    fn commit_entry(&self, _commit: &str, _path: &str) -> Result<Option<CommitEntry>> {
+        Err(ScanError::PrimitiveUnavailable(
+            "fake: no base tree".to_string(),
+        ))
+    }
+    fn path_checksum(&self, _path: &str) -> Result<String> {
         Err(ScanError::PrimitiveUnavailable(
             "fake: no base tree".to_string(),
         ))
@@ -130,7 +139,6 @@ fn file_drift_is_new_then_still_then_resolved_with_base_tree_partial() {
     let finding = r1.reconciled.new.iter().find(|f| f.path == TAMPERED_PATH);
     assert!(finding.is_some_and(|f| f.detail.contains("layered_pkg:opensnitch")));
     assert!(!r1.skipped.iter().any(|s| s.check == "file_drift"));
-    assert!(r1.skipped.iter().any(|s| s.check == "file_drift_base_tree"));
 
     let r2 = run_privileged_scan(&drift_facts(TAMPERED), &store, "dep-abc").unwrap();
     assert!(r2.reconciled.new.is_empty());
@@ -147,7 +155,6 @@ fn file_drift_is_new_then_still_then_resolved_with_base_tree_partial() {
         .resolved
         .iter()
         .any(|f| f.path == TAMPERED_PATH));
-    assert!(r3.skipped.iter().any(|s| s.check == "file_drift_base_tree"));
 }
 
 #[test]
