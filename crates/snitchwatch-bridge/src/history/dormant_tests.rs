@@ -143,12 +143,18 @@ fn offending(src: &str) -> Vec<String> {
     hits
 }
 
-/// Files allowed to mention the primitives: their own modules and tests.
-const OWNERS: [&str; 5] = [
+/// Files allowed to mention the primitives: their own modules and tests, and
+/// the durable half (PR 3b), which holds and releases pins.
+const OWNERS: [&str; 10] = [
     "lifecycle.rs",
     "lifecycle_tests.rs",
     "pins.rs",
     "pins_tests.rs",
+    "durable.rs",
+    "durable_tests.rs",
+    "ledger.rs",
+    "ledger_tests.rs",
+    "crash_tests.rs",
     "dormant_tests.rs",
 ];
 
@@ -240,17 +246,43 @@ const WIRING: [&str; 2] = ["open_store", "insert_event"];
 /// Also a switch, but other writers exist (the Kirigami seen-programs
 /// writer), so outside `history/` it counts only in a file naming `history`.
 const WIRING_HISTORY_ONLY: [&str; 1] = ["Writer"];
-/// The 3b types, whole identifiers.
-const DURABLE_TYPES: [&str; 5] = [
+/// The 3b names with no other use in the workspace: types and functions of
+/// `ledger`, `session` and `durable`. Whole identifiers, anywhere in code.
+/// `durable_names_cover_every_pub_item` keeps this and the next list complete.
+const DURABLE_TYPES: [&str; 17] = [
     "LossCounter",
     "LedgerLimits",
+    "LedgerOverflow",
     "GapCause",
     "SessionEnd",
     "PinnedBatch",
+    "DurableError",
+    "record_gap",
+    "read_gaps",
+    "enforce_limits",
+    "read_watermark",
+    "write_watermark",
+    "read_sessions",
+    "commit_pinned",
+    "commit_gap",
+    "flush_counter",
+    "begin_session",
 ];
-/// The 3b modules. Common words elsewhere in the workspace (`session`), so
-/// outside `history/` they count only in a file that names `history` too.
-const DURABLE_MODULES: [&str; 3] = ["ledger", "session", "durable"];
+/// The other 3b names: the modules and common words (`session`, `Gap`,
+/// `end_session`) that other code uses for other things, so outside
+/// `history/` they count only in a file that names `history` too.
+const DURABLE_MODULES: [&str; 10] = [
+    "ledger",
+    "session",
+    "durable",
+    "Gap",
+    "Session",
+    "start_session",
+    "end_session",
+    "heartbeat",
+    "row_count",
+    "ROW_BYTES",
+];
 
 /// The files that implement and test the durable half.
 const DURABLE_OWNERS: [&str; 7] = [
@@ -386,4 +418,72 @@ fn scanner_sees_a_use_after_an_escaped_quote_in_a_string_literal() {
     // A quote inside the string is not the end of it: the text after the
     // escape is still string, not code.
     assert!(offending("fn f() { let _s = \"a\\\" ReaderGate\"; }").is_empty());
+}
+
+/// Every `pub` item the three owner files define, so the lists above cannot
+/// silently fall behind the code they guard. Free items are at column 0;
+/// `durable.rs` is one `impl Engine`, so all of its `pub` items count.
+fn pub_items(file: &str, all_indents: bool) -> Vec<String> {
+    let text = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/history")
+            .join(file),
+    )
+    .expect("read owner file");
+    let mut items = Vec::new();
+    for line in strip(&text).lines() {
+        let line = if all_indents { line.trim_start() } else { line };
+        let Some(rest) = line.strip_prefix("pub ") else {
+            continue;
+        };
+        let mut words = rest.split(|c: char| !is_ident(c)).filter(|w| !w.is_empty());
+        let kind = words.next().unwrap_or("");
+        if ["struct", "enum", "fn", "const", "type"].contains(&kind) {
+            if let Some(name) = words.next() {
+                items.push(name.to_owned());
+            }
+        }
+    }
+    items
+}
+
+#[test]
+fn durable_names_cover_every_pub_item() {
+    let mut missing = Vec::new();
+    for (file, all) in [
+        ("ledger.rs", false),
+        ("session.rs", false),
+        ("durable.rs", true),
+    ] {
+        for name in pub_items(file, all) {
+            let listed = DURABLE_TYPES.contains(&name.as_str())
+                || DURABLE_MODULES.contains(&name.as_str())
+                // Methods of `LossCounter` and `Engine` used through values.
+                || ["new", "record", "pending_count", "as_str", "parse", "ceiling", "from_budget", "is_uncertain"]
+                    .contains(&name.as_str())
+                || ["DEFAULT_MAX_ROWS", "MIN_CEILING"].contains(&name.as_str());
+            if !listed {
+                missing.push(format!("{file}: {name}"));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "unguarded durable items: {missing:#?}");
+}
+
+#[test]
+fn the_outside_guard_catches_the_real_durable_names() {
+    for name in DURABLE_TYPES {
+        assert!(
+            !outside_hits(&format!("fn f() {{ let _ = {name}; }}")).is_empty(),
+            "{name}"
+        );
+    }
+    for name in DURABLE_MODULES {
+        let planted = format!("use crate::history as h;\nfn f() {{ let _ = {name}; }}");
+        assert!(outside_hits(&planted).contains(&name.to_string()), "{name}");
+        assert!(
+            !inside_hits(&format!("fn f() {{ let _ = {name}; }}")).is_empty(),
+            "{name}"
+        );
+    }
 }

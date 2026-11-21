@@ -123,3 +123,85 @@ fn a_poisoned_lock_is_recovered() {
     assert_eq!(r.oldest(), Some(3));
     r.release(&id).unwrap();
 }
+
+fn manual(start: i64) -> (Arc<std::sync::atomic::AtomicI64>, PinRegistry) {
+    let ms = Arc::new(std::sync::atomic::AtomicI64::new(start));
+    let read = Arc::clone(&ms);
+    let clock: Clock = Arc::new(move || read.load(Ordering::SeqCst));
+    (ms, PinRegistry::with_clock(clock))
+}
+
+#[test]
+fn accept_records_the_clock_it_read() {
+    let (ms, r) = manual(700);
+    let (pin, at) = r.accept_timed().unwrap();
+    assert_eq!(at, 700);
+    assert_eq!(r.oldest(), Some(700));
+    ms.store(900, Ordering::SeqCst);
+    assert_eq!(r.now(), 900);
+    r.release(&pin).unwrap();
+}
+
+#[test]
+fn commit_watermark_is_the_minimum_of_now_and_the_oldest_kept_pin() {
+    let (ms, r) = manual(100);
+    assert_eq!(r.commit_watermark(&[]), Ok(100));
+    let old = r.accept().unwrap();
+    ms.store(300, Ordering::SeqCst);
+    let newer = r.accept().unwrap();
+    ms.store(500, Ordering::SeqCst);
+    assert_eq!(r.commit_watermark(&[]), Ok(100));
+    // The transaction that releases `old` is not held back by it.
+    assert_eq!(r.commit_watermark(&[&old]), Ok(300));
+    assert_eq!(r.commit_watermark(&[&old, &newer]), Ok(500));
+    ms.store(50, Ordering::SeqCst);
+    assert_eq!(
+        r.commit_watermark(&[&old, &newer]),
+        Ok(50),
+        "never after now"
+    );
+}
+
+#[test]
+fn release_all_is_all_or_nothing() {
+    let (_, r) = manual(0);
+    let (_, other) = manual(0);
+    let a = r.accept().unwrap();
+    let b = r.accept().unwrap();
+    let foreign = other.accept().unwrap();
+    assert_eq!(r.release_all(&[&a, &foreign]), Err(PinError::Foreign));
+    assert_eq!(
+        r.release_all(&[&a, &a]),
+        Err(PinError::Unknown),
+        "twice in one call"
+    );
+    assert_eq!(r.len(), 2, "nothing was released");
+    r.release_all(&[&a, &b]).unwrap();
+    assert!(r.is_empty());
+    assert_eq!(r.release_all(&[&a]), Err(PinError::Unknown));
+    assert_eq!(r.commit_watermark(&[&foreign]), Err(PinError::Foreign));
+}
+
+/// The clock is read while the registry's lock is held, so no pin can be
+/// accepted "between" a watermark's clock reading and its pin scan.
+#[test]
+fn the_clock_is_read_under_the_registry_lock() {
+    use std::sync::{OnceLock, Weak};
+    let registry: Arc<OnceLock<Weak<PinRegistry>>> = Arc::new(OnceLock::new());
+    let readings = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (probe, log) = (Arc::clone(&registry), Arc::clone(&readings));
+    let clock: Clock = Arc::new(move || {
+        let locked = probe
+            .get()
+            .and_then(Weak::upgrade)
+            .is_some_and(|r| r.lock_is_held_elsewhere());
+        log.lock().unwrap().push(locked);
+        42
+    });
+    let r = Arc::new(PinRegistry::with_clock(clock));
+    registry.set(Arc::downgrade(&r)).unwrap();
+    let pin = r.accept().unwrap();
+    r.commit_watermark(&[&pin]).unwrap();
+    let readings = readings.lock().unwrap();
+    assert_eq!(*readings, vec![true, true], "accept, commit_watermark");
+}

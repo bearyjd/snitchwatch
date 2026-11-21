@@ -12,15 +12,21 @@
 //! * [`schema`] pins `page_size`, checks a real `PRAGMA user_version`.
 //! * [`caps`] and [`record`] are S1: the field-cap table and the insert API.
 //! * [`settings`] is the bridge-owned enabled/consent/retention file.
+//! * [`ledger`], [`session`] and [`durable`] (PR 3b) are the durable half of
+//!   the lifecycle: gap and session ledger, coverage watermark, and pin
+//!   release in the transaction that makes an item durable.
 
 pub mod budget;
 pub mod caps;
+pub mod durable;
+pub mod ledger;
 pub mod lifecycle;
 pub mod open;
 pub mod pins;
 pub mod record;
 pub mod rule_identity;
 pub mod schema;
+pub mod session;
 pub mod settings;
 pub mod writer;
 
@@ -173,6 +179,7 @@ mod budget_tests;
 #[cfg(test)]
 mod caps_tests;
 #[cfg(test)]
+mod crash_tests;
 #[cfg(test)]
 mod dormant_tests;
 #[cfg(test)]

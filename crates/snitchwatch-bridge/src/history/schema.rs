@@ -16,9 +16,16 @@
 //! **Shape.** Fewer b-trees mean less write amplification, so the schema has
 //! as few as it can: rowid tables, and only fixed-width columns are indexed
 //! (`ts_ms`, the 16-byte `rule_hash`). Nothing indexes `process_path` or `dst_host`. The `gaps` and
-//! `sessions` tables of the design arrive with the ledger (PR 3), by a
-//! version-2 migration; `meta` is not needed (the version is
-//! `user_version`, the consent record is in the settings file).
+//! `sessions` tables of the design (D6) and the one-row `meta` table holding
+//! the coverage watermark arrive in version 2 ([`v2_additions_sql`]); the
+//! consent record is in the settings file.
+//!
+//! **Migration** (v1 to v2): the v1 text ([`v1_sql`]) is frozen byte for byte,
+//! since `sqlite_master` keeps it and `require_known_schema` compares it. An
+//! existing v1 file is checked against it, then the additions and
+//! `user_version = 2` go in one transaction, so a failure leaves a v1 file.
+//! Only `open_store` reaches this, and it refuses unless history is enabled:
+//! with history off nothing is opened, created or migrated.
 
 use std::path::Path;
 
@@ -33,7 +40,7 @@ use super::Unavailable;
 pub const PAGE_SIZE: u32 = 4096;
 /// `PRAGMA auto_vacuum` value for INCREMENTAL.
 pub const AUTO_VACUUM_INCREMENTAL: i64 = 2;
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 fn text_cap(column: &str, cap: usize) -> String {
     format!("CHECK ({column} IS NULL OR length(CAST({column} AS BLOB)) <= {cap})")
@@ -49,11 +56,11 @@ fn one_of(values: &[&str]) -> String {
 /// could be a megabyte. Strict typing plus the `CHECK`s below is what makes
 /// the S1 caps hold.
 ///
-/// The `CREATE` statements of [`SCHEMA_VERSION`]. Every cap of `caps.rs`
-/// appears here as a `CHECK`, from the same constants, so the schema is the
-/// proof that no value can exceed it. Generated once and byte-stable, since
+/// The `CREATE` statements of schema version 1, frozen. Every cap of
+/// `caps.rs` appears here as a `CHECK`, from the same constants, so the schema
+/// is the proof that no value can exceed it. Byte-stable, since
 /// `sqlite_master` keeps the text and `require_known_schema` compares it.
-pub fn schema_sql() -> String {
+pub fn v1_sql() -> String {
     format!(
         "CREATE TABLE events (
     id INTEGER PRIMARY KEY,
@@ -96,8 +103,62 @@ CREATE TABLE rules_seen (
     )
 }
 
+/// `gaps.cause`, as stored (the design's D6 table; the enum that names them is
+/// `ledger::GapCause`, in the same order).
+pub(crate) const GAP_CAUSES: [&str; 10] = [
+    "bridge-down",
+    "daemon-disconnected",
+    "upstream-loss",
+    "queue-overflow",
+    "admission-drop",
+    "write-failed",
+    "disabled",
+    "evicted",
+    "clock-jump",
+    "uncertain",
+];
+/// `sessions.end_kind`, as stored, in the order of `session::SessionEnd`.
+pub(crate) const END_KINDS: [&str; 3] = ["clean", "disabled", "unclean"];
+
+/// What version 2 adds (D6, L1): the gap ledger, the session ledger and the
+/// coverage watermark. Every column is fixed-width or a short enum, so a row's
+/// size is bounded (`ledger::ROW_BYTES`).
+pub fn v2_additions_sql() -> String {
+    format!(
+        "CREATE TABLE gaps (
+    id INTEGER PRIMARY KEY,
+    start_ms INTEGER NOT NULL,
+    end_ms INTEGER NOT NULL CHECK (end_ms >= start_ms),
+    start_exact INTEGER NOT NULL CHECK (start_exact IN (0, 1)),
+    cause TEXT NOT NULL CHECK (cause IN ({causes})),
+    count INTEGER NOT NULL CHECK (count >= 1)
+) STRICT;
+CREATE TABLE sessions (
+    id INTEGER PRIMARY KEY,
+    start_ms INTEGER NOT NULL,
+    end_ms INTEGER,
+    end_kind TEXT CHECK (end_kind IS NULL OR end_kind IN ({ends})),
+    CHECK ((end_ms IS NULL) = (end_kind IS NULL))
+) STRICT;
+CREATE TABLE meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    watermark_ms INTEGER NOT NULL
+) STRICT;
+",
+        causes = one_of(&GAP_CAUSES),
+        ends = one_of(&END_KINDS),
+    )
+}
+
+/// The `CREATE` statements of [`SCHEMA_VERSION`].
+pub fn schema_sql() -> String {
+    v1_sql() + &v2_additions_sql()
+}
+
 /// `sqlite_master` rows a complete v1 database has.
-const OBJECTS: i64 = 5;
+const OBJECTS_V1: i64 = 5;
+/// ... and a complete v2 one: v1 plus `gaps`, `sessions`, `meta`.
+const OBJECTS: i64 = OBJECTS_V1 + 3;
 
 fn refuse(e: impl std::fmt::Display) -> Unavailable {
     Unavailable::new(format!("history database: {e}"))
@@ -126,6 +187,12 @@ pub(crate) fn prepare(path: &Path) -> Result<Connection, Unavailable> {
     match version {
         0 if objects == 0 => create(&conn, &schema)?,
         0 => return Err(refuse("not a Snitchwatch history database")),
+        1 => {
+            crate::sqlite_file::require_known_schema(&conn, &v1_sql()).map_err(refuse)?;
+            if objects != OBJECTS_V1 {
+                return Err(refuse("the schema is incomplete"));
+            }
+        }
         SCHEMA_VERSION => {
             crate::sqlite_file::require_known_schema(&conn, &schema).map_err(refuse)?;
             if objects != OBJECTS {
@@ -153,7 +220,25 @@ pub(crate) fn prepare(path: &Path) -> Result<Connection, Unavailable> {
     if int(&conn, "secure_delete")? != 1 {
         return Err(refuse("secure_delete could not be enabled"));
     }
+    // Last, so a file that is refused for its layout is never modified.
+    if version == 1 {
+        migrate_v1_to_v2(&conn)?;
+    }
     Ok(conn)
+}
+
+/// Version 1 to 2: the additions and the new version in one transaction. A
+/// failure rolls back, leaving the v1 file as it was.
+fn migrate_v1_to_v2(conn: &Connection) -> Result<(), Unavailable> {
+    conn.execute_batch(&format!(
+        "BEGIN; {} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;",
+        v2_additions_sql()
+    ))
+    .map_err(|e| {
+        // Best effort: the connection is dropped on error, which rolls back too.
+        let _ = conn.execute_batch("ROLLBACK;");
+        refuse(format!("migrating the schema to version 2: {e}"))
+    })
 }
 
 /// A new file: the layout pragmas (they take effect only before the first
@@ -185,7 +270,8 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
             .unwrap();
-        // 2 tables + 2 indexes + the UNIQUE index on rules_seen.rule_hash.
+        // v1: 2 tables + 2 indexes + the UNIQUE index on rules_seen.rule_hash;
+        // v2 adds 3 tables.
         assert_eq!(n, OBJECTS);
     }
 }
