@@ -224,8 +224,20 @@ composefs, not `base_checksum`.
 
 ## Tasks (TDD: each RED test is written and shown failing at runtime before its fix; the executor records the RED output)
 
-- [ ] **1. Host evidence for the to-verify items (PR A; owner-run, read-only, non-blocking for
-  Tasks 2 and 4).**
+- [x] **1. Host evidence for the to-verify items. DONE 2026-11-21 (owner-measured; not implemented as a script change).**
+  - Measured on a stock Bazzite host, 501 candidates after the /var,/boot filtering:
+    446 regular files MATCH; 15 directories MATCH (second checksum field); 3 symlinks MATCH;
+    36 BOTH_ABSENT (31 under /usr/local); 1 `/usr/bin/sudoreplay` unreadable by an unprivileged
+    user (mode `--x--x--x`; the scanner runs as root, so expected to match, unverified).
+  - About 10.6 s for all 501 pairs including host-spawn overhead.
+  - `/usr/etc/shells` DIFFERs (xattr-only, legitimate content) but is not an `rpm -Va` candidate.
+  - Argv fixed by the owner: `ostree ls -d -C <commit> <abs path>` and `ostree checksum <abs path>`
+    (no `--repo=`, no `--`).
+  - Absent-path stderr/exit were pinned from a throwaway repo with libostree 2026.2 (exit 1, empty
+    stdout, `error: Inspecting path '<p>': No such file or directory: <p>`; through a symlink
+    ancestor `error: Inspecting path '<p>': Not a directory`). Not yet confirmed on the host's
+    2026.4: a different text fails closed (`Err`, run incomplete). Confirm in Task 6.
+  - Original (superseded) Task text follows for the record.
   - Extend `scripts/file-drift-evidence.sh` with a `Q-BT` section. It must run only read-only
     commands, each under a timeout, as the script does today.
   - For every post-#409 candidate (rpm-failing, outside `MUTABLE_PREFIXES` and
@@ -454,23 +466,31 @@ composefs, not `base_checksum`.
    recomputing without specific `user.overlay.*` xattrs (`--ignore-xattrs` does not reproduce the
    expected value, so this would need a narrower primitive). **Blocking** if Task 1 shows they
    alone exceed the cap on a clean image.
+   **Decided 2026-11-21 (owner: "defaults"): xattr-only mismatches stay flagged, anomalous, with both checksums in the detail.**
 2. **Which commit:** deployed `checksum` (proposed) or `base_checksum`. They differ on layered or
    overridden hosts, and only the stock image was measured. With `base_checksum`, every file of an
    overridden base package becomes anomalous.
+   **Decided 2026-11-21 (owner: "defaults"): compare against the booted deployment `checksum`, not `base_checksum`.**
 3. **Directories (`.M.`) and symlinks (`L`).** The policy depends on Task 1: compare via
    `ostree checksum` if it supports them without following, otherwise keep them anomalous with
    `base-tree comparison unsupported: <kind>`. A count of `.M.` directories on the stock image is
    needed first.
+   **Decided 2026-11-21 (owner: "defaults"): directories: expected = the SECOND checksum field of `ostree ls -d -C` (dirmeta), actual = `ostree checksum <dir>`; regular files and symlinks: expected = the FIRST checksum field (5th column), actual = `ostree checksum <path>`; `ostree ls -d` so a directory is not expanded.**
 4. **Missing on disk and absent from the commit is `Expected`** (proposed): it is image-baked, for
    example the `/usr/local` symlink into `/var/usrlocal`. Confirm. The alternative keeps them
    anomalous, at 31 findings on every stock scan.
+   **Decided 2026-11-21 (owner: "defaults"): a path rpm reports missing that is absent from the commit AND absent on disk is Expected.**
 5. **`file_drift_unowned` skip entry.** Keep the constant entry so the report says rule-5 coverage
    is absent (proposed), or drop it to avoid a permanent line in the GUI. A follow-up plan for the
    unowned pass is needed either way.
+   **Decided 2026-11-21 (owner: "defaults"): keep a constant `file_drift_unowned` skipped entry (rule-5 unowned files under /usr are still not checked).**
 6. **TOCTOU vanish:** stop the loop as `incomplete` (proposed, consistent with today's
    failed-lookup rule), or record that one path as anomalous `vanished during scan` and continue.
+   **Decided 2026-11-21 (owner: "defaults"): a file that vanishes mid-scan (`ostree checksum` fails on a path that existed) marks the run incomplete and stops; nothing resolves.**
 7. **Spawn cost:** per-path `ls` + `checksum` (about 22 ms per pair measured) vs batching `ostree
    ls` paths. Revisit only with Task 6 timing; `rpm -qf` cost for the non-matching remainder is
    unmeasured.
+   **Decided 2026-11-21 (owner: "defaults"): per-path lookups, no batching.**
 8. **Layered-entry format** of `rpm-ostree status --json` (carried from 11-19 Task 6; `[]` on the
    stock image). Still needed before layered-host behaviour can be trusted.
+   **Still OPEN (owner, 2026-11-21): left as a RUNBOOK / real-host item (Task 6).**
