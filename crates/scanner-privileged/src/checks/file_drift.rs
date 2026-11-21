@@ -163,6 +163,12 @@ fn base_tree_verdict(
     })
 }
 
+/// Rule 1 (mutable location) and rule 4 (dynamic allowlist) vouch for a path
+/// whatever its owner or checksum, so these paths cost no spawn at all.
+fn vouched_without_spawn(path: &Path) -> bool {
+    under_any(path, MUTABLE_PREFIXES) || under_any(path, DYNAMIC_ALLOWLIST_PREFIXES)
+}
+
 /// Run one `rpm -Va` failure through the classification tree; `Some` only
 /// when anomalous. Rule 2 (the base-tree object comparison) runs before the
 /// owner lookup, so image-baked files cost no `rpm -qf`. Owner lookups use the
@@ -174,11 +180,7 @@ fn assess(
     failure: &VerifyFailure,
 ) -> Result<Option<Finding>> {
     let path = Path::new(&failure.path);
-    if under_any(path, MUTABLE_PREFIXES) {
-        return Ok(None);
-    }
-    // Rule 4 vouches for the path whatever its owner: skip every spawn.
-    if under_any(path, DYNAMIC_ALLOWLIST_PREFIXES) {
+    if vouched_without_spawn(path) {
         return Ok(None);
     }
     let base = match commit {
