@@ -260,6 +260,29 @@ mod tests {
     }
 
     #[test]
+    fn var_and_boot_rpm_paths_are_mutable_and_do_not_flood_the_cap() {
+        // Stock ostree image: rpm -Va reports rpm-owned /var and /boot paths
+        // as missing by design; they must not count toward the path cap.
+        let mut verify =
+            String::from("missing     /var/lib/rpm-state\nmissing     /boot/extlinux/cat.c32\n");
+        for i in 0..(MAX_DRIFT_PATHS + 100) {
+            verify.push_str(&format!("missing     /var/lib/flood/{i}\n"));
+        }
+        verify.push_str("..5......    /usr/bin/bash\n");
+        let f = facts(&verify).with_owner("/usr/bin/bash", "bash");
+        let o = run_file_drift(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/bash"]);
+        assert_eq!(o.incomplete, None);
+    }
+
+    #[test]
+    fn var_and_boot_prefix_lookalikes_are_still_assessed() {
+        let f = facts("missing     /variable/x\nmissing     /bootloader/y\n");
+        let o = run_file_drift(&f).unwrap();
+        assert_eq!(paths(&o), ["/variable/x", "/bootloader/y"]);
+    }
+
+    #[test]
     fn rule3_layered_clean_yields_no_finding() {
         // Layered file absent from rpm -Va output verifies clean; the only
         // way it is listed is a base-tree difference, which rule 3 vouches for.
