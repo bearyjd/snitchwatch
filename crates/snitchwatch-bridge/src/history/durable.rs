@@ -33,8 +33,9 @@ pub struct PinnedBatch {
 pub enum DurableError {
     #[error(transparent)]
     Write(#[from] WriteError),
-    /// The transaction committed but a pin could not be released (a handle
-    /// that was already released, or that belongs to another registry).
+    /// A pin was refused before the transaction began (a handle that was
+    /// already released, listed twice, or that belongs to another registry):
+    /// nothing was written and no pin was released.
     #[error("history pin: {0}")]
     Pin(#[from] PinError),
 }
@@ -54,7 +55,8 @@ impl Engine {
             session::write_watermark(conn, watermark)?;
             Ok(units)
         })?;
-        // Only now: the rows and the watermark are durable.
+        // Only now: the rows and the watermark are durable. The pins were
+        // validated by `commit_watermark`, so this cannot fail.
         registry.release_all(pins)?;
         Ok(report)
     }
@@ -65,8 +67,16 @@ impl Engine {
         batch: &PinnedBatch,
         registry: &PinRegistry,
     ) -> Result<TxnReport, DurableError> {
-        self.ensure_room()?;
+        if batch.items.len() as u64 > self.budget().rows_per_txn {
+            return Err(WriteError::BatchTooLarge {
+                got: batch.items.len(),
+                max: self.budget().rows_per_txn,
+            }
+            .into());
+        }
         let pins: Vec<&PinId> = batch.pins.iter().collect();
+        registry.check_release(&pins)?;
+        self.ensure_room()?;
         self.durable_txn(registry, &pins, TxnKind::Insert, |conn, _| {
             for item in &batch.items {
                 if let Some(snapshot) = &item.snapshot {

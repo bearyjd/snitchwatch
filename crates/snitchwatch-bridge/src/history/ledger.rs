@@ -231,14 +231,16 @@ struct Collapse {
     gap_ids: Vec<i64>,
 }
 
-/// Rows left after collapsing the oldest `k` gaps.
-fn rows_after(total: u64, gaps: &[GapRow], sessions: &[(i64, i64)], k: usize) -> u64 {
+/// A closed session that is not the newest: `(id, start_ms, end_ms)`.
+type ClosedSession = (i64, i64, i64);
+
+/// Closed sessions wholly inside the span of the oldest `k` gaps.
+fn inside_span(gaps: &[GapRow], sessions: &[ClosedSession], k: usize) -> usize {
     let (start, end) = span(&gaps[..k]);
-    let inside = sessions
+    sessions
         .iter()
-        .filter(|(s, e)| *s >= start && *e <= end)
-        .count() as u64;
-    total - k as u64 + 1 - inside
+        .filter(|(_, s, e)| *s >= start && *e <= end)
+        .count()
 }
 
 fn span(gaps: &[GapRow]) -> (i64, i64) {
@@ -248,21 +250,36 @@ fn span(gaps: &[GapRow]) -> (i64, i64) {
 }
 
 /// The smallest collapse of the oldest gaps that leaves at most `target`
-/// rows, or all of them when none does. `None` when there is no gap.
+/// rows, or all of them when none does. When the sessions inside their span
+/// are too few (a clock that stepped back leaves old sessions outside every
+/// gap's span), the oldest closed sessions by id are absorbed too and the span
+/// widens to cover them, so the ledger can always be brought down.
+/// `None` when there is no gap.
 fn plan_collapse(
     total: u64,
     gaps: &[GapRow],
-    sessions: &[(i64, i64)],
+    sessions: &[ClosedSession],
     target: u64,
 ) -> Option<Collapse> {
     if gaps.is_empty() {
         return None;
     }
+    let rows_after = |k: usize| total - k as u64 + 1 - inside_span(gaps, sessions, k) as u64;
     let k = (1..=gaps.len())
-        .find(|&k| rows_after(total, gaps, sessions, k) <= target)
+        .find(|&k| rows_after(k) <= target)
         .unwrap_or(gaps.len());
     let chosen = &gaps[..k];
-    let (start_ms, end_ms) = span(chosen);
+    let (mut start_ms, mut end_ms) = span(chosen);
+    let extra = rows_after(k).saturating_sub(target) as usize;
+    let (lo, hi) = (start_ms, end_ms);
+    for (_, s, e) in sessions
+        .iter()
+        .filter(|(_, s, e)| !(*s >= lo && *e <= hi))
+        .take(extra)
+    {
+        start_ms = start_ms.min(*s);
+        end_ms = end_ms.max(*e);
+    }
     Some(Collapse {
         start_ms,
         end_ms,
@@ -299,12 +316,13 @@ pub fn enforce_limits(conn: &Connection, limits: &LedgerLimits) -> rusqlite::Res
     Ok(())
 }
 
-fn closed_sessions_but_newest(conn: &Connection) -> rusqlite::Result<Vec<(i64, i64)>> {
+/// Oldest first, by id.
+fn closed_sessions_but_newest(conn: &Connection) -> rusqlite::Result<Vec<ClosedSession>> {
     let mut stmt = conn.prepare(
-        "SELECT start_ms, end_ms FROM sessions WHERE end_ms IS NOT NULL \
-         AND id <> (SELECT max(id) FROM sessions)",
+        "SELECT id, start_ms, end_ms FROM sessions WHERE end_ms IS NOT NULL \
+         AND id <> (SELECT max(id) FROM sessions) ORDER BY id",
     )?;
-    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     rows.collect()
 }
 

@@ -228,17 +228,29 @@ pub(crate) fn prepare(path: &Path) -> Result<Connection, Unavailable> {
 }
 
 /// Version 1 to 2: the additions and the new version in one transaction. A
-/// failure rolls back, leaving the v1 file as it was.
+/// failure rolls back, leaving the v1 file as it was. The version is read again
+/// once the write lock is held, so a migrator that lost the race does nothing.
 fn migrate_v1_to_v2(conn: &Connection) -> Result<(), Unavailable> {
-    conn.execute_batch(&format!(
-        "BEGIN; {} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;",
-        v2_additions_sql()
-    ))
-    .map_err(|e| {
-        // Best effort: the connection is dropped on error, which rolls back too.
-        let _ = conn.execute_batch("ROLLBACK;");
-        refuse(format!("migrating the schema to version 2: {e}"))
-    })
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(|e| refuse(format!("migrating the schema to version 2: {e}")))?;
+    let step = (|| {
+        if int(conn, "user_version").map_err(|e| e.to_string())? >= SCHEMA_VERSION {
+            return Ok(());
+        }
+        conn.execute_batch(&format!(
+            "{} PRAGMA user_version = {SCHEMA_VERSION};",
+            v2_additions_sql()
+        ))
+        .map_err(|e| e.to_string())
+    })();
+    match step.and_then(|()| conn.execute_batch("COMMIT;").map_err(|e| e.to_string())) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Best effort: the connection is dropped on error, which rolls back too.
+            let _ = conn.execute_batch("ROLLBACK;");
+            Err(refuse(format!("migrating the schema to version 2: {e}")))
+        }
+    }
 }
 
 /// A new file: the layout pragmas (they take effect only before the first
@@ -273,5 +285,54 @@ mod tests {
         // v1: 2 tables + 2 indexes + the UNIQUE index on rules_seen.rule_hash;
         // v2 adds 3 tables.
         assert_eq!(n, OBJECTS);
+    }
+
+    fn v1_file() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&v1_sql()).unwrap();
+        conn.execute_batch(
+            "INSERT INTO events (ts_ms, process_path, action, answered_by) \
+             VALUES (1234, '/usr/bin/curl', 'allow', 'rule'); PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn tables(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap();
+        let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn a_migration_that_fails_partway_leaves_a_valid_v1_file_that_migrates_next_time() {
+        let conn = v1_file();
+        let before = tables(&conn);
+        // The last table of the additions already exists as something else, so
+        // `gaps` and `sessions` are created before the statement that fails.
+        conn.execute_batch("CREATE VIEW meta AS SELECT 1 AS id;")
+            .unwrap();
+        assert!(migrate_v1_to_v2(&conn).is_err());
+        assert_eq!(int(&conn, "user_version").unwrap(), 1);
+        assert_eq!(tables(&conn), before, "no half-migrated table is left");
+        assert!(conn.is_autocommit(), "no transaction is left open");
+        let events: i64 = conn
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(events, 1, "the v1 rows are intact");
+        conn.execute_batch("DROP VIEW meta;").unwrap();
+        migrate_v1_to_v2(&conn).unwrap();
+        assert_eq!(int(&conn, "user_version").unwrap(), SCHEMA_VERSION);
+        assert_eq!(tables(&conn).len(), before.len() + 3);
+    }
+
+    #[test]
+    fn migrating_a_file_another_migrator_already_moved_to_v2_does_nothing() {
+        let conn = v1_file();
+        migrate_v1_to_v2(&conn).unwrap();
+        migrate_v1_to_v2(&conn).unwrap();
+        assert_eq!(int(&conn, "user_version").unwrap(), SCHEMA_VERSION);
     }
 }

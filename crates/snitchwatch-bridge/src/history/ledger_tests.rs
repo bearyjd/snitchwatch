@@ -267,3 +267,33 @@ fn a_late_gap_never_deletes_the_newest_closed_session() {
     let gap = start_session(&conn, &l, 700, 700).unwrap();
     assert_eq!(gap.map(|g| (g.start_ms, g.end_ms)), Some((500, 700)));
 }
+
+#[test]
+fn boots_whose_clock_steps_backwards_never_lock_the_ledger() {
+    let conn = ledger_db();
+    let l = small(64);
+    let boots = 200i64;
+    // Every boot starts at 100 (an RTC-less board) and stops cleanly a long
+    // time later, so no closed session lies inside any gap's time span.
+    for i in 0..boots {
+        start_session(&conn, &l, 100, 100).unwrap();
+        end_session(&conn, 1_000_000 + i, SessionEnd::Clean).unwrap();
+        let rows = row_count(&conn).unwrap();
+        assert!(rows <= l.ceiling(), "{rows} rows after boot {i}");
+    }
+    start_session(&conn, &l, 10_000_000, 10_000_000).unwrap();
+    assert!(row_count(&conn).unwrap() <= l.ceiling());
+    let gaps = read_gaps(&conn).unwrap();
+    // Every restart gap is covered, and the sessions that were absorbed are
+    // inside the uncertain span.
+    for i in 1..=boots {
+        assert!(covered(&gaps, 1_000_000 + i - 1, 1_000_000 + i - 1), "{i}");
+    }
+    let uncertain: Vec<&Gap> = gaps
+        .iter()
+        .filter(|g| g.cause == GapCause::Uncertain)
+        .collect();
+    assert_eq!(uncertain.len(), 1);
+    assert!(uncertain[0].start_ms <= 100, "covers the absorbed sessions");
+    assert_eq!(gaps.iter().map(|g| g.count).sum::<u64>(), boots as u64);
+}

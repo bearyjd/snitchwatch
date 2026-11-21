@@ -156,13 +156,14 @@ impl PinRegistry {
 
     /// The watermark a commit happening now may record, for a transaction that
     /// will release `released` together with writing it: `min(now, oldest pin
-    /// that is not one of them)`. Time and pins are read under one lock. A
-    /// handle of another registry is `Foreign` (and releases nothing).
+    /// that is not one of them)`. Time and pins are read under one lock.
+    /// `released` is validated first, as [`release_all`](Self::release_all)
+    /// will: a handle of another registry is `Foreign`, one that is not live
+    /// or is listed twice is `Unknown`. Validated before the transaction, so
+    /// the release after `COMMIT` cannot fail.
     pub fn commit_watermark(&self, released: &[&PinId]) -> Result<i64, PinError> {
-        if released.iter().any(|p| p.registry != self.registry) {
-            return Err(PinError::Foreign);
-        }
         let inner = self.lock();
+        self.validate_locked(&inner, released)?;
         let now = (self.clock)();
         let oldest_kept = inner
             .by_arrival
@@ -170,6 +171,26 @@ impl PinRegistry {
             .find(|(_, id)| !released.iter().any(|p| p.id == *id))
             .map(|(arrival, _)| *arrival);
         Ok(oldest_kept.map_or(now, |o| o.min(now)))
+    }
+
+    /// Whether `pins` could all be released now (see
+    /// [`commit_watermark`](Self::commit_watermark)); changes nothing.
+    pub fn check_release(&self, pins: &[&PinId]) -> Result<(), PinError> {
+        self.validate_locked(&self.lock(), pins)
+    }
+
+    fn validate_locked(&self, inner: &Inner, pins: &[&PinId]) -> Result<(), PinError> {
+        if pins.iter().any(|p| p.registry != self.registry) {
+            return Err(PinError::Foreign);
+        }
+        let mut seen = BTreeSet::new();
+        if !pins
+            .iter()
+            .all(|p| inner.arrival_by_id.contains_key(&p.id) && seen.insert(p.id))
+        {
+            return Err(PinError::Unknown);
+        }
+        Ok(())
     }
 
     /// Releases every pin of `pins`, or none: all are validated first.

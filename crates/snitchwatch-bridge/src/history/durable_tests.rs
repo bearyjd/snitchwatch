@@ -423,3 +423,67 @@ fn a_session_started_with_a_pin_held_does_not_raise_the_watermark_past_it() {
         .unwrap();
     assert_eq!(rig.watermark(), Some(1000));
 }
+
+#[test]
+fn commit_pinned_rejects_more_items_than_rows_per_txn_before_any_transaction() {
+    let mut rig = rig(1000);
+    let max = rig.engine.budget().rows_per_txn as usize;
+    let batch = PinnedBatch {
+        items: (0..=max as i64).map(|i| item(1000 + i)).collect(),
+        pins: vec![rig.registry.accept().unwrap()],
+    };
+    let err = rig.engine.commit_pinned(&batch, &rig.registry).unwrap_err();
+    assert!(matches!(
+        err,
+        DurableError::Write(WriteError::BatchTooLarge { .. })
+    ));
+    assert_eq!(rig.count("events"), 0);
+    assert_eq!(rig.registry.len(), 1, "the pin is untouched");
+    assert_eq!(rig.watermark(), None);
+}
+
+#[test]
+fn a_duplicate_or_released_pin_is_refused_before_anything_commits() {
+    let mut rig = rig(1000);
+    let gap = Gap {
+        start_ms: 1000,
+        end_ms: 1200,
+        start_exact: true,
+        cause: GapCause::QueueOverflow,
+        count: 4,
+    };
+    let live = rig.registry.accept().unwrap();
+    let stale = rig.registry.accept().unwrap();
+    rig.registry.release(&stale).unwrap();
+    for pins in [vec![&live, &live], vec![&live, &stale]] {
+        let err = rig
+            .engine
+            .commit_gap(&gap, &pins, &rig.registry, &rig.limits)
+            .unwrap_err();
+        assert!(matches!(err, DurableError::Pin(_)), "{err:?}");
+        assert!(rig.gaps().is_empty(), "nothing committed");
+        assert_eq!(rig.watermark(), None);
+        assert_eq!(rig.registry.len(), 1, "no pin released");
+    }
+}
+
+#[test]
+fn a_flush_refused_before_the_transaction_neither_clears_nor_double_counts() {
+    let mut rig = rig(1000);
+    let mut counter = LossCounter::new(GapCause::QueueOverflow);
+    counter.record(&rig.registry, 3).unwrap();
+    rig.set(2000);
+    let other = PinRegistry::new();
+    let err = rig
+        .engine
+        .flush_counter(&mut counter, &other, &rig.limits)
+        .unwrap_err();
+    assert!(matches!(err, DurableError::Pin(_)));
+    assert!(rig.gaps().is_empty());
+    assert_eq!(counter.pending_count(), 3, "still pending, not cleared");
+    rig.engine
+        .flush_counter(&mut counter, &rig.registry, &rig.limits)
+        .unwrap();
+    assert_eq!(rig.gaps().iter().map(|g| g.count).sum::<u64>(), 3);
+    assert_eq!(counter.pending_count(), 0);
+}
