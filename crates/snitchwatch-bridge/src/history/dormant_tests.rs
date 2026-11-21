@@ -1,5 +1,7 @@
-//! PR 3a stays dormant: the lifecycle primitives are constructed nowhere in
-//! production code, so a bridge started without history enabled never builds
+//! History stays dormant: the lifecycle primitives (PR 3a), the durable
+//! lifecycle (PR 3b) and everything that would switch history on (`enable(`,
+//! `open_store`, the writer, `insert_event`) are named nowhere outside their
+//! owner files, so a bridge started without history enabled never builds
 //! them (the no-`history/`-directory half is `tests.rs`).
 
 use std::fs;
@@ -97,11 +99,35 @@ fn is_ident(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
+/// Exactly a module declaration (`pub mod x;`, `mod x;`): the one thing a
+/// parent module may say about a gated module. A line that merely contains
+/// `pub mod ` (`pub mod a { use ...::pins::PinId; }`) is code and is scanned.
+fn is_mod_decl(line: &str) -> bool {
+    let t = line.trim();
+    let rest = ["pub mod ", "pub(crate) mod ", "mod "]
+        .iter()
+        .find_map(|p| t.strip_prefix(p));
+    rest.and_then(|r| r.strip_suffix(';'))
+        .is_some_and(|name| !name.is_empty() && name.chars().all(is_ident))
+}
+
+/// Every whole identifier in the code of `src` (comments, strings and char
+/// literals blanked), module declarations excepted.
+fn code_words(src: &str) -> Vec<String> {
+    strip(src)
+        .lines()
+        .filter(|l| !is_mod_decl(l))
+        .flat_map(|l| l.split(|ch: char| !is_ident(ch)))
+        .filter(|w| !w.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// What a non-owner source file references: lifecycle/pins types or modules.
-/// `pub mod` declaration lines (the history `mod.rs`) are exempt.
+/// Module declaration lines (the history `mod.rs`) are exempt.
 fn offending(src: &str) -> Vec<String> {
     let mut hits = Vec::new();
-    for line in strip(src).lines().filter(|l| !l.contains("pub mod ")) {
+    for line in strip(src).lines().filter(|l| !is_mod_decl(l)) {
         hits.extend(
             TYPES
                 .iter()
@@ -137,8 +163,7 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-#[test]
-fn primitives_have_no_production_call_sites() {
+fn workspace_sources() -> Vec<PathBuf> {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut files = Vec::new();
     for krate in fs::read_dir(&crates).expect("crates dir") {
@@ -148,11 +173,22 @@ fn primitives_have_no_production_call_sites() {
         }
     }
     assert!(files.len() > 20, "scan found the workspace sources");
+    files
+}
+
+fn in_history(file: &Path) -> bool {
+    file.components().any(|c| c.as_os_str() == "history")
+}
+
+fn file_name(file: &Path) -> &str {
+    file.file_name().and_then(|n| n.to_str()).unwrap_or("")
+}
+
+#[test]
+fn primitives_have_no_production_call_sites() {
     let mut offenders = Vec::new();
-    for file in files {
-        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let in_history = file.components().any(|c| c.as_os_str() == "history");
-        if in_history && OWNERS.contains(&name) {
+    for file in workspace_sources() {
+        if in_history(&file) && OWNERS.contains(&file_name(&file)) {
             continue;
         }
         let text = fs::read_to_string(&file).expect("read source");
@@ -194,4 +230,160 @@ fn a_block_comment_does_not_join_lines_and_hide_the_next_use() {
     assert!(!offending(src).is_empty());
     let multi = "pub mod a; /* one\ntwo\nthree */ use crate::history::pins::PinId;";
     assert!(!offending(multi).is_empty());
+}
+
+// ---- PR 3b: the durable lifecycle, and the switches that turn history on ----
+
+/// What switches history on or writes to it. Named outside `history/` it
+/// would be a call site: whole identifiers, anywhere in code.
+const WIRING: [&str; 2] = ["open_store", "insert_event"];
+/// Also a switch, but other writers exist (the Kirigami seen-programs
+/// writer), so outside `history/` it counts only in a file naming `history`.
+const WIRING_HISTORY_ONLY: [&str; 1] = ["Writer"];
+/// The 3b types, whole identifiers.
+const DURABLE_TYPES: [&str; 5] = [
+    "LossCounter",
+    "LedgerLimits",
+    "GapCause",
+    "SessionEnd",
+    "PinnedBatch",
+];
+/// The 3b modules. Common words elsewhere in the workspace (`session`), so
+/// outside `history/` they count only in a file that names `history` too.
+const DURABLE_MODULES: [&str; 3] = ["ledger", "session", "durable"];
+
+/// The files that implement and test the durable half.
+const DURABLE_OWNERS: [&str; 7] = [
+    "ledger.rs",
+    "ledger_tests.rs",
+    "session.rs",
+    "durable.rs",
+    "durable_tests.rs",
+    "crash_tests.rs",
+    "dormant_tests.rs",
+];
+
+/// What a file outside `history/` may not name: the module itself (its only
+/// permitted mention is the `pub mod history;` declaration), the switches,
+/// and the 3b names. `enable` counts only as a call, in a file naming
+/// `history` (`Choices::enable` and friends exist elsewhere).
+fn outside_hits(src: &str) -> Vec<String> {
+    let words = code_words(src);
+    let names_history = words.iter().any(|w| w == "history");
+    let mut hits: Vec<String> = Vec::new();
+    for w in &words {
+        let gated = WIRING.contains(&w.as_str())
+            || DURABLE_TYPES.contains(&w.as_str())
+            || (names_history
+                && (w == "history"
+                    || WIRING_HISTORY_ONLY.contains(&w.as_str())
+                    || DURABLE_MODULES.contains(&w.as_str())));
+        if gated && !hits.contains(w) {
+            hits.push(w.clone());
+        }
+    }
+    if names_history && strip(src).contains("enable(") {
+        hits.push("enable(".to_owned());
+    }
+    hits
+}
+
+/// What a non-owner file inside `history/` may not name of the durable half.
+fn inside_hits(src: &str) -> Vec<String> {
+    let mut hits: Vec<String> = Vec::new();
+    for w in code_words(src) {
+        let gated = DURABLE_TYPES.contains(&w.as_str()) || DURABLE_MODULES.contains(&w.as_str());
+        if gated && !hits.contains(&w) {
+            hits.push(w);
+        }
+    }
+    hits
+}
+
+#[test]
+fn nothing_outside_history_names_the_switches_or_the_durable_half() {
+    let mut offenders = Vec::new();
+    for file in workspace_sources() {
+        if in_history(&file) {
+            continue;
+        }
+        for hit in outside_hits(&fs::read_to_string(&file).expect("read source")) {
+            offenders.push(format!("{} uses {hit}", file.display()));
+        }
+    }
+    assert!(offenders.is_empty(), "{offenders:#?}");
+}
+
+#[test]
+fn the_durable_half_is_named_only_by_its_owners() {
+    let mut offenders = Vec::new();
+    for file in workspace_sources() {
+        if !in_history(&file) || DURABLE_OWNERS.contains(&file_name(&file)) {
+            continue;
+        }
+        for hit in inside_hits(&fs::read_to_string(&file).expect("read source")) {
+            offenders.push(format!("{} uses {hit}", file.display()));
+        }
+    }
+    assert!(offenders.is_empty(), "{offenders:#?}");
+}
+
+#[test]
+fn the_outside_guard_catches_each_not_yet_wired_piece() {
+    for planted in [
+        "fn f() { let _ = crate::history::open_store(&l); }",
+        "fn f() { insert_event(&c, &e); }",
+        "use crate::history::writer::Writer;\nfn f(w: &Writer) {}",
+        "use snitchwatch_bridge::history::{enable};\nfn f() { enable(&l, c); }",
+        "fn f(c: LossCounter) {}",
+        "fn f(l: LedgerLimits) {}",
+        "fn f(c: GapCause) {}",
+        "use crate::history::ledger;",
+        "use crate::history::session::x;",
+        "use crate::history::durable::y;",
+        "use crate::history as h;",
+    ] {
+        assert!(!outside_hits(planted).is_empty(), "missed: {planted}");
+    }
+}
+
+#[test]
+fn the_outside_guard_leaves_unrelated_code_alone() {
+    assert!(outside_hits("fn f() { Choices::default().enable(ID); }").is_empty());
+    assert!(outside_hits("mod session; fn f(s: Session) { s.start(); }").is_empty());
+    assert!(outside_hits("pub mod history;").is_empty());
+    assert!(outside_hits("// history::open_store\nlet s = \"history\";").is_empty());
+    assert!(outside_hits("fn f(w: BufWriter) {}").is_empty());
+    assert!(outside_hits("fn f(w: &Writer) {}").is_empty());
+}
+
+#[test]
+fn the_inside_guard_catches_a_stray_durable_reference() {
+    assert!(!inside_hits("use super::ledger::LossCounter;").is_empty());
+    assert!(!inside_hits("fn f() { session::start(); }").is_empty());
+    assert!(inside_hits("pub mod ledger;\npub mod session;").is_empty());
+}
+
+#[test]
+fn a_module_declaration_line_does_not_exempt_code_after_it() {
+    assert!(!offending("pub mod a { use crate::history::pins::PinId; }").is_empty());
+    assert!(!outside_hits("pub mod a { fn f() { open_store(); } }").is_empty());
+    assert!(offending("pub mod pins;\nmod lifecycle;").is_empty());
+}
+
+#[test]
+fn blanking_a_multi_line_comment_keeps_its_newlines() {
+    assert_eq!(strip("a /* x\ny\nz */ b\nc").lines().count(), 4);
+    assert_eq!(strip("a \"x\ny\" b\nc").lines().count(), 3);
+}
+
+#[test]
+fn scanner_sees_a_use_after_an_escaped_quote_in_a_string_literal() {
+    let src = "fn f() { let _s = \"a\\\"b\"; let _g: ReaderGate; }";
+    assert!(!offending(src).is_empty());
+    let apostrophe = "fn f() { let _s = \"it\\'s\"; let _g: PinRegistry; }";
+    assert!(!offending(apostrophe).is_empty());
+    // A quote inside the string is not the end of it: the text after the
+    // escape is still string, not code.
+    assert!(offending("fn f() { let _s = \"a\\\" ReaderGate\"; }").is_empty());
 }
