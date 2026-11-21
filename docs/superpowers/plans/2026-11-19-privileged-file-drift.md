@@ -426,6 +426,7 @@ four scans against one open `ScanStore`. Don't duplicate it. Add the seams it mi
        hardening).
    - Related: baseline-spec stop-and-ask #2 (cache ownership split).
    - **Still open (2026-11-19):** `base_tree_drift` returns `PrimitiveUnavailable` and the check is reported partial (`file_drift_base_tree` under `skipped`); no ostree/composefs/baseline.db primitive is implemented.
+   - **Answered 2026-11-21:** per-path `ostree ls -d -C` vs `ostree checksum` comparison; see `docs/superpowers/plans/2026-11-21-file-drift-base-tree-primitive.md`. `base_tree_drift` was replaced by `commit_entry`/`path_checksum`.
 2. **Time budget.** Proposed `FILE_DRIFT_BUDGET = 180 s` out of the 540 s watchdog. Is that the
    right split, given chkrootkit runs last and is also slow? Needs the real-host timing from Task 6.
    - **Decided 2026-11-19 (owner: "defaults"):** keep `FILE_DRIFT_BUDGET = 180 s` as a named, provisional constant; revisit with the Task 6 real-host timing.
