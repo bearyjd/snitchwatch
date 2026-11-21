@@ -359,6 +359,7 @@ pub mod testing {
         checksums: HashMap<String, String>,
         checksum_errors: HashSet<String>,
         pub lookups: std::cell::Cell<usize>,
+        lookup_delay: std::time::Duration,
     }
 
     impl SyntheticFacts {
@@ -431,6 +432,11 @@ pub mod testing {
         }
         pub fn with_deployment_json(mut self, v: impl Into<String>) -> Self {
             self.deployment_json = Some(v.into());
+            self
+        }
+        /// Every `commit_entry` takes this long (budget tests).
+        pub fn with_lookup_delay(mut self, delay: std::time::Duration) -> Self {
+            self.lookup_delay = delay;
             self
         }
         /// `ostree` is not installed (degraded base-tree pass).
@@ -540,6 +546,7 @@ pub mod testing {
         }
         fn commit_entry(&self, _commit: &str, path: &str) -> Result<Option<CommitEntry>> {
             self.lookups.set(self.lookups.get() + 1);
+            std::thread::sleep(self.lookup_delay);
             if self.entry_errors.contains(path) {
                 return Err(ScanError::Io {
                     path: path.to_string(),

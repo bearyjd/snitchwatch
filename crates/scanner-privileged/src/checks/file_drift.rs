@@ -10,6 +10,7 @@ use scanner_core::provenance::{under_any, DYNAMIC_ALLOWLIST_PREFIXES, MUTABLE_PR
 use scanner_core::rpmverify::{failing_entries, VerifyFailure};
 use scanner_core::{classify, Classification, LayeredMatch, PathFacts};
 
+use crate::checks::base_tree::{is_commit_hex, lookup_path_ok};
 use crate::error::Result;
 use crate::facts::SystemFacts;
 use crate::model::{CheckType, Finding};
@@ -66,7 +67,7 @@ pub fn run_file_drift_within(
 ) -> Result<FileDriftOutcome> {
     let started = Instant::now();
     let report = failing_entries(&facts.rpm_verify_all()?);
-    let base_tree_unavailable: Option<String> = None;
+    let (commit, base_tree_unavailable) = base_tree_commit(facts, deployment);
     let mut anomalies = Vec::new();
     let mut incomplete = None;
     for failure in &report.failures {
@@ -77,7 +78,7 @@ pub fn run_file_drift_within(
             ));
             break;
         }
-        match assess(facts, deployment, failure) {
+        match assess(facts, deployment, commit, failure) {
             Ok(finding) => anomalies.extend(finding),
             Err(e) => {
                 incomplete = Some(format!("{}: {e}", failure.path));
@@ -105,20 +106,96 @@ pub fn run_file_drift_within(
     })
 }
 
+/// The commit to compare against, or why the whole base-tree pass is
+/// degraded (decided before the loop, so a run never degrades midway).
+fn base_tree_commit<'a>(
+    facts: &dyn SystemFacts,
+    deployment: &'a DeploymentState,
+) -> (Option<&'a str>, Option<String>) {
+    if !facts.ostree_available() {
+        return (None, Some("ostree is not installed".to_string()));
+    }
+    if !is_commit_hex(&deployment.checksum) {
+        let why = "the booted deployment checksum is not a 64-hex commit";
+        return (None, Some(why.to_string()));
+    }
+    (Some(deployment.checksum.as_str()), None)
+}
+
+/// What the base commit says about one `rpm -Va` failure (rule 2).
+enum BaseTree {
+    /// Not compared (degraded pass, or a path that must not reach `ostree`).
+    Unchecked,
+    /// The deployed object is the committed one, or the image itself lacks a
+    /// path rpm reports missing.
+    Expected,
+    Mismatch {
+        expected: String,
+        actual: String,
+    },
+    NotInCommit,
+    MissingInCommit,
+}
+
+fn base_tree_verdict(
+    facts: &dyn SystemFacts,
+    commit: &str,
+    failure: &VerifyFailure,
+) -> Result<BaseTree> {
+    let Some(entry) = facts.commit_entry(commit, &failure.path)? else {
+        return Ok(if failure.missing {
+            BaseTree::Expected
+        } else {
+            BaseTree::NotInCommit
+        });
+    };
+    if failure.missing {
+        return Ok(BaseTree::MissingInCommit);
+    }
+    let actual = facts.path_checksum(&failure.path)?;
+    Ok(if actual == entry.checksum {
+        BaseTree::Expected
+    } else {
+        BaseTree::Mismatch {
+            expected: entry.checksum,
+            actual,
+        }
+    })
+}
+
 /// Run one `rpm -Va` failure through the classification tree; `Some` only
-/// when anomalous. Owner lookups use the raw path; findings use the escaped one.
+/// when anomalous. Rule 2 (the base-tree object comparison) runs before the
+/// owner lookup, so image-baked files cost no `rpm -qf`. Owner lookups use the
+/// raw path; findings use the escaped one.
 fn assess(
     facts: &dyn SystemFacts,
     deployment: &DeploymentState,
+    commit: Option<&str>,
     failure: &VerifyFailure,
 ) -> Result<Option<Finding>> {
     let path = Path::new(&failure.path);
     if under_any(path, MUTABLE_PREFIXES) {
         return Ok(None);
     }
-    // Rule 4 vouches for the path whatever its owner: skip the `rpm -qf` spawn.
+    // Rule 4 vouches for the path whatever its owner: skip every spawn.
     if under_any(path, DYNAMIC_ALLOWLIST_PREFIXES) {
         return Ok(None);
+    }
+    let base = match commit {
+        Some(commit) if lookup_path_ok(&failure.path) => base_tree_verdict(facts, commit, failure)?,
+        Some(_) | None => BaseTree::Unchecked,
+    };
+    match &base {
+        BaseTree::Expected => return Ok(None),
+        BaseTree::MissingInCommit => {
+            let detail = "missing (present in base commit)";
+            return Ok(drift_finding(
+                Classification::Anomalous,
+                &failure.path,
+                detail,
+            ));
+        }
+        BaseTree::Unchecked | BaseTree::Mismatch { .. } | BaseTree::NotInCommit => {}
     }
     // A missing file has no on-disk owner to ask, so a missing layered file
     // reports plain "missing" (it is anomalous either way).
@@ -137,21 +214,33 @@ fn assess(
         layered_pkg: layered.then_some(LayeredMatch::Modified),
         on_dynamic_allowlist: false,
     };
-    let detail = detail_for(failure, owner.as_deref(), layered);
+    let detail = detail_for(failure, owner.as_deref(), layered, &base);
     Ok(drift_finding(classify(&path_facts), &failure.path, &detail))
 }
 
-fn detail_for(failure: &VerifyFailure, owner: Option<&str>, layered: bool) -> String {
-    let Some(pkg) = owner else {
-        return if failure.missing {
-            "missing"
-        } else {
-            "unowned"
-        }
-        .to_string();
+fn detail_for(
+    failure: &VerifyFailure,
+    owner: Option<&str>,
+    layered: bool,
+    base: &BaseTree,
+) -> String {
+    let who = match owner {
+        Some(pkg) if layered => format!("layered_pkg:{pkg}"),
+        Some(pkg) => format!("base_pkg:{pkg}"),
+        None if failure.missing => return "missing".to_string(),
+        None => "unowned".to_string(),
     };
-    let kind = if layered { "layered_pkg" } else { "base_pkg" };
-    format!("rpm -V mismatch [{}] vs {kind}:{pkg}", failure.attrs)
+    let attrs = &failure.attrs;
+    match base {
+        BaseTree::Mismatch { expected, actual } => {
+            format!("base-tree mismatch [{attrs}] expected={expected} actual={actual} vs {who}")
+        }
+        BaseTree::NotInCommit => format!("not in base commit [{attrs}] vs {who}"),
+        BaseTree::Unchecked | BaseTree::Expected | BaseTree::MissingInCommit if owner.is_some() => {
+            format!("rpm -V mismatch [{attrs}] vs {who}")
+        }
+        BaseTree::Unchecked | BaseTree::Expected | BaseTree::MissingInCommit => who,
+    }
 }
 
 /// Only an anomalous classification becomes a finding. Exhaustive on purpose:
@@ -190,6 +279,7 @@ fn is_bidi_format(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checks::base_tree::{CommitEntry, EntryKind};
     use crate::facts::testing::SyntheticFacts;
     use crate::model::Classification;
 
@@ -203,7 +293,13 @@ mod tests {
         }
     }
 
+    /// ostree-less host: the classification tests below that predate the
+    /// base-tree pass exercise the degraded (rpm -Va only) path.
     fn facts(verify: &str) -> SyntheticFacts {
+        healthy(verify).without_ostree()
+    }
+
+    fn healthy(verify: &str) -> SyntheticFacts {
         SyntheticFacts::new().with_rpm_verify(verify)
     }
 
@@ -398,5 +494,224 @@ mod tests {
             let text = &o.findings[0].path;
             assert!(!text.contains(c), "{c:?} survived: {text:?}");
         }
+    }
+
+    const SUM_A: &str = "9b88d8cc9a6c591204bc4a12dd85488122834f756cc02f24ca3a1ddc5d49273f";
+    const SUM_B: &str = "989b825aa7d0db2e775b8cd6f45719fb557ebb5916a93b6d963b2577bb0e6279";
+
+    fn entry(sum: &str) -> CommitEntry {
+        CommitEntry {
+            kind: EntryKind::File,
+            checksum: sum.to_string(),
+        }
+    }
+
+    /// The commit holds `path` with checksum A and disk matches.
+    fn matching(f: SyntheticFacts, path: &str) -> SyntheticFacts {
+        f.with_commit_entry(path, entry(SUM_A))
+            .with_path_checksum(path, SUM_A)
+    }
+
+    /// The commit holds `path` with checksum A and disk holds B.
+    fn differing(f: SyntheticFacts, path: &str) -> SyntheticFacts {
+        f.with_commit_entry(path, entry(SUM_A))
+            .with_path_checksum(path, SUM_B)
+    }
+
+    #[test]
+    fn rule2_equal_checksum_is_expected_with_no_owner_lookup() {
+        // An owner lookup on this path would fail: rule 2 must come first.
+        let f = matching(
+            healthy("S.5....T.    /usr/lib/os-release\n"),
+            "/usr/lib/os-release",
+        )
+        .with_owner_error("/usr/lib/os-release");
+        let o = run(&f).unwrap();
+        assert!(o.findings.is_empty());
+        assert_eq!(o.incomplete, None);
+        assert_eq!(o.base_tree_unavailable, None);
+    }
+
+    #[test]
+    fn differing_checksum_is_anomalous_with_both_checksums_and_the_owner() {
+        let f = differing(healthy("..5......    /usr/bin/bash\n"), "/usr/bin/bash")
+            .with_owner("/usr/bin/bash", "bash");
+        let o = run(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/bash"]);
+        let d = &o.findings[0].detail;
+        assert!(d.contains(&format!("expected={SUM_A}")), "{d}");
+        assert!(d.contains(&format!("actual={SUM_B}")), "{d}");
+        assert!(d.contains("base_pkg:bash"), "{d}");
+    }
+
+    #[test]
+    fn xattr_only_mismatch_stays_anomalous_and_unowned_is_named() {
+        let f = differing(healthy("S.5....T.    /usr/etc/shells\n"), "/usr/etc/shells");
+        let o = run(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/etc/shells"]);
+        assert!(o.findings[0].detail.contains("base-tree mismatch"));
+        assert!(o.findings[0].detail.ends_with("unowned"));
+    }
+
+    #[test]
+    fn a_path_absent_from_the_commit_is_anomalous() {
+        let f = healthy("..5......    /usr/bin/implant\n")
+            .with_commit_absent("/usr/bin/implant")
+            .with_owner("/usr/bin/implant", "bash");
+        let o = run(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/implant"]);
+        let d = &o.findings[0].detail;
+        assert!(d.contains("not in base commit"), "{d}");
+        assert!(d.contains("base_pkg:bash"), "{d}");
+        assert_eq!(o.incomplete, None);
+    }
+
+    #[test]
+    fn missing_on_disk_but_present_in_the_commit_is_anomalous() {
+        let f =
+            healthy("missing     /usr/bin/gone\n").with_commit_entry("/usr/bin/gone", entry(SUM_A));
+        let o = run(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/gone"]);
+        assert_eq!(o.findings[0].detail, "missing (present in base commit)");
+    }
+
+    #[test]
+    fn missing_on_disk_and_absent_from_the_commit_is_expected() {
+        let f = healthy("missing     /usr/local/bin\n").with_commit_absent("/usr/local/bin");
+        let o = run(&f).unwrap();
+        assert!(o.findings.is_empty());
+        assert_eq!(o.incomplete, None);
+    }
+
+    #[test]
+    fn layered_owned_differing_file_is_anomalous_naming_the_package() {
+        let f = differing(
+            healthy("..5......    /usr/bin/opensnitchd\n"),
+            "/usr/bin/opensnitchd",
+        )
+        .with_owner("/usr/bin/opensnitchd", "opensnitch");
+        let o = run(&f).unwrap();
+        let d = &o.findings[0].detail;
+        assert!(d.contains("layered_pkg:opensnitch"), "{d}");
+        assert!(d.contains("base-tree mismatch"), "{d}");
+    }
+
+    #[test]
+    fn mutable_and_allowlisted_paths_cost_no_ostree_spawn() {
+        let f =
+            healthy("..5......    /var/log/x\nmissing     /boot/x\n..5......  c /etc/foo.conf\n");
+        let o = run(&f).unwrap();
+        assert!(o.findings.is_empty());
+        assert_eq!(o.incomplete, None);
+        assert_eq!(f.lookups.get(), 0);
+    }
+
+    #[test]
+    fn a_vanished_file_keeps_earlier_findings_marks_incomplete_and_stops() {
+        let f = differing(
+            healthy("..5......    /usr/bin/a\n..5......    /usr/bin/b\n..5......    /usr/bin/c\n"),
+            "/usr/bin/a",
+        )
+        .with_commit_entry("/usr/bin/b", entry(SUM_A))
+        .with_path_checksum_error("/usr/bin/b");
+        let f = differing(f, "/usr/bin/c");
+        let o = run(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/a"]);
+        assert!(o.incomplete.is_some_and(|r| r.contains("/usr/bin/b")));
+    }
+
+    #[test]
+    fn a_budget_overrun_during_lookups_keeps_findings_and_marks_incomplete() {
+        let f = differing(
+            healthy("..5......    /usr/bin/a\n..5......    /usr/bin/b\n"),
+            "/usr/bin/a",
+        );
+        let f = differing(f, "/usr/bin/b").with_lookup_delay(Duration::from_millis(150));
+        let o = run_file_drift_within(&f, &deployment(), Duration::from_millis(100)).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/a"]);
+        assert!(o.incomplete.is_some_and(|r| r.contains("budget")));
+    }
+
+    #[test]
+    fn without_ostree_the_pass_is_degraded_with_no_spawn() {
+        let f = healthy("S.5....T.    /usr/bin/bash\nmissing     /usr/bin/gone\n")
+            .with_owner("/usr/bin/bash", "bash")
+            .without_ostree();
+        let o = run(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/bash", "/usr/bin/gone"]);
+        assert!(o
+            .base_tree_unavailable
+            .is_some_and(|r| r.contains("ostree")));
+        assert_eq!(o.incomplete, None);
+        assert_eq!(f.lookups.get(), 0);
+    }
+
+    #[test]
+    fn a_non_hex_deployment_checksum_degrades_the_pass_with_no_spawn() {
+        let f = healthy("S.5....T.    /usr/bin/bash\n").with_owner("/usr/bin/bash", "bash");
+        let mut d = deployment();
+        d.checksum = "unknown".to_string();
+        let o = run_file_drift(&f, &d).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/bash"]);
+        assert!(o.base_tree_unavailable.is_some());
+        assert_eq!(f.lookups.get(), 0);
+    }
+
+    #[test]
+    fn degraded_findings_are_a_superset_of_healthy_findings() {
+        let verify = "S.5....T.    /usr/bin/same\n..5......    /usr/bin/diff\n..5......    /usr/bin/new\n\
+                      missing     /usr/bin/gone\nmissing     /usr/local/x\n..5......    /usr/lib/f\n";
+        let build = |f: SyntheticFacts| {
+            let f = matching(f, "/usr/bin/same");
+            let f = differing(f, "/usr/bin/diff").with_commit_absent("/usr/bin/new");
+            let f = f.with_commit_entry("/usr/bin/gone", entry(SUM_A));
+            let f = f.with_commit_absent("/usr/local/x");
+            matching(f, "/usr/lib/f")
+        };
+        let healthy_run = run(&build(healthy(verify))).unwrap();
+        let degraded = run(&build(healthy(verify).without_ostree())).unwrap();
+        let (h, d) = (paths(&healthy_run), paths(&degraded));
+        assert_eq!(h, ["/usr/bin/diff", "/usr/bin/new", "/usr/bin/gone"]);
+        assert!(h.iter().all(|p| d.contains(p)), "{h:?} not within {d:?}");
+        assert!(d.len() > h.len());
+    }
+
+    #[test]
+    fn an_unavailable_primitive_mid_run_is_incomplete_not_degraded() {
+        let f = differing(
+            healthy("..5......    /usr/bin/a\n..5......    /usr/bin/b\n..5......    /usr/bin/c\n"),
+            "/usr/bin/a",
+        );
+        let f = differing(f, "/usr/bin/b");
+        // /usr/bin/c has no commit_entry configured: PrimitiveUnavailable.
+        let o = run(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/a", "/usr/bin/b"]);
+        assert!(o.incomplete.is_some_and(|r| r.contains("/usr/bin/c")));
+        assert_eq!(o.base_tree_unavailable, None);
+    }
+
+    #[test]
+    fn an_untouched_image_over_the_cap_yields_no_findings_and_a_complete_run() {
+        let n = MAX_DRIFT_PATHS + 1;
+        let verify: String = (0..n)
+            .map(|i| format!("S.5....T.    /usr/lib64/f{i}.pyc\n"))
+            .collect();
+        let f = (0..n).fold(healthy(&verify), |f, i| {
+            matching(f, &format!("/usr/lib64/f{i}.pyc"))
+        });
+        let o = run(&f).unwrap();
+        assert!(o.findings.is_empty(), "{:?}", paths(&o));
+        assert_eq!(o.incomplete, None);
+    }
+
+    #[test]
+    fn a_path_with_control_characters_is_never_looked_up_and_stays_anomalous() {
+        let raw = "/usr/bin/a\u{1b}[31m\rx";
+        let f = healthy(&format!("..5......    {raw}\n")).with_owner(raw, "bash");
+        let o = run(&f).unwrap();
+        assert_eq!(o.findings.len(), 1);
+        assert!(!o.findings[0].path.chars().any(|c| c.is_control()));
+        assert_eq!(f.lookups.get(), 0);
+        assert_eq!(o.incomplete, None);
     }
 }
