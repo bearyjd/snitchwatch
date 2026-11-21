@@ -149,11 +149,18 @@ pub fn run_privileged_scan(facts: &dyn SystemFacts, store: &ScanStore) -> Result
     })
 }
 
+/// Constant coverage note: files under `/usr` that no package owns are not
+/// enumerated (`rpm -Va` cannot list them), so rule 5 covers only rpm-owned
+/// files. It never blocks completion: no unowned-enumeration finding exists
+/// that a run could wrongly resolve (plan 2026-11-21 Non-goals).
+const UNOWNED_NOT_CHECKED: &str = "unowned files under /usr are not enumerated (rpm -Va cannot see them); see plan 2026-11-21 Non-goals";
+
 /// Run the file-drift check. It counts as completed (so its earlier findings
-/// may resolve) once `rpm -Va` was read and understood, even while the
-/// base-tree pass is unavailable (plan, interim rule: until plan OQ1 no
-/// base-tree finding can exist to be wrongly resolved). Lines `rpm -Va` printed
-/// that were not understood fail closed: reported, and nothing resolves.
+/// may resolve) once `rpm -Va` was read and understood and the run is not
+/// incomplete. A degraded base-tree pass (no `ostree`, no usable booted commit)
+/// still counts: it reports a superset of a healthy run's anomalies, so it
+/// cannot resolve what a healthy run would keep. Lines `rpm -Va` printed that
+/// were not understood fail closed: reported, and nothing resolves.
 fn run_file_drift_step(
     facts: &dyn SystemFacts,
     deployment: &Result<DeploymentState>,
@@ -183,6 +190,10 @@ fn run_file_drift_step(
         }
     };
     anomalies.extend(outcome.findings);
+    skipped.push(SkippedCheck {
+        check: "file_drift_unowned",
+        reason: UNOWNED_NOT_CHECKED.to_string(),
+    });
     let incomplete = outcome.incomplete.is_some();
     if let Some(reason) = outcome.incomplete {
         skipped.push(SkippedCheck {
