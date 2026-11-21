@@ -2,6 +2,7 @@
 //! (or reads the host only through [`crate::facts::SystemFacts`]) so it is
 //! testable with synthetic fixtures.
 
+pub mod base_tree;
 pub mod file_drift;
 pub mod kargs;
 pub mod lockdown;
