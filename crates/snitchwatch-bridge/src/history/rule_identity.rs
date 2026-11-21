@@ -78,7 +78,7 @@ pub(crate) const LIST_OPERANDS: [&str; 5] = [
 pub const MAX_KIND: usize = 256;
 const UNKNOWN: &str = "[unknown]";
 pub(crate) const OPERATOR_TYPES: [&str; 5] = ["simple", "regexp", "network", "lists", "list"];
-const ACTIONS: [&str; 3] = ["allow", "deny", "reject"];
+pub(crate) const ACTIONS: [&str; 3] = ["allow", "deny", "reject"];
 const MAX_DURATION: usize = 32;
 const VERSION: &[u8] = b"SWRI\x01";
 
@@ -157,6 +157,14 @@ pub struct RuleIdentity {
     pub qualifiers: Qualifiers,
 }
 
+/// The hash of canonical bytes: the one place a rule hash is computed.
+pub(super) fn hash_of(canonical: &[u8]) -> [u8; RULE_HASH] {
+    let digest = Sha256::digest(canonical);
+    let mut hash = [0u8; RULE_HASH];
+    hash.copy_from_slice(&digest[..RULE_HASH]);
+    hash
+}
+
 /// Redact, encode and hash `rule`.
 pub fn identify(rule: &Rule) -> Result<RuleIdentity, IdentityError> {
     if rule.name.len() > RULE_NAME {
@@ -179,11 +187,8 @@ pub fn identify(rule: &Rule) -> Result<RuleIdentity, IdentityError> {
     if enc.out.len() > SNAPSHOT {
         return Err(IdentityError::TooLarge);
     }
-    let digest = Sha256::digest(&enc.out);
-    let mut hash = [0u8; RULE_HASH];
-    hash.copy_from_slice(&digest[..RULE_HASH]);
     Ok(RuleIdentity {
-        hash,
+        hash: hash_of(&enc.out),
         class: RuleClass::of(&rule.name),
         qualifiers: Qualifiers {
             list_contents_not_recorded: enc.lists,

@@ -9,13 +9,17 @@
 //!   the file; a withheld operand shows `"withheld": true`, never a value or
 //!   a digest of one. A snapshot over [`caps::SNAPSHOT`] bytes after JSON
 //!   escaping is refused ([`SnapshotError::TooLarge`]), never cut.
-//! * **Caps** ([`SnapshotLimits`]): a count, [`caps::SNAPSHOT`] bytes each
-//!   (the type and the schema `CHECK`) and a total. Only snapshots that no
-//!   event refers to are ever evicted, oldest first; events are never
-//!   touched. When the table is full of referenced snapshots, the new
-//!   snapshot is **refused** ([`SnapshotOutcome::Refused`]) and its event is
-//!   stored without one: the hash still identifies the rule, the display text
-//!   is missing. It fails closed; nothing referenced is dropped.
+//! * **Only canonical bytes become text.** A [`SnapshotRecord`] can be built
+//!   only here, and [`snapshot_for`] recomputes the hash from the canonical
+//!   bytes and refuses an identity whose hash is not theirs.
+//! * **Caps** ([`SnapshotLimits`], D7): at most [`MAX_SNAPSHOTS`] snapshots,
+//!   [`caps::SNAPSHOT`] bytes each (the type and the schema `CHECK`) and
+//!   [`MAX_TOTAL_BYTES`] in all (less if the budget's share is smaller).
+//!   Over a bound the **oldest snapshot is dropped even if events still refer
+//!   to it**: the event keeps its `rule_hash`, only the display text goes, so
+//!   the limit always has a victim. Only a snapshot too large for the total
+//!   by itself is refused ([`SnapshotOutcome::Refused`]). The running total
+//!   is a [`SnapshotUsage`], read once per transaction and kept up to date.
 //! * **Cleanup** ([`delete_oldest_events`]): the events and the snapshots
 //!   they leave unreferenced go in one statement sequence on one connection,
 //!   so the caller's transaction makes them atomic (a fault before `COMMIT`
@@ -23,18 +27,22 @@
 //!
 //! Dormant: called only by the history writer.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
 
 use super::budget::Budget;
+use super::caps::RULE_HASH;
 use super::caps::{Snapshot, SNAPSHOT};
-use super::record::{insert_snapshot, SnapshotRecord};
-use super::rule_identity::RuleIdentity;
+use super::record::insert_snapshot;
+use super::rule_identity::{hash_of, RuleIdentity};
 use crate::cache::rules::MAX_OPERATOR_DEPTH;
 
-/// Most snapshots the table holds.
-pub const MAX_SNAPSHOTS: u64 = 1024;
-/// The snapshot table's share of the main file: one tenth.
+/// Most snapshots the table holds (D7).
+pub const MAX_SNAPSHOTS: u64 = 2000;
+/// Most snapshot bytes the table holds (D7): 4 MiB.
+const MAX_TOTAL_BYTES: u64 = 4 * 1024 * 1024;
+/// The snapshot table's share of the main file, a ceiling on the above: one
+/// tenth.
 const TOTAL_SHARE_DIVISOR: u64 = 10;
 const VERSION: &[u8] = b"SWRI\x01";
 
@@ -45,6 +53,46 @@ pub enum SnapshotError {
     Malformed,
     #[error("the snapshot is longer than {SNAPSHOT} bytes")]
     TooLarge,
+    #[error("the identity's hash is not the hash of its canonical bytes")]
+    HashMismatch,
+}
+
+/// A `rules_seen` row (D7). Built only by [`snapshot_for`] (and, in tests,
+/// [`SnapshotRecord::for_test`]), so its text always comes from canonical
+/// bytes whose hash is `rule_hash`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotRecord {
+    rule_hash: [u8; RULE_HASH],
+    snapshot: Snapshot,
+    first_seen_ms: i64,
+}
+
+impl SnapshotRecord {
+    pub(crate) fn rule_hash(&self) -> [u8; RULE_HASH] {
+        self.rule_hash
+    }
+
+    pub(crate) fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
+    pub(crate) fn first_seen_ms(&self) -> i64 {
+        self.first_seen_ms
+    }
+
+    /// Arbitrary contents, for tests of the storage layers.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        rule_hash: [u8; RULE_HASH],
+        snapshot: Snapshot,
+        first_seen_ms: i64,
+    ) -> Self {
+        Self {
+            rule_hash,
+            snapshot,
+            first_seen_ms,
+        }
+    }
 }
 
 /// The snapshot table's bounds.
@@ -62,9 +110,13 @@ impl SnapshotLimits {
         }
     }
 
-    /// At most [`MAX_SNAPSHOTS`], and a tenth of the main file in bytes.
+    /// D7's bounds, the byte total lowered to a tenth of the main file when
+    /// that is smaller.
     pub fn from_budget(budget: &Budget) -> Self {
-        Self::new(MAX_SNAPSHOTS, budget.main_bytes / TOTAL_SHARE_DIVISOR)
+        Self::new(
+            MAX_SNAPSHOTS,
+            MAX_TOTAL_BYTES.min(budget.main_bytes / TOTAL_SHARE_DIVISOR),
+        )
     }
 }
 
@@ -73,8 +125,31 @@ impl SnapshotLimits {
 pub enum SnapshotOutcome {
     Stored,
     AlreadyPresent,
-    /// Over a cap with nothing evictable: not stored.
+    /// Too large for the total by itself (or a zero count cap): not stored,
+    /// nothing evicted.
     Refused,
+}
+
+/// What the snapshot table holds, read once per transaction and updated as
+/// [`admit_snapshot`] stores and evicts, so no admission re-sums the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotUsage {
+    count: u64,
+    bytes: u64,
+}
+
+impl SnapshotUsage {
+    pub(crate) fn load(conn: &Connection) -> rusqlite::Result<Self> {
+        let (count, bytes): (i64, i64) = conn.query_row(
+            "SELECT count(*), coalesce(sum(length(CAST(snapshot AS BLOB))), 0) FROM rules_seen",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(Self {
+            count: count.max(0) as u64,
+            bytes: bytes.max(0) as u64,
+        })
+    }
 }
 
 /// A byte cursor over the canonical form (`rule_identity::Encoder`'s layout).
@@ -151,6 +226,9 @@ pub fn snapshot_for(
     identity: &RuleIdentity,
     first_seen_ms: i64,
 ) -> Result<SnapshotRecord, SnapshotError> {
+    if hash_of(&identity.canonical) != identity.hash {
+        return Err(SnapshotError::HashMismatch);
+    }
     let mut r = Reader(&identity.canonical);
     if r.take(VERSION.len())? != VERSION {
         return Err(SnapshotError::Malformed);
@@ -181,38 +259,41 @@ pub fn snapshot_for(
     })
     .to_string();
     Ok(SnapshotRecord {
-        rule_hash: identity.hash,
+        rule_hash: hash_of(&identity.canonical),
         snapshot: Snapshot::new(&text).ok_or(SnapshotError::TooLarge)?,
         first_seen_ms,
     })
 }
 
-/// Evicts the oldest snapshot that no event refers to; false if none.
-fn evict_one_unreferenced(conn: &Connection) -> rusqlite::Result<bool> {
-    let n = conn.execute(
-        "DELETE FROM rules_seen WHERE id = (SELECT id FROM rules_seen WHERE NOT EXISTS \
-         (SELECT 1 FROM events WHERE events.rule_hash = rules_seen.rule_hash) \
-         ORDER BY first_seen_ms, id LIMIT 1)",
-        [],
-    )?;
-    Ok(n > 0)
-}
-
-fn usage(conn: &Connection) -> rusqlite::Result<(u64, u64)> {
-    let (count, bytes): (i64, i64) = conn.query_row(
-        "SELECT count(*), coalesce(sum(length(CAST(snapshot AS BLOB))), 0) FROM rules_seen",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    Ok((count.max(0) as u64, bytes.max(0) as u64))
+/// Drops the oldest snapshot, referenced or not (D7); false if the table is
+/// empty.
+fn evict_oldest(conn: &Connection, usage: &mut SnapshotUsage) -> rusqlite::Result<bool> {
+    let victim: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT id, length(CAST(snapshot AS BLOB)) FROM rules_seen \
+             ORDER BY first_seen_ms, id LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, len)) = victim else {
+        return Ok(false);
+    };
+    conn.execute("DELETE FROM rules_seen WHERE id = ?1", [id])?;
+    usage.count = usage.count.saturating_sub(1);
+    usage.bytes = usage.bytes.saturating_sub(len.max(0) as u64);
+    Ok(true)
 }
 
 /// Stores `record` unless its hash is present, within `limits`: makes room
-/// by evicting unreferenced snapshots only, else refuses. Run it inside the
-/// transaction that inserts the event, so an eviction rolls back with it.
+/// by dropping the oldest snapshots, whether or not events still refer to
+/// them (D7). `usage` is the table's usage ([`SnapshotUsage::load`] once per
+/// transaction) and is kept current. Run it inside the transaction that
+/// inserts the event, so an eviction rolls back with it.
 pub fn admit_snapshot(
     conn: &Connection,
     limits: &SnapshotLimits,
+    usage: &mut SnapshotUsage,
     record: &SnapshotRecord,
 ) -> rusqlite::Result<SnapshotOutcome> {
     let present: bool = conn.query_row(
@@ -227,16 +308,16 @@ pub fn admit_snapshot(
     if limits.max_count == 0 || len > limits.max_total_bytes {
         return Ok(SnapshotOutcome::Refused);
     }
-    loop {
-        let (count, bytes) = usage(conn)?;
-        if count < limits.max_count && bytes.saturating_add(len) <= limits.max_total_bytes {
-            break;
-        }
-        if !evict_one_unreferenced(conn)? {
+    while usage.count >= limits.max_count
+        || usage.bytes.saturating_add(len) > limits.max_total_bytes
+    {
+        if !evict_oldest(conn, usage)? {
             return Ok(SnapshotOutcome::Refused);
         }
     }
     insert_snapshot(conn, record)?;
+    usage.count += 1;
+    usage.bytes += len;
     Ok(SnapshotOutcome::Stored)
 }
 

@@ -19,7 +19,7 @@ use super::ledger::{record_gap, Gap, LedgerLimits, LossCounter};
 use super::pins::{PinError, PinId, PinRegistry};
 use super::record::insert_event;
 use super::session::{self, SessionEnd};
-use super::snapshots::{admit_snapshot, SnapshotLimits};
+use super::snapshots::{admit_snapshot, SnapshotLimits, SnapshotUsage};
 use super::writer::{Engine, Item, TxnKind, TxnReport, WriteError};
 
 /// Items taken from the queue together with the pins that account for them.
@@ -75,14 +75,16 @@ impl Engine {
             }
             .into());
         }
+        batch.items.iter().try_for_each(Item::check_snapshot)?;
         let pins: Vec<&PinId> = batch.pins.iter().collect();
         registry.check_release(&pins)?;
         self.ensure_room()?;
         let limits = SnapshotLimits::from_budget(self.budget());
         self.durable_txn(registry, &pins, TxnKind::Insert, |conn, _| {
+            let mut usage = SnapshotUsage::load(conn)?;
             for item in &batch.items {
                 if let Some(snapshot) = &item.snapshot {
-                    admit_snapshot(conn, &limits, snapshot)?;
+                    admit_snapshot(conn, &limits, &mut usage, snapshot)?;
                 }
                 insert_event(conn, &item.event)?;
             }

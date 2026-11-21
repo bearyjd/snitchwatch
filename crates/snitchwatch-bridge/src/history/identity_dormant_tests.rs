@@ -93,8 +93,10 @@ fn the_scan_notices_a_call_site() {
 
 /// PR 4b: what stores or evicts snapshots. Named outside `history/` it would
 /// be a call site; inside, only the writer and durable halves use them.
-const SNAPSHOTS: [&str; 8] = [
+const SNAPSHOTS: [&str; 10] = [
     "snapshots::",
+    "SnapshotRecord",
+    "SnapshotUsage",
     "SnapshotLimits",
     "SnapshotOutcome",
     "SnapshotError",

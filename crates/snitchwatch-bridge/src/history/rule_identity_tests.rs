@@ -350,16 +350,67 @@ const IDENTITY_SUPPORTED: [&str; 5] = ["list", "lists", "network", "regexp", "si
 /// Vendored types `identify` refuses until it models them.
 const IDENTITY_REFUSED: [&str; 2] = ["complex", "range"];
 
+/// Every string constant of Go type `ty` declared in `go`: `Ty("x")`
+/// anywhere, and `Name Ty = "x"` inside a `const`/`var` declaration. A line
+/// inside such a declaration that names `ty` in any other shape panics, so a
+/// new declaration style cannot slip past the canary.
+fn vendored_consts<'a>(go: &'a str, ty: &str) -> Vec<&'a str> {
+    let call = regex::Regex::new(&format!(r#"\b{ty}\("([^"]*)"\)"#)).unwrap();
+    let typed = regex::Regex::new(&format!(r#"\b{ty}\s*=\s*"([^"]*)""#)).unwrap();
+    let named = regex::Regex::new(&format!(r"(?:^|[^.\w]){ty}\b")).unwrap();
+    assert!(!go.contains("/*"), "block comments are not modelled");
+    let mut out = Vec::new();
+    let mut in_decl = false;
+    for raw in go.lines() {
+        let line = raw.split("//").next().unwrap_or("").trim();
+        if line.starts_with("const (") || line.starts_with("var (") {
+            in_decl = true;
+            continue;
+        }
+        if in_decl && line == ")" {
+            in_decl = false;
+            continue;
+        }
+        let decl = in_decl || line.starts_with("const ") || line.starts_with("var ");
+        let mut found: Vec<&str> = call
+            .captures_iter(line)
+            .map(|c| c.get(1).unwrap().as_str())
+            .collect();
+        if decl {
+            found.extend(
+                typed
+                    .captures_iter(line)
+                    .map(|c| c.get(1).unwrap().as_str()),
+            );
+            if named.is_match(line) && found.is_empty() {
+                panic!("an unrecognised {ty} declaration: {line}");
+            }
+        }
+        out.extend(found);
+    }
+    out.sort_unstable();
+    out
+}
+
 fn vendored_types() -> Vec<&'static str> {
-    let go = include_str!("../../../../vendor/opensnitch/daemon/rule/operator.go");
-    let mut v: Vec<&str> = go
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("//"))
-        .filter_map(|l| l.split("Type(\"").nth(1))
-        .filter_map(|l| l.split('"').next())
-        .collect();
-    v.sort_unstable();
-    v
+    vendored_consts(
+        include_str!("../../../../vendor/opensnitch/daemon/rule/operator.go"),
+        "Type",
+    )
+}
+
+#[test]
+fn the_vendored_const_scanner_sees_every_declaration_style() {
+    let go = "const (\n\tA = Type(\"a\")\n\tB Type = \"b\" // c\n\t// C = Type(\"no\")\n)\n\
+              const D = Type(\"d\")\nconst E Type = \"e\"\nvar F = Type(\"f\")\n\
+              func init() { m[Type(\"g\")] = 1 }\ntype Type string\nvar x = o.Type == A\n";
+    assert_eq!(vendored_consts(go, "Type"), ["a", "b", "d", "e", "f", "g"]);
+}
+
+#[test]
+#[should_panic(expected = "unrecognised Type declaration")]
+fn the_vendored_const_scanner_refuses_a_declaration_it_cannot_read() {
+    vendored_consts("const (\n\tA Type = someFunc()\n)\n", "Type");
 }
 
 #[test]
@@ -681,4 +732,22 @@ fn an_over_long_kind_fails_closed() {
     );
     let ok = "k".repeat(MAX_KIND);
     assert!(identify(&rule("r", Some(op("simple", &ok, "")))).is_ok());
+}
+
+// ---- the vendored actions ---------------------------------------------
+
+#[test]
+fn identity_actions_match_the_vendored_daemon() {
+    let go = include_str!("../../../../vendor/opensnitch/daemon/rule/rule.go");
+    let vendored = vendored_consts(go, "Action");
+    let mut ours = ACTIONS.to_vec();
+    ours.sort_unstable();
+    assert_eq!(vendored, ours, "a new daemon action needs a decision");
+    for a in vendored {
+        let r = Rule {
+            action: a.into(),
+            ..rule("r", None)
+        };
+        assert!(contains(&id(&r).canonical, a), "{a} is kept verbatim");
+    }
 }

@@ -28,7 +28,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use super::budget::Budget;
 use super::record::{insert_event, EventRecord, SnapshotRecord};
-use super::snapshots::{admit_snapshot, delete_oldest_events, SnapshotLimits};
+use super::snapshots::{admit_snapshot, delete_oldest_events, SnapshotLimits, SnapshotUsage};
 use super::{Location, Store};
 
 /// Default queue bounds (D5).
@@ -59,7 +59,23 @@ impl Item {
             + e.protocol.as_ref().map_or(0, |v| v.allocated())
             + e.rule_name.as_ref().map_or(0, |v| v.allocated())
             + e.rule_class.as_ref().map_or(0, |v| v.allocated())
-            + self.snapshot.as_ref().map_or(0, |s| s.snapshot.allocated())
+            + self
+                .snapshot
+                .as_ref()
+                .map_or(0, |s| s.snapshot().allocated())
+    }
+}
+
+impl Item {
+    /// A snapshot must be the one its event's `rule_hash` names; otherwise
+    /// nothing would ever delete it with that event. Checked before any
+    /// write.
+    pub(crate) fn check_snapshot(&self) -> Result<(), WriteError> {
+        match (&self.snapshot, self.event.rule_hash) {
+            (None, _) => Ok(()),
+            (Some(s), Some(hash)) if s.rule_hash() == hash => Ok(()),
+            _ => Err(WriteError::SnapshotMismatch),
+        }
     }
 }
 
@@ -223,6 +239,10 @@ pub enum WriteError {
     JournalMode(String),
     #[error("a batch of {got} rows is over the {max}-row transaction budget")]
     BatchTooLarge { got: usize, max: u64 },
+    /// An item carries a snapshot that is not its event's rule's; nothing
+    /// was written.
+    #[error("an item's snapshot does not belong to its event's rule hash")]
+    SnapshotMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -480,11 +500,13 @@ impl Engine {
                 max: self.budget.rows_per_txn,
             });
         }
+        items.iter().try_for_each(Item::check_snapshot)?;
         let limits = SnapshotLimits::from_budget(&self.budget);
         self.transact(TxnKind::Insert, |conn| {
+            let mut usage = SnapshotUsage::load(conn)?;
             for item in items {
                 if let Some(snapshot) = &item.snapshot {
-                    admit_snapshot(conn, &limits, snapshot)?;
+                    admit_snapshot(conn, &limits, &mut usage, snapshot)?;
                 }
                 insert_event(conn, &item.event)?;
             }

@@ -214,11 +214,7 @@ fn ip_addresses_store_at_most_their_longest_text() {
 #[test]
 fn snapshots_round_trip_and_the_hash_is_unique() {
     let (_keep, store) = store();
-    let s = SnapshotRecord {
-        rule_hash: [7; RULE_HASH],
-        snapshot: Snapshot::new("{}").unwrap(),
-        first_seen_ms: 5,
-    };
+    let s = SnapshotRecord::for_test([7; RULE_HASH], Snapshot::new("{}").unwrap(), 5);
     insert_snapshot(store.connection(), &s).unwrap();
     assert!(
         insert_snapshot(store.connection(), &s).is_err(),
