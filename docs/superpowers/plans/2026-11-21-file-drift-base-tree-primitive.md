@@ -499,4 +499,4 @@ composefs, not `base_checksum`.
    **Decided 2026-11-21 (owner: "defaults"): per-path lookups, no batching.**
 8. **Layered-entry format** of `rpm-ostree status --json` (carried from 11-19 Task 6; `[]` on the
    stock image). Still needed before layered-host behaviour can be trusted.
-   **Still OPEN (owner, 2026-11-21): left as a RUNBOOK / real-host item (Task 6).**
+   **Q8 closed as label-only: parse reads packages + requested-packages + requested-local-packages (union); real layered entry format not live-verified (no layered image available); a mislabel shows base_pkg instead of layered_pkg, detection is unaffected.**
