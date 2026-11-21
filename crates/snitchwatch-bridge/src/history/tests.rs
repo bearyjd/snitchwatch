@@ -562,7 +562,10 @@ fn reopening_keeps_the_data_and_the_version() {
     let (_, at) = enabled_location(&root);
     drop(open_store(&at).unwrap());
     let store = open_store(&at).unwrap();
-    assert_eq!(pragma(&store, "user_version"), 1.into());
+    assert_eq!(
+        pragma(&store, "user_version"),
+        schema::SCHEMA_VERSION.into()
+    );
     let tables: i64 = store
         .connection()
         .query_row(
@@ -571,7 +574,7 @@ fn reopening_keeps_the_data_and_the_version() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(tables, 2);
+    assert_eq!(tables, 5, "events, rules_seen, gaps, sessions, meta");
 }
 
 fn set_user_version(at: &Location, version: i64) {
@@ -626,7 +629,7 @@ fn a_database_with_another_page_size_is_refused() {
         let conn = rusqlite::Connection::open(at.db_path()).unwrap();
         conn.execute_batch("PRAGMA page_size = 8192; PRAGMA auto_vacuum = 2;")
             .unwrap();
-        conn.execute_batch(&schema::schema_sql()).unwrap();
+        conn.execute_batch(&schema::v1_sql()).unwrap();
         conn.execute_batch("PRAGMA user_version = 1;").unwrap();
     }
     let Err(reason) = open_store(&at) else {
@@ -643,7 +646,7 @@ fn a_database_without_incremental_vacuum_is_refused() {
         let conn = rusqlite::Connection::open(at.db_path()).unwrap();
         conn.execute_batch("PRAGMA page_size = 4096; PRAGMA auto_vacuum = 0;")
             .unwrap();
-        conn.execute_batch(&schema::schema_sql()).unwrap();
+        conn.execute_batch(&schema::v1_sql()).unwrap();
         conn.execute_batch("PRAGMA user_version = 1;").unwrap();
     }
     assert!(open_store(&at).is_err());
@@ -707,7 +710,176 @@ fn settings_survive_the_database_being_recreated() {
     std::fs::remove_file(at.db_path()).unwrap();
     let before = std::fs::read(at.settings_path()).unwrap();
     let store = open_store(&at).unwrap();
-    assert_eq!(pragma(&store, "user_version"), 1.into());
+    assert_eq!(
+        pragma(&store, "user_version"),
+        schema::SCHEMA_VERSION.into()
+    );
     assert_eq!(std::fs::read(at.settings_path()).unwrap(), before);
     assert!(matches!(load_state(&at), State::Enabled(_)));
+}
+
+/// A version-1 file as PR 1 created it: layout pragmas, the v1 tables, one
+/// event and one snapshot.
+fn make_v1_database(at: &Location) {
+    let conn = rusqlite::Connection::open(at.db_path()).unwrap();
+    conn.execute_batch("PRAGMA page_size = 4096; PRAGMA auto_vacuum = 2;")
+        .unwrap();
+    conn.execute_batch(&schema::v1_sql()).unwrap();
+    conn.execute_batch(
+        "INSERT INTO events (ts_ms, process_path, action, answered_by) \
+         VALUES (1234, '/usr/bin/curl', 'allow', 'rule'); \
+         INSERT INTO rules_seen (rule_hash, snapshot, first_seen_ms) \
+         VALUES (zeroblob(16), '{}', 99); \
+         PRAGMA user_version = 1;",
+    )
+    .unwrap();
+    drop(conn);
+    std::fs::set_permissions(at.db_path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+fn count(store: &Store, table: &str) -> i64 {
+    store
+        .connection()
+        .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_v1_database_is_migrated_to_v2_keeping_its_rows() {
+    let root = tempdir();
+    let (_, at) = enabled_location(&root);
+    make_v1_database(&at);
+    let store = open_store(&at).unwrap();
+    assert_eq!(
+        pragma(&store, "user_version"),
+        schema::SCHEMA_VERSION.into()
+    );
+    assert_eq!(count(&store, "events"), 1);
+    assert_eq!(count(&store, "rules_seen"), 1);
+    let path: String = store
+        .connection()
+        .query_row("SELECT process_path FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(path, "/usr/bin/curl");
+    for table in ["gaps", "sessions", "meta"] {
+        assert_eq!(count(&store, table), 0, "{table} exists and is empty");
+    }
+    drop(store);
+    // Reopening a migrated file is the plain v2 path.
+    let again = open_store(&at).unwrap();
+    assert_eq!(count(&again, "events"), 1);
+}
+
+#[test]
+fn a_migrated_database_has_exactly_the_schema_of_a_new_one() {
+    let root = tempdir();
+    let (_, migrated) = enabled_location(&root);
+    make_v1_database(&migrated);
+    let migrated = open_store(&migrated).unwrap();
+    let root2 = tempdir();
+    let (_, fresh) = enabled_location(&root2);
+    let fresh = open_store(&fresh).unwrap();
+    let sql = |s: &Store| -> Vec<String> {
+        let mut stmt = s
+            .connection()
+            .prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(sql(&migrated), sql(&fresh));
+}
+
+#[test]
+fn a_v1_file_refused_for_its_layout_is_not_migrated() {
+    let root = tempdir();
+    let (_, at) = enabled_location(&root);
+    {
+        let conn = rusqlite::Connection::open(at.db_path()).unwrap();
+        // auto_vacuum stays NONE.
+        conn.execute_batch(&schema::v1_sql()).unwrap();
+        conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+    }
+    assert!(open_store(&at).is_err());
+    let conn = rusqlite::Connection::open(at.db_path()).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    let tables: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!((version, tables), (1, 2), "the refused file was modified");
+}
+
+#[test]
+fn a_v1_file_with_a_stray_object_is_refused_and_left_alone() {
+    let root = tempdir();
+    let (_, at) = enabled_location(&root);
+    make_v1_database(&at);
+    rusqlite::Connection::open(at.db_path())
+        .unwrap()
+        .execute_batch("CREATE TABLE gaps (x);")
+        .unwrap();
+    assert!(open_store(&at).is_err());
+    let conn = rusqlite::Connection::open(at.db_path()).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 1);
+}
+
+#[test]
+fn history_that_is_off_never_migrates_a_v1_file() {
+    // Off is "no settings file": nothing opens the database, so nothing
+    // upgrades it. Migration is reachable only through `open_store`.
+    let root = tempdir();
+    let state = state_dir(&root);
+    let at = location(&state);
+    std::fs::create_dir(at.dir()).unwrap();
+    std::fs::set_permissions(at.dir(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    make_v1_database(&at);
+    assert!(matches!(load_state(&at), State::Off));
+    assert!(open_store(&at).is_err());
+    let conn = rusqlite::Connection::open(at.db_path()).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 1);
+    assert_eq!(names(at.dir()), vec!["history.db".to_string()]);
+}
+
+#[test]
+fn the_ledger_tables_hold_only_times_counts_and_enums() {
+    // Privacy: no process, path, host, argument or payload column can exist in
+    // a gap, session or watermark row (the plan's stored-fields allowlist).
+    let root = tempdir();
+    let (_, at) = enabled_location(&root);
+    let store = open_store(&at).unwrap();
+    let columns = |table: &str| -> Vec<String> {
+        let mut stmt = store
+            .connection()
+            .prepare(&format!(
+                "SELECT name FROM pragma_table_info('{table}') ORDER BY cid"
+            ))
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        columns("gaps"),
+        ["id", "start_ms", "end_ms", "start_exact", "cause", "count"]
+    );
+    assert_eq!(
+        columns("sessions"),
+        ["id", "start_ms", "end_ms", "end_kind"]
+    );
+    assert_eq!(columns("meta"), ["id", "watermark_ms"]);
 }

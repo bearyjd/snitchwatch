@@ -229,6 +229,8 @@ pub enum TxnKind {
     Insert,
     Evict,
     Vacuum,
+    /// Gap, session and watermark writes (`durable`).
+    Ledger,
 }
 
 /// What one committed transaction did, with its journal size measured just
@@ -314,6 +316,10 @@ pub struct Engine {
     budget: Budget,
     journal: PathBuf,
     observer: Option<Observer>,
+    /// Test seam: an error to raise after a transaction's rows were written
+    /// and before `COMMIT`, to prove nothing else happens when it fails.
+    #[cfg(test)]
+    fault_before_commit: Option<Box<dyn FnMut() -> Option<WriteError> + Send>>,
 }
 
 impl Engine {
@@ -356,6 +362,8 @@ impl Engine {
             budget,
             journal: journal.into(),
             observer: None,
+            #[cfg(test)]
+            fault_before_commit: None,
         };
         engine.pin_journal_mode()?;
         Ok(engine)
@@ -415,9 +423,17 @@ impl Engine {
         self.pragma_u64("page_count")
     }
 
+    #[cfg(test)]
+    pub(crate) fn fault_before_commit_for_test(
+        &mut self,
+        fault: Box<dyn FnMut() -> Option<WriteError> + Send>,
+    ) {
+        self.fault_before_commit = Some(fault);
+    }
+
     /// Run `work` in one write transaction; check the journal against the
     /// budget before committing.
-    fn transact(
+    pub(super) fn transact(
         &mut self,
         kind: TxnKind,
         work: impl FnOnce(&Connection) -> Result<u64, WriteError>,
@@ -437,6 +453,11 @@ impl Engine {
                 journal: journal_bytes,
                 limit,
             });
+        }
+        #[cfg(test)]
+        if let Some(error) = self.fault_before_commit.as_mut().and_then(|f| f()) {
+            drop(tx); // rolls back
+            return Err(error);
         }
         tx.commit()?;
         let report = TxnReport {
@@ -550,14 +571,20 @@ impl Engine {
     /// Make room (evicting and vacuuming within the page budget), then insert
     /// `batch`, at most `rows_per_txn` items.
     pub fn write_batch(&mut self, batch: &[Item]) -> Result<(), WriteError> {
-        if !self.make_room()? {
-            return Err(WriteError::Sqlite(rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
-                Some("history is over its disk budget".into()),
-            )));
-        }
+        self.ensure_room()?;
         self.insert_batch(batch)?;
         Ok(())
+    }
+
+    /// [`make_room`](Self::make_room), as an error when it could not.
+    pub(super) fn ensure_room(&mut self) -> Result<(), WriteError> {
+        if self.make_room()? {
+            return Ok(());
+        }
+        Err(WriteError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+            Some("history is over its disk budget".into()),
+        )))
     }
 }
 

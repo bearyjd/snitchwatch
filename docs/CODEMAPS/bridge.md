@@ -32,4 +32,4 @@ Lib: 246 .rs files (many `*_tests.rs`). CLI orchestration: `crates/snitchwatch-b
 | `sqlite_file.rs`, `state_file.rs` | owner-only file helpers |
 
 ## Notes
-- `history/mod.rs` says "dormant". `history/dormant_tests.rs` fails if code outside the history owner files names six lifecycle/pins types or the identifiers `lifecycle`/`pins` (:9-19,102-117); it does not cover other history APIs.
+- `history/mod.rs` says "dormant". `history/dormant_tests.rs` fails if code outside the history owner files names the lifecycle/pins types or modules; if any file outside `history/` names `open_store`, `insert_event`, the history module, `Writer`/`enable(` next to it, or a 3b name (`ledger`, `session`, `durable`, `LossCounter`, `GapCause`, ...); or if a non-owner file inside `history/` names the 3b names. A completeness test fails when `ledger.rs`, `session.rs` or `durable.rs` gain a `pub` item the lists do not cover. PR 3b (durable lifecycle: schema v2 with `gaps`/`sessions`/`meta`, watermark, pin release in the committing transaction, bounded ledger) is built and tested but, like the rest, called from nowhere.
