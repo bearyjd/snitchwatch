@@ -565,6 +565,26 @@ pub const OSTREE_LS_ARGS: [&str; 3] = ["ls", "-d", "-C"];
 /// `ostree checksum` subcommand; the absolute path follows.
 pub const OSTREE_CHECKSUM_ARGS: [&str; 1] = ["checksum"];
 
+/// Payload of the `TimedOut` error every primitive gets once the whole-scan
+/// watchdog has fired (as opposed to one primitive's own deadline).
+#[derive(Debug)]
+pub struct WatchdogExpired;
+
+impl std::fmt::Display for WatchdogExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("scanner watchdog already expired")
+    }
+}
+
+impl std::error::Error for WatchdogExpired {}
+
+/// Whether `error` is the watchdog-expiry error.
+pub fn is_watchdog_expired(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<WatchdogExpired>())
+}
+
 /// Stdout of an `ostree ls` that exited 1 with the pinned absent-path stderr.
 /// Real `ostree ls` output never contains NUL, so exit 0 with empty stdout
 /// stays distinguishable from a proven absence.
@@ -710,7 +730,7 @@ fn capture_allowing(command: &mut Command, timeout: Duration, allow: Allow) -> i
             Ok(())
         });
     }
-    let expired = || io::Error::new(io::ErrorKind::TimedOut, "scanner watchdog already expired");
+    let expired = || io::Error::new(io::ErrorKind::TimedOut, WatchdogExpired);
     {
         // Authorized only while `Running`, atomically with marking it in flight.
         let mut state = watchdog_state();

@@ -432,6 +432,7 @@ composefs, not `base_checksum`.
   or hashes target files. `ostree` does, as a child under `command::run`, with the env cleared,
   `TRUSTED_DIRS` resolution, byte caps, per-spawn deadlines and the watchdog-swept process group.
   The 11-19 `no_persistent_service` guard is unaffected.
+- **Known limitation (decoys and the cap).** Decoy `base-tree lookup failed` findings count toward `MAX_DRIFT_PATHS`, so enough decoys listed before an implant can push it past the cap. The run is then incomplete and nothing resolves, but that implant is not listed until the decoys are removed.
 - **Bounded cost.** `MAX_DRIFT_PATHS`, the 1 MiB stdout cap, `FILE_DRIFT_BUDGET` and the extended
   static assert bound spawns and time. Hitting any of them is surfaced, never treated as clean.
 

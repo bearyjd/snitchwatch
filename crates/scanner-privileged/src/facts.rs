@@ -384,6 +384,7 @@ pub mod testing {
         entry_errors: HashSet<String>,
         checksums: HashMap<String, String>,
         checksum_errors: HashMap<String, std::io::ErrorKind>,
+        watchdog_expired: HashSet<String>,
         pub lookups: std::cell::Cell<usize>,
         lookup_delay: std::time::Duration,
     }
@@ -505,6 +506,11 @@ pub mod testing {
         pub fn with_path_timeout(self, path: impl Into<String>) -> Self {
             self.with_path_checksum_failure(path, std::io::ErrorKind::TimedOut)
         }
+        /// `path_checksum(path)` fails because the whole-scan watchdog fired.
+        pub fn with_path_watchdog_expired(mut self, path: impl Into<String>) -> Self {
+            self.watchdog_expired.insert(path.into());
+            self
+        }
         fn with_path_checksum_failure(
             mut self,
             path: impl Into<String>,
@@ -601,6 +607,15 @@ pub mod testing {
         }
         fn path_checksum(&self, path: &str) -> Result<String> {
             self.lookups.set(self.lookups.get() + 1);
+            if self.watchdog_expired.contains(path) {
+                return Err(ScanError::Io {
+                    path: path.to_string(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        crate::command::WatchdogExpired,
+                    ),
+                });
+            }
             if let Some(kind) = self.checksum_errors.get(path) {
                 return Err(ScanError::Io {
                     path: path.to_string(),

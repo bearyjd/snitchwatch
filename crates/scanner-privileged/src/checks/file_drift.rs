@@ -91,7 +91,7 @@ pub fn run_file_drift_within(
                 }
             }
             Err(e) => {
-                incomplete = Some(format!("{}: {e}", failure.path));
+                incomplete = Some(escape_untrusted(&format!("{}: {e}", failure.path)));
                 break;
             }
         }
@@ -257,6 +257,7 @@ fn lookup_failure(error: ScanError, failure: &VerifyFailure) -> Result<Assessed>
     let reason = match &error {
         ScanError::Io { source, .. } => match source.kind() {
             io::ErrorKind::NotFound => return Err(error),
+            _ if crate::command::is_watchdog_expired(source) => return Err(error),
             io::ErrorKind::TimedOut => "deadline exceeded",
             _ => "ostree failed",
         },
@@ -802,5 +803,30 @@ mod tests {
         let o = run(&f).unwrap();
         assert_eq!(paths(&o), ["/usr/bin/a", "/usr/bin/b"]);
         assert!(o.incomplete.is_some());
+    }
+
+    #[test]
+    fn an_expired_watchdog_stops_the_run_instead_of_adding_per_path_findings() {
+        let verify = "..5......    /usr/bin/a\n..5......    /usr/bin/b\n..5......    /usr/bin/c\n";
+        let f = differing(healthy(verify), "/usr/bin/a");
+        let f = f
+            .with_commit_entry("/usr/bin/b", entry(SUM_A))
+            .with_path_watchdog_expired("/usr/bin/b");
+        let f = differing(f, "/usr/bin/c");
+        let o = run(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/a"]);
+        assert!(o.incomplete.is_some_and(|r| r.contains("/usr/bin/b")));
+    }
+
+    #[test]
+    fn the_vanished_stop_reason_escapes_the_path() {
+        let raw = "/usr/bin/v\u{1b}[31m\u{202e}x";
+        let f = healthy(&format!("..5......    {raw}\n")).with_owner_error(raw);
+        let reason = run(&f).unwrap().incomplete.unwrap();
+        assert!(
+            !reason.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "{reason:?}"
+        );
+        assert!(reason.contains("\\u{1b}"), "{reason}");
     }
 }
