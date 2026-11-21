@@ -135,12 +135,12 @@ fn file_drift_is_new_then_still_then_resolved_with_base_tree_partial() {
     let dir = tempfile::tempdir().unwrap();
     let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
 
-    let r1 = run_privileged_scan(&drift_facts(TAMPERED), &store, "dep-abc").unwrap();
+    let r1 = run_privileged_scan(&drift_facts(TAMPERED), &store).unwrap();
     let finding = r1.reconciled.new.iter().find(|f| f.path == TAMPERED_PATH);
     assert!(finding.is_some_and(|f| f.detail.contains("layered_pkg:opensnitch")));
     assert!(!r1.skipped.iter().any(|s| s.check == "file_drift"));
 
-    let r2 = run_privileged_scan(&drift_facts(TAMPERED), &store, "dep-abc").unwrap();
+    let r2 = run_privileged_scan(&drift_facts(TAMPERED), &store).unwrap();
     assert!(r2.reconciled.new.is_empty());
     assert!(r2
         .reconciled
@@ -149,7 +149,7 @@ fn file_drift_is_new_then_still_then_resolved_with_base_tree_partial() {
         .any(|f| f.path == TAMPERED_PATH));
 
     // Restored: resolves even though the base-tree pass is unavailable.
-    let r3 = run_privileged_scan(&drift_facts(""), &store, "dep-abc").unwrap();
+    let r3 = run_privileged_scan(&drift_facts(""), &store).unwrap();
     assert!(r3
         .reconciled
         .resolved
@@ -163,7 +163,7 @@ fn a_truncated_run_never_resolves_findings_past_the_cap() {
     let dir = tempfile::tempdir().unwrap();
     let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
     let late = "/usr/lib/late";
-    let r1 = run_privileged_scan(&drift_facts("missing     /usr/lib/late\n"), &store, "d").unwrap();
+    let r1 = run_privileged_scan(&drift_facts("missing     /usr/lib/late\n"), &store).unwrap();
     assert!(r1.reconciled.new.iter().any(|f| f.path == late));
 
     // Scan 2: more than the cap of other anomalies, `late` is past the cap.
@@ -171,7 +171,7 @@ fn a_truncated_run_never_resolves_findings_past_the_cap() {
         .map(|i| format!("missing     /usr/lib/g{i}\n"))
         .collect();
     verify.push_str("missing     /usr/lib/late\n");
-    let r2 = run_privileged_scan(&drift_facts(&verify), &store, "d").unwrap();
+    let r2 = run_privileged_scan(&drift_facts(&verify), &store).unwrap();
     assert!(
         r2.reconciled.resolved.is_empty(),
         "{:?}",
@@ -183,7 +183,7 @@ fn a_truncated_run_never_resolves_findings_past_the_cap() {
         .any(|s| s.check == "file_drift_incomplete"));
 
     // Scan 3: complete and clean -> now it may resolve.
-    let r3 = run_privileged_scan(&drift_facts(""), &store, "d").unwrap();
+    let r3 = run_privileged_scan(&drift_facts(""), &store).unwrap();
     assert!(r3.reconciled.resolved.iter().any(|f| f.path == late));
 }
 
@@ -191,14 +191,14 @@ fn a_truncated_run_never_resolves_findings_past_the_cap() {
 fn a_failed_rpm_primitive_skips_file_drift_without_aborting_the_scan() {
     let dir = tempfile::tempdir().unwrap();
     let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
-    let r1 = run_privileged_scan(&drift_facts(TAMPERED), &store, "dep-abc").unwrap();
+    let r1 = run_privileged_scan(&drift_facts(TAMPERED), &store).unwrap();
     assert!(r1.reconciled.new.iter().any(|f| f.path == TAMPERED_PATH));
 
     let mut broken = drift_facts(TAMPERED);
     broken.rpm_verify_io_error = true;
     broken.proc_modules.push_str("rk_hidden 1 0 - Live 0x0\n");
     broken.committed_kargs = String::new();
-    let r2 = run_privileged_scan(&broken, &store, "dep-abc").unwrap();
+    let r2 = run_privileged_scan(&broken, &store).unwrap();
     let skip = r2.skipped.iter().find(|s| s.check == "file_drift");
     assert!(
         skip.is_some_and(|s| s.reason.contains("rpmdb locked")),
@@ -226,7 +226,7 @@ fn full_scan_diffs_new_still_and_resolved_across_runs() {
     // tier would have flagged for deeper inspection).
     let mut facts = healthy_facts();
     facts.proc_modules.push_str("rk_hidden 1 0 - Live 0x0\n");
-    let report = run_privileged_scan(&facts, &store, "dep-abc").unwrap();
+    let report = run_privileged_scan(&facts, &store).unwrap();
     assert!(report
         .reconciled
         .new
@@ -235,7 +235,7 @@ fn full_scan_diffs_new_still_and_resolved_across_runs() {
     assert_eq!(report.informational.len(), 2); // secure boot + lockdown
 
     // Scan 2: same anomaly still present → still outstanding, not new.
-    let report2 = run_privileged_scan(&facts, &store, "dep-abc").unwrap();
+    let report2 = run_privileged_scan(&facts, &store).unwrap();
     assert!(report2.reconciled.new.is_empty());
     assert!(report2
         .reconciled
@@ -245,7 +245,7 @@ fn full_scan_diffs_new_still_and_resolved_across_runs() {
 
     // Scan 3: module gone (rootkit removed) → resolved.
     let clean = healthy_facts();
-    let report3 = run_privileged_scan(&clean, &store, "dep-abc").unwrap();
+    let report3 = run_privileged_scan(&clean, &store).unwrap();
     assert!(report3
         .reconciled
         .resolved
@@ -263,18 +263,18 @@ fn a_skipped_check_does_not_resolve_its_earlier_findings() {
     let mut infected = healthy_facts();
     infected.chkrootkit = Some("/usr/sbin/chkrootkit".to_string());
     infected.chkrootkit_output = "Checking 'lkm'... INFECTED\n".to_string();
-    let r1 = run_privileged_scan(&infected, &store, "dep-abc").unwrap();
+    let r1 = run_privileged_scan(&infected, &store).unwrap();
     assert!(r1.reconciled.new.iter().any(|f| f.path == lkm));
 
     // Scan 2: chkrootkit is gone (skipped) -> the finding must stay open.
-    let r2 = run_privileged_scan(&healthy_facts(), &store, "dep-abc").unwrap();
+    let r2 = run_privileged_scan(&healthy_facts(), &store).unwrap();
     assert!(r2.skipped.iter().any(|s| s.check == "rootkit_signature"));
     assert!(r2.reconciled.resolved.is_empty(), "{:?}", r2.reconciled);
 
     // Scan 3: chkrootkit runs and is clean -> now it resolves.
     let mut clean = healthy_facts();
     clean.chkrootkit = Some("/usr/sbin/chkrootkit".to_string());
-    let r3 = run_privileged_scan(&clean, &store, "dep-abc").unwrap();
+    let r3 = run_privileged_scan(&clean, &store).unwrap();
     assert!(r3.reconciled.resolved.iter().any(|f| f.path == lkm));
 }
 
@@ -284,7 +284,7 @@ fn secure_boot_transition_flagged_only_on_change() {
     let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
 
     // Scan 1: secure boot on → informational only.
-    let r1 = run_privileged_scan(&healthy_facts(), &store, "dep-abc").unwrap();
+    let r1 = run_privileged_scan(&healthy_facts(), &store).unwrap();
     assert!(!r1
         .reconciled
         .new
@@ -294,7 +294,7 @@ fn secure_boot_transition_flagged_only_on_change() {
     // Scan 2: secure boot off → weakening transition → new anomaly.
     let mut off = healthy_facts();
     off.secure_boot = false;
-    let r2 = run_privileged_scan(&off, &store, "dep-abc").unwrap();
+    let r2 = run_privileged_scan(&off, &store).unwrap();
     assert!(r2
         .reconciled
         .new
@@ -306,7 +306,7 @@ fn secure_boot_transition_flagged_only_on_change() {
 fn chkrootkit_absent_is_skipped_not_treated_clean() {
     let dir = tempfile::tempdir().unwrap();
     let store = ScanStore::open(&dir.path().join("scans.db")).unwrap();
-    let report = run_privileged_scan(&healthy_facts(), &store, "dep-abc").unwrap();
+    let report = run_privileged_scan(&healthy_facts(), &store).unwrap();
     assert!(report
         .skipped
         .iter()

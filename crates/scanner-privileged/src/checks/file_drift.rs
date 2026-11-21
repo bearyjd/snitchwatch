@@ -2,16 +2,15 @@
 //! files), delegated to `rpm -Va` and classified with scanner-core's pure
 //! tree. The privileged process never opens or hashes target files itself.
 
-use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use scanner_core::deployment::{parse_status_json, DeploymentState};
+use scanner_core::deployment::DeploymentState;
 use scanner_core::provenance::{under_any, DYNAMIC_ALLOWLIST_PREFIXES, MUTABLE_PREFIXES};
 use scanner_core::rpmverify::{failing_entries, VerifyFailure};
 use scanner_core::{classify, Classification, LayeredMatch, PathFacts};
 
-use crate::error::{Result, ScanError};
+use crate::error::Result;
 use crate::facts::SystemFacts;
 use crate::model::{CheckType, Finding};
 
@@ -37,7 +36,8 @@ pub const MAX_DRIFT_PATHS: usize = 500;
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct FileDriftOutcome {
     pub findings: Vec<Finding>,
-    /// Why the base-tree/unowned pass did not run (check is partial).
+    /// Why the base-tree comparison did not run (every rpm failure is then
+    /// reported, never fewer than a healthy run would report). `None` when it ran.
     pub base_tree_unavailable: Option<String>,
     /// `rpm -Va` lines that yielded no absolute path (never silently dropped).
     pub unparsed_lines: usize,
@@ -47,16 +47,12 @@ pub struct FileDriftOutcome {
     pub incomplete: Option<String>,
 }
 
-/// One path to classify: an `rpm -Va` failure, or a base-tree difference.
-struct Candidate {
-    path: String,
-    /// `rpm -V` attribute field; `None` for base-tree candidates.
-    attrs: Option<String>,
-    missing: bool,
-}
-
-pub fn run_file_drift(facts: &dyn SystemFacts) -> Result<FileDriftOutcome> {
-    run_file_drift_within(facts, FILE_DRIFT_BUDGET)
+/// `deployment` is the one `rpm-ostree status --json` read of the scan.
+pub fn run_file_drift(
+    facts: &dyn SystemFacts,
+    deployment: &DeploymentState,
+) -> Result<FileDriftOutcome> {
+    run_file_drift_within(facts, deployment, FILE_DRIFT_BUDGET)
 }
 
 /// [`run_file_drift`] with an explicit budget (a test seam). Every candidate
@@ -65,15 +61,15 @@ pub fn run_file_drift(facts: &dyn SystemFacts) -> Result<FileDriftOutcome> {
 /// findings built so far and marks the outcome `incomplete`, never clean.
 pub fn run_file_drift_within(
     facts: &dyn SystemFacts,
+    deployment: &DeploymentState,
     budget: Duration,
 ) -> Result<FileDriftOutcome> {
     let started = Instant::now();
-    let deployment = read_deployment(facts)?;
     let report = failing_entries(&facts.rpm_verify_all()?);
     let base_tree_unavailable: Option<String> = None;
     let mut anomalies = Vec::new();
     let mut incomplete = None;
-    for candidate in candidates(&report.failures) {
+    for failure in &report.failures {
         if started.elapsed() >= budget {
             incomplete = Some(format!(
                 "file_drift budget of {}s exceeded",
@@ -81,10 +77,10 @@ pub fn run_file_drift_within(
             ));
             break;
         }
-        match assess(facts, &deployment, &candidate) {
+        match assess(facts, deployment, failure) {
             Ok(finding) => anomalies.extend(finding),
             Err(e) => {
-                incomplete = Some(format!("{}: {e}", candidate.path));
+                incomplete = Some(format!("{}: {e}", failure.path));
                 break;
             }
         }
@@ -109,32 +105,14 @@ pub fn run_file_drift_within(
     })
 }
 
-fn read_deployment(facts: &dyn SystemFacts) -> Result<DeploymentState> {
-    parse_status_json(&facts.deployment_status_json()?).map_err(|e| ScanError::Io {
-        path: "rpm-ostree status --json".to_string(),
-        source: io::Error::new(io::ErrorKind::InvalidData, e.to_string()),
-    })
-}
-
-fn candidates(failures: &[VerifyFailure]) -> Vec<Candidate> {
-    failures
-        .iter()
-        .map(|f| Candidate {
-            path: f.path.clone(),
-            attrs: Some(f.attrs.clone()),
-            missing: f.missing,
-        })
-        .collect()
-}
-
-/// Run one candidate through the classification tree; `Some` only when
-/// anomalous. Owner lookups use the raw path; findings use the escaped one.
+/// Run one `rpm -Va` failure through the classification tree; `Some` only
+/// when anomalous. Owner lookups use the raw path; findings use the escaped one.
 fn assess(
     facts: &dyn SystemFacts,
     deployment: &DeploymentState,
-    candidate: &Candidate,
+    failure: &VerifyFailure,
 ) -> Result<Option<Finding>> {
-    let path = Path::new(&candidate.path);
+    let path = Path::new(&failure.path);
     if under_any(path, MUTABLE_PREFIXES) {
         return Ok(None);
     }
@@ -144,10 +122,10 @@ fn assess(
     }
     // A missing file has no on-disk owner to ask, so a missing layered file
     // reports plain "missing" (it is anomalous either way).
-    let owner = if candidate.missing {
+    let owner = if failure.missing {
         None
     } else {
-        facts.file_owner(&candidate.path)?
+        facts.file_owner(&failure.path)?
     };
     let layered = owner
         .as_deref()
@@ -156,24 +134,16 @@ fn assess(
         path,
         in_mutable_location: false,
         base_tree_match: (owner.is_some() && !layered).then_some(false),
-        layered_pkg: layered.then_some(if candidate.attrs.is_some() {
-            LayeredMatch::Modified
-        } else {
-            LayeredMatch::Clean
-        }),
+        layered_pkg: layered.then_some(LayeredMatch::Modified),
         on_dynamic_allowlist: false,
     };
-    let detail = detail_for(candidate, owner.as_deref(), layered);
-    Ok(drift_finding(
-        classify(&path_facts),
-        &candidate.path,
-        &detail,
-    ))
+    let detail = detail_for(failure, owner.as_deref(), layered);
+    Ok(drift_finding(classify(&path_facts), &failure.path, &detail))
 }
 
-fn detail_for(candidate: &Candidate, owner: Option<&str>, layered: bool) -> String {
+fn detail_for(failure: &VerifyFailure, owner: Option<&str>, layered: bool) -> String {
     let Some(pkg) = owner else {
-        return if candidate.missing {
+        return if failure.missing {
             "missing"
         } else {
             "unowned"
@@ -181,10 +151,7 @@ fn detail_for(candidate: &Candidate, owner: Option<&str>, layered: bool) -> Stri
         .to_string();
     };
     let kind = if layered { "layered_pkg" } else { "base_pkg" };
-    match &candidate.attrs {
-        Some(attrs) => format!("rpm -V mismatch [{attrs}] vs {kind}:{pkg}"),
-        None => format!("differs from base commit vs {kind}:{pkg}"),
-    }
+    format!("rpm -V mismatch [{}] vs {kind}:{pkg}", failure.attrs)
 }
 
 /// Only an anomalous classification becomes a finding. Exhaustive on purpose:
@@ -226,13 +193,22 @@ mod tests {
     use crate::facts::testing::SyntheticFacts;
     use crate::model::Classification;
 
-    const DEPLOY: &str =
-        r#"{"deployments":[{"booted":true,"checksum":"abc","packages":["opensnitch"]}]}"#;
+    const COMMIT: &str = "d39c44ff4c9cf2ef204e6e025429558ac2772758b62e458a2a7d068fdd793410";
+
+    fn deployment() -> DeploymentState {
+        DeploymentState {
+            checksum: COMMIT.to_string(),
+            base_checksum: COMMIT.to_string(),
+            layered_packages: vec!["opensnitch".to_string()],
+        }
+    }
 
     fn facts(verify: &str) -> SyntheticFacts {
-        SyntheticFacts::new()
-            .with_deployment_json(DEPLOY)
-            .with_rpm_verify(verify)
+        SyntheticFacts::new().with_rpm_verify(verify)
+    }
+
+    fn run(f: &SyntheticFacts) -> Result<FileDriftOutcome> {
+        run_file_drift(f, &deployment())
     }
 
     fn paths(o: &FileDriftOutcome) -> Vec<&str> {
@@ -242,7 +218,7 @@ mod tests {
     #[test]
     fn rule1_mutable_location_yields_no_finding() {
         let f = facts("S.5....T.    /var/log/x\n").with_owner("/var/log/x", "bash");
-        assert!(run_file_drift(&f).unwrap().findings.is_empty());
+        assert!(run(&f).unwrap().findings.is_empty());
     }
 
     #[test]
@@ -256,7 +232,7 @@ mod tests {
         }
         verify.push_str("..5......    /usr/bin/bash\n");
         let f = facts(&verify).with_owner("/usr/bin/bash", "bash");
-        let o = run_file_drift(&f).unwrap();
+        let o = run(&f).unwrap();
         assert_eq!(paths(&o), ["/usr/bin/bash"]);
         assert_eq!(o.incomplete, None);
     }
@@ -264,7 +240,7 @@ mod tests {
     #[test]
     fn var_and_boot_prefix_lookalikes_are_still_assessed() {
         let f = facts("missing     /variable/x\nmissing     /bootloader/y\n");
-        let o = run_file_drift(&f).unwrap();
+        let o = run(&f).unwrap();
         assert_eq!(paths(&o), ["/variable/x", "/bootloader/y"]);
     }
 
@@ -272,7 +248,7 @@ mod tests {
     fn rule3_layered_modified_is_anomalous_naming_the_package() {
         let f = facts("..5......    /usr/bin/opensnitchd\n")
             .with_owner("/usr/bin/opensnitchd", "opensnitch");
-        let o = run_file_drift(&f).unwrap();
+        let o = run(&f).unwrap();
         assert_eq!(o.findings.len(), 1);
         let finding = &o.findings[0];
         assert_eq!(finding.check_type, CheckType::FileDrift);
@@ -288,7 +264,7 @@ mod tests {
     #[test]
     fn base_package_failure_is_anomalous_naming_base_pkg() {
         let f = facts("S.5....T.    /usr/bin/bash\n").with_owner("/usr/bin/bash", "bash");
-        let o = run_file_drift(&f).unwrap();
+        let o = run(&f).unwrap();
         assert_eq!(o.findings.len(), 1);
         assert!(o.findings[0].detail.contains("base_pkg:bash"));
     }
@@ -296,13 +272,13 @@ mod tests {
     #[test]
     fn rule4_etc_config_is_expected_no_finding() {
         let f = facts("S.5....T.  c /etc/foo.conf\n").with_owner("/etc/foo.conf", "foo");
-        assert!(run_file_drift(&f).unwrap().findings.is_empty());
+        assert!(run(&f).unwrap().findings.is_empty());
     }
 
     #[test]
     fn missing_file_is_anomalous_with_missing_detail() {
         let f = facts("missing     /usr/bin/gone\n");
-        let o = run_file_drift(&f).unwrap();
+        let o = run(&f).unwrap();
         assert_eq!(paths(&o), ["/usr/bin/gone"]);
         assert_eq!(o.findings[0].detail, "missing");
     }
@@ -313,7 +289,7 @@ mod tests {
         let verify: String = (0..n)
             .map(|i| format!("..5......    /usr/lib/f{i}\n"))
             .collect();
-        let o = run_file_drift(&facts(&verify)).unwrap();
+        let o = run(&facts(&verify)).unwrap();
         assert_eq!(o.findings.len(), MAX_DRIFT_PATHS + 1);
         let agg = o
             .findings
@@ -331,7 +307,7 @@ mod tests {
         let verify: String = (0..MAX_DRIFT_PATHS)
             .map(|i| format!("..5......    /usr/lib/f{i}\n"))
             .collect();
-        let o = run_file_drift(&facts(&verify)).unwrap();
+        let o = run(&facts(&verify)).unwrap();
         assert_eq!(o.findings.len(), MAX_DRIFT_PATHS);
         assert!(o.findings.iter().all(|f| f.path != "/"));
         assert_eq!(o.incomplete, None);
@@ -340,7 +316,7 @@ mod tests {
     #[test]
     fn every_finding_path_is_absolute() {
         let f = facts("missing     /usr/bin/a\n..5......    /usr/bin/b\n");
-        let o = run_file_drift(&f).unwrap();
+        let o = run(&f).unwrap();
         assert_eq!(o.findings.len(), 2);
         assert!(o.findings.iter().all(|f| f.path.starts_with('/')));
     }
@@ -349,7 +325,7 @@ mod tests {
     fn control_characters_are_escaped_in_path_and_detail() {
         let verify = "..5......    /usr/bin/a\u{1b}[31mred\r\u{202e}x\n";
         let f = facts(verify).with_owner("/usr/bin/a\u{1b}[31mred\r\u{202e}x", "ev\u{1b}il");
-        let o = run_file_drift(&f).unwrap();
+        let o = run(&f).unwrap();
         assert_eq!(o.findings.len(), 1);
         let finding = &o.findings[0];
         for text in [&finding.path, &finding.detail] {
@@ -361,7 +337,7 @@ mod tests {
 
     #[test]
     fn unparsed_rpm_lines_are_counted() {
-        let o = run_file_drift(&facts("error: something odd\n")).unwrap();
+        let o = run(&facts("error: something odd\n")).unwrap();
         assert_eq!(o.unparsed_lines, 1);
         assert!(o.findings.is_empty());
     }
@@ -369,7 +345,7 @@ mod tests {
     #[test]
     fn an_exceeded_budget_keeps_findings_and_marks_the_run_incomplete() {
         let f = facts("..5......    /usr/bin/b\n").with_owner("/usr/bin/b", "bash");
-        let o = run_file_drift_within(&f, Duration::ZERO).unwrap();
+        let o = run_file_drift_within(&f, &deployment(), Duration::ZERO).unwrap();
         assert!(o.findings.is_empty());
         assert!(o.incomplete.is_some_and(|r| r.contains("budget")));
     }
@@ -378,7 +354,7 @@ mod tests {
     fn a_failed_owner_lookup_keeps_earlier_findings_and_marks_incomplete() {
         let f = facts("..5......    /usr/bin/a\n..5......    /usr/bin/b\n")
             .with_owner_error("/usr/bin/b");
-        let o = run_file_drift(&f).unwrap();
+        let o = run(&f).unwrap();
         assert_eq!(paths(&o), ["/usr/bin/a"]);
         assert!(o.incomplete.is_some_and(|r| r.contains("/usr/bin/b")));
     }
@@ -396,7 +372,7 @@ mod tests {
                 .map(String::from),
             )
             .collect();
-        let o = run_file_drift(&facts(&verify)).unwrap();
+        let o = run(&facts(&verify)).unwrap();
         assert_eq!(paths(&o), ["/usr/bin/a", "/usr/bin/b", "/usr/bin/c"]);
         assert_eq!(o.incomplete, None);
     }
@@ -407,7 +383,7 @@ mod tests {
         let f = facts("..5......  c /etc/boom.conf\n..5......    /var/log/boom\n")
             .with_owner_error("/etc/boom.conf")
             .with_owner_error("/var/log/boom");
-        let o = run_file_drift(&f).unwrap();
+        let o = run(&f).unwrap();
         assert!(o.findings.is_empty());
         assert_eq!(o.incomplete, None);
     }
@@ -418,7 +394,7 @@ mod tests {
             '\u{2028}', '\u{2029}', '\u{61c}', '\u{200b}', '\u{200c}', '\u{200d}',
         ] {
             let verify = format!("missing     /usr/bin/a{c}b\n");
-            let o = run_file_drift(&facts(&verify)).unwrap();
+            let o = run(&facts(&verify)).unwrap();
             let text = &o.findings[0].path;
             assert!(!text.contains(c), "{c:?} survived: {text:?}");
         }
