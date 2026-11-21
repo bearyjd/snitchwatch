@@ -23,8 +23,15 @@ use crate::inspector::SystemInspector;
 use crate::rpmverify::layered_match_for;
 
 /// Prefixes considered inherently mutable / out of scan scope (rule 1).
-pub const MUTABLE_PREFIXES: &[&str] =
-    &["/var/log", "/home", "/tmp", "/run", "/proc", "/sys", "/dev"];
+///
+/// `/var` and `/boot` are not part of the deployed ostree image (machine-local
+/// state, separate partition), so `rpm -Va` reports rpm-owned paths there as
+/// missing/changed by design. Measured 2026-11-21 on a stock Bazzite host: of
+/// 2,361 `rpm -Va` lines, 1,749 were under `/var/lib` and ~68 under `/boot`,
+/// flooding file_drift's 500-path cap on a clean image.
+pub const MUTABLE_PREFIXES: &[&str] = &[
+    "/var", "/boot", "/home", "/tmp", "/run", "/proc", "/sys", "/dev",
+];
 
 /// Curated dynamic/generated allowlist prefixes (rule 4). Intentionally
 /// conservative; extend as real Bazzite testing surfaces false positives.
@@ -148,6 +155,36 @@ mod tests {
             checksum: "dep".into(),
             base_checksum: "base".into(),
             layered_packages: layered.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn var_and_boot_are_mutable_not_applicable() {
+        let sys = MockInspector::new();
+        for path in [
+            "/var/lib/rpm-state",
+            "/boot/extlinux/cat.c32",
+            "/var",
+            "/boot",
+        ] {
+            assert!(under_any(Path::new(path), MUTABLE_PREFIXES), "{path}");
+            assert_eq!(
+                classify_path(&sys, None, &PathBuf::from(path)),
+                Provenance::Classified(Classification::NotApplicable),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn mutable_prefix_match_is_boundary_aware() {
+        for path in [
+            "/variable/x",
+            "/bootloader/y",
+            "/usr/var/lib/x",
+            "/usr/boot/x",
+        ] {
+            assert!(!under_any(Path::new(path), MUTABLE_PREFIXES), "{path}");
         }
     }
 
