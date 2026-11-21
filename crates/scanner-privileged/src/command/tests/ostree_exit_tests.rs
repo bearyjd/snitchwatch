@@ -40,8 +40,14 @@ fn the_exact_ls_shape_with_the_pinned_stderr_is_data() {
     assert_eq!(ls_allow(), Allow::OstreeAbsent(PATH.to_string()));
     for text in [GONE, NOT_DIR] {
         let out = verify(&format!("{}; exit 1", say(text)), ls_allow()).unwrap();
-        assert_eq!(out, "");
+        assert_eq!(out, OSTREE_ABSENT_MARKER);
     }
+}
+
+#[test]
+fn exit_zero_with_empty_stdout_is_not_the_absent_marker() {
+    let _lock = serial();
+    assert_eq!(verify("exit 0", ls_allow()).unwrap(), "");
 }
 
 #[test]

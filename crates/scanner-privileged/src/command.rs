@@ -565,6 +565,11 @@ pub const OSTREE_LS_ARGS: [&str; 3] = ["ls", "-d", "-C"];
 /// `ostree checksum` subcommand; the absolute path follows.
 pub const OSTREE_CHECKSUM_ARGS: [&str; 1] = ["checksum"];
 
+/// Stdout of an `ostree ls` that exited 1 with the pinned absent-path stderr.
+/// Real `ostree ls` output never contains NUL, so exit 0 with empty stdout
+/// stays distinguishable from a proven absence.
+pub const OSTREE_ABSENT_MARKER: &str = "\0ostree-absent";
+
 /// Which non-zero exits of a primitive are data rather than failure.
 #[derive(Debug, PartialEq, Eq)]
 enum Allow {
@@ -793,6 +798,9 @@ fn capture_allowing(command: &mut Command, timeout: Duration, allow: Allow) -> i
                     "system primitive failed: code {} status {code}",
                     status.si_code
                 )));
+            }
+            if code != 0 && matches!(allow, Allow::OstreeAbsent(_)) {
+                return Ok(OSTREE_ABSENT_MARKER.to_string());
             }
             return String::from_utf8(out).map_err(|_| {
                 io::Error::new(

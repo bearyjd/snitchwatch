@@ -107,6 +107,15 @@ fn lookup_request(commit: Option<&str>, path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Absence is proven only by the `OstreeAbsent` allowance (marker stdout);
+/// any other output, including an empty one, must parse or fail closed.
+fn entry_from_output(out: &str, path: &str) -> Result<Option<CommitEntry>> {
+    if out == crate::command::OSTREE_ABSENT_MARKER {
+        return Ok(None);
+    }
+    parse_ls_entry(out, path).map(Some)
+}
+
 /// Production [`SystemFacts`]: reads real sysfs/procfs paths and shells out
 /// to `rpm-ostree`, `modinfo`, `rpm`, `mokutil`, `chkrootkit`.
 ///
@@ -277,11 +286,7 @@ impl SystemFacts for LiveSystem {
         let mut args: Vec<&str> = crate::command::OSTREE_LS_ARGS.to_vec();
         args.extend([commit, path]);
         let out = Self::run_within("ostree", &args, OSTREE_LOOKUP_DEADLINE)?;
-        // Real output is never empty: empty means the absent-path allowance.
-        if out.is_empty() {
-            return Ok(None);
-        }
-        parse_ls_entry(&out, path).map(Some)
+        entry_from_output(&out, path)
     }
 
     fn path_checksum(&self, path: &str) -> Result<String> {
@@ -588,6 +593,14 @@ mod tests {
         }
         assert!(lookup_request(None, "/usr/bin/a").is_ok());
         assert!(lookup_request(Some(COMMIT), "/usr/bin/a").is_ok());
+    }
+
+    #[test]
+    fn only_the_absent_marker_means_absent_and_empty_output_fails_closed() {
+        let path = "/usr/bin/a";
+        assert!(entry_from_output("", path).is_err());
+        let marker = crate::command::OSTREE_ABSENT_MARKER;
+        assert_eq!(entry_from_output(marker, path).unwrap(), None);
     }
 
     #[test]
