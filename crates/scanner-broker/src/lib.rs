@@ -421,6 +421,14 @@ mod tests {
         assert_eq!(validate_report(report.to_string()).0, "ok");
     }
     #[test]
+    fn accepts_base_tree_mismatch_details_and_the_unowned_skip() {
+        let sum = "9b88d8cc9a6c591204bc4a12dd85488122834f756cc02f24ca3a1ddc5d49273f";
+        let report = format!(
+            r#"{{"scan_id":3,"new":[{{"path":"/usr/etc/shells","detail":"base-tree mismatch [S.5....T.] expected={sum} actual={sum} vs unowned"}}],"still_outstanding":[],"resolved":[],"informational":[],"skipped":[{{"check":"file_drift_unowned","reason":"unowned files under /usr are not enumerated"}}]}}"#
+        );
+        assert_eq!(validate_report(report).0, "ok");
+    }
+    #[test]
     fn rejects_overlap_and_exits_only_when_idle() {
         let broker = Broker::default();
         let first = broker.begin().unwrap();

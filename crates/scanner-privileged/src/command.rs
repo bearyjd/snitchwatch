@@ -1,4 +1,5 @@
 //! Bounded, locale-stable execution of fixed system primitives. No shell.
+use crate::checks::base_tree::is_commit_hex;
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -557,6 +558,38 @@ pub const RPM_VERIFY_ARGS: [&str; 4] = ["-Va", "--nomtime", "--noscripts", "--no
 /// `rpm -qf` query format for the owning package name.
 pub const OWNER_QUERYFORMAT: &str = "%{NAME}\n";
 
+/// `ostree ls` flags: `-d` lists a directory itself instead of its children,
+/// `-C` prints checksums. The commit and the absolute path follow as the last
+/// two argv elements (owner-measured shape, plan 2026-11-21 Task 1).
+pub const OSTREE_LS_ARGS: [&str; 3] = ["ls", "-d", "-C"];
+/// `ostree checksum` subcommand; the absolute path follows.
+pub const OSTREE_CHECKSUM_ARGS: [&str; 1] = ["checksum"];
+
+/// Payload of the `TimedOut` error every primitive gets once the whole-scan
+/// watchdog has fired (as opposed to one primitive's own deadline).
+#[derive(Debug)]
+pub struct WatchdogExpired;
+
+impl std::fmt::Display for WatchdogExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("scanner watchdog already expired")
+    }
+}
+
+impl std::error::Error for WatchdogExpired {}
+
+/// Whether `error` is the watchdog-expiry error.
+pub fn is_watchdog_expired(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<WatchdogExpired>())
+}
+
+/// Stdout of an `ostree ls` that exited 1 with the pinned absent-path stderr.
+/// Real `ostree ls` output never contains NUL, so exit 0 with empty stdout
+/// stays distinguishable from a proven absence.
+pub const OSTREE_ABSENT_MARKER: &str = "\0ostree-absent";
+
 /// Which non-zero exits of a primitive are data rather than failure.
 #[derive(Debug, PartialEq, Eq)]
 enum Allow {
@@ -567,6 +600,9 @@ enum Allow {
     /// `rpm -Va`: a non-zero normal exit, empty stderr, and at least one
     /// parseable verify line on stdout (drift found).
     VerifyDrift,
+    /// `ostree ls -d -C <commit> <path>`: exit 1, empty stdout and exactly one
+    /// of the pinned "path is not in the commit" stderr lines for this path.
+    OstreeAbsent(String),
 }
 
 fn allowance(program: &str, args: &[&str]) -> Allow {
@@ -577,6 +613,11 @@ fn allowance(program: &str, args: &[&str]) -> Allow {
         ("rpm", ["-qf", path]) => not_owned(path),
         ("rpm", ["-qf", "--queryformat", fmt, path]) if *fmt == OWNER_QUERYFORMAT => {
             not_owned(path)
+        }
+        ("ostree", [a, b, c, commit, path])
+            if [*a, *b, *c] == OSTREE_LS_ARGS && is_commit_hex(commit) =>
+        {
+            Allow::OstreeAbsent((*path).to_string())
         }
         _ => Allow::Strict,
     }
@@ -689,7 +730,7 @@ fn capture_allowing(command: &mut Command, timeout: Duration, allow: Allow) -> i
             Ok(())
         });
     }
-    let expired = || io::Error::new(io::ErrorKind::TimedOut, "scanner watchdog already expired");
+    let expired = || io::Error::new(io::ErrorKind::TimedOut, WatchdogExpired);
     {
         // Authorized only while `Running`, atomically with marking it in flight.
         let mut state = watchdog_state();
@@ -778,6 +819,9 @@ fn capture_allowing(command: &mut Command, timeout: Duration, allow: Allow) -> i
                     status.si_code
                 )));
             }
+            if code != 0 && matches!(allow, Allow::OstreeAbsent(_)) {
+                return Ok(OSTREE_ABSENT_MARKER.to_string());
+            }
             return String::from_utf8(out).map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -811,8 +855,23 @@ fn exit_allowed(allow: &Allow, exited: bool, code: i32, out: &[u8], err: &[u8]) 
             // Any stderr means rpm hit errors: the stdout may be partial.
             exited && err.is_empty() && has_verify_line(&String::from_utf8_lossy(out))
         }
+        Allow::OstreeAbsent(path) => {
+            exited && code == 1 && out.is_empty() && ostree_absent_stderr(path, err)
+        }
         Allow::Strict => false,
     }
+}
+
+/// The stderr texts `ostree ls` prints for a path the commit does not hold
+/// (pinned against a throwaway repo, libostree 2026.2): a missing leaf, and a
+/// path below a non-directory (e.g. through the commit's `/usr/local` symlink).
+fn ostree_absent_stderr(path: &str, err: &[u8]) -> bool {
+    [
+        format!("error: Inspecting path '{path}': No such file or directory: {path}\n"),
+        format!("error: Inspecting path '{path}': Not a directory\n"),
+    ]
+    .iter()
+    .any(|expected| err == expected.as_bytes())
 }
 
 #[cfg(test)]
@@ -822,6 +881,7 @@ mod tests {
     use crate::containment::test_fixtures::scanner_fixture::ScannerFixture;
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     mod exit_tests;
+    mod ostree_exit_tests;
     mod verify_exit_tests;
     fn fixture(script: &str) -> io::Result<String> {
         capture(

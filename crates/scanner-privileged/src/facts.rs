@@ -10,6 +10,9 @@
 
 use std::path::Path;
 
+use crate::checks::base_tree::{
+    is_commit_hex, lookup_path_ok, parse_checksum, parse_ls_entry, CommitEntry,
+};
 use crate::error::{Result, ScanError};
 
 /// All host reads the scanner performs, behind one trait for testability.
@@ -65,16 +68,72 @@ pub trait SystemFacts {
     /// Raw `rpm-ostree status --json`.
     fn deployment_status_json(&self) -> Result<String>;
 
-    /// Paths under `/usr` that differ from, or are absent from, the booted
-    /// base commit (baseline spec rule 2 / unowned files). Live
-    /// implementation is plan Open Question 1: until then
-    /// `PrimitiveUnavailable`, which reports the check as partial.
-    fn base_tree_drift(&self) -> Result<Vec<String>>;
+    /// Whether `ostree` is resolvable in the trusted directories (the
+    /// base-tree primitive's pre-check; `false` degrades the whole pass).
+    fn ostree_available(&self) -> bool;
+
+    /// What the base commit `commit` holds at the absolute `path` (baseline
+    /// spec rule 2), or `None` when the commit has no such path. A failed
+    /// lookup is an `Err`, never `None`.
+    fn commit_entry(&self, commit: &str, path: &str) -> Result<Option<CommitEntry>>;
+
+    /// The OSTree checksum of what is on disk at the absolute `path`, not
+    /// following a final symlink. A path that vanished is an `Err`.
+    fn path_checksum(&self, path: &str) -> Result<String>;
 }
 
 /// Deadline of one `rpm -qf` owner lookup (the check as a whole is bounded by
 /// `checks::file_drift::FILE_DRIFT_BUDGET`; a lookup may overshoot it once).
 pub(crate) const FILE_OWNER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Deadline of each `ostree` spawn of the base-tree pass (`ls`, `checksum`).
+pub(crate) const OSTREE_LOOKUP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Refuse a base-tree lookup that could reach `ostree` as anything but a
+/// 64-hex commit (when given) and one absolute path: runs before any spawn.
+fn lookup_request(commit: Option<&str>, path: &str) -> Result<()> {
+    let refuse = |what: &str| ScanError::Io {
+        path: path.to_string(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, what.to_string()),
+    };
+    if commit.is_some_and(|c| !is_commit_hex(c)) {
+        return Err(refuse("base-tree lookup needs a 64-hex commit"));
+    }
+    if !lookup_path_ok(path) {
+        return Err(refuse(
+            "base-tree lookup needs an absolute path without control characters",
+        ));
+    }
+    Ok(())
+}
+
+/// Absence is proven only by the `OstreeAbsent` allowance (marker stdout);
+/// any other output, including an empty one, must parse or fail closed.
+fn entry_from_output(out: &str, path: &str) -> Result<Option<CommitEntry>> {
+    if out == crate::command::OSTREE_ABSENT_MARKER {
+        return Ok(None);
+    }
+    parse_ls_entry(out, path).map(Some)
+}
+
+/// A failed `ostree checksum` of a path that no longer exists is a vanished
+/// file (kind `NotFound`), distinct from a deadline or I/O failure on a path
+/// that is still there.
+fn vanished_if_gone(error: ScanError, path: &str) -> ScanError {
+    let failed_exit = matches!(
+        &error,
+        ScanError::Io { source, .. } if source.kind() == std::io::ErrorKind::Other
+    );
+    let gone =
+        std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    if failed_exit && gone {
+        return ScanError::Io {
+            path: path.to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "file vanished during scan"),
+        };
+    }
+    error
+}
 
 /// Production [`SystemFacts`]: reads real sysfs/procfs paths and shells out
 /// to `rpm-ostree`, `modinfo`, `rpm`, `mokutil`, `chkrootkit`.
@@ -237,10 +296,25 @@ impl SystemFacts for LiveSystem {
         Self::run("rpm-ostree", &["status", "--json"])
     }
 
-    fn base_tree_drift(&self) -> Result<Vec<String>> {
-        Err(ScanError::PrimitiveUnavailable(
-            "base-tree check not implemented: see plan OQ1".to_string(),
-        ))
+    fn ostree_available(&self) -> bool {
+        Self::which("ostree").is_some()
+    }
+
+    fn commit_entry(&self, commit: &str, path: &str) -> Result<Option<CommitEntry>> {
+        lookup_request(Some(commit), path)?;
+        let mut args: Vec<&str> = crate::command::OSTREE_LS_ARGS.to_vec();
+        args.extend([commit, path]);
+        let out = Self::run_within("ostree", &args, OSTREE_LOOKUP_DEADLINE)?;
+        entry_from_output(&out, path)
+    }
+
+    fn path_checksum(&self, path: &str) -> Result<String> {
+        lookup_request(None, path)?;
+        let mut args: Vec<&str> = crate::command::OSTREE_CHECKSUM_ARGS.to_vec();
+        args.push(path);
+        let out = Self::run_within("ostree", &args, OSTREE_LOOKUP_DEADLINE)
+            .map_err(|e| vanished_if_gone(e, path))?;
+        parse_checksum(&out)
     }
 }
 
@@ -305,7 +379,14 @@ pub mod testing {
         owners: HashMap<String, String>,
         owner_errors: HashSet<String>,
         deployment_json: Option<String>,
-        base_tree_drift: Option<Vec<String>>,
+        ostree_missing: bool,
+        entries: HashMap<String, Option<CommitEntry>>,
+        entry_errors: HashSet<String>,
+        checksums: HashMap<String, String>,
+        checksum_errors: HashMap<String, std::io::ErrorKind>,
+        watchdog_expired: HashSet<String>,
+        pub lookups: std::cell::Cell<usize>,
+        lookup_delay: std::time::Duration,
     }
 
     impl SyntheticFacts {
@@ -380,12 +461,62 @@ pub mod testing {
             self.deployment_json = Some(v.into());
             self
         }
-        pub fn with_base_tree_drift<I, S>(mut self, paths: I) -> Self
-        where
-            I: IntoIterator<Item = S>,
-            S: Into<String>,
-        {
-            self.base_tree_drift = Some(paths.into_iter().map(Into::into).collect());
+        /// Every `commit_entry` takes this long (budget tests).
+        pub fn with_lookup_delay(mut self, delay: std::time::Duration) -> Self {
+            self.lookup_delay = delay;
+            self
+        }
+        /// `ostree` is not installed (degraded base-tree pass).
+        pub fn without_ostree(mut self) -> Self {
+            self.ostree_missing = true;
+            self
+        }
+        /// The commit holds `entry` at `path`.
+        pub fn with_commit_entry(mut self, path: impl Into<String>, entry: CommitEntry) -> Self {
+            self.entries.insert(path.into(), Some(entry));
+            self
+        }
+        /// The commit has no `path`.
+        pub fn with_commit_absent(mut self, path: impl Into<String>) -> Self {
+            self.entries.insert(path.into(), None);
+            self
+        }
+        /// `commit_entry(path)` fails (e.g. a failed `ostree ls`).
+        pub fn with_commit_entry_error(mut self, path: impl Into<String>) -> Self {
+            self.entry_errors.insert(path.into());
+            self
+        }
+        pub fn with_path_checksum(
+            mut self,
+            path: impl Into<String>,
+            sum: impl Into<String>,
+        ) -> Self {
+            self.checksums.insert(path.into(), sum.into());
+            self
+        }
+        /// `path_checksum(path)` fails with a generic I/O error.
+        pub fn with_path_checksum_error(self, path: impl Into<String>) -> Self {
+            self.with_path_checksum_failure(path, std::io::ErrorKind::Other)
+        }
+        /// `path_checksum(path)` fails because the file no longer exists.
+        pub fn with_path_vanished(self, path: impl Into<String>) -> Self {
+            self.with_path_checksum_failure(path, std::io::ErrorKind::NotFound)
+        }
+        /// `path_checksum(path)` hits its deadline (a FIFO-like decoy).
+        pub fn with_path_timeout(self, path: impl Into<String>) -> Self {
+            self.with_path_checksum_failure(path, std::io::ErrorKind::TimedOut)
+        }
+        /// `path_checksum(path)` fails because the whole-scan watchdog fired.
+        pub fn with_path_watchdog_expired(mut self, path: impl Into<String>) -> Self {
+            self.watchdog_expired.insert(path.into());
+            self
+        }
+        fn with_path_checksum_failure(
+            mut self,
+            path: impl Into<String>,
+            kind: std::io::ErrorKind,
+        ) -> Self {
+            self.checksum_errors.insert(path.into(), kind);
             self
         }
 
@@ -457,10 +588,44 @@ pub mod testing {
                 .clone()
                 .ok_or_else(|| Self::unavailable("deployment_status_json"))
         }
-        fn base_tree_drift(&self) -> Result<Vec<String>> {
-            self.base_tree_drift
-                .clone()
-                .ok_or_else(|| Self::unavailable("base_tree_drift"))
+        fn ostree_available(&self) -> bool {
+            !self.ostree_missing
+        }
+        fn commit_entry(&self, _commit: &str, path: &str) -> Result<Option<CommitEntry>> {
+            self.lookups.set(self.lookups.get() + 1);
+            std::thread::sleep(self.lookup_delay);
+            if self.entry_errors.contains(path) {
+                return Err(ScanError::Io {
+                    path: path.to_string(),
+                    source: std::io::Error::other("synthetic ostree ls failure"),
+                });
+            }
+            self.entries
+                .get(path)
+                .cloned()
+                .ok_or_else(|| Self::unavailable("commit_entry"))
+        }
+        fn path_checksum(&self, path: &str) -> Result<String> {
+            self.lookups.set(self.lookups.get() + 1);
+            if self.watchdog_expired.contains(path) {
+                return Err(ScanError::Io {
+                    path: path.to_string(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        crate::command::WatchdogExpired,
+                    ),
+                });
+            }
+            if let Some(kind) = self.checksum_errors.get(path) {
+                return Err(ScanError::Io {
+                    path: path.to_string(),
+                    source: std::io::Error::new(*kind, "synthetic ostree checksum failure"),
+                });
+            }
+            self.checksums
+                .get(path)
+                .cloned()
+                .ok_or_else(|| Self::unavailable("path_checksum"))
         }
     }
 }
@@ -468,6 +633,61 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const COMMIT: &str = "d39c44ff4c9cf2ef204e6e025429558ac2772758b62e458a2a7d068fdd793410";
+
+    #[test]
+    fn lookups_refuse_relative_option_like_and_control_character_paths_before_spawning() {
+        for bad in ["usr/bin/a", "-d", "--help", "", "/usr/a\nb", "/usr/a\u{1b}"] {
+            assert!(lookup_request(None, bad).is_err(), "{bad:?}");
+            assert!(lookup_request(Some(COMMIT), bad).is_err(), "{bad:?}");
+        }
+        assert!(lookup_request(None, "/usr/bin/a").is_ok());
+        assert!(lookup_request(Some(COMMIT), "/usr/bin/a").is_ok());
+    }
+
+    #[test]
+    fn only_the_absent_marker_means_absent_and_empty_output_fails_closed() {
+        let path = "/usr/bin/a";
+        assert!(entry_from_output("", path).is_err());
+        let marker = crate::command::OSTREE_ABSENT_MARKER;
+        assert_eq!(entry_from_output(marker, path).unwrap(), None);
+    }
+
+    #[test]
+    fn a_failed_checksum_of_a_missing_path_is_a_vanished_file_only_then() {
+        let dir = std::env::temp_dir().join(format!("sw-vanish-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = dir.join("here");
+        std::fs::write(&present, "x").unwrap();
+        let failure = || ScanError::Io {
+            path: "ostree".to_string(),
+            source: std::io::Error::other("system primitive failed"),
+        };
+        let kind = |e: ScanError| match e {
+            ScanError::Io { source, .. } => Some(source.kind()),
+            _ => None,
+        };
+        let gone = dir.join("gone");
+        let vanished = vanished_if_gone(failure(), gone.to_str().unwrap());
+        assert_eq!(kind(vanished), Some(std::io::ErrorKind::NotFound));
+        let still_there = vanished_if_gone(failure(), present.to_str().unwrap());
+        assert_eq!(kind(still_there), Some(std::io::ErrorKind::Other));
+        let timeout = ScanError::Io {
+            path: "ostree".to_string(),
+            source: std::io::Error::from(std::io::ErrorKind::TimedOut),
+        };
+        let kept = vanished_if_gone(timeout, gone.to_str().unwrap());
+        assert_eq!(kind(kept), Some(std::io::ErrorKind::TimedOut));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_commit_that_is_not_64_hex_is_refused_before_spawning() {
+        for bad in ["unknown", "abc", "", "--help", &COMMIT.to_uppercase()] {
+            assert!(lookup_request(Some(bad), "/usr/bin/a").is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn parses_bracketed_lockdown_state() {

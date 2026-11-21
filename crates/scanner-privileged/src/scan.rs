@@ -9,6 +9,8 @@
 //! `SkippedCheck` and the scan continues — a degraded scan is visibly
 //! degraded, never silently "all clear".
 
+use scanner_core::deployment::{parse_status_json, DeploymentState};
+
 use crate::checks::{file_drift, kargs, lockdown, modules, rootkit};
 use crate::error::{Result, ScanError};
 use crate::facts::SystemFacts;
@@ -45,15 +47,24 @@ pub fn report_json(report: &ScanReport) -> serde_json::Value {
     })
 }
 
+/// The scan's single `rpm-ostree status --json` read, parsed.
+fn read_deployment(facts: &dyn SystemFacts) -> Result<DeploymentState> {
+    parse_status_json(&facts.deployment_status_json()?).map_err(|e| ScanError::Io {
+        path: "rpm-ostree status --json".to_string(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
+    })
+}
+
 /// Run the ordered privileged-tier scan against `facts`, persisting results
-/// to `store`. `deployment_checksum` tags the scan run (from
-/// `rpm-ostree status --json`; caller supplies it).
-pub fn run_privileged_scan(
-    facts: &dyn SystemFacts,
-    store: &ScanStore,
-    deployment_checksum: &str,
-) -> Result<ScanReport> {
-    let scan_id = store.start_scan(deployment_checksum, TIER_PRIVILEGED)?;
+/// to `store`. The booted deployment checksum (from the one
+/// `rpm-ostree status --json` read, `"unknown"` when unreadable) tags the
+/// scan run and feeds the file-drift base-tree comparison.
+pub fn run_privileged_scan(facts: &dyn SystemFacts, store: &ScanStore) -> Result<ScanReport> {
+    let deployment = read_deployment(facts);
+    let tag = deployment
+        .as_ref()
+        .map_or("unknown", |d| d.checksum.as_str());
+    let scan_id = store.start_scan(tag, TIER_PRIVILEGED)?;
 
     let mut anomalies: Vec<Finding> = Vec::new();
     let mut informational: Vec<Finding> = Vec::new();
@@ -64,7 +75,13 @@ pub fn run_privileged_scan(
     // 1. File-integrity/drift check (rpm -Va, classified per baseline spec §1).
     //    A failed primitive is a visible skip, never an abort: the cheaper
     //    checks below must still run (privileged spec §3).
-    run_file_drift_step(facts, &mut anomalies, &mut skipped, &mut completed);
+    run_file_drift_step(
+        facts,
+        &deployment,
+        &mut anomalies,
+        &mut skipped,
+        &mut completed,
+    );
 
     // 2. Kargs drift (cheap).
     match run_kargs(facts) {
@@ -132,18 +149,33 @@ pub fn run_privileged_scan(
     })
 }
 
+/// Constant coverage note: files under `/usr` that no package owns are not
+/// enumerated (`rpm -Va` cannot list them), so rule 5 covers only rpm-owned
+/// files. It never blocks completion: no unowned-enumeration finding exists
+/// that a run could wrongly resolve (plan 2026-11-21 Non-goals).
+const UNOWNED_NOT_CHECKED: &str = "unowned files under /usr are not enumerated (rpm -Va cannot see them); see plan 2026-11-21 Non-goals";
+
 /// Run the file-drift check. It counts as completed (so its earlier findings
-/// may resolve) once `rpm -Va` was read and understood, even while the
-/// base-tree pass is unavailable (plan, interim rule: until plan OQ1 no
-/// base-tree finding can exist to be wrongly resolved). Lines `rpm -Va` printed
-/// that were not understood fail closed: reported, and nothing resolves.
+/// may resolve) once `rpm -Va` was read and understood and the run is not
+/// incomplete. A degraded base-tree pass (no `ostree`, no usable booted commit)
+/// still counts: it reports a superset of a healthy run's anomalies, so it
+/// cannot resolve what a healthy run would keep. Lines `rpm -Va` printed that
+/// were not understood fail closed: reported, and nothing resolves.
 fn run_file_drift_step(
     facts: &dyn SystemFacts,
+    deployment: &Result<DeploymentState>,
     anomalies: &mut Vec<Finding>,
     skipped: &mut Vec<SkippedCheck>,
     completed: &mut Vec<CheckType>,
 ) {
-    let outcome = match file_drift::run_file_drift(facts) {
+    let outcome = match deployment
+        .as_ref()
+        .map_err(|e| ScanError::Io {
+            path: "rpm-ostree status --json".to_string(),
+            source: std::io::Error::other(e.to_string()),
+        })
+        .and_then(|d| file_drift::run_file_drift(facts, d))
+    {
         Ok(outcome) => outcome,
         Err(error) => {
             let reason = match error {
@@ -158,6 +190,10 @@ fn run_file_drift_step(
         }
     };
     anomalies.extend(outcome.findings);
+    skipped.push(SkippedCheck {
+        check: "file_drift_unowned",
+        reason: UNOWNED_NOT_CHECKED.to_string(),
+    });
     let incomplete = outcome.incomplete.is_some();
     if let Some(reason) = outcome.incomplete {
         skipped.push(SkippedCheck {
@@ -263,7 +299,7 @@ mod tests {
     #[test]
     fn clean_system_first_scan_only_informational_and_skips() {
         let store = ScanStore::open_in_memory().unwrap();
-        let report = run_privileged_scan(&base_facts(), &store, "dep1").unwrap();
+        let report = run_privileged_scan(&base_facts(), &store).unwrap();
         // No anomalies.
         assert!(report.reconciled.new.is_empty());
         // Two informational state findings (secure boot + lockdown).
@@ -278,7 +314,7 @@ mod tests {
     fn kargs_drift_surfaces_as_new_anomaly() {
         let facts = base_facts().with_committed_kargs(""); // nothing committed → quiet is drift
         let store = ScanStore::open_in_memory().unwrap();
-        let report = run_privileged_scan(&facts, &store, "dep1").unwrap();
+        let report = run_privileged_scan(&facts, &store).unwrap();
         assert!(report
             .reconciled
             .new
@@ -291,7 +327,7 @@ mod tests {
         let facts =
             base_facts().with_proc_modules("xfs 1 0 - Live 0x0\nrk_hidden 1 0 - Live 0x0\n");
         let store = ScanStore::open_in_memory().unwrap();
-        let report = run_privileged_scan(&facts, &store, "dep1").unwrap();
+        let report = run_privileged_scan(&facts, &store).unwrap();
         assert!(report
             .reconciled
             .new
@@ -303,10 +339,10 @@ mod tests {
     fn secure_boot_disable_transition_flags_between_scans() {
         let store = ScanStore::open_in_memory().unwrap();
         // Scan 1: enabled.
-        run_privileged_scan(&base_facts(), &store, "dep1").unwrap();
+        run_privileged_scan(&base_facts(), &store).unwrap();
         // Scan 2: now disabled → weakening transition → anomaly.
         let facts2 = base_facts().with_secure_boot(false);
-        let report = run_privileged_scan(&facts2, &store, "dep1").unwrap();
+        let report = run_privileged_scan(&facts2, &store).unwrap();
         assert!(report
             .reconciled
             .new
@@ -319,7 +355,7 @@ mod tests {
         let facts =
             base_facts().with_chkrootkit("/usr/sbin/chkrootkit", "Checking 'lkm'... INFECTED\n");
         let store = ScanStore::open_in_memory().unwrap();
-        let report = run_privileged_scan(&facts, &store, "dep1").unwrap();
+        let report = run_privileged_scan(&facts, &store).unwrap();
         assert!(report
             .reconciled
             .new
@@ -336,7 +372,7 @@ mod tests {
             .with_lockdown("none")
             .with_secure_boot(false);
         let store = ScanStore::open_in_memory().unwrap();
-        let report = run_privileged_scan(&facts, &store, "dep1").unwrap();
+        let report = run_privileged_scan(&facts, &store).unwrap();
         assert!(report.skipped.iter().any(|s| s.check == "kargs_drift"));
     }
 
@@ -353,11 +389,11 @@ mod tests {
     fn not_understood_rpm_output_fails_closed_and_resolves_nothing() {
         let store = ScanStore::open_in_memory().unwrap();
         let tampered = drift_facts("S.5....T.    /usr/bin/bash\n");
-        let r1 = run_privileged_scan(&tampered, &store, "dep1").unwrap();
+        let r1 = run_privileged_scan(&tampered, &store).unwrap();
         assert!(r1.reconciled.new.iter().any(|f| f.path == "/usr/bin/bash"));
         assert!(!r1.skipped.iter().any(|s| s.check == "file_drift"));
 
-        let r2 = run_privileged_scan(&drift_facts("error: odd\n"), &store, "dep1").unwrap();
+        let r2 = run_privileged_scan(&drift_facts("error: odd\n"), &store).unwrap();
         assert!(r2.skipped.iter().any(|s| s.check == "file_drift_unparsed"));
         assert!(r2.reconciled.resolved.is_empty(), "{:?}", r2.reconciled);
     }

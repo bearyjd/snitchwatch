@@ -115,27 +115,6 @@ fn notify_watchdog_timeout() {
     );
 }
 
-/// Best-effort active-deployment checksum from `rpm-ostree status --json`.
-/// Falls back to "unknown" when rpm-ostree is unavailable (e.g. in a sandbox
-/// or non-ostree host) so the scan can still run and record results.
-fn deployment_checksum() -> String {
-    let text = match scanner_privileged::command::run("rpm-ostree", &["status", "--json"]) {
-        Ok(text) => text,
-        Err(_) => return "unknown".to_string(),
-    };
-    serde_json::from_str::<serde_json::Value>(&text)
-        .ok()
-        .and_then(|v| {
-            v.get("deployments")?
-                .as_array()?
-                .iter()
-                .find(|d| d.get("booted").and_then(|b| b.as_bool()).unwrap_or(false))
-                .or_else(|| v.get("deployments")?.as_array()?.first())
-                .and_then(|d| d.get("checksum").and_then(|c| c.as_str()).map(String::from))
-        })
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 fn print_report(report: &ScanReport) {
     println!(
         "=== snitchwatch privileged scan (scan_id={}) ===",
@@ -281,10 +260,9 @@ fn run() -> anyhow::Result<i32> {
     }
     let store = ScanStore::open(&args.db)?;
     let facts = LiveSystem::new();
-    let checksum = deployment_checksum();
 
-    tracing::info!(db = %args.db.display(), deployment = %checksum, "starting privileged scan");
-    let report = run_privileged_scan(&facts, &store, &checksum)?;
+    tracing::info!(db = %args.db.display(), "starting privileged scan");
+    let report = run_privileged_scan(&facts, &store)?;
 
     if args.json {
         print_json(&report);

@@ -88,9 +88,13 @@ other argument (`crates/snitchwatch-bridge-cli/src/cli.rs:49-60`).
 
 Manual, owner-run, not blocking merge (same boundary as the Phase 6 plan). The
 check runs `rpm -Va --nomtime --noscripts --nodeps` inside the existing on-demand
-polkit-gated scan; the rule-2 base-tree pass is not implemented, so a clean scan
-still lists `file_drift_base_tree` under `skipped` (plan Open Question 1). Plan:
-`docs/superpowers/plans/2026-11-19-privileged-file-drift.md`.
+polkit-gated scan. Rule 2 compares each failing path with the booted commit
+(`ostree ls -d -C <commit> <path>` vs `ostree checksum <path>`), so a healthy scan
+lists no `file_drift_base_tree` under `skipped`; it appears only when `ostree` or a
+valid booted commit is missing. `file_drift_unowned` is always listed: unowned files
+under `/usr` are not enumerated. Plans:
+`docs/superpowers/plans/2026-11-19-privileged-file-drift.md`,
+`docs/superpowers/plans/2026-11-21-file-drift-base-tree-primitive.md`.
 
 `scripts/file-drift-evidence.sh` (read-only, run as root on the host) captures the evidence for
 Q1-Q3 below into one directory; bring back its `summary.txt`.
@@ -109,8 +113,25 @@ Q1-Q3 below into one directory; bring back its `summary.txt`.
   `--excludedocs`/`%ghost`/`/usr/etc` paths also flood?).
 - [ ] Layer a package, edit one of its files, confirm exactly one anomaly naming
   `layered_pkg:<name>`; restore the file and confirm it resolves on the next scan.
-- [ ] Confirm the report `skipped` list shows `file_drift_base_tree` and not
-  `file_drift`.
+- [ ] Confirm the report `skipped` list shows `file_drift_unowned` and neither
+  `file_drift_base_tree` nor `file_drift_incomplete` nor `file_drift`.
+- [ ] Base-tree pass (plan 2026-11-21 Task 6), on the stock image via `RunDeepScan`: no
+  aggregate `/` finding; the anomaly count is the host evidence `differ` + `absent` +
+  `missing+present` total; `/usr/etc/shells`-style xattr-only cases appear with both
+  checksums in the detail. Record total `file_drift` wall time (`rpm -Va` about 39 s plus
+  about 10.6 s of lookups measured) against the 180 s budget.
+- [x] Confirmed on the host's `ostree` 2026.4 (read-only, 2026-11-21): `ostree ls -d -C <commit>
+  /usr/local/no-such-file-xyz` exits 1 with empty stdout and stderr `error: Inspecting path
+  '/usr/local/no-such-file-xyz': No such file or directory: /usr/local/no-such-file-xyz`; a path
+  below a file (`/usr/bin/bash/x`) gives `... Not a directory`. Identical to the pinned texts
+  (trailing newline not byte-verified on the host); a different text would fail closed.
+- [ ] Confirm `/usr/bin/sudoreplay` (mode `--x--x--x`) matches when scanned as root.
+- [ ] `ostree admin unlock` (or the equivalent dev overlay) on a test host, append to a base
+  file, confirm one `base-tree mismatch` anomaly; revert and reboot, confirm it resolves.
+  Delete one base file in the overlay and expect `missing (present in base commit)`.
+- [ ] Open (plan 2026-11-21 Q8): the layered-entry format of `rpm-ostree status --json`
+  `packages` / `requested-packages` is still unverified; layer one package, record the
+  entries, edit one of its files and expect one `layered_pkg:` anomaly with both checksums.
 - [ ] Capture stderr of a plain `rpm -Va --nomtime --noscripts --nodeps` on a clean image.
   The runner rejects any non-zero `rpm -Va` run that wrote to stderr (it cannot tell a
   partial run from a full one), so routine rpmdb notices would skip `file_drift` on every
