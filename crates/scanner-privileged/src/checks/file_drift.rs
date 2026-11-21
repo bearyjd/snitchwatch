@@ -2,6 +2,7 @@
 //! files), delegated to `rpm -Va` and classified with scanner-core's pure
 //! tree. The privileged process never opens or hashes target files itself.
 
+use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -11,7 +12,7 @@ use scanner_core::rpmverify::{failing_entries, VerifyFailure};
 use scanner_core::{classify, Classification, LayeredMatch, PathFacts};
 
 use crate::checks::base_tree::{is_commit_hex, lookup_path_ok};
-use crate::error::Result;
+use crate::error::{Result, ScanError};
 use crate::facts::SystemFacts;
 use crate::model::{CheckType, Finding};
 
@@ -79,7 +80,16 @@ pub fn run_file_drift_within(
             break;
         }
         match assess(facts, deployment, commit, failure) {
-            Ok(finding) => anomalies.extend(finding),
+            Ok(Assessed {
+                finding,
+                lookup_failed,
+            }) => {
+                anomalies.extend(finding);
+                if lookup_failed {
+                    let path = escape_untrusted(&failure.path);
+                    incomplete.get_or_insert(format!("{path}: base-tree lookup failed"));
+                }
+            }
             Err(e) => {
                 incomplete = Some(format!("{}: {e}", failure.path));
                 break;
@@ -120,6 +130,23 @@ fn base_tree_commit<'a>(
         return (None, Some(why.to_string()));
     }
     (Some(deployment.checksum.as_str()), None)
+}
+
+/// One candidate's result. `lookup_failed` marks a decoy-shaped failure (a
+/// deadline or I/O error on a path that still exists): the path is reported and
+/// the run continues, but is incomplete so nothing resolves.
+struct Assessed {
+    finding: Option<Finding>,
+    lookup_failed: bool,
+}
+
+impl Assessed {
+    fn of(finding: Option<Finding>) -> Self {
+        Assessed {
+            finding,
+            lookup_failed: false,
+        }
+    }
 }
 
 /// What the base commit says about one `rpm -Va` failure (rule 2).
@@ -178,24 +205,26 @@ fn assess(
     deployment: &DeploymentState,
     commit: Option<&str>,
     failure: &VerifyFailure,
-) -> Result<Option<Finding>> {
+) -> Result<Assessed> {
     let path = Path::new(&failure.path);
     if vouched_without_spawn(path) {
-        return Ok(None);
+        return Ok(Assessed::of(None));
     }
     let base = match commit {
-        Some(commit) if lookup_path_ok(&failure.path) => base_tree_verdict(facts, commit, failure)?,
+        Some(commit) if lookup_path_ok(&failure.path) => {
+            match base_tree_verdict(facts, commit, failure) {
+                Ok(verdict) => verdict,
+                Err(e) => return lookup_failure(e, failure),
+            }
+        }
         Some(_) | None => BaseTree::Unchecked,
     };
     match &base {
-        BaseTree::Expected => return Ok(None),
+        BaseTree::Expected => return Ok(Assessed::of(None)),
         BaseTree::MissingInCommit => {
             let detail = "missing (present in base commit)";
-            return Ok(drift_finding(
-                Classification::Anomalous,
-                &failure.path,
-                detail,
-            ));
+            let finding = drift_finding(Classification::Anomalous, &failure.path, detail);
+            return Ok(Assessed::of(finding));
         }
         BaseTree::Unchecked | BaseTree::Mismatch { .. } | BaseTree::NotInCommit => {}
     }
@@ -217,7 +246,29 @@ fn assess(
         on_dynamic_allowlist: false,
     };
     let detail = detail_for(failure, owner.as_deref(), layered, &base);
-    Ok(drift_finding(classify(&path_facts), &failure.path, &detail))
+    let class = classify(&path_facts);
+    Ok(Assessed::of(drift_finding(class, &failure.path, &detail)))
+}
+
+/// A vanished file (Q6) or an unavailable primitive stops the run as
+/// incomplete. Any other failed lookup is reported as a finding so one decoy
+/// (a FIFO, a device, a huge file) cannot hide the candidates after it.
+fn lookup_failure(error: ScanError, failure: &VerifyFailure) -> Result<Assessed> {
+    let reason = match &error {
+        ScanError::Io { source, .. } => match source.kind() {
+            io::ErrorKind::NotFound => return Err(error),
+            io::ErrorKind::TimedOut => "deadline exceeded",
+            _ => "ostree failed",
+        },
+        ScanError::PrimitiveUnavailable(_) | ScanError::Sqlite(_) | ScanError::Poisoned => {
+            return Err(error)
+        }
+    };
+    let detail = format!("base-tree lookup failed: {reason}");
+    Ok(Assessed {
+        finding: drift_finding(Classification::Anomalous, &failure.path, &detail),
+        lookup_failed: true,
+    })
 }
 
 fn detail_for(
@@ -615,7 +666,7 @@ mod tests {
             "/usr/bin/a",
         )
         .with_commit_entry("/usr/bin/b", entry(SUM_A))
-        .with_path_checksum_error("/usr/bin/b");
+        .with_path_vanished("/usr/bin/b");
         let f = differing(f, "/usr/bin/c");
         let o = run(&f).unwrap();
         assert_eq!(paths(&o), ["/usr/bin/a"]);
@@ -715,5 +766,41 @@ mod tests {
         assert!(!o.findings[0].path.chars().any(|c| c.is_control()));
         assert_eq!(f.lookups.get(), 0);
         assert_eq!(o.incomplete, None);
+    }
+
+    #[test]
+    fn a_decoy_whose_lookup_fails_is_reported_and_does_not_hide_later_candidates() {
+        let verify = "..5......    /usr/bin/fifo\n..5......    /usr/bin/implant\n";
+        let f = healthy(verify)
+            .with_commit_entry("/usr/bin/fifo", entry(SUM_A))
+            .with_path_timeout("/usr/bin/fifo");
+        let f = differing(f, "/usr/bin/implant");
+        let o = run(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/fifo", "/usr/bin/implant"]);
+        assert!(o.findings[0].detail.starts_with("base-tree lookup failed"));
+        assert!(o.findings[1].detail.contains("base-tree mismatch"));
+        assert!(o.incomplete.is_some_and(|r| r.contains("/usr/bin/fifo")));
+    }
+
+    #[test]
+    fn a_generic_lookup_error_is_also_a_finding_and_the_run_continues() {
+        let verify = "..5......    /usr/bin/a\n..5......    /usr/bin/b\n";
+        let f = healthy(verify)
+            .with_commit_entry("/usr/bin/a", entry(SUM_A))
+            .with_path_checksum_error("/usr/bin/a");
+        let f = differing(f, "/usr/bin/b");
+        let o = run(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/a", "/usr/bin/b"]);
+        assert!(o.incomplete.is_some());
+    }
+
+    #[test]
+    fn a_failed_commit_lookup_is_a_finding_and_the_run_continues() {
+        let verify = "missing     /usr/bin/a\n..5......    /usr/bin/b\n";
+        let f = healthy(verify).with_commit_entry_error("/usr/bin/a");
+        let f = differing(f, "/usr/bin/b");
+        let o = run(&f).unwrap();
+        assert_eq!(paths(&o), ["/usr/bin/a", "/usr/bin/b"]);
+        assert!(o.incomplete.is_some());
     }
 }

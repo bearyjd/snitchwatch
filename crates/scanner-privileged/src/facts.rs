@@ -116,6 +116,25 @@ fn entry_from_output(out: &str, path: &str) -> Result<Option<CommitEntry>> {
     parse_ls_entry(out, path).map(Some)
 }
 
+/// A failed `ostree checksum` of a path that no longer exists is a vanished
+/// file (kind `NotFound`), distinct from a deadline or I/O failure on a path
+/// that is still there.
+fn vanished_if_gone(error: ScanError, path: &str) -> ScanError {
+    let failed_exit = matches!(
+        &error,
+        ScanError::Io { source, .. } if source.kind() == std::io::ErrorKind::Other
+    );
+    let gone =
+        std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+    if failed_exit && gone {
+        return ScanError::Io {
+            path: path.to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "file vanished during scan"),
+        };
+    }
+    error
+}
+
 /// Production [`SystemFacts`]: reads real sysfs/procfs paths and shells out
 /// to `rpm-ostree`, `modinfo`, `rpm`, `mokutil`, `chkrootkit`.
 ///
@@ -293,7 +312,9 @@ impl SystemFacts for LiveSystem {
         lookup_request(None, path)?;
         let mut args: Vec<&str> = crate::command::OSTREE_CHECKSUM_ARGS.to_vec();
         args.push(path);
-        parse_checksum(&Self::run_within("ostree", &args, OSTREE_LOOKUP_DEADLINE)?)
+        let out = Self::run_within("ostree", &args, OSTREE_LOOKUP_DEADLINE)
+            .map_err(|e| vanished_if_gone(e, path))?;
+        parse_checksum(&out)
     }
 }
 
@@ -362,7 +383,7 @@ pub mod testing {
         entries: HashMap<String, Option<CommitEntry>>,
         entry_errors: HashSet<String>,
         checksums: HashMap<String, String>,
-        checksum_errors: HashSet<String>,
+        checksum_errors: HashMap<String, std::io::ErrorKind>,
         pub lookups: std::cell::Cell<usize>,
         lookup_delay: std::time::Duration,
     }
@@ -472,9 +493,24 @@ pub mod testing {
             self.checksums.insert(path.into(), sum.into());
             self
         }
-        /// `path_checksum(path)` fails (e.g. the file vanished).
-        pub fn with_path_checksum_error(mut self, path: impl Into<String>) -> Self {
-            self.checksum_errors.insert(path.into());
+        /// `path_checksum(path)` fails with a generic I/O error.
+        pub fn with_path_checksum_error(self, path: impl Into<String>) -> Self {
+            self.with_path_checksum_failure(path, std::io::ErrorKind::Other)
+        }
+        /// `path_checksum(path)` fails because the file no longer exists.
+        pub fn with_path_vanished(self, path: impl Into<String>) -> Self {
+            self.with_path_checksum_failure(path, std::io::ErrorKind::NotFound)
+        }
+        /// `path_checksum(path)` hits its deadline (a FIFO-like decoy).
+        pub fn with_path_timeout(self, path: impl Into<String>) -> Self {
+            self.with_path_checksum_failure(path, std::io::ErrorKind::TimedOut)
+        }
+        fn with_path_checksum_failure(
+            mut self,
+            path: impl Into<String>,
+            kind: std::io::ErrorKind,
+        ) -> Self {
+            self.checksum_errors.insert(path.into(), kind);
             self
         }
 
@@ -565,10 +601,10 @@ pub mod testing {
         }
         fn path_checksum(&self, path: &str) -> Result<String> {
             self.lookups.set(self.lookups.get() + 1);
-            if self.checksum_errors.contains(path) {
+            if let Some(kind) = self.checksum_errors.get(path) {
                 return Err(ScanError::Io {
                     path: path.to_string(),
-                    source: std::io::Error::other("synthetic ostree checksum failure"),
+                    source: std::io::Error::new(*kind, "synthetic ostree checksum failure"),
                 });
             }
             self.checksums
@@ -601,6 +637,34 @@ mod tests {
         assert!(entry_from_output("", path).is_err());
         let marker = crate::command::OSTREE_ABSENT_MARKER;
         assert_eq!(entry_from_output(marker, path).unwrap(), None);
+    }
+
+    #[test]
+    fn a_failed_checksum_of_a_missing_path_is_a_vanished_file_only_then() {
+        let dir = std::env::temp_dir().join(format!("sw-vanish-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = dir.join("here");
+        std::fs::write(&present, "x").unwrap();
+        let failure = || ScanError::Io {
+            path: "ostree".to_string(),
+            source: std::io::Error::other("system primitive failed"),
+        };
+        let kind = |e: ScanError| match e {
+            ScanError::Io { source, .. } => Some(source.kind()),
+            _ => None,
+        };
+        let gone = dir.join("gone");
+        let vanished = vanished_if_gone(failure(), gone.to_str().unwrap());
+        assert_eq!(kind(vanished), Some(std::io::ErrorKind::NotFound));
+        let still_there = vanished_if_gone(failure(), present.to_str().unwrap());
+        assert_eq!(kind(still_there), Some(std::io::ErrorKind::Other));
+        let timeout = ScanError::Io {
+            path: "ostree".to_string(),
+            source: std::io::Error::from(std::io::ErrorKind::TimedOut),
+        };
+        let kept = vanished_if_gone(timeout, gone.to_str().unwrap());
+        assert_eq!(kind(kept), Some(std::io::ErrorKind::TimedOut));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
