@@ -235,8 +235,8 @@ composefs, not `base_checksum`.
     (no `--repo=`, no `--`).
   - Absent-path stderr/exit were pinned from a throwaway repo with libostree 2026.2 (exit 1, empty
     stdout, `error: Inspecting path '<p>': No such file or directory: <p>`; through a symlink
-    ancestor `error: Inspecting path '<p>': Not a directory`). Not yet confirmed on the host's
-    2026.4: a different text fails closed (`Err`, run incomplete). Confirm in Task 6.
+    ancestor `error: Inspecting path '<p>': Not a directory`). CONFIRMED on the host's ostree 2026.4 (read-only, 2026-11-21):
+    `ostree ls -d -C <commit> /usr/local/no-such-file-xyz` => exit 1, empty stdout, stderr `error: Inspecting path '/usr/local/no-such-file-xyz': No such file or directory: /usr/local/no-such-file-xyz`; `.../usr/bin/bash/x` => exit 1, `error: Inspecting path '/usr/bin/bash/x': Not a directory`. Identical to the pins (the trailing newline was not byte-verified on the host). A different text would fail closed.
   - Original (superseded) Task text follows for the record.
   - Extend `scripts/file-drift-evidence.sh` with a `Q-BT` section. It must run only read-only
     commands, each under a timeout, as the script does today.
@@ -261,7 +261,7 @@ composefs, not `base_checksum`.
   - **Gate:** if `differ` (xattr-only) or dir/symlink candidates exceed `MAX_DRIFT_PATHS` on a
     clean image, Open Question 1 becomes **blocking** for PR B's merge. A clean image would still
     hit the cap.
-- [ ] **2. Pure parser and validation (`checks/base_tree.rs`).**
+- [x] **2. Pure parser and validation (`checks/base_tree.rs`).**
   - RED:
     - a regular-file line yields `File` + checksum;
     - `d` and `l` lines yield `Dir`/`Symlink` (fixtures from Task 1 once available, synthetic
@@ -277,7 +277,8 @@ composefs, not `base_checksum`.
     - drop the path-equality check, and the child-listing test fails;
     - drop the hex check, and the non-hex test fails;
     - split on all whitespace instead of a bounded split, and the spaces test fails.
-- [ ] **3. `SystemFacts` methods, argv constants, `Allow::OstreeAbsent`, deadlines.**
+  - RED 2026-11-21: 6 of 13 parser tests failed against the stub (the Err-expecting ones passed vacuously); mutations (drop path equality, drop hex check, whitespace split) each failed 1-3 tests.
+- [x] **3. `SystemFacts` methods, argv constants, `Allow::OstreeAbsent`, deadlines.**
   - RED:
     - fixture-script tests in `command/tests` (pattern of `verify_exit_tests`):
       - exit 1 + the pinned absent stderr under the exact `OSTREE_LS_ARGS` shape gives the
@@ -306,7 +307,8 @@ composefs, not `base_checksum`.
     - drop `-d` from `OSTREE_LS_ARGS`, and the argv-constant test fails;
     - raise `OSTREE_LOOKUP_DEADLINE` to 30 s, and the static assert fails to compile (record the
       compile error).
-- [ ] **4. `run_file_drift`: rule 2 first, decision table, single deployment read.**
+  - RED 2026-11-21: `the_exact_ls_shape_with_the_pinned_stderr_is_data` and 3 facts guard tests failed first; mutations (widen allowance, drop stderr match, drop `-d`, drop abs-path guard, drop commit-hex guard) each failed; `OSTREE_LOOKUP_DEADLINE`=30 s fails to compile (E0080 on the static assert).
+- [x] **4. `run_file_drift`: rule 2 first, decision table, single deployment read.**
   - RED in `file_drift.rs` tests via `SyntheticFacts`, one per decision-table row:
     - present + equal is `Expected`, with **zero** `file_owner` calls (counted);
     - present + differ is anomalous, and the detail contains both `expected=` and `actual=` hex;
@@ -344,7 +346,8 @@ composefs, not `base_checksum`.
     - treat a `path_checksum` `Err` as a match, and the TOCTOU-vanish test fails;
     - skip the degraded pre-check (always classify as healthy), and the degraded and superset tests
       fail.
-- [ ] **5. `scan.rs`/`main.rs` wiring, end-to-end, broker, docs.**
+  - RED 2026-11-21: 14 of 33 file_drift tests failed before the fix; all 8 listed mutations failed at least one test.
+- [x] **5. `scan.rs`/`main.rs` wiring, end-to-end, broker, docs.**
   - `scan.rs`: emit `file_drift_base_tree` only in degraded mode, and add the
     `file_drift_unowned` entry (pending Open Question 5).
   - Update the unit test at `scan.rs:271-273` and the 11-19 live-shaped e2e expectations.
@@ -373,6 +376,7 @@ composefs, not `base_checksum`.
     - restore the unconditional `file_drift_base_tree` push, and the healthy-run assertion fails;
     - restore `main.rs`'s direct `command::run("rpm-ostree", ...)` read, and the
       one-status-read-per-scan count fails.
+  - RED 2026-11-21: `a_healthy_run_reports_no_base_tree_skip_but_states_the_unowned_gap` failed (no `file_drift_unowned`); mutations (unconditional base-tree skip, second status read) each failed.
 - [ ] **6. Real-host checklist additions (`docs/RUNBOOK.md`, manual, non-blocking for merge).**
   - On the stock image via the broker (`RunDeepScan`), confirm all of the following:
     - no aggregate `/` finding;
@@ -487,6 +491,7 @@ composefs, not `base_checksum`.
 6. **TOCTOU vanish:** stop the loop as `incomplete` (proposed, consistent with today's
    failed-lookup rule), or record that one path as anomalous `vanished during scan` and continue.
    **Decided 2026-11-21 (owner: "defaults"): a file that vanishes mid-scan (`ostree checksum` fails on a path that existed) marks the run incomplete and stops; nothing resolves.**
+   Refined after review 2026-11-21: this applies to the VANISHED case only (and to an unavailable primitive). Any other lookup failure (deadline, I/O error on a path that still exists) is reported as an anomalous `base-tree lookup failed: <reason>` finding, the run is marked incomplete (nothing resolves) and continues, so one decoy (FIFO, device, huge file) cannot hide later candidates. `ostree ls` exit 0 with empty stdout is an error; absence is proven only by the pinned exit-1 stderr.
 7. **Spawn cost:** per-path `ls` + `checksum` (about 22 ms per pair measured) vs batching `ostree
    ls` paths. Revisit only with Task 6 timing; `rpm -qf` cost for the non-matching remainder is
    unmeasured.

@@ -120,11 +120,11 @@ Q1-Q3 below into one directory; bring back its `summary.txt`.
   `missing+present` total; `/usr/etc/shells`-style xattr-only cases appear with both
   checksums in the detail. Record total `file_drift` wall time (`rpm -Va` about 39 s plus
   about 10.6 s of lookups measured) against the 180 s budget.
-- [ ] Confirm on the host's `ostree` (2026.4) that `ostree ls -d -C <commit> <absent path>`
-  exits 1 with empty stdout and stderr exactly `error: Inspecting path '<p>': No such file or
-  directory: <p>` (and `... Not a directory` for a path below a symlink such as
-  `/usr/local/x`). The pins come from a throwaway repo on libostree 2026.2; a different text
-  fails closed (the run is `incomplete`, nothing resolves) and the pin must be updated.
+- [x] Confirmed on the host's `ostree` 2026.4 (read-only, 2026-11-21): `ostree ls -d -C <commit>
+  /usr/local/no-such-file-xyz` exits 1 with empty stdout and stderr `error: Inspecting path
+  '/usr/local/no-such-file-xyz': No such file or directory: /usr/local/no-such-file-xyz`; a path
+  below a file (`/usr/bin/bash/x`) gives `... Not a directory`. Identical to the pinned texts
+  (trailing newline not byte-verified on the host); a different text would fail closed.
 - [ ] Confirm `/usr/bin/sudoreplay` (mode `--x--x--x`) matches when scanned as root.
 - [ ] `ostree admin unlock` (or the equivalent dev overlay) on a test host, append to a base
   file, confirm one `base-tree mismatch` anomaly; revert and reboot, confirm it resolves.
