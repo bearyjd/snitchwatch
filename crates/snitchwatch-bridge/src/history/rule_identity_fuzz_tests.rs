@@ -47,7 +47,7 @@ impl Lcg {
 }
 
 const WORDS: [&str; 6] = ["", "a", "ab", "\0\0\0\x01", "x.y", "/p"];
-const TYPES: [&str; 6] = ["simple", "regexp", "list", "lists", "network", "bogus"];
+const TYPES: [&str; 5] = ["simple", "regexp", "list", "lists", "network"];
 const OPERANDS: [&str; 11] = [
     "dest.host",
     "process.path",
@@ -94,12 +94,7 @@ fn gen_op(rng: &mut Lcg, depth: usize) -> (Operator, Node) {
         list: members,
     };
     let node = Node {
-        kind: if TYPES[..5].contains(&kind) {
-            kind
-        } else {
-            "?"
-        }
-        .into(),
+        kind: kind.into(),
         operand: operand.into(),
         sensitive,
         value,

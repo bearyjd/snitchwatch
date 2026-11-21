@@ -178,8 +178,9 @@ fn a_journal_is_a_sector_header_plus_whole_page_records() {
 fn worst_case_churn_keeps_every_journal_within_the_full_journal_limit() {
     let mut rig = rig(16 * MIB);
     let budget = *rig.engine.budget();
-    // Several times the main file's capacity: inserts, evictions, vacuums.
-    let rows = budget.max_page_count * PAGE / 14_000 * 3 / 2;
+    // Past the main file's capacity: inserts, evictions, vacuums. Snapshots
+    // are capped at a tenth of the file (PR 4b), so a row is mostly its event.
+    let rows = budget.max_page_count * PAGE / 5_000 * 3 / 2;
     churn(&mut rig, rows, worst_item);
     assert_all_within_budget(&rig);
     let reports = rig.reports.lock().unwrap();

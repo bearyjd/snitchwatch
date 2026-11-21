@@ -27,7 +27,8 @@ use std::time::Duration;
 use rusqlite::{Connection, TransactionBehavior};
 
 use super::budget::Budget;
-use super::record::{ensure_snapshot, insert_event, EventRecord, SnapshotRecord};
+use super::record::{insert_event, EventRecord, SnapshotRecord};
+use super::snapshots::{admit_snapshot, delete_oldest_events, SnapshotLimits};
 use super::{Location, Store};
 
 /// Default queue bounds (D5).
@@ -479,10 +480,11 @@ impl Engine {
                 max: self.budget.rows_per_txn,
             });
         }
+        let limits = SnapshotLimits::from_budget(&self.budget);
         self.transact(TxnKind::Insert, |conn| {
             for item in items {
                 if let Some(snapshot) = &item.snapshot {
-                    ensure_snapshot(conn, snapshot)?;
+                    admit_snapshot(conn, &limits, snapshot)?;
                 }
                 insert_event(conn, &item.event)?;
             }
@@ -493,30 +495,8 @@ impl Engine {
     /// Delete the oldest `rows_per_txn` events and, in the same transaction,
     /// every snapshot that none of the remaining events refers to.
     pub fn evict_chunk(&mut self) -> Result<TxnReport, WriteError> {
-        let n = self.budget.rows_per_txn as i64;
-        self.transact(TxnKind::Evict, |conn| {
-            let hashes: Vec<Vec<u8>> = conn
-                .prepare(
-                    "SELECT DISTINCT rule_hash FROM \
-                     (SELECT rule_hash FROM events ORDER BY ts_ms, id LIMIT ?1) \
-                     WHERE rule_hash IS NOT NULL",
-                )?
-                .query_map([n], |r| r.get(0))?
-                .collect::<Result<_, _>>()?;
-            let deleted = conn.execute(
-                "DELETE FROM events WHERE id IN \
-                 (SELECT id FROM events ORDER BY ts_ms, id LIMIT ?1)",
-                [n],
-            )?;
-            for hash in hashes {
-                conn.execute(
-                    "DELETE FROM rules_seen WHERE rule_hash = ?1 AND NOT EXISTS \
-                     (SELECT 1 FROM events WHERE events.rule_hash = ?1)",
-                    [hash],
-                )?;
-            }
-            Ok(deleted as u64)
-        })
+        let n = self.budget.rows_per_txn;
+        self.transact(TxnKind::Evict, |conn| Ok(delete_oldest_events(conn, n)?))
     }
 
     /// Return up to `vacuum_steps_per_txn` free pages to the filesystem.

@@ -145,7 +145,8 @@ fn offending(src: &str) -> Vec<String> {
 
 /// Files allowed to mention the primitives: their own modules and tests, and
 /// the durable half (PR 3b), which holds and releases pins.
-const OWNERS: [&str; 10] = [
+const OWNERS: [&str; 11] = [
+    "snapshots_tests.rs",
     "lifecycle.rs",
     "lifecycle_tests.rs",
     "pins.rs",
@@ -285,7 +286,8 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 7] = [
+const DURABLE_OWNERS: [&str; 8] = [
+    "snapshots_tests.rs",
     "ledger.rs",
     "ledger_tests.rs",
     "session.rs",
