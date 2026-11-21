@@ -108,6 +108,7 @@ Q1-Q3 below into one directory; bring back its `summary.txt`.
   `FILE_DRIFT_BUDGET` (180 s, provisional; Q2).
 - [ ] Record the real format of `rpm-ostree status --json` `packages` /
   `requested-packages` entries: plain names or NEVRAs.
+  Q8 closed as label-only: parse reads packages + requested-packages + requested-local-packages (union); real layered entry format not live-verified (no layered image available); a mislabel shows base_pkg instead of layered_pkg, detection is unaffected.
 - [ ] Confirm an untouched image produces no flood of `T`/`M`/`missing` lines and no
   `file_drift_unparsed` or aggregate `/` finding (Q3: is `--nomtime` enough, or do
   `--excludedocs`/`%ghost`/`/usr/etc` paths also flood?).
