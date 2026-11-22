@@ -649,8 +649,123 @@ fn a_full_queue_drops_and_counts_and_leaks_no_pin() {
     let stats = capture.stats();
     assert_eq!(capture.queued_for_test(), 3);
     assert_eq!(stats.dropped_queue, 7);
-    // One live pin per queued item, none for the dropped ones.
-    assert_eq!(registry.len(), 3);
+    // One live pin per queued item, plus ONE for all the dropped ones: the
+    // watermark may not pass events that were never recorded.
+    assert_eq!(registry.len(), 4);
+    assert_eq!(
+        capture.shared.losses.lock().unwrap().queue.pending_count(),
+        7
+    );
+}
+
+#[test]
+fn admission_refusals_hold_exactly_one_pin_however_many_there_are() {
+    let registry = Arc::new(PinRegistry::new());
+    let mut config = config_for(&Budget::new(16 * MIB).unwrap());
+    config.admission.process_rate = 1;
+    config.admission.process_burst = 1;
+    let capture = Capture::new_unstarted_for_test(registry.clone(), config);
+    for round in 0..3 {
+        let events: Vec<Event> = (0..20)
+            .map(|i| simple("/a", &format!("h{round}-{i}"), i))
+            .collect();
+        let refs: Vec<&Event> = events.iter().collect();
+        capture.observe(&refs);
+    }
+    let refused = capture.stats().refused_process_rate;
+    assert!(refused >= 50, "{refused}");
+    assert_eq!(registry.len(), capture.queued_for_test() + 1);
+    let pending = capture
+        .shared
+        .losses
+        .lock()
+        .unwrap()
+        .admission
+        .pending_count();
+    assert_eq!(pending, refused);
+}
+
+#[test]
+fn a_snapshot_that_cannot_be_built_is_counted() {
+    let registry = Arc::new(PinRegistry::new());
+    let capture = Capture::new_unstarted_for_test(
+        registry,
+        unlimited(config_for(&Budget::new(16 * MIB).unwrap())),
+    );
+    let mut m = map_event(&event(conn("/a", "h", 80), rule("r", "deny"), 1)).unwrap();
+    m.identity.as_mut().unwrap().canonical.push(0);
+    capture.shared.enqueue(m, 1);
+    assert_eq!(capture.stats().snapshot_errors, 1);
+    assert_eq!(capture.queued_for_test(), 1);
+}
+
+fn locked_rig() -> (Capture, Arc<PinRegistry>, Db, tempfile::TempDir) {
+    let root = tempdir();
+    let state = state_dir(&root);
+    let location = locate(Mode::User, Some(&state)).unwrap();
+    enable(
+        &location,
+        Consent {
+            text_id: "t".into(),
+            accepted_ms: 1,
+        },
+    )
+    .unwrap();
+    let registry = Arc::new(PinRegistry::new());
+    let engine = engine_at(&location);
+    let config = unlimited(config_for(engine.budget()));
+    let capture = Capture::spawn(engine, registry.clone(), config).unwrap();
+    // The "slow disk": a transaction held open by another connection.
+    let blocker = Db::open(location.db_path()).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    (capture, registry, blocker, root)
+}
+
+#[test]
+fn shutdown_with_a_locked_database_is_bounded() {
+    let (capture, _registry, _blocker, _root) = locked_rig();
+    let events: Vec<Event> = (0..50).map(|i| simple("/a", &format!("h{i}"), i)).collect();
+    let refs: Vec<&Event> = events.iter().collect();
+    capture.observe(&refs);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let start = std::time::Instant::now();
+    let stats = capture.shutdown();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(stats.written, 0);
+    assert_eq!(stats.lost_write, 50);
+}
+
+#[test]
+fn a_batch_that_fails_once_is_retried_and_written() {
+    let root = tempdir();
+    let state = state_dir(&root);
+    let location = locate(Mode::User, Some(&state)).unwrap();
+    enable(
+        &location,
+        Consent {
+            text_id: "t".into(),
+            accepted_ms: 1,
+        },
+    )
+    .unwrap();
+    let registry = Arc::new(PinRegistry::new());
+    let mut engine = engine_at(&location);
+    let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let t = tries.clone();
+    engine.fault_before_commit_for_test(Box::new(move || {
+        (t.fetch_add(1, Ordering::SeqCst) == 0)
+            .then(|| super::super::writer::WriteError::Io(std::io::Error::other("injected")))
+    }));
+    let config = unlimited(config_for(engine.budget()));
+    let capture = Capture::spawn(engine, registry.clone(), config).unwrap();
+    capture.observe(&[&simple("/a", "first", 1)]);
+    let stats = capture.shutdown();
+    assert_eq!((stats.lost_write, stats.written), (0, 1));
+    assert_eq!(registry.len(), 0);
 }
 
 #[test]
@@ -669,10 +784,11 @@ fn a_failed_commit_loses_the_batch_but_keeps_the_oldest_pin() {
     let (clock, read) = manual_clock(50_000);
     let registry = Arc::new(PinRegistry::with_clock(read));
     let mut engine = engine_at(&location);
-    let failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let f = failed.clone();
     engine.fault_before_commit_for_test(Box::new(move || {
-        (!f.swap(true, Ordering::SeqCst))
+        // The first batch fails its try and its retry.
+        (f.fetch_add(1, Ordering::SeqCst) < 2)
             .then(|| super::super::writer::WriteError::Io(std::io::Error::other("injected")))
     }));
     let config = unlimited(config_for(engine.budget()));

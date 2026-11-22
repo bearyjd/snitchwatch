@@ -139,6 +139,14 @@ impl PinRegistry {
         Ok(PinId { registry, id })
     }
 
+    /// When `pin` arrived, if it is live and ours.
+    pub(crate) fn arrival_of(&self, pin: &PinId) -> Option<i64> {
+        if pin.registry != self.registry {
+            return None;
+        }
+        self.lock().arrival_by_id.get(&pin.id).copied()
+    }
+
     /// Releases a pin. A second release is `Unknown`, a handle from another
     /// registry is `Foreign`; either way nothing changes.
     pub fn release(&self, pin: &PinId) -> Result<(), PinError> {

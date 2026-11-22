@@ -61,7 +61,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use snitchwatch_proto::protocol::Event;
 
@@ -69,6 +69,7 @@ use super::admission::{Admission, AdmissionConfig, Refusal};
 use super::budget::Budget;
 use super::caps::{DstHost, ProcessPath, Protocol, RuleName};
 use super::durable::PinnedBatch;
+use super::ledger::{GapCause, LossCounter};
 use super::pins::{PinId, PinRegistry};
 use super::record::{Action, AnsweredBy, EventRecord};
 use super::rule_identity::{identify, RuleClass, RuleIdentity};
@@ -202,6 +203,8 @@ pub struct CaptureStats {
     /// Matched-rule events whose rule has no identity (recorded without a
     /// hash).
     pub unidentified_rules: u64,
+    /// Rows stored with a rule hash but no snapshot (it could not be built).
+    pub snapshot_errors: u64,
 }
 
 #[derive(Default)]
@@ -216,6 +219,7 @@ struct Counters {
     written: AtomicU64,
     lost_write: AtomicU64,
     unidentified_rules: AtomicU64,
+    snapshot_errors: AtomicU64,
 }
 
 fn add(counter: &AtomicU64, n: u64) {
@@ -245,6 +249,16 @@ static QUEUES_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 pub fn queues_allocated() -> usize {
     QUEUES_ALLOCATED.load(Ordering::Relaxed)
 }
+
+/// How long the writer waits on a lock held by another connection.
+const WRITER_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
+/// Wait before the one retry of a failed batch, doubling per lost batch.
+const RETRY_BACKOFF_MIN: Duration = Duration::from_millis(100);
+const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(2);
+/// A failing writer logs at most this often.
+const ERROR_LOG_EVERY: Duration = Duration::from_secs(30);
+/// After close the writer drains for at most this long; the rest is lost.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(2);
 
 type Entry = (Item, PinId);
 
@@ -303,6 +317,10 @@ impl PinnedQueue {
         self.queued.load(Ordering::Acquire)
     }
 
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
     /// The writer's end, once.
     fn take_receiver(&self) -> Option<Receiver<Entry>> {
         self.rx.lock().unwrap_or_else(|e| e.into_inner()).take()
@@ -341,10 +359,19 @@ impl PinnedQueue {
     }
 }
 
+/// Events that were never recorded, one tally (so one pin) per cause. Each
+/// pin holds the watermark back until the tally becomes a gap row; PR 7
+/// flushes them. Until then at most one pin per cause is ever held.
+struct Losses {
+    queue: LossCounter,
+    admission: LossCounter,
+}
+
 struct Shared {
     registry: Arc<PinRegistry>,
     queue: PinnedQueue,
     admission: Mutex<Admission>,
+    losses: Mutex<Losses>,
     counters: Counters,
     #[cfg(test)]
     probe: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -356,6 +383,10 @@ impl Shared {
             registry,
             queue: PinnedQueue::new(config.queue_max_bytes, config.queue_max_count),
             admission: Mutex::new(Admission::new(config.admission)),
+            losses: Mutex::new(Losses {
+                queue: LossCounter::new(GapCause::QueueOverflow),
+                admission: LossCounter::new(GapCause::AdmissionDrop),
+            }),
             counters: Counters::default(),
             #[cfg(test)]
             probe: Mutex::new(None),
@@ -376,6 +407,7 @@ impl Shared {
             written: get(&c.written),
             lost_write: get(&c.lost_write),
             unidentified_rules: get(&c.unidentified_rules),
+            snapshot_errors: get(&c.snapshot_errors),
         }
     }
 
@@ -397,22 +429,42 @@ impl Shared {
             .release_bytes(process, bytes);
     }
 
+    /// Tallies `n` events that will never be recorded, holding a pin for the
+    /// cause until a gap row is durable. When even that pin cannot be taken
+    /// (the registry is exhausted) only the counters know.
+    fn lose(&self, pick: impl FnOnce(&mut Losses) -> &mut LossCounter, n: u64) {
+        let mut losses = self.losses.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = pick(&mut losses).record(&self.registry, n);
+    }
+
     /// Admit, pin and queue one record.
     fn enqueue(&self, mapped: Mapped, now_ms: i64) {
         let n = u64::from(mapped.record.repeat_count);
         let counters = &self.counters;
         let bytes = match self.admit(&mapped.record, now_ms) {
             Ok(bytes) => bytes,
-            Err(Refusal::ProcessRate) => return add(&counters.refused_process_rate, n),
-            Err(Refusal::ByteShare) => return add(&counters.refused_byte_share, n),
-            Err(Refusal::GlobalRate) => return add(&counters.refused_global_rate, n),
+            Err(refusal) => {
+                let counter = match refusal {
+                    Refusal::ProcessRate => &counters.refused_process_rate,
+                    Refusal::ByteShare => &counters.refused_byte_share,
+                    Refusal::GlobalRate => &counters.refused_global_rate,
+                };
+                add(counter, n);
+                return self.lose(|l| &mut l.admission, n);
+            }
         };
         let Mapped {
             record, identity, ..
         } = mapped;
         let snapshot = identity
             .as_ref()
-            .and_then(|i| snapshot_for(i, record.ts_ms).ok());
+            .and_then(|i| match snapshot_for(i, record.ts_ms) {
+                Ok(snapshot) => Some(snapshot),
+                Err(_) => {
+                    add(&counters.snapshot_errors, 1);
+                    None
+                }
+            });
         let item = Item {
             event: record,
             snapshot,
@@ -421,13 +473,14 @@ impl Shared {
             Ok(pin) => pin,
             Err(_) => {
                 self.refund(&item.event, bytes);
-                return add(&counters.dropped_pin, n);
+                add(&counters.dropped_pin, n);
+                return self.lose(|l| &mut l.queue, n);
             }
         };
         if let Err(entry) = self.queue.try_push(item, pin) {
             let (item, pin) = *entry;
-            // Nothing will ever commit it: its pin must not hold the
-            // watermark back.
+            // Nothing will ever commit it; the loss tally holds a pin for it.
+            self.lose(|l| &mut l.queue, n);
             let _ = self.registry.release(&pin);
             self.refund(&item.event, bytes);
             add(&counters.dropped_queue, n);
@@ -464,41 +517,102 @@ impl Shared {
     }
 
     /// The writer thread: commit pinned batches until the queue is closed and
-    /// empty.
+    /// empty, or, once closed, until [`SHUTDOWN_DRAIN`] has passed.
     fn run_writer(&self, mut engine: Engine, rx: Receiver<Entry>) {
         let rows = engine.budget().rows_per_txn as usize;
-        // The oldest pin of the first batch that failed, held for good.
+        // A short lock wait: a locked database costs a batch, not the thread.
+        let _ = engine.connection().busy_timeout(WRITER_BUSY_TIMEOUT);
+        // The oldest pin of the batches that failed, held for good.
         let mut held: Option<PinId> = None;
+        let mut backoff = RETRY_BACKOFF_MIN;
+        let mut last_logged: Option<Instant> = None;
+        let mut deadline: Option<Instant> = None;
         while let Some(batch) = self.queue.pop_batch(&rx, rows, Duration::from_millis(200)) {
+            if self.queue.is_closed() {
+                let limit = *deadline.get_or_insert_with(|| Instant::now() + SHUTDOWN_DRAIN);
+                if Instant::now() >= limit {
+                    self.abandon(batch, &rx, &mut held);
+                    return;
+                }
+            }
             if batch.items.is_empty() {
                 continue;
             }
-            let events: u64 = batch
-                .items
-                .iter()
-                .map(|i| u64::from(i.event.repeat_count))
-                .sum();
-            match engine.commit_pinned(&batch, &self.registry) {
-                Ok(_) => add(&self.counters.written, events),
+            let mut result = engine.commit_pinned(&batch, &self.registry);
+            if result.is_err() {
+                // Once closed there is no time to wait: the retry is immediate.
+                if !self.queue.is_closed() {
+                    std::thread::sleep(backoff);
+                }
+                result = engine.commit_pinned(&batch, &self.registry);
+            }
+            let events = batch_events(&batch);
+            match result {
+                Ok(_) => {
+                    add(&self.counters.written, events);
+                    backoff = RETRY_BACKOFF_MIN;
+                }
                 Err(e) => {
-                    add(&self.counters.lost_write, events);
-                    tracing::error!(error = %e, lost = batch.items.len(), "history write failed");
-                    self.keep_oldest_pin(batch.pins, &mut held);
-                    std::thread::sleep(Duration::from_millis(500));
+                    self.lost_batch(batch, &mut held);
+                    if last_logged.is_none_or(|t| t.elapsed() >= ERROR_LOG_EVERY) {
+                        last_logged = Some(Instant::now());
+                        tracing::error!(error = %e, lost = events, "history write failed");
+                    }
+                    backoff = (backoff * 2).min(RETRY_BACKOFF_MAX);
                 }
             }
         }
     }
 
-    /// Releases `pins` but the oldest, unless one is already held (it is
-    /// older: pins arrive in order).
+    /// The batch could not be written: count it, give its admission bytes
+    /// back and keep only the oldest pin.
+    fn lost_batch(&self, batch: PinnedBatch, held: &mut Option<PinId>) {
+        add(&self.counters.lost_write, batch_events(&batch));
+        for item in &batch.items {
+            self.refund(&item.event, estimate_bytes(&item.event));
+        }
+        self.keep_oldest_pin(batch.pins, held);
+    }
+
+    /// Shutdown ran out of time: everything still queued is lost.
+    fn abandon(&self, batch: PinnedBatch, rx: &Receiver<Entry>, held: &mut Option<PinId>) {
+        let (mut items, mut pins) = (batch.items, batch.pins);
+        for (item, pin) in rx.try_iter() {
+            items.push(item);
+            pins.push(pin);
+        }
+        self.lost_batch(PinnedBatch { items, pins }, held);
+    }
+
+    /// Releases `pins` but the one that arrived first, unless the pin
+    /// already held is older.
     fn keep_oldest_pin(&self, mut pins: Vec<PinId>, held: &mut Option<PinId>) {
-        if held.is_none() && !pins.is_empty() {
-            *held = Some(pins.remove(0));
+        let arrival = |p: &PinId| self.registry.arrival_of(p).unwrap_or(i64::MAX);
+        if let Some(i) = (0..pins.len()).min_by_key(|&i| arrival(&pins[i])) {
+            let oldest = pins.swap_remove(i);
+            match held.take() {
+                Some(prev) if arrival(&prev) <= arrival(&oldest) => {
+                    pins.push(oldest);
+                    *held = Some(prev);
+                }
+                Some(prev) => {
+                    pins.push(prev);
+                    *held = Some(oldest);
+                }
+                None => *held = Some(oldest),
+            }
         }
         let refs: Vec<&PinId> = pins.iter().collect();
         let _ = self.registry.release_all(&refs);
     }
+}
+
+fn batch_events(batch: &PinnedBatch) -> u64 {
+    batch
+        .items
+        .iter()
+        .map(|i| u64::from(i.event.repeat_count))
+        .sum()
 }
 
 /// History capture: the admission state, the pinned queue and the writer

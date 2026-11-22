@@ -49,6 +49,11 @@ pub enum Refusal {
     GlobalRate,
 }
 
+// KNOWN GAP (D5), BLOCKING PR 8 / the consent PR: the byte share is only a
+// refusal of what is admitted this run. Until (1) self-eviction replaces
+// refusal, (2) the ledger is loaded from the DB at start, and (3) retained
+// bytes are accounted (snapshot bytes included, `release_bytes` called by
+// retention), a process's share is not what the store really holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdmissionConfig {
     pub global_rate: u64,
