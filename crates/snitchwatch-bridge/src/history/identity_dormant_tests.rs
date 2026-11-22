@@ -15,7 +15,10 @@ const IDENTITY: [&str; 6] = [
     "RuleClass::of",
 ];
 
-const OWNERS: [&str; 6] = [
+const OWNERS: [&str; 9] = [
+    "capture.rs",
+    "capture_tests.rs",
+    "hook_tests.rs",
     "snapshots.rs",
     "snapshots_tests.rs",
     "rule_identity.rs",

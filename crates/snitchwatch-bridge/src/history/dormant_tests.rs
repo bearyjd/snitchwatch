@@ -145,7 +145,10 @@ fn offending(src: &str) -> Vec<String> {
 
 /// Files allowed to mention the primitives: their own modules and tests, and
 /// the durable half (PR 3b), which holds and releases pins.
-const OWNERS: [&str; 11] = [
+const OWNERS: [&str; 14] = [
+    "capture.rs",
+    "capture_tests.rs",
+    "hook_tests.rs",
     "snapshots_tests.rs",
     "lifecycle.rs",
     "lifecycle_tests.rs",
@@ -286,7 +289,10 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 8] = [
+const DURABLE_OWNERS: [&str; 11] = [
+    "capture.rs",
+    "capture_tests.rs",
+    "hook_tests.rs",
     "snapshots_tests.rs",
     "ledger.rs",
     "ledger_tests.rs",
@@ -296,6 +302,97 @@ const DURABLE_OWNERS: [&str; 8] = [
     "crash_tests.rs",
     "dormant_tests.rs",
 ];
+
+/// PR 5: capture and admission. Whole identifiers that name them, a
+/// violation anywhere outside `history/`.
+const CAPTURE_TYPES: [&str; 4] = [
+    "CaptureStats",
+    "CaptureConfig",
+    "queues_allocated",
+    "AdmissionConfig",
+];
+/// Their modules and common words (`capture`, `Refusal`, `start`): counted
+/// only in a file that names `history`.
+const CAPTURE_MODULES: [&str; 14] = [
+    "capture",
+    "admission",
+    "Admission",
+    "Capture",
+    "start",
+    "Mapped",
+    "Refusal",
+    "GLOBAL_RATE",
+    "GLOBAL_BURST",
+    "PROCESS_RATE",
+    "PROCESS_BURST",
+    "SHARE_PERCENT",
+    "MAX_BUCKETS",
+    "IDLE_MS",
+];
+/// The files that implement and test capture and admission.
+const CAPTURE_OWNERS: [&str; 7] = [
+    "capture.rs",
+    "capture_tests.rs",
+    "admission.rs",
+    "admission_tests.rs",
+    "hook_tests.rs",
+    "dormant_tests.rs",
+    "mod.rs",
+];
+
+/// The two production hook sites PR 5 wires, and the only paths each may name:
+/// `UiService` holds the capture and `ping` feeds it; the bridge binary asks
+/// `start` for one. Exact paths, nothing else of `history` (not
+/// `history::open_store`, not a `use history::{...}` list, not the reader,
+/// guard, gaps or control modules of later PRs).
+const HOOK_FILES: [(&str, &[&str]); 2] = [
+    (
+        "snitchwatch-bridge/src/grpc_server.rs",
+        &["history::capture::Capture"],
+    ),
+    (
+        "snitchwatch-bridge-cli/src/lib.rs",
+        &[
+            "history::capture::Capture",
+            "history::capture::start",
+            "history::Mode",
+        ],
+    ),
+];
+
+/// `text` with each `path` that is not the start of a longer identifier
+/// (`history::capture::Capture` inside `history::capture::CaptureStats`)
+/// replaced by a space.
+fn replace_whole_path(text: &str, path: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(path) {
+        let end = at + path.len();
+        out.push_str(&rest[..at]);
+        if rest[end..].chars().next().is_some_and(is_ident) {
+            out.push_str(path);
+        } else {
+            out.push(' ');
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// [`outside_hits`] for `file`, with the paths its hook is allowed to name
+/// taken out first.
+fn outside_hits_for(file: &Path, src: &str) -> Vec<String> {
+    let allowed = HOOK_FILES
+        .iter()
+        .find(|(name, _)| file.ends_with(name))
+        .map_or(&[][..], |(_, paths)| *paths);
+    let mut text = src.to_owned();
+    for path in allowed {
+        text = replace_whole_path(&text, path);
+    }
+    outside_hits(&text)
+}
 
 /// What a file outside `history/` may not name: the module itself (its only
 /// permitted mention is the `pub mod history;` declaration), the switches,
@@ -308,10 +405,12 @@ fn outside_hits(src: &str) -> Vec<String> {
     for w in &words {
         let gated = WIRING.contains(&w.as_str())
             || DURABLE_TYPES.contains(&w.as_str())
+            || CAPTURE_TYPES.contains(&w.as_str())
             || (names_history
                 && (w == "history"
                     || WIRING_HISTORY_ONLY.contains(&w.as_str())
-                    || DURABLE_MODULES.contains(&w.as_str())));
+                    || DURABLE_MODULES.contains(&w.as_str())
+                    || CAPTURE_MODULES.contains(&w.as_str())));
         if gated && !hits.contains(w) {
             hits.push(w.clone());
         }
@@ -341,7 +440,8 @@ fn nothing_outside_history_names_the_switches_or_the_durable_half() {
         if in_history(&file) {
             continue;
         }
-        for hit in outside_hits(&fs::read_to_string(&file).expect("read source")) {
+        let text = fs::read_to_string(&file).expect("read source");
+        for hit in outside_hits_for(&file, &text) {
             offenders.push(format!("{} uses {hit}", file.display()));
         }
     }
@@ -488,4 +588,149 @@ fn the_outside_guard_catches_the_real_durable_names() {
             "{name}"
         );
     }
+}
+
+// ---- PR 5: the hooks ----
+
+/// What a non-owner file inside `history/` may not name of capture and
+/// admission: their types and constants anywhere, and the modules as a path.
+fn capture_inside_hits(src: &str) -> Vec<String> {
+    let mut hits: Vec<String> = Vec::new();
+    for w in code_words(src) {
+        let gated = (CAPTURE_TYPES.contains(&w.as_str()) || CAPTURE_MODULES.contains(&w.as_str()))
+            && !["start", "capture", "Capture"].contains(&w.as_str());
+        if gated && !hits.contains(&w) {
+            hits.push(w);
+        }
+    }
+    // The common words only as a path into the module.
+    let stripped = strip(src);
+    for path in ["capture::", "admission::", "::capture", "::admission"] {
+        if stripped
+            .lines()
+            .filter(|l| !is_mod_decl(l))
+            .any(|l| l.contains(path))
+        {
+            hits.push(path.to_owned());
+        }
+    }
+    hits
+}
+
+#[test]
+fn the_capture_half_is_named_only_by_its_owners() {
+    let mut offenders = Vec::new();
+    for file in workspace_sources() {
+        if !in_history(&file) || CAPTURE_OWNERS.contains(&file_name(&file)) {
+            continue;
+        }
+        let text = fs::read_to_string(&file).expect("read source");
+        for hit in capture_inside_hits(&text) {
+            offenders.push(format!("{} uses {hit}", file.display()));
+        }
+    }
+    assert!(offenders.is_empty(), "{offenders:#?}");
+}
+
+#[test]
+fn the_capture_guard_catches_a_planted_use_inside_history() {
+    for planted in [
+        "use super::capture::Capture;",
+        "use super::capture;",
+        "use super::capture as c;\nfn f() { c::start(); }",
+        "use super::admission::Admission;",
+        "fn f(c: CaptureStats) {}",
+        "fn f() { let _ = GLOBAL_RATE; }",
+        "fn f(r: Refusal) {}",
+        "fn f() { crate::history::admission::x(); }",
+    ] {
+        assert!(
+            !capture_inside_hits(planted).is_empty(),
+            "missed: {planted}"
+        );
+    }
+    assert!(capture_inside_hits("pub mod capture;\npub mod admission;").is_empty());
+}
+
+/// Every `pub` item of `capture.rs` and `admission.rs` is guarded, so a new
+/// one cannot slip in unscanned.
+#[test]
+fn capture_names_cover_every_pub_item() {
+    let mut missing = Vec::new();
+    for file in ["capture.rs", "admission.rs"] {
+        for name in pub_items(file, false) {
+            let listed =
+                CAPTURE_TYPES.contains(&name.as_str()) || CAPTURE_MODULES.contains(&name.as_str());
+            if !listed {
+                missing.push(format!("{file}: {name}"));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "unguarded capture items: {missing:#?}");
+}
+
+fn hook(name: &str) -> PathBuf {
+    PathBuf::from("crates").join(name)
+}
+
+#[test]
+fn the_hook_files_may_name_exactly_their_paths() {
+    let grpc = hook("snitchwatch-bridge/src/grpc_server.rs");
+    let ok = "pub struct S { h: Option<Arc<crate::history::capture::Capture>> }";
+    assert!(outside_hits_for(&grpc, ok).is_empty());
+    let cli = hook("snitchwatch-bridge-cli/src/lib.rs");
+    let ok = "fn f() { let _ = snitchwatch_bridge::history::capture::start(snitchwatch_bridge::history::Mode::User, None); }";
+    assert!(
+        outside_hits_for(&cli, ok).is_empty(),
+        "{:?}",
+        outside_hits_for(&cli, ok)
+    );
+}
+
+/// The relaxation must not let a hook file reach the pieces PR 5 does not
+/// wire (guard, gaps, reader, control) or the switches (`enable`, the store,
+/// the writer, the durable half), nor let any other file name capture.
+#[test]
+fn the_relaxed_guard_still_catches_what_is_not_wired() {
+    let grpc = hook("snitchwatch-bridge/src/grpc_server.rs");
+    let cli = hook("snitchwatch-bridge-cli/src/lib.rs");
+    let elsewhere = hook("snitchwatch-bridge/src/ws_server.rs");
+    for planted in [
+        "use crate::history::guard::OutcomeGuard;",
+        "fn f() { crate::history::gaps::label(); }",
+        "fn f() { crate::history::reader::page(); }",
+        "fn f() { crate::history::control::clear(); }",
+        "fn f() { crate::history::open_store(&l); }",
+        "fn f() { crate::history::enable(&l, c); }",
+        "use crate::history::writer::Writer;",
+        "use crate::history::durable::PinnedBatch;",
+        "use crate::history::lifecycle::ReaderGate;",
+        "use crate::history::{capture, Mode};",
+        "fn f() { crate::history::capture::queues_allocated(); }",
+        "fn f(s: crate::history::capture::CaptureStats) {}",
+        "use crate::history::Settings;",
+    ] {
+        // The allowed names themselves are fine; anything else is not.
+        let with_allowed = format!("{planted}\nfn g(_: crate::history::capture::Capture) {{}}");
+        assert!(
+            !outside_hits_for(&grpc, &with_allowed).is_empty(),
+            "grpc hook missed: {planted}"
+        );
+        assert!(
+            !outside_hits_for(&cli, &with_allowed).is_empty(),
+            "cli hook missed: {planted}"
+        );
+        assert!(
+            !outside_hits_for(&elsewhere, &with_allowed).is_empty(),
+            "another file missed: {planted}"
+        );
+    }
+    // Any other file naming even the allowed paths is a violation.
+    let allowed = "fn f(_: crate::history::capture::Capture) {}";
+    assert!(!outside_hits_for(&elsewhere, allowed).is_empty());
+    assert!(!outside_hits_for(
+        &hook("snitchwatch-bridge/src/ws_server.rs"),
+        "use crate::history::Mode;"
+    )
+    .is_empty());
 }
