@@ -111,11 +111,11 @@ fn worst_item(i: u64) -> Item {
     e.src_port = Some(65535);
     e.src_ip = Some(ip);
     Item {
-        snapshot: Some(SnapshotRecord {
-            rule_hash: hash_of(i),
-            snapshot: Snapshot::new(&text("{", i, SNAPSHOT)).unwrap(),
-            first_seen_ms: i as i64,
-        }),
+        snapshot: Some(SnapshotRecord::for_test(
+            hash_of(i),
+            Snapshot::new(&text("{", i, SNAPSHOT)).unwrap(),
+            i as i64,
+        )),
         event: e,
     }
 }
@@ -178,8 +178,9 @@ fn a_journal_is_a_sector_header_plus_whole_page_records() {
 fn worst_case_churn_keeps_every_journal_within_the_full_journal_limit() {
     let mut rig = rig(16 * MIB);
     let budget = *rig.engine.budget();
-    // Several times the main file's capacity: inserts, evictions, vacuums.
-    let rows = budget.max_page_count * PAGE / 14_000 * 3 / 2;
+    // Past the main file's capacity: inserts, evictions, vacuums. Snapshots
+    // are capped at a tenth of the file (PR 4b), so a row is mostly its event.
+    let rows = budget.max_page_count * PAGE / 5_000 * 3 / 2;
     churn(&mut rig, rows, worst_item);
     assert_all_within_budget(&rig);
     let reports = rig.reports.lock().unwrap();
@@ -364,9 +365,12 @@ fn deleted_content_is_not_left_in_the_file() {
     let canary = "/canary-5f3c9a1e-delete-me";
     let mut item = worst_item(1);
     item.event.process_path = Some(ProcessPath::new(&format!("{canary}/x")));
-    let mut snap = worst_item(1).snapshot.unwrap();
-    snap.snapshot = Snapshot::new(&format!("{{\"path\":\"{canary}-rule\"}}")).unwrap();
-    item.snapshot = Some(snap);
+    let old = worst_item(1).snapshot.unwrap();
+    item.snapshot = Some(SnapshotRecord::for_test(
+        old.rule_hash(),
+        Snapshot::new(&format!("{{\"path\":\"{canary}-rule\"}}")).unwrap(),
+        old.first_seen_ms(),
+    ));
     rig.engine.insert_batch(&[item]).unwrap();
     let find = |needle: &str| {
         let bytes = std::fs::read(rig.location.db_path()).unwrap();
@@ -384,11 +388,7 @@ fn deleted_content_is_not_left_in_the_file() {
 #[test]
 fn evicting_an_event_removes_its_unreferenced_snapshot_but_keeps_shared_ones() {
     let mut rig = rig(16 * MIB);
-    let shared = SnapshotRecord {
-        rule_hash: hash_of(9),
-        snapshot: Snapshot::new("{\"shared\":1}").unwrap(),
-        first_seen_ms: 0,
-    };
+    let shared = SnapshotRecord::for_test(hash_of(9), Snapshot::new("{\"shared\":1}").unwrap(), 0);
     let mut a = small_item(1);
     a.event.rule_hash = Some(hash_of(9));
     a.snapshot = Some(shared.clone());
@@ -598,7 +598,10 @@ fn queue_accounting_covers_the_item_and_every_allocation() {
             .into_iter()
             .flatten()
             .sum::<usize>()
-            + item.snapshot.as_ref().map_or(0, |s| s.snapshot.allocated());
+            + item
+                .snapshot
+                .as_ref()
+                .map_or(0, |s| s.snapshot().allocated());
         assert!(
             item.queue_bytes() >= floor,
             "{} < {floor}",

@@ -23,6 +23,22 @@
 //! Raw `process.path` / `dest.host` values are the user's own rule text and
 //! are recorded as written (the stated limit in D4).
 //!
+//! # Operator types
+//!
+//! Only [`OPERATOR_TYPES`] (`simple`, `regexp`, `network`, `lists`, `list`)
+//! have an identity. Any other type, at any nesting depth, makes [`identify`]
+//! return [`IdentityError::UnsupportedOperatorType`]: no identity, no
+//! snapshot, and the error never carries rule text. Mapping unknown types to
+//! one placeholder (the 4a behaviour) made distinct rules (`range` with
+//! `1-10` and `range` with `1-65535`, a `complex` rule, a type a newer daemon
+//! adds) hash alike, which would show one rule's history as another's. The
+//! vendored daemon (OpenSnitch master, a1353848) also defines `complex`
+//! ("for future use") and `range`; both are refused, not allowlisted, until
+//! their values have a stated redaction. The test
+//! `identity_operator_types_match_the_vendored_daemon` parses the vendored
+//! `operator.go` and fails when the daemon's set is not exactly supported
+//! plus refused, so a new upstream type needs a decision.
+//!
 //! Failing closed: a rule beyond [`MAX_OPERATOR_DEPTH`], [`MAX_NODES`],
 //! [`MAX_OPERATOR_LIST_LEN`] members per list or [`caps::SNAPSHOT`] canonical
 //! bytes has no identity ([`IdentityError`]), and recursion stops at the
@@ -61,8 +77,8 @@ pub(crate) const LIST_OPERANDS: [&str; 5] = [
 /// Longest operand kind string kept (over it: fail closed).
 pub const MAX_KIND: usize = 256;
 const UNKNOWN: &str = "[unknown]";
-const OPERATOR_TYPES: [&str; 5] = ["simple", "regexp", "network", "lists", "list"];
-const ACTIONS: [&str; 3] = ["allow", "deny", "reject"];
+pub(crate) const OPERATOR_TYPES: [&str; 5] = ["simple", "regexp", "network", "lists", "list"];
+pub(crate) const ACTIONS: [&str; 3] = ["allow", "deny", "reject"];
 const MAX_DURATION: usize = 32;
 const VERSION: &[u8] = b"SWRI\x01";
 
@@ -81,6 +97,8 @@ pub enum IdentityError {
     KindTooLong,
     #[error("redacted form longer than {SNAPSHOT} bytes")]
     TooLarge,
+    #[error("an operator type this build does not identify")]
+    UnsupportedOperatorType,
 }
 
 /// `events.rule_class`, derived from the rule-name prefixes already in use.
@@ -139,6 +157,14 @@ pub struct RuleIdentity {
     pub qualifiers: Qualifiers,
 }
 
+/// The hash of canonical bytes: the one place a rule hash is computed.
+pub(super) fn hash_of(canonical: &[u8]) -> [u8; RULE_HASH] {
+    let digest = Sha256::digest(canonical);
+    let mut hash = [0u8; RULE_HASH];
+    hash.copy_from_slice(&digest[..RULE_HASH]);
+    hash
+}
+
 /// Redact, encode and hash `rule`.
 pub fn identify(rule: &Rule) -> Result<RuleIdentity, IdentityError> {
     if rule.name.len() > RULE_NAME {
@@ -161,11 +187,8 @@ pub fn identify(rule: &Rule) -> Result<RuleIdentity, IdentityError> {
     if enc.out.len() > SNAPSHOT {
         return Err(IdentityError::TooLarge);
     }
-    let digest = Sha256::digest(&enc.out);
-    let mut hash = [0u8; RULE_HASH];
-    hash.copy_from_slice(&digest[..RULE_HASH]);
     Ok(RuleIdentity {
-        hash,
+        hash: hash_of(&enc.out),
         class: RuleClass::of(&rule.name),
         qualifiers: Qualifiers {
             list_contents_not_recorded: enc.lists,
@@ -244,8 +267,11 @@ impl Encoder {
         if op.operand.len() > MAX_KIND {
             return Err(IdentityError::KindTooLong);
         }
+        if !OPERATOR_TYPES.contains(&op.r#type.as_str()) {
+            return Err(IdentityError::UnsupportedOperatorType);
+        }
         let value = classify(op);
-        self.text(allowed(&op.r#type, &OPERATOR_TYPES))?;
+        self.text(&op.r#type)?;
         self.text(&op.operand)?;
         self.bytes(&[u8::from(op.sensitive)]);
         match value {

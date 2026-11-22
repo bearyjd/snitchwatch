@@ -28,6 +28,7 @@ pub mod rule_identity;
 pub mod schema;
 pub mod session;
 pub mod settings;
+pub mod snapshots;
 pub mod writer;
 
 use std::path::{Path, PathBuf};
@@ -193,6 +194,8 @@ mod rule_identity_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+#[cfg(test)]
+mod snapshots_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

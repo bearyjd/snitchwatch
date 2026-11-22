@@ -5,7 +5,7 @@
 
 use snitchwatch_proto::protocol::{Operator, Rule};
 
-use super::rule_identity::identify;
+use super::rule_identity::{identify, IdentityError};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Val {
@@ -65,6 +65,10 @@ const KEPT: [&str; 3] = ["dest.host", "process.path", "lists.ips"];
 const ACTIONS: [&str; 4] = ["allow", "deny", "reject", "bogus!"];
 const DURATIONS: [&str; 5] = ["once", "1.5h", "2.5h", "always", "bad!"];
 
+fn has_bogus(node: &Node) -> bool {
+    node.kind == "bogus" || node.members.iter().any(has_bogus)
+}
+
 fn gen_op(rng: &mut Lcg, depth: usize) -> (Operator, Node) {
     let kind = rng.pick(&TYPES);
     let operand = rng.pick(&OPERANDS);
@@ -94,12 +98,7 @@ fn gen_op(rng: &mut Lcg, depth: usize) -> (Operator, Node) {
         list: members,
     };
     let node = Node {
-        kind: if TYPES[..5].contains(&kind) {
-            kind
-        } else {
-            "?"
-        }
-        .into(),
+        kind: kind.into(),
         operand: operand.into(),
         sensitive,
         value,
@@ -144,8 +143,18 @@ fn gen_rule(rng: &mut Lcg) -> (Rule, Visible) {
 fn canonical_bytes_and_hashes_are_equal_exactly_when_the_visible_forms_are() {
     let mut rng = Lcg(7);
     let mut seen = Vec::new();
+    let mut refused = 0;
     for _ in 0..600 {
         let (rule, visible) = gen_rule(&mut rng);
+        // An unmodelled operator type, at any depth, has no identity.
+        if visible.tree.as_ref().is_some_and(has_bogus) {
+            assert_eq!(
+                identify(&rule).unwrap_err(),
+                IdentityError::UnsupportedOperatorType
+            );
+            refused += 1;
+            continue;
+        }
         let ident = identify(&rule).expect("identity");
         seen.push((ident.canonical, ident.hash, visible));
     }
@@ -158,4 +167,5 @@ fn canonical_bytes_and_hashes_are_equal_exactly_when_the_visible_forms_are() {
         }
     }
     assert!(equal_pairs > 0, "the table exercises the equal case too");
+    assert!(refused > 0, "the table exercises the refused case too");
 }

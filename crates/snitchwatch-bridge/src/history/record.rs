@@ -7,7 +7,8 @@ use std::net::IpAddr;
 
 use rusqlite::{params, Connection};
 
-use super::caps::{DstHost, ProcessPath, Protocol, RuleClass, RuleName, Snapshot, RULE_HASH};
+use super::caps::{DstHost, ProcessPath, Protocol, RuleClass, RuleName, RULE_HASH};
+pub use super::snapshots::SnapshotRecord;
 
 /// `events.action`, as stored.
 pub(crate) const ACTIONS: [&str; 6] = [
@@ -105,14 +106,6 @@ impl EventRecord {
     }
 }
 
-/// A `rules_seen` row (D7). PR 4 builds the redacted snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SnapshotRecord {
-    pub rule_hash: [u8; RULE_HASH],
-    pub snapshot: Snapshot,
-    pub first_seen_ms: i64,
-}
-
 fn ip_text(ip: Option<IpAddr>) -> Option<String> {
     ip.map(|ip| ip.to_string())
 }
@@ -151,24 +144,9 @@ pub fn insert_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> rusqlite
     conn.execute(
         "INSERT INTO rules_seen (rule_hash, snapshot, first_seen_ms) VALUES (?1, ?2, ?3)",
         params![
-            snapshot.rule_hash.as_slice(),
-            snapshot.snapshot.as_str(),
-            snapshot.first_seen_ms
-        ],
-    )?;
-    Ok(())
-}
-
-/// [`insert_snapshot`] unless that hash is already stored (then nothing is
-/// written, so the page budget is not spent).
-pub fn ensure_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO rules_seen (rule_hash, snapshot, first_seen_ms) \
-         VALUES (?1, ?2, ?3)",
-        params![
-            snapshot.rule_hash.as_slice(),
-            snapshot.snapshot.as_str(),
-            snapshot.first_seen_ms
+            snapshot.rule_hash().as_slice(),
+            snapshot.snapshot().as_str(),
+            snapshot.first_seen_ms()
         ],
     )?;
     Ok(())

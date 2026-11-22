@@ -242,14 +242,14 @@ fn a_value_cannot_forge_a_nested_operator() {
 // ---- allowlist ------------------------------------------------------
 
 #[test]
-fn unknown_types_and_actions_are_not_recorded_but_kinds_are_kept() {
+fn unknown_actions_and_durations_are_not_recorded_but_kinds_are_kept() {
     let mk = |kind: &str, action: &str, dur: &str| Rule {
         action: action.into(),
         duration: dur.into(),
         ..rule("r", Some(op(kind, "weird.kind", "d")))
     };
-    let a = id(&mk("CANARY-T", "CANARY-A", "CANARY!"));
-    let b = id(&mk("OTHER-T", "OTHER-A", "other!"));
+    let a = id(&mk("simple", "CANARY-A", "CANARY!"));
+    let b = id(&mk("simple", "OTHER-A", "other!"));
     assert_eq!(a.canonical, b.canonical);
     assert!(!contains(&a.canonical, "CANARY"));
     assert!(contains(&a.canonical, "weird.kind"));
@@ -342,6 +342,137 @@ fn list_operand_names_match_the_vendored_daemon() {
         assert!(id(&r).qualifiers.list_contents_not_recorded, "{name}");
         assert!(contains(&id(&r).canonical, "/d"), "{name} directory kept");
     }
+}
+
+/// `identify` supports exactly these operator types; every other type fails
+/// closed (`UnsupportedOperatorType`), at any depth.
+const IDENTITY_SUPPORTED: [&str; 5] = ["list", "lists", "network", "regexp", "simple"];
+/// Vendored types `identify` refuses until it models them.
+const IDENTITY_REFUSED: [&str; 2] = ["complex", "range"];
+
+/// Every string constant of Go type `ty` declared in `go`: `Ty("x")`
+/// anywhere, and `Name Ty = "x"` inside a `const`/`var` declaration. A line
+/// inside such a declaration that names `ty` in any other shape panics, so a
+/// new declaration style cannot slip past the canary.
+fn vendored_consts<'a>(go: &'a str, ty: &str) -> Vec<&'a str> {
+    let call = regex::Regex::new(&format!(r#"\b{ty}\("([^"]*)"\)"#)).unwrap();
+    let typed = regex::Regex::new(&format!(r#"\b{ty}\s*=\s*"([^"]*)""#)).unwrap();
+    let named = regex::Regex::new(&format!(r"(?:^|[^.\w]){ty}\b")).unwrap();
+    assert!(!go.contains("/*"), "block comments are not modelled");
+    let mut out = Vec::new();
+    let mut in_decl = false;
+    for raw in go.lines() {
+        let line = raw.split("//").next().unwrap_or("").trim();
+        if line.starts_with("const (") || line.starts_with("var (") {
+            in_decl = true;
+            continue;
+        }
+        if in_decl && line == ")" {
+            in_decl = false;
+            continue;
+        }
+        let decl = in_decl || line.starts_with("const ") || line.starts_with("var ");
+        let mut found: Vec<&str> = call
+            .captures_iter(line)
+            .map(|c| c.get(1).unwrap().as_str())
+            .collect();
+        if decl {
+            found.extend(
+                typed
+                    .captures_iter(line)
+                    .map(|c| c.get(1).unwrap().as_str()),
+            );
+            if named.is_match(line) && found.is_empty() {
+                panic!("an unrecognised {ty} declaration: {line}");
+            }
+        }
+        out.extend(found);
+    }
+    out.sort_unstable();
+    out
+}
+
+fn vendored_types() -> Vec<&'static str> {
+    vendored_consts(
+        include_str!("../../../../vendor/opensnitch/daemon/rule/operator.go"),
+        "Type",
+    )
+}
+
+#[test]
+fn the_vendored_const_scanner_sees_every_declaration_style() {
+    let go = "const (\n\tA = Type(\"a\")\n\tB Type = \"b\" // c\n\t// C = Type(\"no\")\n)\n\
+              const D = Type(\"d\")\nconst E Type = \"e\"\nvar F = Type(\"f\")\n\
+              func init() { m[Type(\"g\")] = 1 }\ntype Type string\nvar x = o.Type == A\n";
+    assert_eq!(vendored_consts(go, "Type"), ["a", "b", "d", "e", "f", "g"]);
+}
+
+#[test]
+#[should_panic(expected = "unrecognised Type declaration")]
+fn the_vendored_const_scanner_refuses_a_declaration_it_cannot_read() {
+    vendored_consts("const (\n\tA Type = someFunc()\n)\n", "Type");
+}
+
+#[test]
+fn identity_operator_types_match_the_vendored_daemon() {
+    let vendored = vendored_types();
+    let mut known: Vec<&str> = IDENTITY_SUPPORTED
+        .iter()
+        .chain(&IDENTITY_REFUSED)
+        .copied()
+        .collect();
+    known.sort_unstable();
+    assert_eq!(
+        vendored, known,
+        "a new daemon operator type needs a decision"
+    );
+    let mut ours = OPERATOR_TYPES.to_vec();
+    ours.sort_unstable();
+    assert_eq!(
+        ours, IDENTITY_SUPPORTED,
+        "OPERATOR_TYPES is the supported set"
+    );
+    for t in vendored {
+        let supported = IDENTITY_SUPPORTED.contains(&t);
+        let leaf = op(t, "dest.host", "example.com");
+        let nested = rule("r", Some(group(vec![group(vec![leaf.clone()])])));
+        for r in [rule("r", Some(leaf)), nested] {
+            match identify(&r) {
+                Ok(_) => assert!(supported, "{t} must be refused"),
+                Err(e) => {
+                    assert!(!supported, "{t} must be supported");
+                    assert_eq!(e, IdentityError::UnsupportedOperatorType, "{t}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn distinct_unsupported_types_never_share_an_identity_or_leak_text() {
+    for t in ["range", "complex", "CANARY-FUTURE-TYPE", ""] {
+        let r = rule("CANARY-NAME", Some(op(t, "dest.port", "CANARY-DATA")));
+        let e = identify(&r).unwrap_err();
+        assert_eq!(e, IdentityError::UnsupportedOperatorType, "{t:?}");
+        assert!(!format!("{e:?} {e}").contains("CANARY"));
+    }
+    // Deepest allowed nesting, and as a later sibling.
+    let deep = (0..crate::cache::rules::MAX_OPERATOR_DEPTH - 1)
+        .fold(op("range", "dest.port", "1-2"), |inner, _| {
+            group(vec![inner])
+        });
+    assert_eq!(
+        identify(&rule("r", Some(deep))),
+        Err(IdentityError::UnsupportedOperatorType)
+    );
+    let late = group(vec![
+        op("simple", "dest.port", "1"),
+        group(vec![op("simple", "dest.port", "2"), op("complex", "x", "")]),
+    ]);
+    assert_eq!(
+        identify(&rule("r", Some(late))),
+        Err(IdentityError::UnsupportedOperatorType)
+    );
 }
 
 /// The vendored daemon's operator types, and what `rule_policy` does with
@@ -601,4 +732,22 @@ fn an_over_long_kind_fails_closed() {
     );
     let ok = "k".repeat(MAX_KIND);
     assert!(identify(&rule("r", Some(op("simple", &ok, "")))).is_ok());
+}
+
+// ---- the vendored actions ---------------------------------------------
+
+#[test]
+fn identity_actions_match_the_vendored_daemon() {
+    let go = include_str!("../../../../vendor/opensnitch/daemon/rule/rule.go");
+    let vendored = vendored_consts(go, "Action");
+    let mut ours = ACTIONS.to_vec();
+    ours.sort_unstable();
+    assert_eq!(vendored, ours, "a new daemon action needs a decision");
+    for a in vendored {
+        let r = Rule {
+            action: a.into(),
+            ..rule("r", None)
+        };
+        assert!(contains(&id(&r).canonical, a), "{a} is kept verbatim");
+    }
 }
