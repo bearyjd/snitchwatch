@@ -126,6 +126,10 @@ pub struct UiService {
     /// Names `user.name` uids for display (`crate::accounts`); none in
     /// tests unless one sets a fake.
     account_lookup: Option<crate::accounts::AccountLookup>,
+    /// Connection history capture (`crate::history::capture`). `None`, the
+    /// only value production code gives it while history is off, is the whole
+    /// off switch: `ping` tests it and does nothing else.
+    history_capture: Option<Arc<crate::history::capture::Capture>>,
 }
 
 impl UiService {
@@ -162,7 +166,16 @@ impl UiService {
             daemon_config: Default::default(),
             answer_timeout: crate::deferred_answers::ANSWER_TIMEOUT,
             account_lookup: None,
+            history_capture: None,
         }
+    }
+
+    /// Record the decided events of every `ping` in connection history.
+    /// Called only with a capture [`crate::history::capture::start`] made,
+    /// which exists only while history is enabled.
+    pub fn with_history_capture(mut self, capture: Arc<crate::history::capture::Capture>) -> Self {
+        self.history_capture = Some(capture);
+        self
     }
 
     /// Name `user.name` uids for display with `lookup`
@@ -323,15 +336,22 @@ impl Ui for UiService {
             // the rules cache lock the next block takes.
             self.rules
                 .observe_daemon_rules(stats.rules, stats.uptime, self.commands.in_flight());
+            // The events that became rows, kept for history only when it is on.
+            let mut captured: Vec<&snitchwatch_proto::protocol::Event> = Vec::new();
             let new_rows: Vec<_> = {
                 let rules = self.rules_handle();
                 let rules = rules.lock().unwrap_or_else(|e| e.into_inner());
                 let listed = |name: &str| rules.rules().map(|r| r.contains_key(name));
-                stats
-                    .events
-                    .iter()
-                    .filter_map(|event| event_to_row(event, listed))
-                    .collect()
+                let mut rows = Vec::new();
+                for event in &stats.events {
+                    if let Some(row) = event_to_row(event, listed) {
+                        if self.history_capture.is_some() {
+                            captured.push(event);
+                        }
+                        rows.push(row);
+                    }
+                }
+                rows
             };
             if !new_rows.is_empty() {
                 {
@@ -345,6 +365,13 @@ impl Ui for UiService {
                     if let Err(e) = self.broadcast.send(msg) {
                         warn!(error = %e, "ping: broadcast send failed");
                     }
+                }
+            }
+            // History, last: after the cache lock (and the rules lock above)
+            // is dropped and the live rows are out. Bounded, never waits.
+            if let Some(capture) = &self.history_capture {
+                if !captured.is_empty() {
+                    capture.observe(&captured);
                 }
             }
 
@@ -740,3 +767,7 @@ mod pause_answer_tests;
 #[cfg(test)]
 #[path = "grpc_server/answer_timeout_tests.rs"]
 mod answer_timeout_tests;
+
+#[cfg(test)]
+#[path = "history/hook_tests.rs"]
+mod history_hook_tests;

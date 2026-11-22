@@ -16,8 +16,10 @@
 //!   the lifecycle: gap and session ledger, coverage watermark, and pin
 //!   release in the transaction that makes an item durable.
 
+pub mod admission;
 pub mod budget;
 pub mod caps;
+pub mod capture;
 pub mod durable;
 pub mod ledger;
 pub mod lifecycle;

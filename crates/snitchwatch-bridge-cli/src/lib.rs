@@ -205,6 +205,24 @@ pub async fn run_system(listeners: activation::ActivatedListeners) -> Result<Run
     Ok(bridge)
 }
 
+/// The history capture for this bridge, if history is enabled in its state
+/// directory. Only a persistent state directory can hold history.
+fn history_capture(
+    options: &RunOptions,
+) -> Option<std::sync::Arc<snitchwatch_bridge::history::capture::Capture>> {
+    let Storage::Persistent(dir) = &options.storage else {
+        return None;
+    };
+    // Not a `match` naming `BridgeMode::System`: only `run_system` may say
+    // that (`blocklist_wiring.rs`); the other variant is the only way here.
+    let mode = if matches!(options.mode, BridgeMode::User) {
+        snitchwatch_bridge::history::Mode::User
+    } else {
+        snitchwatch_bridge::history::Mode::System
+    };
+    snitchwatch_bridge::history::capture::start(mode, Some(dir))
+}
+
 async fn run_with_incoming<I, IO>(
     config: BridgeConfig,
     grpc_endpoint: GrpcEndpoint,
@@ -266,6 +284,13 @@ where
         GrpcEndpoint::Unix(_) => DaemonTransport::Unix,
         GrpcEndpoint::UserUnix(_) => DaemonTransport::UnixUser,
     });
+    // Connection history is off unless the owner enabled it: `start` reads
+    // the state (creating nothing) and gives `None` for off, so a bridge with
+    // history off starts no writer, makes no directory and allocates no queue.
+    let ui_service_inner = match history_capture(&options) {
+        Some(capture) => ui_service_inner.with_history_capture(capture),
+        None => ui_service_inner,
+    };
     // Taken before the gRPC server starts, so no rules snapshot is missed.
     let rules_synced = ui_service_inner.rules_synced();
     let profile_rules_synced = ui_service_inner.rules_synced();
