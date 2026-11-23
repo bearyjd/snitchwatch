@@ -13,6 +13,8 @@ fn deferred_row(process_path: Option<&str>) -> ConnectionRow {
         dst_ip: "93.184.216.34".into(),
         dst_port: 443,
         protocol: "tcp".into(),
+        src_ip: None,
+        src_port: None,
         direction: "outgoing".into(),
         action: None,
         bytes_sent: 0,

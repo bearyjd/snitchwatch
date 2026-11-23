@@ -11,6 +11,8 @@ fn server_message_round_trips_via_json() {
             dst_ip: "140.82.121.4".to_string(),
             dst_port: 443,
             protocol: "tcp".to_string(),
+            src_ip: Some("2001:db8::1".parse().unwrap()),
+            src_port: Some(51544),
             direction: "outgoing".to_string(),
             action: None,
             bytes_sent: 0,
@@ -27,6 +29,8 @@ fn server_message_round_trips_via_json() {
     let json = serde_json::to_string(&msg).unwrap();
     assert!(json.contains(r#""action":"insertConnectionRows""#));
     assert!(json.contains(r#""dstHost":"github.com""#));
+    assert!(json.contains(r#""srcIp":"2001:db8::1""#));
+    assert!(json.contains(r#""srcPort":51544"#));
     assert!(
         !json.contains("matchedRule"),
         "matchedRule must be omitted when None, so old web-frontend consumers are unaffected: {json}"
@@ -98,6 +102,8 @@ fn connection_row_carries_matched_rule_when_decided() {
         dst_ip: "140.82.121.4".to_string(),
         dst_port: 443,
         protocol: "tcp".to_string(),
+        src_ip: None,
+        src_port: None,
         direction: "outgoing".to_string(),
         action: Some("allow".to_string()),
         bytes_sent: 0,
@@ -136,7 +142,11 @@ fn connection_row_without_matched_rule_field_defaults_to_none() {
     });
     let parsed: ConnectionRow = serde_json::from_value(json).unwrap();
     assert_eq!(parsed.matched_rule, None);
+    assert_eq!((parsed.src_ip, parsed.src_port), (None, None));
     assert!(!parsed.decided_by_default);
+    let encoded = serde_json::to_value(parsed).unwrap();
+    assert!(encoded.get("srcIp").is_none());
+    assert!(encoded.get("srcPort").is_none());
 }
 
 /// E3 (plan `2026-10-08-default-applied-events.md`): additive like
@@ -151,6 +161,8 @@ fn decided_by_default_is_sent_only_when_set_and_has_no_rule() {
         dst_ip: "93.184.216.34".to_string(),
         dst_port: 443,
         protocol: "tcp".to_string(),
+        src_ip: None,
+        src_port: None,
         direction: "outgoing".to_string(),
         action: Some("deny".to_string()),
         bytes_sent: 0,

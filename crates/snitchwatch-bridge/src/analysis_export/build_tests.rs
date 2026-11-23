@@ -25,6 +25,8 @@ fn row(time: i64) -> ConnectionRow {
         dst_ip: "192.0.2.1".into(),
         dst_port: 443,
         protocol: "tcp".into(),
+        src_ip: None,
+        src_port: None,
         direction: "RAW-DIRECTION-CANARY".into(),
         action: Some("allow".into()),
         bytes_sent: 123_456_789,

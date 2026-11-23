@@ -97,6 +97,11 @@ pub struct ConnectionRow {
     pub dst_ip: String,
     pub dst_port: u16,
     pub protocol: String,
+    /// Source socket address reported by the daemon, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_ip: Option<std::net::IpAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_port: Option<u16>,
     pub direction: String,
     /// `null` for pending rows, `"allow"` / `"deny"` / `"blocklist"` once decided.
     /// A `deferred` row may also be `null`: the daemon applied its default

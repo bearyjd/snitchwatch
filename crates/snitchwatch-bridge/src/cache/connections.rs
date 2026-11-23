@@ -9,7 +9,7 @@
 use crate::client_presence::Admission;
 use crate::filter_pause::FilterPause;
 use crate::tray_state::{TrayState, TrayStatePublisher};
-use crate::ws_messages::{ConnectionRow, VerdictDuration, VerdictScope};
+use crate::ws_messages::{AutoAnswer, ConnectionRow, VerdictDuration, VerdictScope};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
@@ -36,10 +36,21 @@ pub struct VerdictResolution {
     pub verdict: Verdict,
     pub duration: VerdictDuration,
     pub scope: VerdictScope,
+    pub auto_answer: Option<AutoAnswer>,
 }
 
+/// Why a pending prompt settled without a verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnansweredVerdict {
+    GuiLost,
+    TimedOut(Option<&'static str>),
+    Deferred(Option<&'static str>),
+}
+
+pub type PendingVerdict = Result<VerdictResolution, UnansweredVerdict>;
+
 struct PendingEntry {
-    sender: oneshot::Sender<VerdictResolution>,
+    sender: oneshot::Sender<PendingVerdict>,
     admission: Option<Admission>,
     cancellations: Option<broadcast::Sender<crate::ws_messages::ServerMessage>>,
 }
@@ -148,7 +159,7 @@ impl ConnectionCache {
     /// Insert a pending row and return the receiver side of its verdict
     /// channel. The gRPC client task awaits this receiver before responding
     /// to the AskRule call.
-    pub fn insert_pending(&mut self, row: ConnectionRow) -> oneshot::Receiver<VerdictResolution> {
+    pub fn insert_pending(&mut self, row: ConnectionRow) -> oneshot::Receiver<PendingVerdict> {
         self.insert_pending_inner(row, None, None)
     }
 
@@ -157,7 +168,7 @@ impl ConnectionCache {
         row: ConnectionRow,
         admission: Admission,
         cancellations: broadcast::Sender<crate::ws_messages::ServerMessage>,
-    ) -> Option<oneshot::Receiver<VerdictResolution>> {
+    ) -> Option<oneshot::Receiver<PendingVerdict>> {
         admission
             .clone()
             .while_current(|| self.insert_pending_inner(row, Some(admission), Some(cancellations)))
@@ -168,7 +179,7 @@ impl ConnectionCache {
         row: ConnectionRow,
         admission: Option<Admission>,
         cancellations: Option<broadcast::Sender<crate::ws_messages::ServerMessage>>,
-    ) -> oneshot::Receiver<VerdictResolution> {
+    ) -> oneshot::Receiver<PendingVerdict> {
         debug_assert!(row.action.is_none(), "pending rows must have action=None");
         let id = row.id.clone();
         let (tx, rx) = oneshot::channel();
@@ -195,22 +206,57 @@ impl ConnectionCache {
         duration: VerdictDuration,
         scope: VerdictScope,
     ) -> Result<(), CacheError> {
+        self.resolve_pending(
+            row_id,
+            VerdictResolution {
+                verdict,
+                duration,
+                scope,
+                auto_answer: None,
+            },
+        )
+        .map(|_| ())
+    }
+
+    pub(crate) fn resolve_paused(&mut self, row_id: &str) -> Result<ConnectionRow, CacheError> {
+        self.resolve_pending(
+            row_id,
+            VerdictResolution {
+                verdict: Verdict::Allow,
+                duration: VerdictDuration::Once,
+                scope: VerdictScope::ThisHost,
+                auto_answer: Some(AutoAnswer::FilterPaused),
+            },
+        )
+        .cloned()
+    }
+
+    fn resolve_pending(
+        &mut self,
+        row_id: &str,
+        resolution: VerdictResolution,
+    ) -> Result<&ConnectionRow, CacheError> {
         let entry = self
             .pending
             .remove(row_id)
             .ok_or_else(|| CacheError::NotPending(row_id.to_string()))?;
         let cancellations = entry.cancellations;
-        let resolution = VerdictResolution {
-            verdict,
-            duration,
-            scope,
+        let mut sender = Some(entry.sender);
+        let mut settle = || {
+            sender
+                .take()
+                .expect("settle once")
+                .send(Ok(resolution))
+                .is_ok()
         };
-        let settle = || entry.sender.send(resolution).is_ok();
         let delivered = match entry.admission {
             Some(admission) => admission.while_current(settle).unwrap_or(false),
             None => settle(),
         };
         if !delivered {
+            if let Some(sender) = sender {
+                let _ = sender.send(Err(UnansweredVerdict::GuiLost));
+            }
             self.rows.retain(|row| row.id != row_id);
             Self::publish_cancellation(cancellations, row_id);
             self.republish_pending_count();
@@ -222,7 +268,10 @@ impl ConnectionCache {
         // synthetic once-off rule name `verdict_to_rule` hands back to
         // opensnitchd as the `AskRule` reply (see `rule_name_for`'s doc
         // comment for why this is the single source of truth for that name).
-        let result = if let Some(row) = self.rows.iter_mut().find(|r| r.id == row_id) {
+        let index = self.rows.iter().position(|r| r.id == row_id);
+        if let Some(index) = index {
+            let row = &mut self.rows[index];
+            let verdict = resolution.verdict;
             row.action = Some(match verdict {
                 Verdict::Allow => "allow".to_string(),
                 Verdict::Deny => "deny".to_string(),
@@ -234,12 +283,14 @@ impl ConnectionCache {
                 row.process_path.as_deref().unwrap_or(""),
             ));
             row.answer_deadline_ms = None;
-            Ok(())
-        } else {
-            Err(CacheError::NotFound(row_id.to_string()))
-        };
+            if let Some(why) = resolution.auto_answer {
+                row.auto_answer = Some(why);
+            }
+        }
         self.republish_pending_count();
-        result
+        index
+            .map(|index| &self.rows[index])
+            .ok_or_else(|| CacheError::NotFound(row_id.to_string()))
     }
 
     /// Cancel only unresolved prompts; a verdict that already won is preserved.
@@ -256,15 +307,20 @@ impl ConnectionCache {
     /// Put off an unresolved prompt without a verdict (prompt-slot plan
     /// Part C). Like [`Self::cancel_pending`], a verdict that already won is
     /// preserved, but the row stays listed: deferred, with `action` (the
-    /// daemon's default action, when known) and `why`. Dropping the verdict
-    /// sender makes the waiting `AskRule` give the daemon no answer.
+    /// daemon's default action, when known) and `why`. The resolution
+    /// preserves the source and the default action at settlement.
     pub(crate) fn defer_pending(
         &mut self,
         row_id: &str,
-        action: Option<&str>,
-        why: Option<crate::ws_messages::AutoAnswer>,
+        action: Option<&'static str>,
+        why: Option<AutoAnswer>,
     ) -> Option<ConnectionRow> {
-        self.pending.remove(row_id)?;
+        let entry = self.pending.remove(row_id)?;
+        let outcome = match why {
+            Some(AutoAnswer::NoAnswer) => UnansweredVerdict::TimedOut(action),
+            _ => UnansweredVerdict::Deferred(action),
+        };
+        let _ = entry.sender.send(Err(outcome));
         self.republish_pending_count();
         let row = self.rows.iter_mut().find(|row| row.id == row_id)?;
         *row = ConnectionRow {
@@ -307,18 +363,6 @@ impl ConnectionCache {
             .filter(|(_, entry)| entry.admission.as_ref().is_some_and(&keep))
             .map(|(id, _)| id.clone())
             .collect()
-    }
-
-    /// Record why the bridge answered `row_id` itself (issue #78) and
-    /// return the updated row.
-    pub(crate) fn label_auto_answer(
-        &mut self,
-        row_id: &str,
-        why: crate::ws_messages::AutoAnswer,
-    ) -> Option<ConnectionRow> {
-        let row = self.rows.iter_mut().find(|row| row.id == row_id)?;
-        row.auto_answer = Some(why);
-        Some(row.clone())
     }
 
     pub fn rows(&self) -> &[ConnectionRow] {
@@ -366,6 +410,8 @@ mod tests {
             dst_ip: "1.1.1.1".to_string(),
             dst_port: 443,
             protocol: "tcp".to_string(),
+            src_ip: None,
+            src_port: None,
             direction: "outgoing".to_string(),
             action: Some(action.to_string()),
             bytes_sent: 0,
@@ -424,7 +470,7 @@ mod tests {
             VerdictScope::ThisHost,
         )
         .unwrap();
-        let received = rx.await.unwrap();
+        let received = rx.await.unwrap().unwrap();
         assert_eq!(received.verdict, Verdict::Allow);
         assert_eq!(received.duration, VerdictDuration::Once);
         assert_eq!(c.rows()[0].action.as_deref(), Some("allow"));
@@ -441,7 +487,7 @@ mod tests {
             VerdictScope::ThisHost,
         )
         .unwrap();
-        let received = rx.await.unwrap();
+        let received = rx.await.unwrap().unwrap();
         assert_eq!(received.duration, VerdictDuration::Always);
     }
 
@@ -522,11 +568,14 @@ mod tests {
                 .is_err());
             if outcome.is_ok() {
                 assert_eq!(cache.rows()[0].action.as_deref(), Some("allow"));
-                assert_eq!(receiver.blocking_recv().unwrap().verdict, Verdict::Allow);
+                assert_eq!(
+                    receiver.blocking_recv().unwrap().unwrap().verdict,
+                    Verdict::Allow
+                );
                 assert!(messages.try_recv().is_err());
             } else {
                 assert!(cache.is_empty());
-                assert!(receiver.blocking_recv().is_err());
+                assert!(receiver.blocking_recv().unwrap().is_err());
                 assert!(matches!(messages.try_recv().unwrap(),
                     crate::ws_messages::ServerMessage::RemoveConnectionRows { ids } if ids == ["race"]));
                 assert!(messages.try_recv().is_err());
@@ -574,6 +623,8 @@ mod tray_state_tests {
             dst_ip: "1.1.1.1".to_string(),
             dst_port: 443,
             protocol: "tcp".to_string(),
+            src_ip: None,
+            src_port: None,
             direction: "outgoing".to_string(),
             action: None,
             bytes_sent: 0,

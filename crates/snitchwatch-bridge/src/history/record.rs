@@ -62,12 +62,25 @@ impl AnsweredBy {
     }
 }
 
+pub(super) const PROMPT_OUTCOMES: [&str; 5] =
+    ["replied", "timeout", "error", "gui-lost", "cancelled"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptOutcome {
+    Replied,
+    Timeout,
+    Error,
+    GuiLost,
+    Cancelled,
+}
+
 /// One history event. Construct with [`EventRecord::new`] and set the
 /// optional fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
     pub ts_ms: i64,
     pub decided_ts_ms: Option<i64>,
+    pub prompt_outcome: Option<PromptOutcome>,
     pub process_path: Option<ProcessPath>,
     pub dst_host: Option<DstHost>,
     pub dst_ip: Option<IpAddr>,
@@ -89,6 +102,7 @@ impl EventRecord {
         Self {
             ts_ms,
             decided_ts_ms: None,
+            prompt_outcome: None,
             process_path: None,
             dst_host: None,
             dst_ip: None,
@@ -115,8 +129,8 @@ pub fn insert_event(conn: &Connection, event: &EventRecord) -> rusqlite::Result<
     conn.execute(
         "INSERT INTO events (ts_ms, decided_ts_ms, process_path, dst_host, dst_ip, dst_port, \
          protocol, action, answered_by, rule_name, rule_hash, rule_class, repeat_count, \
-         src_port, src_ip) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         src_port, src_ip, prompt_outcome) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             event.ts_ms,
             event.decided_ts_ms,
@@ -133,6 +147,9 @@ pub fn insert_event(conn: &Connection, event: &EventRecord) -> rusqlite::Result<
             event.repeat_count,
             event.src_port,
             ip_text(event.src_ip),
+            event
+                .prompt_outcome
+                .map(|outcome| PROMPT_OUTCOMES[outcome as usize]),
         ],
     )?;
     Ok(conn.last_insert_rowid())

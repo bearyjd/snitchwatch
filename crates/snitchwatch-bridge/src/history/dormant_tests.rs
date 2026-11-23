@@ -145,9 +145,10 @@ fn offending(src: &str) -> Vec<String> {
 
 /// Files allowed to mention the primitives: their own modules and tests, and
 /// the durable half (PR 3b), which holds and releases pins.
-const OWNERS: [&str; 14] = [
+const OWNERS: &[&str] = &[
     "capture.rs",
     "capture_tests.rs",
+    "guard.rs",
     "hook_tests.rs",
     "snapshots_tests.rs",
     "lifecycle.rs",
@@ -313,7 +314,7 @@ const CAPTURE_TYPES: [&str; 4] = [
 ];
 /// Their modules and common words (`capture`, `Refusal`, `start`): counted
 /// only in a file that names `history`.
-const CAPTURE_MODULES: [&str; 14] = [
+const CAPTURE_MODULES: &[&str] = &[
     "capture",
     "admission",
     "Admission",
@@ -328,27 +329,33 @@ const CAPTURE_MODULES: [&str; 14] = [
     "SHARE_PERCENT",
     "MAX_BUCKETS",
     "IDLE_MS",
+    "DecisionGuard",
+    "DecisionOutcome",
+    "begin_decision",
 ];
 /// The files that implement and test capture and admission.
-const CAPTURE_OWNERS: [&str; 7] = [
+const CAPTURE_OWNERS: &[&str] = &[
     "capture.rs",
     "capture_tests.rs",
     "admission.rs",
     "admission_tests.rs",
+    "guard.rs",
     "hook_tests.rs",
     "dormant_tests.rs",
     "mod.rs",
 ];
 
 /// The two production hook sites PR 5 wires, and the only paths each may name:
-/// `UiService` holds the capture and `ping` feeds it; the bridge binary asks
-/// `start` for one. Exact paths, nothing else of `history` (not
-/// `history::open_store`, not a `use history::{...}` list, not the reader,
-/// guard, gaps or control modules of later PRs).
+/// `UiService` holds the capture and uses it for pings and prompt outcomes.
+/// The bridge binary asks `start` for one.
 const HOOK_FILES: [(&str, &[&str]); 2] = [
     (
         "snitchwatch-bridge/src/grpc_server.rs",
-        &["history::capture::Capture"],
+        &[
+            "history::capture::Capture",
+            "history::guard::DecisionOutcome",
+            "history::record::AnsweredBy",
+        ],
     ),
     (
         "snitchwatch-bridge-cli/src/lib.rs",
@@ -605,7 +612,13 @@ fn capture_inside_hits(src: &str) -> Vec<String> {
     }
     // The common words only as a path into the module.
     let stripped = strip(src);
-    for path in ["capture::", "admission::", "::capture", "::admission"] {
+    for path in [
+        "capture::",
+        "admission::",
+        "::capture",
+        "::admission",
+        "super::guard",
+    ] {
         if stripped
             .lines()
             .filter(|l| !is_mod_decl(l))
@@ -657,7 +670,7 @@ fn the_capture_guard_catches_a_planted_use_inside_history() {
 #[test]
 fn capture_names_cover_every_pub_item() {
     let mut missing = Vec::new();
-    for file in ["capture.rs", "admission.rs"] {
+    for file in ["capture.rs", "admission.rs", "guard.rs"] {
         for name in pub_items(file, false) {
             let listed =
                 CAPTURE_TYPES.contains(&name.as_str()) || CAPTURE_MODULES.contains(&name.as_str());
@@ -678,7 +691,11 @@ fn the_hook_files_may_name_exactly_their_paths() {
     let grpc = hook("snitchwatch-bridge/src/grpc_server.rs");
     let ok = "pub struct S { h: Option<Arc<crate::history::capture::Capture>> }";
     assert!(outside_hits_for(&grpc, ok).is_empty());
+    let prompt =
+        "use crate::history::guard::DecisionOutcome; use crate::history::record::AnsweredBy;";
+    assert!(outside_hits_for(&grpc, prompt).is_empty());
     let cli = hook("snitchwatch-bridge-cli/src/lib.rs");
+    assert!(!outside_hits_for(&cli, prompt).is_empty());
     let ok = "fn f() { let _ = snitchwatch_bridge::history::capture::start(snitchwatch_bridge::history::Mode::User, None); }";
     assert!(
         outside_hits_for(&cli, ok).is_empty(),
@@ -688,7 +705,7 @@ fn the_hook_files_may_name_exactly_their_paths() {
 }
 
 /// The relaxation must not let a hook file reach the pieces PR 5 does not
-/// wire (guard, gaps, reader, control) or the switches (`enable`, the store,
+/// wire (gaps, reader, control) or the switches (`enable`, the store,
 /// the writer, the durable half), nor let any other file name capture.
 #[test]
 fn the_relaxed_guard_still_catches_what_is_not_wired() {
@@ -696,7 +713,7 @@ fn the_relaxed_guard_still_catches_what_is_not_wired() {
     let cli = hook("snitchwatch-bridge-cli/src/lib.rs");
     let elsewhere = hook("snitchwatch-bridge/src/ws_server.rs");
     for planted in [
-        "use crate::history::guard::OutcomeGuard;",
+        "use crate::history::guard::DecisionGuard;",
         "fn f() { crate::history::gaps::label(); }",
         "fn f() { crate::history::reader::page(); }",
         "fn f() { crate::history::control::clear(); }",

@@ -462,6 +462,8 @@ pub fn demo_rows(now_ms: i64) -> Vec<ConnectionRow> {
             dst_ip: sp.ip.to_string(),
             dst_port: sp.port,
             protocol: sp.proto.to_string(),
+            src_ip: None,
+            src_port: None,
             direction: sp.direction.to_string(),
             action: sp.action.map(str::to_string),
             bytes_sent: 0,

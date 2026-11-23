@@ -519,6 +519,8 @@ fn another_guis_acknowledgement_never_counts_as_this_ones() {
         dst_ip: "10.0.0.1".to_string(),
         dst_port: 443,
         protocol: "tcp".to_string(),
+        src_ip: None,
+        src_port: None,
         direction: "outgoing".to_string(),
         action: Some("allow".to_string()),
         bytes_sent: 0,

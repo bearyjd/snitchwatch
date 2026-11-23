@@ -1,9 +1,8 @@
 //! Issue #78: a filtering pause also answers the prompts already waiting.
 //!
 //! When a pause takes effect, every `AskRule` the bridge is still holding
-//! for the pausing GUI session is answered Allow once, through
-//! [`ConnectionCache::resolve`], the call a GUI's Allow once goes through
-//! too. A once answer is never saved as a rule. An Ask that arrives during
+//! for the pausing GUI session is answered Allow once through the same
+//! settlement path as a GUI verdict. An Ask that arrives during
 //! the pause is allowed once on arrival by `ask_rule`. Both kinds of row are
 //! labelled [`AutoAnswer::FilterPaused`].
 //!
@@ -12,9 +11,9 @@
 //! allowing under the same lock. Either the scan sees the pending row, or
 //! the row's insertion sees the pause.
 
-use crate::cache::connections::{ConnectionCache, Verdict};
+use crate::cache::connections::ConnectionCache;
 use crate::filter_pause::FilterPause;
-use crate::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage, VerdictDuration, VerdictScope};
+use crate::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage};
 use tokio::sync::{broadcast, Mutex};
 
 /// Answer Allow once every waiting prompt the pause applies to (see
@@ -28,17 +27,12 @@ pub(crate) fn allow_waiting(
     cache
         .pending_admitted_where(|admission| pause.applies_to(admission))
         .into_iter()
-        .filter_map(|row_id| {
-            if let Err(error) = cache.resolve(
-                &row_id,
-                Verdict::Allow,
-                VerdictDuration::Once,
-                VerdictScope::ThisHost,
-            ) {
+        .filter_map(|row_id| match cache.resolve_paused(&row_id) {
+            Ok(row) => Some(row),
+            Err(error) => {
                 tracing::info!(%row_id, %error, "waiting prompt not answered by the pause");
-                return None;
+                None
             }
-            cache.label_auto_answer(&row_id, AutoAnswer::FilterPaused)
         })
         .collect()
 }

@@ -70,6 +70,8 @@ pub fn connection_to_row(conn: &Connection, notification_id: u64) -> ConnectionR
         dst_ip: conn.dst_ip.clone(),
         dst_port: conn.dst_port as u16,
         protocol: conn.protocol.clone(),
+        src_ip: conn.src_ip.parse().ok(),
+        src_port: u16::try_from(conn.src_port).ok().filter(|&port| port != 0),
         direction: "outgoing".to_string(),
         action: None,
         bytes_sent: 0,
@@ -212,6 +214,8 @@ mod tests {
         assert_eq!(row.dst_ip, "140.82.121.4");
         assert_eq!(row.dst_port, 443);
         assert_eq!(row.protocol, "tcp");
+        assert_eq!(row.src_ip, Some("192.168.1.10".parse().unwrap()));
+        assert_eq!(row.src_port, Some(51544));
         assert_eq!(row.direction, "outgoing");
         assert!(row.action.is_none(), "ask-rule rows start pending");
         // The `Connection` proto carries no byte counters (issue #19) — this
@@ -221,6 +225,19 @@ mod tests {
         // DaemonStatistics`.
         assert_eq!(row.bytes_sent, 0);
         assert_eq!(row.bytes_received, 0);
+    }
+
+    #[test]
+    fn absent_or_invalid_source_socket_fields_are_omitted() {
+        for (src_ip, src_port) in [("", 0), ("invalid", u32::from(u16::MAX) + 1)] {
+            let conn = Connection {
+                src_ip: src_ip.into(),
+                src_port,
+                ..sample_connection()
+            };
+            let row = connection_to_row(&conn, 42);
+            assert_eq!((row.src_ip, row.src_port), (None, None));
+        }
     }
 
     #[test]

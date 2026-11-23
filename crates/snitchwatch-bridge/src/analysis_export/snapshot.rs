@@ -58,7 +58,7 @@ pub fn capture(
     };
     for row in rows.iter().rev().take(MAX_INSPECTED_ROWS) {
         control.check()?;
-        // Exhaustive classification of all 17 source fields. New fields require review.
+        // Exhaustive classification of source fields. New fields require review.
         let ConnectionRow {
             id: _, // Raw row identifier: excluded, never copied or budgeted.
             process,
@@ -67,6 +67,8 @@ pub fn capture(
             dst_ip,
             dst_port,
             protocol,
+            src_ip: _, // Local socket endpoint: excluded.
+            src_port: _,
             direction: _, // Unsupported source direction: excluded.
             action,
             bytes_sent: _, // Placeholder byte counters: excluded.

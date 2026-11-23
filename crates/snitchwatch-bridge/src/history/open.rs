@@ -190,6 +190,7 @@ pub(crate) fn tighten_sidecars(db: &Path) -> Result<(), crate::sqlite_file::Open
 /// The open history database. Only [`super::open_store`] makes one, and only
 /// while history is enabled.
 pub struct Store {
+    pub(super) consent: Option<super::Consent>,
     conn: rusqlite::Connection,
 }
 
@@ -204,9 +205,18 @@ impl Store {
         &self.conn
     }
 
-    pub(crate) fn open(location: &Location, euid: u32) -> Result<Self, Unavailable> {
+    pub(crate) fn open(
+        location: &Location,
+        euid: u32,
+        settings: super::Settings,
+    ) -> Result<Self, Unavailable> {
         check_dir(location.dir(), euid)?;
-        let conn = schema::prepare(&location.db_path())?;
-        Ok(Self { conn })
+        let budget = super::budget::Budget::new(u64::from(settings.budget_mib) * 1024 * 1024)
+            .map_err(|error| Unavailable::new(error.to_string()))?;
+        let conn = schema::prepare(&location.db_path(), &budget)?;
+        Ok(Self {
+            conn,
+            consent: settings.consent,
+        })
     }
 }

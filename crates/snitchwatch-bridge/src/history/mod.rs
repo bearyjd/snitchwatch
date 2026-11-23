@@ -1,9 +1,6 @@
-//! Connection history, PR 1: the dormant store (design
-//! `docs/superpowers/specs/2026-10-27-connection-history-design.md`, D2, D3,
-//! S1). Nothing here is called from the running bridge yet: no thread, no
-//! socket message and no file, until the owner-visible enable action lands in
-//! a later PR. Reading the state of a history that was never enabled creates
-//! nothing ([`load_state`]).
+//! Opt-in connection history. An enabled bridge captures daemon pings and
+//! accepted prompt outcomes through a bounded writer queue. Reading settings
+//! for a bridge that has never enabled history creates nothing ([`load_state`]).
 //!
 //! * [`locate`] resolves `<state dir>/history/` per bridge mode and never
 //!   falls back to another path.
@@ -20,7 +17,9 @@ pub mod admission;
 pub mod budget;
 pub mod caps;
 pub mod capture;
+mod correlation;
 pub mod durable;
+pub mod guard;
 pub mod ledger;
 pub mod lifecycle;
 pub mod open;
@@ -171,7 +170,7 @@ pub fn open_store(location: &Location) -> Result<Store, Unavailable> {
 
 pub(crate) fn open_store_as(location: &Location, euid: u32) -> Result<Store, Unavailable> {
     match load_state_as(location, euid) {
-        State::Enabled(_) => Store::open(location, euid),
+        State::Enabled(settings) => Store::open(location, euid, settings),
         State::Off => Err(Unavailable::new("history is off")),
         State::Unavailable(reason) => Err(reason),
     }

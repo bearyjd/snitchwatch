@@ -95,8 +95,10 @@ fn a_matched_rule_event_maps_to_the_d4_fields_and_nothing_else() {
     assert_eq!(r.rule_class.as_ref().unwrap().as_str(), "user");
     assert_eq!(r.rule_hash, Some(m.identity.as_ref().unwrap().hash));
     assert_eq!(r.repeat_count, 1);
-    // PR 6 sets these, not PR 5.
-    assert_eq!((r.src_ip, r.src_port), (None, None));
+    assert_eq!(
+        (r.src_ip, r.src_port),
+        (Some("192.168.1.10".parse().unwrap()), Some(51544))
+    );
     assert_eq!(r.decided_ts_ms, None);
     assert!(!m.nolog);
 }
@@ -612,7 +614,7 @@ fn excluded_fields_never_reach_the_store() {
     ] {
         assert!(!contains(&all, canary), "{canary} reached the store");
     }
-    // uid, pid and the source address/port are not columns of an event row.
+    // UID and PID are withheld. Source address and port are allowlisted.
     let db = Db::open(done.location.db_path()).unwrap();
     let dump: String = db
         .query_row(
@@ -626,7 +628,7 @@ fn excluded_fields_never_reach_the_store() {
             |r| r.get(0),
         )
         .unwrap();
-    for absent in ["7777777", "8888888", "51544", "192.168.1.10"] {
+    for absent in ["7777777", "8888888"] {
         assert!(!dump.contains(absent), "{absent} in {dump}");
     }
     let stored: (Option<i64>, Option<String>) = db
@@ -634,7 +636,7 @@ fn excluded_fields_never_reach_the_store() {
             Ok((r.get(0)?, r.get(1)?))
         })
         .unwrap();
-    assert_eq!(stored, (None, None));
+    assert_eq!(stored, (Some(51544), Some("192.168.1.10".into())));
 }
 
 #[test]
@@ -694,7 +696,7 @@ fn a_snapshot_that_cannot_be_built_is_counted() {
     );
     let mut m = map_event(&event(conn("/a", "h", 80), rule("r", "deny"), 1)).unwrap();
     m.identity.as_mut().unwrap().canonical.push(0);
-    capture.shared.enqueue(m, 1);
+    capture.shared.enqueue(m, 1, None);
     assert_eq!(capture.stats().snapshot_errors, 1);
     assert_eq!(capture.queued_for_test(), 1);
 }
@@ -890,4 +892,102 @@ fn the_probe_runs_at_the_start_of_every_observe() {
     capture.observe(&[]);
     capture.observe(&[&simple("/a", "h", 1)]);
     assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn pending_prompt_keeps_arrival_pin_and_drop_records_cancelled_once() {
+    let rig = rig();
+    let guard = rig.capture.begin_decision(&conn("/a", "h", 443)).unwrap();
+    assert_eq!(rig.registry.oldest(), Some(10_000));
+    rig.clock.store(12_000, Ordering::Relaxed);
+    drop(guard);
+    let done = rig.finish();
+    assert!(done.registry.is_empty());
+    let db = Db::open(done.location.db_path()).unwrap();
+    let outcome: (String, i64, i64) = db
+        .query_row(
+            "SELECT prompt_outcome, ts_ms, decided_ts_ms FROM events",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(done.rows.len(), 1);
+    assert_eq!(outcome, ("cancelled".into(), 10_000, 12_000));
+}
+
+#[test]
+fn accepting_before_a_generation_or_consent_change_never_writes_a_snapshot() {
+    let rig = rig();
+    let connection = conn("/a", "h", 443);
+    let reply = rule("test", "allow");
+    let outcome = || DecisionOutcome::Replied {
+        rule: &reply,
+        answered_by: AnsweredBy::Gui,
+    };
+    let first = rig.capture.begin_decision(&connection).unwrap();
+    rig.capture.shared.generation.advance().unwrap();
+    first.settle(outcome());
+    assert!(rig.registry.is_empty());
+    assert_eq!(rig.capture.stats().seen, 0);
+
+    let second = rig.capture.begin_decision(&connection).unwrap();
+    *rig.capture.shared.control.lock().unwrap() = Some(Arc::new(Consent {
+        text_id: "new".into(),
+        accepted_ms: 2,
+    }));
+    second.settle(outcome());
+
+    *rig.capture.shared.control.lock().unwrap() = None;
+    assert!(rig.capture.begin_decision(&connection).is_none());
+    let done = rig.finish();
+    assert!(done.rows.is_empty());
+    assert!(done.registry.is_empty());
+    let db = Db::open(done.location.db_path()).unwrap();
+    let snapshots: i64 = db
+        .query_row("SELECT count(*) FROM rules_seen", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(snapshots, 0);
+}
+
+#[test]
+fn a_rejected_prompt_keeps_its_arrival_pin_in_the_queue_loss_tally() {
+    let rig = rig_with(|mut config| {
+        config.queue_max_count = 0;
+        config.queue_max_bytes = 0;
+        config
+    });
+    let guard = rig.capture.begin_decision(&conn("/a", "h", 443)).unwrap();
+    rig.clock.store(12_000, Ordering::Relaxed);
+    drop(guard);
+    assert_eq!(rig.capture.stats().dropped_queue, 1);
+    assert_eq!(rig.registry.oldest(), Some(10_000));
+    assert_eq!(rig.registry.len(), 1);
+}
+
+#[test]
+fn a_settled_prompt_and_matching_daemon_event_keep_both_flags_and_one_snapshot() {
+    let rig = rig();
+    let connection = conn("/a", "h", 443);
+    let reply = rule("test", "allow");
+    let guard = rig.capture.begin_decision(&connection).unwrap();
+    rig.clock.store(11_000, Ordering::Relaxed);
+    guard.settle(DecisionOutcome::Replied {
+        rule: &reply,
+        answered_by: AnsweredBy::Gui,
+    });
+    rig.send(&[event(connection, reply, 11_100)]);
+
+    let done = rig.finish();
+    assert!(done.registry.is_empty());
+    assert_eq!(done.rows.len(), 2);
+    let db = Db::open(done.location.db_path()).unwrap();
+    let (possible_duplicates, snapshots): (i64, i64) = db
+        .query_row(
+            "SELECT (SELECT count(*) FROM history_events WHERE possible_duplicate = 1), \
+                    (SELECT count(*) FROM rules_seen)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((possible_duplicates, snapshots), (2, 1));
 }
