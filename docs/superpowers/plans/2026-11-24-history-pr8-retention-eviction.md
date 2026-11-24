@@ -3,7 +3,7 @@
 Parent plan: `2026-10-28-connection-history-implementation.md` (PR 8 section).
 Spec: `docs/superpowers/specs/2026-10-27-connection-history-design.md` D5 (251-308), D6/L1 (326-345), D7 snapshot bounds and cleanup (484-498), S2/S4.
 Branch: `feat/history-pr8-retention-eviction`, stacked on `feat/history-pr7-gap-causes`. Bridge only, dormant (history is off by default).
-Status: DRAFT 2026-11-24, waiting on the owner for the "Open decisions" below.
+Status: APPROVED 2026-11-24. The owner accepted all six recommendations in "Decisions" below (1 b, 2 c, 3 a, 4 b, 5 a, 6 events-only pause). Implementation starts after PR 7 (#417) merges; this branch is then rebased onto main.
 
 ## Goal
 
@@ -39,7 +39,9 @@ New `history/retention.rs` (target under 400 lines) owns the policy; `writer.rs`
 5. **Accounting feedback:** every deleted row's size (same `estimate_bytes` formula, see Open decision 2) is returned in the eviction report per process so `Admission::release_bytes` is called; the admission ledger is also seeded from the DB at start (KNOWN GAP 2). Snapshot bytes count toward a process only when attributable to it alone.
 6. **Age clock:** cutoff is computed from wall-clock `now_ms`. A backwards step expires nothing extra. See Open decision 4 for forward jumps.
 
-## Open decisions (not guessed; owner to decide)
+## Decisions (owner accepted every recommended option on 2026-11-24)
+
+Each item below keeps its option text; the option marked "Recommended" is the decision. Item 6 is decided as events-only pause. Consequences to honour: item 1 changes PR 5 behaviour (`Refusal::ByteShare` is replaced by self-eviction, update its tests first and show them fail); item 3 adds no index and no schema bump, but measure the chunk time; item 4 adds the clock-jump expiry guard and a per-pass cap; item 5 adds no schema change, so "cap" lives in live state and logs only; item 6 needs a test that the ledger reserve covers gap and heartbeat writes while event inserts are paused.
 
 1. **Refusal vs self-eviction at the byte share.** Today an over-share process is refused (`Refusal::ByteShare`). The spec (D5 lines 293-296) says an over-share process's own oldest rows are evicted first, then others. Options: (a) keep refusal as the admission gate and add self-eviction only as the budget-pressure tier (a process can sit at its share but never push others out); (b) replace refusal with self-eviction so a noisy process keeps recording newest-for-oldest at its share. Recommended: (b), since the blocking comment says self-eviction replaces refusal and refusal creates a permanent `admission-drop` gap for a process the user may care about. Needs your call because it changes PR 5 behaviour and its tests.
 2. **Byte measure for share and release.** Options: (a) reuse `estimate_bytes` (cheap, matches admission, but an estimate that drifts from real page usage); (b) measure real page use per process via `dbstat` (exact, but needs the `SQLITE_ENABLE_DBSTAT_VTAB` build and is slow); (c) sum column lengths plus a fixed per-row and index overhead computed in SQL. Recommended: (c) with the constant shared with `estimate_bytes`, so admission and eviction cannot disagree. Open because the choice sets what "25% of retained bytes" means.
