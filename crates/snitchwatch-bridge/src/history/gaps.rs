@@ -37,7 +37,9 @@ pub const CLOCK_SLEW_TOLERANCE_MS: i64 = 1_000;
 /// not gaps with bounds. Wire exposure is PR 11.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StandingLabels {
-    /// "Not observable: `nolog` rules" (the daemon reported such traffic).
+    /// "Not observable: `nolog` rules": always, while history is on. The
+    /// daemon skips such traffic before it reaches its statistics, so no
+    /// ping ever reports it.
     pub nolog: bool,
     /// "Not observable: default-applied traffic": no fork marker was seen
     /// this session, so the daemon may be stock.
@@ -68,10 +70,12 @@ pub(super) struct Losses {
     back_at: Option<i64>,
     /// When the outage that `back_at` closes began.
     down_at: Option<i64>,
-    /// Held from each ping's own time until the next ping, so that a crash's
-    /// `bridge-down` gap begins no later than the `since_ms` the next ping
-    /// reports its losses after (the pin of the loss itself arrives later).
-    ping_guard: Option<PinId>,
+    /// One per ping, keyed by the ping's own time and held until the ping
+    /// that reports its losses after that time has its events queued, so that
+    /// a crash's `bridge-down` gap begins no later than that `since_ms` (the
+    /// pin of the loss itself arrives later). Normally one; more only while
+    /// pings overlap.
+    guards: Vec<(i64, PinId)>,
     /// The session is ending: a ping after this would pin again and make the
     /// end `unclean`, so it is ignored.
     closed: bool,
@@ -113,7 +117,7 @@ impl Losses {
             disconnect_flushing: false,
             back_at: None,
             down_at: None,
-            ping_guard: None,
+            guards: Vec::new(),
             closed: false,
             unguarded_pings: 0,
         }
@@ -123,7 +127,7 @@ impl Losses {
     /// to cover. Called before the session ends.
     pub(super) fn release_ping_guard(&mut self, registry: &PinRegistry) {
         self.closed = true;
-        if let Some(pin) = self.ping_guard.take() {
+        for (_, pin) in self.guards.drain(..) {
             let _ = registry.release(&pin);
         }
     }
@@ -149,38 +153,62 @@ impl Losses {
     /// edge before the first closed is one longer gap, never a hole.
     pub(super) fn daemon_down(&mut self, registry: &PinRegistry) {
         self.disconnect_end = None;
+        let fresh = !self.disconnect.is_pending();
+        let _ = self.disconnect.record(registry, 1);
         // A new outage after one that came back unpinged starts a fresh
         // record; a second edge before the first closed keeps the first.
         if self.down_at.is_none() || self.back_at.is_some() {
-            self.down_at = Some(registry.now());
+            // The pin's own reading, so the pre-outage row ends exactly where
+            // the daemon row starts.
+            let at = fresh.then(|| self.disconnect.first_ms()).flatten();
+            self.down_at = Some(at.unwrap_or_else(|| registry.now()));
             self.back_at = None;
         }
-        let _ = self.disconnect.record(registry, 1);
     }
 
-    /// The daemon is back at `at_ms`: the gap closes there.
+    /// The daemon is back at `at_ms`: the gap closes there. The first word
+    /// stands: a ping that proved the daemon up closed it, and the watchdog's
+    /// later poll does not move the end.
     pub(super) fn daemon_up(&mut self, at_ms: i64) {
         if self.disconnect.is_pending() || self.disconnect_flushing {
-            self.disconnect_end = Some(at_ms);
-            self.back_at = Some(at_ms);
+            self.disconnect_end.get_or_insert(at_ms);
+            self.back_at.get_or_insert(at_ms);
         }
     }
 
-    /// What one ping showed was never received: the lower bound of events,
-    /// plus one for a restart, whose losses nothing can count. The ping is
-    /// pinned at its own time and the previous ping's pin is released, or
-    /// becomes the tally's pin when something was lost: the gap then starts
-    /// where the previous ping was seen, and a crash's gap cannot start later.
-    pub(super) fn upstream_loss(&mut self, registry: &PinRegistry, loss: UpstreamLoss) {
-        // Deliberate: a loss reported once the session is closing is dropped,
-        // not recorded, so that the end stays clean.
-        if self.closed {
-            return;
-        }
+    /// A ping reached the bridge: pin it first and take what it reports its
+    /// losses after, but release nothing yet. The ping's events are not
+    /// queued, so the previous ping's guard still covers them until
+    /// [`finish_ping`](Self::finish_ping). Everything the ping needs from
+    /// shared state is taken here, in one step, and carried through.
+    pub(super) fn begin_ping(
+        &mut self,
+        registry: &PinRegistry,
+        loss: UpstreamLoss,
+        events: u64,
+    ) -> PingBegun {
         let now = registry.now();
         let arrival = loss.at_ms.map_or(now, |at| at.min(now));
-        let next = match registry.add(arrival) {
-            Ok(pin) => Some(pin),
+        let mut begun = PingBegun {
+            loss,
+            events,
+            previous: None,
+            outage: None,
+        };
+        if self.closed {
+            return begun;
+        }
+        // The ping is proof the daemon is up, whatever the watchdog saw yet.
+        if self.down_at.is_some() {
+            self.daemon_up(arrival);
+        }
+        if self.back_at.is_some() {
+            begun.outage = self.back_at.take().zip(self.down_at.take());
+        }
+        begun.previous = self.take_guard_for(registry, loss.since_ms);
+        let key = loss.at_ms.unwrap_or(arrival);
+        match registry.add(arrival) {
+            Ok(pin) => self.guards.push((key, pin)),
             Err(error) => {
                 self.unguarded_pings = self.unguarded_pings.saturating_add(1);
                 // Powers of two only: a stuck registry must not flood the log.
@@ -191,15 +219,55 @@ impl Losses {
                         "history could not pin a ping; a crash's gap may start late"
                     );
                 }
-                None
             }
-        };
-        let mut previous = std::mem::replace(&mut self.ping_guard, next);
+        }
+        begun
+    }
+
+    /// The guard of the ping `since_ms` names: the one at exactly that time,
+    /// else the latest before it. Older guards are obsolete and released;
+    /// newer ones belong to pings that came after.
+    fn take_guard_for(&mut self, registry: &PinRegistry, since_ms: Option<i64>) -> Option<PinId> {
+        let limit = since_ms.unwrap_or(i64::MAX);
+        let chosen = self
+            .guards
+            .iter()
+            .filter(|(key, _)| *key <= limit)
+            .map(|(key, _)| *key)
+            .max()?;
+        let (mut taken, kept): (Vec<_>, Vec<_>) =
+            self.guards.drain(..).partition(|(key, _)| *key <= chosen);
+        self.guards = kept;
+        let position = taken.iter().rposition(|(key, _)| *key == chosen)?;
+        let (_, pin) = taken.swap_remove(position);
+        for (_, older) in taken {
+            let _ = registry.release(&older);
+        }
+        Some(pin)
+    }
+
+    /// The ping's events are queued: what it showed was never received is
+    /// now tallied, and the previous guard is released or becomes the
+    /// tally's pin (the gap then starts where the previous ping was seen).
+    pub(super) fn finish_ping(&mut self, registry: &PinRegistry, begun: PingBegun) {
+        let PingBegun {
+            loss,
+            mut previous,
+            outage,
+            ..
+        } = begun;
+        // Deliberate: a loss reported once the session is closing is dropped,
+        // not recorded, so that the end stays clean.
+        if self.closed {
+            if let Some(pin) = previous {
+                let _ = registry.release(&pin);
+            }
+            return;
+        }
         let n = loss.missing.saturating_add(u64::from(loss.restarted));
-        let outage = self.back_at.take().zip(self.down_at.take());
         let mut floor = outage.map(|(up, _)| up);
-        if let (Some((up, down)), true) = (outage, n > 0) {
-            if self.record_around_outage(registry, &mut previous, loss.since_ms, n, (up, down)) {
+        if let (Some(outage), true) = (outage, n > 0) {
+            if self.record_around_outage(registry, &mut previous, loss.since_ms, n, outage) {
                 return;
             }
             // No pin for the part before the outage: overlap rather than a hole.
@@ -223,10 +291,20 @@ impl Losses {
         }
     }
 
+    /// [`begin_ping`](Self::begin_ping) and [`finish_ping`](Self::finish_ping)
+    /// with nothing between them.
+    #[cfg(test)]
+    pub(super) fn upstream_loss(&mut self, registry: &PinRegistry, loss: UpstreamLoss) {
+        let begun = self.begin_ping(registry, loss, 0);
+        self.finish_ping(registry, begun);
+    }
+
     /// Records a loss that straddles an outage as two rows, so that nothing
     /// from the last ping to this one is left bare: `[ping, down]` here and
     /// `[up, now]` in `upstream`. The count is split, not doubled (each row
-    /// needs one). False when no pin could be had for the first part.
+    /// needs one). False when no pin could be had for the first part. Each
+    /// part holds a pin at its own start, so one part's failed write cannot
+    /// let the watermark pass the other's stretch.
     fn record_around_outage(
         &mut self,
         registry: &PinRegistry,
@@ -252,16 +330,42 @@ impl Losses {
         };
         self.pre_outage_end = Some(down);
         self.upstream_pre.record_pinned(registry, 1, pin, None);
-        let _ = self
-            .upstream
-            .record_since(registry, n.saturating_sub(1).max(1), up);
+        let rest = n.saturating_sub(1).max(1);
+        match registry.add(up) {
+            Ok(pin) => self.upstream.record_pinned(registry, rest, pin, Some(up)),
+            Err(_) => {
+                let _ = self.upstream.record_since(registry, rest, up);
+            }
+        }
         true
     }
+}
 
-    /// The open daemon gap's end, if it closed; a heartbeat leaves it open
-    /// otherwise.
-    fn disconnect_closed_at(&self) -> Option<i64> {
-        self.disconnect_end
+/// What a ping took from the shared state when it arrived, carried to the
+/// moment its events are queued.
+pub(super) struct PingBegun {
+    loss: UpstreamLoss,
+    /// Events the ping carried: what a ping cancelled before it finished
+    /// has certainly lost.
+    events: u64,
+    /// The guard of the ping this one reports its losses after.
+    previous: Option<PinId>,
+    /// `(up, down)` of an outage that ended since the previous ping.
+    outage: Option<(i64, i64)>,
+}
+
+impl PingBegun {
+    /// This ping never finished (its handler was dropped): its events are
+    /// lost, so at least that many are missing.
+    pub(super) fn cancelled(self) -> Self {
+        let missing = self.loss.missing.max(self.events);
+        Self {
+            loss: UpstreamLoss {
+                missing,
+                ..self.loss
+            },
+            ..self
+        }
     }
 }
 
@@ -269,9 +373,30 @@ fn locked(losses: &Mutex<Losses>) -> std::sync::MutexGuard<'_, Losses> {
     losses.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Takes `slot`'s tally out under the lock the caller holds.
+fn take_slot(guard: &mut Losses, slot: Slot) -> LossCounter {
+    let taken = guard.slot(slot).take();
+    if matches!(slot, Slot::Disconnect) {
+        guard.disconnect_flushing = taken.is_pending();
+    }
+    taken
+}
+
+/// Where `slot`'s gap ends if it is due now, `None` if it is not: an open
+/// daemon gap waits for its recovery unless the session is `closing`.
+fn due_end(guard: &Losses, registry: &PinRegistry, slot: Slot, closing: bool) -> Option<i64> {
+    let now = registry.now();
+    match slot {
+        Slot::Disconnect => guard.disconnect_end.or(closing.then_some(now)),
+        Slot::UpstreamPre => Some(guard.pre_outage_end.unwrap_or(now)),
+        _ => Some(now),
+    }
+}
+
 /// Flushes one tally without holding the lock across the commit: the tally
 /// is taken out, written with its pin in one transaction, and put back (with
 /// anything counted meanwhile) when that failed.
+#[cfg(test)]
 fn flush_slot(
     engine: &mut Engine,
     registry: &PinRegistry,
@@ -280,14 +405,18 @@ fn flush_slot(
     slot: Slot,
     end_ms: i64,
 ) -> Result<(), DurableError> {
-    let mut taken = {
-        let mut guard = locked(losses);
-        let taken = guard.slot(slot).take();
-        if matches!(slot, Slot::Disconnect) {
-            guard.disconnect_flushing = taken.is_pending();
-        }
-        taken
-    };
+    let taken = take_slot(&mut locked(losses), slot);
+    flush_taken(engine, registry, limits, losses, (slot, taken), end_ms)
+}
+
+fn flush_taken(
+    engine: &mut Engine,
+    registry: &PinRegistry,
+    limits: &LedgerLimits,
+    losses: &Mutex<Losses>,
+    (slot, mut taken): (Slot, LossCounter),
+    end_ms: i64,
+) -> Result<(), DurableError> {
     let result = engine.flush_counter_at(&mut taken, registry, limits, end_ms);
     let mut guard = locked(losses);
     guard.disconnect_flushing = false;
@@ -301,7 +430,9 @@ fn flush_slot(
 
 /// Flushes every counter that is due. The heartbeat leaves an open
 /// daemon-disconnected gap alone; `closing` (shutdown, disable) flushes it
-/// too. The first error is returned, after every counter was tried.
+/// too. The first error is returned, after every counter was tried. Each
+/// tally's end and the tally itself are read under one lock, so an outage
+/// that begins meanwhile is a tally of its own.
 pub(super) fn flush_due(
     engine: &mut Engine,
     registry: &PinRegistry,
@@ -311,18 +442,12 @@ pub(super) fn flush_due(
 ) -> Result<(), DurableError> {
     let mut first = Ok(());
     for slot in EVERY_SLOT {
-        let end_ms = match slot {
-            Slot::Disconnect => match locked(losses).disconnect_closed_at() {
-                Some(end) => end,
-                None if closing => registry.now(),
-                None => continue,
-            },
-            Slot::UpstreamPre => locked(losses)
-                .pre_outage_end
-                .unwrap_or_else(|| registry.now()),
-            _ => registry.now(),
+        let due = {
+            let mut guard = locked(losses);
+            due_end(&guard, registry, slot, closing).map(|end| (take_slot(&mut guard, slot), end))
         };
-        let done = flush_slot(engine, registry, limits, losses, slot, end_ms);
+        let Some((taken, end_ms)) = due else { continue };
+        let done = flush_taken(engine, registry, limits, losses, (slot, taken), end_ms);
         first = first.and(done);
     }
     first
@@ -334,6 +459,9 @@ pub struct ClockWatch {
     /// `(wall_ms, mono_ms)` at the last heartbeat.
     last: Option<(i64, i64)>,
     unrecorded: Option<Gap>,
+    /// Held at the start of `unrecorded` until its row is durable, so that no
+    /// commit in between lets the watermark pass the jump.
+    pin: Option<PinId>,
 }
 
 impl ClockWatch {
@@ -381,14 +509,67 @@ impl ClockWatch {
         self.unrecorded
     }
 
-    /// The jump is durable.
+    /// The jump is durable (the transaction released its pin).
     pub fn recorded(&mut self) {
         self.unrecorded = None;
+        self.pin = None;
+    }
+
+    /// Pins the start of the jump seen and not yet recorded, keeping the
+    /// older pin when it already lies at or before it.
+    fn hold(&mut self, registry: &PinRegistry) {
+        let Some(gap) = self.unrecorded else {
+            return;
+        };
+        let held = self.pin.as_ref().and_then(|pin| registry.arrival_of(pin));
+        if held.is_some_and(|at| at <= gap.start_ms) {
+            return;
+        }
+        if let Ok(pin) = registry.add(gap.start_ms) {
+            if let Some(old) = self.pin.replace(pin) {
+                let _ = registry.release(&old);
+            }
+        }
     }
 }
 
+/// Writes the jump the clock watch saw, if it has not been written: the row
+/// and the release of the pin that held the watermark are one transaction.
+fn record_jump(
+    engine: &mut Engine,
+    registry: &PinRegistry,
+    limits: &LedgerLimits,
+    clock: &mut ClockWatch,
+) -> Result<(), DurableError> {
+    let Some(gap) = clock.unrecorded() else {
+        return Ok(());
+    };
+    clock.hold(registry);
+    // A small step back keeps the whole stepped-over span, though it ends
+    // after now: that is where ordering is unreliable. A step past the jump
+    // threshold (or a clock that was far ahead) would store a far-future end
+    // that later widens collapses and deletes sessions, so it ends at now.
+    let now = registry.now();
+    let end_ms = if gap.end_ms.saturating_sub(now) > CLOCK_JUMP_THRESHOLD_MS {
+        now
+    } else {
+        gap.end_ms
+    };
+    let gap = Gap {
+        start_ms: gap.start_ms.min(end_ms),
+        end_ms,
+        ..gap
+    };
+    let committed = {
+        let pins: Vec<&PinId> = clock.pin.iter().collect();
+        engine.commit_gap(&gap, &pins, registry, limits)
+    };
+    committed.map(|_| clock.recorded())
+}
+
 /// One heartbeat: the clock check, every due counter, then the commit that
-/// advances the watermark. Each is tried; the first error returns.
+/// advances the watermark. Each is tried; the first error returns. A jump
+/// that could not be written holds the watermark (its pin) until it can.
 pub(super) fn beat(
     engine: &mut Engine,
     registry: &PinRegistry,
@@ -398,29 +579,7 @@ pub(super) fn beat(
     mono_ms: i64,
 ) -> Result<(), DurableError> {
     clock.observe(registry.now(), mono_ms);
-    // A small step back keeps the whole stepped-over span, though it ends
-    // after now: that is where ordering is unreliable. A step past the jump
-    // threshold (or a clock that was far ahead) would store a far-future end
-    // that later widens collapses and deletes sessions, so it ends at now.
-    let jump = match clock.unrecorded() {
-        Some(gap) => {
-            let now = registry.now();
-            let end_ms = if gap.end_ms.saturating_sub(now) > CLOCK_JUMP_THRESHOLD_MS {
-                now
-            } else {
-                gap.end_ms
-            };
-            let gap = Gap {
-                start_ms: gap.start_ms.min(end_ms),
-                end_ms,
-                ..gap
-            };
-            engine
-                .commit_gap(&gap, &[], registry, limits)
-                .map(|_| clock.recorded())
-        }
-        None => Ok(()),
-    };
+    let jump = record_jump(engine, registry, limits, clock);
     let flushed = flush_due(engine, registry, limits, losses, false);
     let beat = engine.heartbeat(registry).map(|_| ());
     jump.and(flushed).and(beat)
@@ -435,13 +594,17 @@ pub(super) struct Pulse {
 }
 
 impl Pulse {
-    pub(super) fn new(every: Duration) -> Self {
+    /// `wall_ms` is the wall clock now: the baseline the first heartbeat is
+    /// judged against, so a jump before it is seen.
+    pub(super) fn new(every: Duration, wall_ms: i64) -> Self {
         let now = Instant::now();
+        let mut clock = ClockWatch::new();
+        clock.observe(wall_ms, 0);
         Self {
             every,
             last: now,
             started: now,
-            clock: ClockWatch::new(),
+            clock,
         }
     }
 
@@ -464,21 +627,37 @@ impl Pulse {
         let mono_ms = i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX);
         beat(engine, registry, limits, losses, &mut self.clock, mono_ms)
     }
+
+    pub(super) fn close(
+        &mut self,
+        engine: &mut Engine,
+        registry: &PinRegistry,
+        limits: &LedgerLimits,
+        losses: &Mutex<Losses>,
+        kind: SessionEnd,
+    ) -> Result<(), DurableError> {
+        close(engine, registry, limits, losses, &mut self.clock, kind)
+    }
 }
 
-/// Shutdown or disable: flushes everything (an open daemon gap ends now),
-/// then ends the session as `kind`. Both are tried; the first error returns.
+/// Shutdown or disable: records any pending clock jump, flushes everything
+/// (an open daemon gap ends now), then ends the session as `kind`. Each is
+/// tried; the first error returns.
 pub(super) fn close(
     engine: &mut Engine,
     registry: &PinRegistry,
     limits: &LedgerLimits,
     losses: &Mutex<Losses>,
+    clock: &mut ClockWatch,
     kind: SessionEnd,
 ) -> Result<(), DurableError> {
     locked(losses).release_ping_guard(registry);
+    // A jump that could not be written before is written now, or its pin
+    // keeps the end `unclean`.
+    let jump = record_jump(engine, registry, limits, clock);
     let flushed = flush_due(engine, registry, limits, losses, true);
     let ended = engine.end_session(registry, kind);
-    flushed.and(ended)
+    jump.and(flushed).and(ended)
 }
 
 impl Engine {
@@ -508,6 +687,9 @@ impl Engine {
     }
 }
 
+#[cfg(test)]
+#[path = "gaps_repair_tests.rs"]
+mod repair_tests;
 #[cfg(test)]
 #[path = "gaps_tests.rs"]
 mod tests;

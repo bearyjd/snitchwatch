@@ -25,6 +25,7 @@ pub mod guard;
 pub mod ledger;
 pub mod lifecycle;
 pub mod open;
+pub mod ping;
 mod pinned_queue;
 pub mod pins;
 pub mod record;

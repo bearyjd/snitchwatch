@@ -170,6 +170,16 @@ impl PinRegistry {
     /// or is listed twice is `Unknown`. Validated before the transaction, so
     /// the release after `COMMIT` cannot fail.
     pub fn commit_watermark(&self, released: &[&PinId]) -> Result<i64, PinError> {
+        self.commit_bounds(released).map(|(watermark, _)| watermark)
+    }
+
+    /// [`commit_watermark`](Self::commit_watermark), also giving the oldest
+    /// pin that stays live: the durable watermark must not be left past it,
+    /// even one a clock that stepped back had already moved forward.
+    pub(crate) fn commit_bounds(
+        &self,
+        released: &[&PinId],
+    ) -> Result<(i64, Option<i64>), PinError> {
         let inner = self.lock();
         self.validate_locked(&inner, released)?;
         let now = (self.clock)();
@@ -178,7 +188,7 @@ impl PinRegistry {
             .iter()
             .find(|(_, id)| !released.iter().any(|p| p.id == *id))
             .map(|(arrival, _)| *arrival);
-        Ok(oldest_kept.map_or(now, |o| o.min(now)))
+        Ok((oldest_kept.map_or(now, |o| o.min(now)), oldest_kept))
     }
 
     /// Whether `pins` could all be released now (see

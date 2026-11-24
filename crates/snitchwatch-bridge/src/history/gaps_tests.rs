@@ -335,7 +335,7 @@ fn a_ping_that_lost_nothing_makes_no_tally_and_holds_one_guard_pin_until_the_sto
     losses
         .lock()
         .unwrap()
-        .upstream_loss(&rig.registry, lost(0, false, 900));
+        .upstream_loss(&rig.registry, lost(0, false, 1300));
     assert_eq!(losses.lock().unwrap().upstream.pending_count(), 0);
     assert_eq!(rig.registry.len(), 1, "only the last ping is held");
     assert_eq!(rig.registry.oldest(), Some(1300));
@@ -344,6 +344,7 @@ fn a_ping_that_lost_nothing_makes_no_tally_and_holds_one_guard_pin_until_the_sto
         &rig.registry,
         &rig.limits,
         &losses,
+        &mut ClockWatch::new(),
         SessionEnd::Clean,
     )
     .unwrap();
@@ -923,7 +924,8 @@ fn standing_labels_are_present_only_when_they_apply() {
     assert_eq!(
         fresh,
         StandingLabels {
-            nolog: false,
+            // The daemon never reports `nolog` traffic: always stated.
+            nolog: true,
             stock_default_unobservable: true,
             no_gui_prompts: false
         }
@@ -1091,6 +1093,8 @@ async fn history_gets_the_down_and_up_edges_as_one_exact_gap() {
         Arc::new(crate::diagnostics::kernel_probe::testing::FakeKernelProbe::all_ok()),
         Arc::new(crate::daemon_alerts::DaemonAlertStore::new()),
     ));
+    // The daemon connected before it went away.
+    liveness.touch();
     let watchdog = tokio::spawn(crate::daemon_watchdog::run_with_history(
         liveness.clone(),
         tray_pub,

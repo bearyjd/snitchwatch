@@ -50,10 +50,10 @@ impl Engine {
         kind: TxnKind,
         work: impl FnOnce(&Connection, i64) -> Result<u64, WriteError>,
     ) -> Result<TxnReport, DurableError> {
-        let watermark = registry.commit_watermark(pins)?;
+        let (watermark, oldest_kept) = registry.commit_bounds(pins)?;
         let report = self.transact(kind, |conn| {
             let units = work(conn, watermark)?;
-            session::write_watermark(conn, watermark)?;
+            session::write_watermark_capped(conn, watermark, oldest_kept)?;
             Ok(units)
         })?;
         // Only now: the rows and the watermark are durable. The pins were

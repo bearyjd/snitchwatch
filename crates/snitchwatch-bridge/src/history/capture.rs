@@ -85,7 +85,6 @@ use super::session::SessionEnd;
 use super::snapshots::snapshot_for;
 use super::writer::{Engine, Item, QUEUE_MAX_BYTES, QUEUE_MAX_COUNT};
 use super::{load_state, locate, open_store, Consent, Mode, State};
-use crate::cache::rule_hits::UpstreamLoss;
 
 /// Bytes a record counts for against its process's share, before its strings.
 const ROW_OVERHEAD: u64 = 160;
@@ -321,7 +320,7 @@ impl Shared {
         }
     }
 
-    fn with_losses(&self, f: impl FnOnce(&mut Losses, &PinRegistry)) {
+    pub(super) fn with_losses(&self, f: impl FnOnce(&mut Losses, &PinRegistry)) {
         f(
             &mut self.losses.lock().unwrap_or_else(|e| e.into_inner()),
             &self.registry,
@@ -441,7 +440,7 @@ impl Shared {
         // A short lock wait: a locked database costs a batch, not the thread.
         let _ = engine.connection().busy_timeout(WRITER_BUSY_TIMEOUT);
         let limits = LedgerLimits::from_budget(engine.budget());
-        let mut pulse = gaps::Pulse::new(self.heartbeat_every);
+        let mut pulse = gaps::Pulse::new(self.heartbeat_every, self.registry.now());
         let mut backoff = RETRY_BACKOFF_MIN;
         let mut last_logged: Option<Instant> = None;
         let mut deadline: Option<Instant> = None;
@@ -494,13 +493,19 @@ impl Shared {
                 }
             }
         }
-        self.finish(&mut engine, &limits, began);
+        self.finish(&mut engine, &limits, began, &mut pulse);
     }
 
     /// The queue is closed and drained: flush every tally (an open daemon
     /// gap ends now) and end the session. A failure leaves the pins held, so
     /// the next start still reconstructs a gap from the watermark.
-    fn finish(&self, engine: &mut Engine, limits: &LedgerLimits, began: bool) {
+    fn finish(
+        &self,
+        engine: &mut Engine,
+        limits: &LedgerLimits,
+        began: bool,
+        pulse: &mut gaps::Pulse,
+    ) {
         // Never began: ending would close the previous session as this one's.
         if !began && engine.begin_session(&self.registry, limits).is_err() {
             tracing::error!("history never started its session; the previous one stays open");
@@ -511,7 +516,7 @@ impl Shared {
         } else {
             SessionEnd::Clean
         };
-        if let Err(e) = gaps::close(engine, &self.registry, limits, &self.losses, kind) {
+        if let Err(e) = pulse.close(engine, &self.registry, limits, &self.losses, kind) {
             tracing::error!(error = %e, "history shutdown could not record its gaps");
         }
     }
@@ -570,7 +575,7 @@ fn batch_events(batch: &PinnedBatch) -> u64 {
 /// History capture: the admission state, the pinned queue and the writer
 /// thread. Exists only while history is enabled.
 pub struct Capture {
-    shared: Arc<Shared>,
+    pub(super) shared: Arc<Shared>,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
@@ -648,26 +653,6 @@ impl Capture {
         self.shared.stats()
     }
 
-    /// The daemon went away: a `daemon-disconnected` gap opens now. In
-    /// memory only; the watchdog calls it on its down edge.
-    pub fn daemon_down(&self) {
-        self.shared
-            .with_losses(|l, registry| l.daemon_down(registry));
-    }
-
-    /// The daemon is back: the gap closes now.
-    pub fn daemon_up(&self) {
-        let now = self.shared.registry.now();
-        self.shared.with_losses(|l, _| l.daemon_up(now));
-    }
-
-    /// What one ping showed was never received (`upstream-loss`). In memory
-    /// only.
-    pub fn observe_upstream_loss(&self, loss: UpstreamLoss) {
-        self.shared
-            .with_losses(|l, registry| l.upstream_loss(registry, loss));
-    }
-
     /// A prompt arrived with no authenticated GUI: no row can exist for it.
     pub fn note_no_gui_prompt(&self) {
         self.shared.no_gui_prompts.store(true, Ordering::Relaxed);
@@ -676,7 +661,8 @@ impl Capture {
     /// What history cannot observe today (standing notes, not gaps).
     pub fn standing_labels(&self) -> StandingLabels {
         StandingLabels {
-            nolog: self.shared.counters.skipped_nolog.load(Ordering::Relaxed) > 0,
+            // The daemon never reports `nolog` traffic: stated while history is on.
+            nolog: true,
             stock_default_unobservable: !self.shared.fork_marker_seen.load(Ordering::Relaxed),
             no_gui_prompts: self.shared.no_gui_prompts.load(Ordering::Relaxed),
         }

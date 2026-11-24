@@ -529,6 +529,11 @@ impl LossCounter {
         self.pending.is_some()
     }
 
+    /// When the first pending loss was noticed: its pin's own reading.
+    pub(crate) fn first_ms(&self) -> Option<i64> {
+        self.pending.as_ref().map(|p| p.first_ms)
+    }
+
     /// Unflushed losses, if any.
     pub fn pending_count(&self) -> u64 {
         self.pending.as_ref().map_or(0, |p| p.count)
