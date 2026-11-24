@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use super::durable::DurableError;
 use super::ledger::{Gap, GapCause, LedgerLimits, LossCounter};
-use super::pins::PinRegistry;
+use super::pins::{PinId, PinRegistry};
 use super::session::SessionEnd;
 use super::writer::Engine;
 use crate::cache::rule_hits::UpstreamLoss;
@@ -55,6 +55,10 @@ pub(super) struct Losses {
     pub(super) disconnect: LossCounter,
     /// When the daemon came back; `None` while it is still away.
     disconnect_end: Option<i64>,
+    /// Held from each ping's own time until the next ping, so that a crash's
+    /// `bridge-down` gap begins no later than the `since_ms` the next ping
+    /// reports its losses after (the pin of the loss itself arrives later).
+    ping_guard: Option<PinId>,
 }
 
 /// The tallies a flush walks through.
@@ -84,6 +88,15 @@ impl Losses {
             upstream: LossCounter::bounded(GapCause::UpstreamLoss),
             disconnect: LossCounter::new(GapCause::DaemonDisconnected),
             disconnect_end: None,
+            ping_guard: None,
+        }
+    }
+
+    /// Lets the watermark pass the last ping: a clean stop has nothing left
+    /// to cover. Called before the session ends.
+    pub(super) fn release_ping_guard(&mut self, registry: &PinRegistry) {
+        if let Some(pin) = self.ping_guard.take() {
+            let _ = registry.release(&pin);
         }
     }
 
@@ -112,16 +125,29 @@ impl Losses {
     }
 
     /// What one ping showed was never received: the lower bound of events,
-    /// plus one for a restart, whose losses nothing can count.
+    /// plus one for a restart, whose losses nothing can count. The ping is
+    /// pinned at its own time and the previous ping's pin is released, or
+    /// becomes the tally's pin when something was lost: the gap then starts
+    /// where the previous ping was seen, and a crash's gap cannot start later.
     pub(super) fn upstream_loss(&mut self, registry: &PinRegistry, loss: UpstreamLoss) {
+        let now = registry.now();
+        let arrival = loss.at_ms.map_or(now, |at| at.min(now));
+        let next = registry.add(arrival).ok();
+        let previous = std::mem::replace(&mut self.ping_guard, next);
         let n = loss.missing.saturating_add(u64::from(loss.restarted));
-        if n == 0 {
-            return;
+        match (previous, n) {
+            (Some(pin), 0) => {
+                let _ = registry.release(&pin);
+            }
+            (Some(pin), n) => self.upstream.record_pinned(registry, n, pin),
+            (None, 0) => {}
+            (None, n) => {
+                let _ = match loss.since_ms {
+                    Some(since_ms) => self.upstream.record_since(registry, n, since_ms),
+                    None => self.upstream.record(registry, n),
+                };
+            }
         }
-        let _ = match loss.since_ms {
-            Some(since_ms) => self.upstream.record_since(registry, n, since_ms),
-            None => self.upstream.record(registry, n),
-        };
     }
 
     /// The open daemon gap's end, if it closed; a heartbeat leaves it open
@@ -323,6 +349,7 @@ pub(super) fn close(
     losses: &Mutex<Losses>,
     kind: SessionEnd,
 ) -> Result<(), DurableError> {
+    locked(losses).release_ping_guard(registry);
     let flushed = flush_due(engine, registry, limits, losses, true);
     let ended = engine.end_session(registry, kind);
     flushed.and(ended)

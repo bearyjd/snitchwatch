@@ -215,6 +215,8 @@ pub struct UpstreamLoss {
     pub restarted: bool,
     /// The ping before this one: the loss lies after it.
     pub since_ms: Option<i64>,
+    /// This ping's own time, which the next ping reports as its `since_ms`.
+    pub at_ms: Option<i64>,
 }
 
 /// The counts. Pure: times and the rule cache's membership are passed in.
@@ -369,6 +371,7 @@ impl RuleHits {
             missing,
             restarted: uptime_fell || reset,
             since_ms,
+            at_ms: Some(now_ms),
         };
         (uptime_fell || missed, loss)
     }

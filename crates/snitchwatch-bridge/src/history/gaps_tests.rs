@@ -179,6 +179,7 @@ fn lost(missing: u64, restarted: bool, since_ms: i64) -> UpstreamLoss {
         missing,
         restarted,
         since_ms: Some(since_ms),
+        at_ms: None,
     }
 }
 
@@ -211,18 +212,42 @@ fn upstream_loss_is_the_lower_bound_sum_and_a_restart_adds_one_uncertain() {
 }
 
 #[test]
-fn a_ping_that_lost_nothing_makes_no_tally_and_holds_no_pin() {
-    let rig = rig(1000);
+fn a_ping_that_lost_nothing_makes_no_tally_and_holds_one_guard_pin_until_the_stop() {
+    let mut rig = rig(1000);
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
     let losses = losses();
-    losses
-        .lock()
-        .unwrap()
-        .upstream_loss(&rig.registry, UpstreamLoss::default());
+    for at in [1100, 1200, 1300] {
+        rig.set(at);
+        losses.lock().unwrap().upstream_loss(
+            &rig.registry,
+            UpstreamLoss {
+                at_ms: Some(at),
+                ..UpstreamLoss::default()
+            },
+        );
+    }
     losses
         .lock()
         .unwrap()
         .upstream_loss(&rig.registry, lost(0, false, 900));
+    assert_eq!(losses.lock().unwrap().upstream.pending_count(), 0);
+    assert_eq!(rig.registry.len(), 1, "only the last ping is held");
+    assert_eq!(rig.registry.oldest(), Some(1300));
+    close(
+        &mut rig.engine,
+        &rig.registry,
+        &rig.limits,
+        &losses,
+        SessionEnd::Clean,
+    )
+    .unwrap();
     assert!(rig.registry.is_empty());
+    assert_eq!(
+        read_sessions(rig.engine.connection()).unwrap()[0].end,
+        Some(SessionEnd::Clean)
+    );
 }
 
 // ---- 6. clock jumps --------------------------------------------------------

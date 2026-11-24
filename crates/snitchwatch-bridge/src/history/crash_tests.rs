@@ -78,12 +78,27 @@ fn crash_child() {
             _held_pin = None;
         }
         "upstream-tally" => {
+            // The ping at 1500 showed no loss; the one at 2000 shows 4 lost
+            // since it. The row's pin arrives at 2000, but the gap must be
+            // covered from 1500.
+            ms.store(1500, std::sync::atomic::Ordering::SeqCst);
+            losses.upstream_loss(
+                &registry,
+                UpstreamLoss {
+                    missing: 0,
+                    restarted: false,
+                    since_ms: None,
+                    at_ms: Some(1500),
+                },
+            );
+            ms.store(2000, std::sync::atomic::Ordering::SeqCst);
             losses.upstream_loss(
                 &registry,
                 UpstreamLoss {
                     missing: 4,
                     restarted: false,
                     since_ms: Some(1500),
+                    at_ms: Some(2000),
                 },
             );
             _held_pin = None;
@@ -191,9 +206,11 @@ fn kill_9_with_an_open_daemon_gap_leaves_an_uncertain_gap_from_the_down_edge() {
 }
 
 #[test]
-fn kill_9_with_an_unflushed_upstream_tally_the_gap_begins_no_later_than_its_pin() {
+fn kill_9_with_an_unflushed_upstream_tally_the_gap_covers_everything_since_the_last_ping() {
     let (gap, _) = crash_and_recover("upstream-tally");
-    assert_uncertain_crash_gap(&gap, 2000);
+    // The losses lie after the ping at 1500: the bridge-down gap must begin
+    // no later, or [1500, the pin's arrival] has no row.
+    assert_uncertain_crash_gap(&gap, 1500);
 }
 
 #[test]

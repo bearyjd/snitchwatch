@@ -26,7 +26,14 @@ fn events(n: usize) -> Vec<Event> {
 fn baseline() -> RuleHits {
     let mut hits = RuleHits::default();
     let (_, loss) = hits.record_with_loss(&events(0), 100, 10, T1, |_| true);
-    assert_eq!(loss, UpstreamLoss::default(), "the first ping has no past");
+    assert_eq!(
+        loss,
+        UpstreamLoss {
+            at_ms: Some(T1),
+            ..UpstreamLoss::default()
+        },
+        "the first ping has no past"
+    );
     hits
 }
 
@@ -39,7 +46,8 @@ fn the_missing_count_is_the_counter_growth_beyond_the_events_received() {
         UpstreamLoss {
             missing: 4,
             restarted: false,
-            since_ms: Some(T1)
+            since_ms: Some(T1),
+            at_ms: Some(T2)
         }
     );
 }
@@ -67,7 +75,8 @@ fn a_counter_that_went_down_is_a_restart_with_no_countable_loss() {
         UpstreamLoss {
             missing: 0,
             restarted: true,
-            since_ms: Some(T1)
+            since_ms: Some(T1),
+            at_ms: Some(T2)
         }
     );
 }
