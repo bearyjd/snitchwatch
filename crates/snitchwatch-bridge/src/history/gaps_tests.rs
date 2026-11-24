@@ -252,6 +252,27 @@ fn a_backwards_step_is_a_clock_jump_covering_the_stepped_over_time() {
 }
 
 #[test]
+fn a_step_back_smaller_than_the_heartbeat_interval_is_still_a_clock_jump() {
+    let mut watch = ClockWatch::new();
+    jump(&mut watch, 100_000, 0);
+    // A 5 s heartbeat, the wall clock stepped back 3 s: it still moved
+    // forward (2 s) but 3 s less than the monotonic clock did.
+    assert!(
+        jump(&mut watch, 102_000, 5_000).is_some(),
+        "a 3 s step back is a jump"
+    );
+}
+
+#[test]
+fn a_slew_within_the_tolerance_is_no_clock_jump() {
+    let mut watch = ClockWatch::new();
+    jump(&mut watch, 100_000, 0);
+    // NTP slewing: 0.5 s slow over a 5 s heartbeat.
+    assert_eq!(jump(&mut watch, 104_500, 5_000), None);
+    assert_eq!(jump(&mut watch, 109_000 + 500, 10_000), None);
+}
+
+#[test]
 fn a_forward_jump_past_the_threshold_is_a_clock_jump() {
     let mut watch = ClockWatch::new();
     jump(&mut watch, 100_000, 0);

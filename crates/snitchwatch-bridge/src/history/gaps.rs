@@ -28,6 +28,11 @@ use crate::cache::rule_hits::UpstreamLoss;
 /// one heartbeat interval has jumped (owner decision 2026-11-24).
 pub const CLOCK_JUMP_THRESHOLD_MS: i64 = 60_000;
 
+/// How much slower than the monotonic clock the wall clock may run over one
+/// heartbeat before it counts as stepped back: NTP slews at up to 0.05%, so a
+/// second absorbs it.
+pub const CLOCK_SLEW_TOLERANCE_MS: i64 = 1_000;
+
 /// What history cannot observe, as standing notes on the history view (D6):
 /// not gaps with bounds. Wire exposure is PR 11.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -192,7 +197,9 @@ impl ClockWatch {
     }
 
     /// One heartbeat at `wall_ms` on the wall clock and `mono_ms` on the
-    /// monotonic one. A wall clock that stepped back, or moved more than
+    /// monotonic one. A wall clock that stepped back (moved less than the
+    /// monotonic one by more than [`CLOCK_SLEW_TOLERANCE_MS`]; a step smaller
+    /// than the interval still moves forward), or moved more than
     /// [`CLOCK_JUMP_THRESHOLD_MS`] further than the monotonic one since the
     /// last heartbeat, has jumped: the interval between the two wall times is
     /// a `clock-jump` gap, in which ordering is unreliable.
@@ -202,7 +209,8 @@ impl ClockWatch {
         };
         let wall_delta = wall_ms.saturating_sub(last_wall);
         let mono_delta = mono_ms.saturating_sub(last_mono).max(0);
-        if wall_delta >= 0 && wall_delta.saturating_sub(mono_delta) <= CLOCK_JUMP_THRESHOLD_MS {
+        let drift = wall_delta.saturating_sub(mono_delta);
+        if (-CLOCK_SLEW_TOLERANCE_MS..=CLOCK_JUMP_THRESHOLD_MS).contains(&drift) {
             return;
         }
         let (start_ms, end_ms) = (last_wall.min(wall_ms), last_wall.max(wall_ms));
