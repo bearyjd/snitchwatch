@@ -76,11 +76,18 @@ pub(super) struct Losses {
     /// pin of the loss itself arrives later). Normally one; more only while
     /// pings overlap.
     guards: Vec<(i64, PinId)>,
+    /// The `since` of every ping between begin and finish (`i64::MAX` when it
+    /// has none): guards at or above the lowest are still some ping's own.
+    in_flight: Vec<i64>,
     /// The session is ending: a ping after this would pin again and make the
     /// end `unclean`, so it is ignored.
     closed: bool,
     /// Pings whose guard pin could not be taken (pin ids exhausted).
     unguarded_pings: u64,
+    /// Test seam: runs once, inside the disconnect slot's flush, between
+    /// reading its end and taking its tally.
+    #[cfg(test)]
+    pub(super) between_read_and_take: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// The tallies a flush walks through.
@@ -118,8 +125,11 @@ impl Losses {
             back_at: None,
             down_at: None,
             guards: Vec::new(),
+            in_flight: Vec::new(),
             closed: false,
             unguarded_pings: 0,
+            #[cfg(test)]
+            between_read_and_take: None,
         }
     }
 
@@ -172,7 +182,11 @@ impl Losses {
     pub(super) fn daemon_up(&mut self, at_ms: i64) {
         if self.disconnect.is_pending() || self.disconnect_flushing {
             self.disconnect_end.get_or_insert(at_ms);
-            self.back_at.get_or_insert(at_ms);
+            // Only an open outage has an end to remember: after a ping
+            // closed it, the next ping must not find a stale one.
+            if self.down_at.is_some() {
+                self.back_at.get_or_insert(at_ms);
+            }
         }
     }
 
@@ -194,6 +208,7 @@ impl Losses {
             events,
             previous: None,
             outage: None,
+            in_flight: None,
         };
         if self.closed {
             return begun;
@@ -205,7 +220,10 @@ impl Losses {
         if self.back_at.is_some() {
             begun.outage = self.back_at.take().zip(self.down_at.take());
         }
-        begun.previous = self.take_guard_for(registry, loss.since_ms);
+        begun.previous = self.take_guard_for(loss.since_ms);
+        let since = loss.since_ms.unwrap_or(i64::MAX);
+        self.in_flight.push(since);
+        begun.in_flight = Some(since);
         let key = loss.at_ms.unwrap_or(arrival);
         match registry.add(arrival) {
             Ok(pin) => self.guards.push((key, pin)),
@@ -221,35 +239,65 @@ impl Losses {
                 }
             }
         }
+        self.release_unneeded_guards(registry);
         begun
     }
 
     /// The guard of the ping `since_ms` names: the one at exactly that time,
-    /// else the latest before it. Older guards are obsolete and released;
-    /// newer ones belong to pings that came after.
-    fn take_guard_for(&mut self, registry: &PinRegistry, since_ms: Option<i64>) -> Option<PinId> {
-        let limit = since_ms.unwrap_or(i64::MAX);
-        let chosen = self
+    /// and no other, since a ping that has not begun yet may need any older
+    /// one. A ping with no `since` takes the latest, unless others are in
+    /// flight. What no ping takes is released by
+    /// [`release_unneeded_guards`](Self::release_unneeded_guards).
+    fn take_guard_for(&mut self, since_ms: Option<i64>) -> Option<PinId> {
+        let position = match since_ms {
+            Some(since) => self.guards.iter().position(|(key, _)| *key == since),
+            None if self.in_flight.is_empty() => self
+                .guards
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, (key, _))| *key)
+                .map(|(i, _)| i),
+            None => None,
+        }?;
+        Some(self.guards.remove(position).1)
+    }
+
+    /// Releases the guards no ping can still take: those below the newest
+    /// one at or under the lowest `since` in flight (every ping begun later
+    /// names a `since` at or above the pings before it).
+    fn release_unneeded_guards(&mut self, registry: &PinRegistry) {
+        let bound = self.in_flight.iter().copied().min().unwrap_or(i64::MAX);
+        let Some(anchor) = self
             .guards
             .iter()
-            .filter(|(key, _)| *key <= limit)
             .map(|(key, _)| *key)
-            .max()?;
-        let (mut taken, kept): (Vec<_>, Vec<_>) =
-            self.guards.drain(..).partition(|(key, _)| *key <= chosen);
+            .filter(|key| *key <= bound)
+            .max()
+        else {
+            return;
+        };
+        let (obsolete, kept): (Vec<_>, Vec<_>) =
+            self.guards.drain(..).partition(|(key, _)| *key < anchor);
         self.guards = kept;
-        let position = taken.iter().rposition(|(key, _)| *key == chosen)?;
-        let (_, pin) = taken.swap_remove(position);
-        for (_, older) in taken {
-            let _ = registry.release(&older);
+        for (_, pin) in obsolete {
+            let _ = registry.release(&pin);
         }
-        Some(pin)
     }
 
     /// The ping's events are queued: what it showed was never received is
     /// now tallied, and the previous guard is released or becomes the
     /// tally's pin (the gap then starts where the previous ping was seen).
     pub(super) fn finish_ping(&mut self, registry: &PinRegistry, begun: PingBegun) {
+        if let Some(since) = begun.in_flight {
+            if let Some(i) = self.in_flight.iter().position(|s| *s == since) {
+                self.in_flight.swap_remove(i);
+            }
+        }
+        self.tally_ping(registry, begun);
+        self.release_unneeded_guards(registry);
+    }
+
+    fn tally_ping(&mut self, registry: &PinRegistry, begun: PingBegun) {
         let PingBegun {
             loss,
             mut previous,
@@ -352,6 +400,8 @@ pub(super) struct PingBegun {
     previous: Option<PinId>,
     /// `(up, down)` of an outage that ended since the previous ping.
     outage: Option<(i64, i64)>,
+    /// What this ping registered in [`Losses::in_flight`], if it did.
+    in_flight: Option<i64>,
 }
 
 impl PingBegun {
@@ -391,6 +441,24 @@ fn due_end(guard: &Losses, registry: &PinRegistry, slot: Slot, closing: bool) ->
         Slot::UpstreamPre => Some(guard.pre_outage_end.unwrap_or(now)),
         _ => Some(now),
     }
+}
+
+/// The tally of `slot` and where its gap ends, if it is due: both under the
+/// one lock the caller holds.
+fn take_due(
+    guard: &mut Losses,
+    registry: &PinRegistry,
+    slot: Slot,
+    closing: bool,
+) -> Option<(LossCounter, i64)> {
+    let end = due_end(guard, registry, slot, closing)?;
+    #[cfg(test)]
+    if matches!(slot, Slot::Disconnect) {
+        if let Some(hook) = guard.between_read_and_take.take() {
+            hook();
+        }
+    }
+    Some((take_slot(guard, slot), end))
 }
 
 /// Flushes one tally without holding the lock across the commit: the tally
@@ -442,10 +510,7 @@ pub(super) fn flush_due(
 ) -> Result<(), DurableError> {
     let mut first = Ok(());
     for slot in EVERY_SLOT {
-        let due = {
-            let mut guard = locked(losses);
-            due_end(&guard, registry, slot, closing).map(|end| (take_slot(&mut guard, slot), end))
-        };
+        let due = take_due(&mut locked(losses), registry, slot, closing);
         let Some((taken, end_ms)) = due else { continue };
         let done = flush_taken(engine, registry, limits, losses, (slot, taken), end_ms);
         first = first.and(done);

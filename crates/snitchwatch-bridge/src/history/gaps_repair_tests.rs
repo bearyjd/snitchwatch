@@ -422,3 +422,122 @@ fn a_ping_cancelled_before_its_events_were_queued_counts_them_lost() {
     l.finish_ping(&rig.registry, begun.cancelled());
     assert_eq!(l.upstream.pending_count(), 2);
 }
+
+// ---- fifth pass -------------------------------------------------------------
+
+/// M1: the end of the daemon gap and its tally are read under one lock. A
+/// second outage that starts between the two (the seam runs there, with the
+/// lock held; the outage can only land after the take) is a gap of its own.
+#[test]
+fn a_second_outage_cannot_slip_between_the_end_and_the_take() {
+    let mut rig = rig(1000);
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
+    let losses = Arc::new(losses());
+    let clock = rig.clock.clone();
+    let registry = Arc::new(PinRegistry::with_clock(Arc::new(move || {
+        clock.load(Ordering::SeqCst)
+    })));
+    locked(&losses).daemon_down(&registry);
+    rig.set(2000);
+    locked(&losses).daemon_up(2000);
+    rig.set(2500);
+    let handle = Arc::new(Mutex::new(None));
+    let (mid, during, slot) = (losses.clone(), registry.clone(), handle.clone());
+    locked(&losses).between_read_and_take = Some(Box::new(move || {
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        let racer = std::thread::spawn(move || {
+            locked(&mid).daemon_down(&during);
+            flag.store(true, Ordering::SeqCst);
+        });
+        *slot.lock().unwrap() = Some(racer);
+        // Lets the racer in if the lock is free; it is not, when the read
+        // and the take share one critical section.
+        for _ in 0..30 {
+            if done.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }));
+    flush_due(&mut rig.engine, &registry, &rig.limits, &losses, false).unwrap();
+    handle.lock().unwrap().take().unwrap().join().unwrap();
+    assert_eq!(rows(&rig).len(), 1, "the first outage: [1000, 2000]");
+    rig.set(3500);
+    locked(&losses).daemon_up(3500);
+    flush_due(&mut rig.engine, &registry, &rig.limits, &losses, false).unwrap();
+    let found = rows(&rig);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(
+        (found[1].start_ms, found[1].end_ms),
+        (2500, 3500),
+        "{found:?}"
+    );
+}
+
+/// M2: B (since 2000) begins before A (since 1000, at 2000). B must not eat
+/// the 1000 guard A needs: a `kill -9` after the heartbeat at 3000 leaves
+/// every instant from 1000 covered.
+#[test]
+fn a_ping_that_begins_first_does_not_consume_an_earlier_pings_guard() {
+    let mut rig = rig(1000);
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
+    let (losses, mut clock) = (losses(), ClockWatch::new());
+    {
+        let mut l = locked(&losses);
+        let first = l.begin_ping(&rig.registry, ping(0, None, 1000), 0);
+        l.finish_ping(&rig.registry, first);
+    }
+    rig.set(3000);
+    let (b, a) = {
+        let mut l = locked(&losses);
+        (
+            l.begin_ping(&rig.registry, ping(0, Some(2000), 3000), 0),
+            l.begin_ping(&rig.registry, ping(3, Some(1000), 2000), 0),
+        )
+    };
+    assert!(a.previous.is_some(), "A still has the guard at 1000");
+    beat_ok(&mut rig, &losses, &mut clock, 0);
+    assert_watermark_held(&rig, "both pings in flight");
+    let after = rows_after_a_crash(&rig, 3500);
+    assert_covered(&after, 1000, 3500, "a crash with both pings in flight");
+    locked(&losses).finish_ping(&rig.registry, b);
+    locked(&losses).finish_ping(&rig.registry, a);
+    assert_eq!(locked(&losses).upstream.pending_count(), 3);
+}
+
+/// L1: a ping whose since is below every guard key never takes a guard; the
+/// guards must not pile up behind it.
+#[test]
+fn guards_do_not_pile_up_behind_pings_with_an_unmatched_since() {
+    let rig = rig(1000);
+    let mut l = Losses::new();
+    for at in [1000, 2000, 3000, 4000] {
+        let begun = l.begin_ping(&rig.registry, ping(0, Some(500), at), 0);
+        l.finish_ping(&rig.registry, begun);
+    }
+    assert_eq!(rig.registry.len(), 1, "only the latest ping's guard");
+    l.release_ping_guard(&rig.registry);
+    assert_eq!(rig.registry.len(), 0, "close releases every guard");
+}
+
+/// L2: the watchdog's up edge after a ping already closed the outage leaves
+/// no `back_at` behind to split the next ping's loss.
+#[test]
+fn a_late_watchdog_up_edge_leaves_no_stale_outage_end() {
+    let rig = rig(1000);
+    let mut l = Losses::new();
+    l.daemon_down(&rig.registry);
+    rig.set(4500);
+    let begun = l.begin_ping(&rig.registry, ping(0, Some(1000), 4500), 0);
+    assert!(begun.outage.is_some());
+    l.finish_ping(&rig.registry, begun);
+    l.daemon_up(4600); // the watchdog's poll, after the ping
+    assert_eq!(l.back_at, None, "no outage is open for it to close");
+    let next = l.begin_ping(&rig.registry, ping(2, Some(4500), 5000), 0);
+    assert_eq!(next.outage, None, "the outage was closed once already");
+}
