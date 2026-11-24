@@ -429,10 +429,11 @@ fn the_heartbeat_writes_a_clock_jump_row_and_keeps_it_until_it_is_durable() {
     assert!(gaps(&rig).is_empty());
     rig.set(90_500);
     beat_at(&mut rig, &losses, &mut clock, 5_500);
-    // The stepped-over time reaches back to 100 000, which is after `now`.
+    // The stepped-over time reaches back to 100 000, which is after `now`:
+    // a small step keeps the whole span in which ordering is unreliable.
     assert_eq!(
         gaps(&rig),
-        vec![gap(90_000, 90_500, GapCause::ClockJump, 1)]
+        vec![gap(90_000, 100_000, GapCause::ClockJump, 1)]
     );
 }
 
@@ -451,6 +452,48 @@ fn a_clock_jump_row_never_ends_after_the_registry_now() {
     assert_eq!(rows[0].cause, GapCause::ClockJump);
     assert!(rows[0].end_ms <= 400_000, "{rows:?}");
     assert!(rows[0].start_ms <= rows[0].end_ms);
+}
+
+/// One heartbeat at `from`, then one at `to` (5 s of monotonic time later).
+fn step_clock(from: i64, to: i64) -> Vec<Gap> {
+    let mut rig = rig(from);
+    let losses = losses();
+    let mut clock = ClockWatch::new();
+    beat_at(&mut rig, &losses, &mut clock, 0);
+    rig.set(to);
+    beat_at(&mut rig, &losses, &mut clock, 5_000);
+    gaps(&rig)
+}
+
+#[test]
+fn a_step_back_keeps_its_span_up_to_the_threshold_and_ends_at_now_beyond_it() {
+    let now = 1_000_000;
+    let kept = step_clock(now + CLOCK_JUMP_THRESHOLD_MS, now);
+    assert_eq!(
+        kept,
+        vec![gap(
+            now,
+            now + CLOCK_JUMP_THRESHOLD_MS,
+            GapCause::ClockJump,
+            1
+        )]
+    );
+    let clamped = step_clock(now + CLOCK_JUMP_THRESHOLD_MS + 1, now);
+    assert_eq!(clamped, vec![gap(now, now, GapCause::ClockJump, 1)]);
+}
+
+#[test]
+fn a_far_forward_jump_ends_at_now_and_never_beyond() {
+    let rows = step_clock(100_000, 100_000 + 10 * CLOCK_JUMP_THRESHOLD_MS);
+    assert_eq!(
+        rows,
+        vec![gap(
+            100_000,
+            100_000 + 10 * CLOCK_JUMP_THRESHOLD_MS,
+            GapCause::ClockJump,
+            1
+        )]
+    );
 }
 
 #[test]

@@ -291,11 +291,18 @@ pub(super) fn beat(
     mono_ms: i64,
 ) -> Result<(), DurableError> {
     clock.observe(registry.now(), mono_ms);
-    // What was stepped over can lie in the future (the clock was set back):
-    // the row never ends after now.
+    // A small step back keeps the whole stepped-over span, though it ends
+    // after now: that is where ordering is unreliable. A step past the jump
+    // threshold (or a clock that was far ahead) would store a far-future end
+    // that later widens collapses and deletes sessions, so it ends at now.
     let jump = match clock.unrecorded() {
         Some(gap) => {
-            let end_ms = gap.end_ms.min(registry.now());
+            let now = registry.now();
+            let end_ms = if gap.end_ms.saturating_sub(now) > CLOCK_JUMP_THRESHOLD_MS {
+                now
+            } else {
+                gap.end_ms
+            };
             let gap = Gap {
                 start_ms: gap.start_ms.min(end_ms),
                 end_ms,
