@@ -32,7 +32,7 @@ use super::ledger::{Gap, GapCause, LedgerLimits};
 use super::pins::PinRegistry;
 use super::record::{Action, AnsweredBy, EventRecord};
 use super::retention_support::*;
-use super::writer::{Item, WriteError};
+use super::writer::{Item, WriteError, EVICTION_ROUNDS};
 
 /// Tiny rows from many processes until the used pages are `over` past the
 /// high-water mark: more than three eviction chunks can clear.
@@ -54,15 +54,16 @@ fn one_item(ts: i64) -> Item {
 }
 
 #[test]
-fn eviction_that_cannot_reach_high_water_in_three_rounds_reports_not_made() {
+fn eviction_that_cannot_reach_high_water_within_the_chunk_limit_reports_not_made() {
     let mut rig = rig();
     fill_to(&rig, 200);
     let before = count(&rig, "events");
     assert!(!rig.engine.make_room().unwrap());
     let taken = before - count(&rig, "events");
-    assert!(
-        taken > 0 && taken <= 3 * 32,
-        "three chunks of at most 32: {taken}"
+    assert_eq!(
+        taken,
+        i64::from(EVICTION_ROUNDS) * 32,
+        "it went on while chunks removed rows, and stopped at the limit"
     );
     assert!(used(&rig) > high_water(&rig));
     assert!(rig.engine.file_pages().unwrap() <= rig.engine.budget().max_page_count);
@@ -231,8 +232,12 @@ fn while_paused_events_are_lost_without_another_eviction_and_the_ledger_still_wr
     assert!(live.capture.stats().cap_paused);
     let rows = db_events(&live.location);
     assert!(
-        filled - rows <= 96,
-        "one attempt is three chunks, not a retry as well"
+        filled - rows > 0,
+        "the first attempt did evict (a writer that never tries fails this)"
+    );
+    assert!(
+        filled - rows <= i64::from(EVICTION_ROUNDS) * 32,
+        "one attempt is at most the chunk limit, not a retry as well"
     );
     live.capture.observe(&[&web_event("b.example")]);
     wait_for("the second loss", || live.capture.stats().lost_cap == 2);
@@ -279,7 +284,9 @@ fn while_paused_events_are_lost_without_another_eviction_and_the_ledger_still_wr
 
 #[test]
 fn recording_resumes_when_a_retry_makes_room_and_the_pause_state_clears() {
-    let live = live(6, |c| c.pause_min = Duration::from_millis(20));
+    // More than one attempt's chunks clear: the first attempt pauses, the retry
+    // finishes.
+    let live = live(120, |c| c.pause_min = Duration::from_millis(20));
     let mut sent = 0;
     wait_for("recording to resume", || {
         sent += 1;

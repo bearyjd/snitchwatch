@@ -34,9 +34,12 @@ use super::{Location, Store};
 /// Default queue bounds (D5).
 pub const QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const QUEUE_MAX_COUNT: usize = 4096;
-/// Eviction rounds that may fail to bring usage under the high-water mark
-/// before recording pauses (D5).
-pub const EVICTION_ROUNDS: u32 = 3;
+/// Most eviction chunks (of `rows_per_txn` rows) one attempt to make room
+/// takes, while each removes rows: enough to go down to the low-water mark
+/// from a full file, few enough that the writer is back to its queue (and to
+/// a shutdown) in about a second. Recording pauses (D5) when the store is
+/// still over high water after them.
+pub const EVICTION_ROUNDS: u32 = 128;
 
 /// One event and the rule snapshot it refers to, if that is new.
 #[derive(Debug, Clone)]
@@ -244,7 +247,8 @@ pub enum WriteError {
     #[error("an item's snapshot does not belong to its event's rule hash")]
     SnapshotMismatch,
     /// Eviction could not bring the store under its high-water mark within
-    /// [`EVICTION_ROUNDS`] rounds: recording is paused and retried with
+    /// [`EVICTION_ROUNDS`] chunks, or a chunk removed nothing: recording is
+    /// paused and retried with
     /// backoff (D5). Lives in this error and the logs only (owner decision
     /// 2026-11-24, item 5): the lost events become a plain `write-failed`
     /// gap.
@@ -350,6 +354,8 @@ pub struct Engine {
     /// Event bytes eviction removed per process since the last
     /// [`Engine::take_released`], for admission's ledger.
     pub(super) released: std::collections::HashMap<String, u64>,
+    /// Who holds what, for tier 2's gate.
+    pub(super) tally: super::retention_room::Tally,
     /// Test seam: an error to raise after a transaction's rows were written
     /// and before `COMMIT`, to prove nothing else happens when it fails.
     #[cfg(test)]
@@ -400,6 +406,7 @@ impl Engine {
             observer: None,
             retention_days: super::settings::DEFAULT_RETENTION_DAYS,
             released: std::collections::HashMap::new(),
+            tally: super::retention_room::Tally::default(),
             #[cfg(test)]
             fault_before_commit: None,
         };
@@ -511,6 +518,7 @@ impl Engine {
 
     /// Insert up to `rows_per_txn` items in one transaction.
     pub fn insert_batch(&mut self, items: &[Item]) -> Result<TxnReport, WriteError> {
+
         if items.len() as u64 > self.budget.rows_per_txn {
             return Err(WriteError::BatchTooLarge {
                 got: items.len(),
@@ -519,7 +527,7 @@ impl Engine {
         }
         items.iter().try_for_each(Item::check_snapshot)?;
         let limits = SnapshotLimits::from_budget(&self.budget);
-        self.transact(TxnKind::Insert, |conn| {
+        let report = self.transact(TxnKind::Insert, |conn| {
             let mut usage = SnapshotUsage::load(conn)?;
             for item in items {
                 if let Some(snapshot) = &item.snapshot {
@@ -528,7 +536,9 @@ impl Engine {
                 insert_event(conn, &item.event)?;
             }
             Ok(items.len() as u64)
-        })
+        })?;
+        self.tally.inserted(items);
+        Ok(report)
     }
 
     /// Return up to `vacuum_steps_per_txn` free pages to the filesystem.

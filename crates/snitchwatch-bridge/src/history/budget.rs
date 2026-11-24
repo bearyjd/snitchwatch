@@ -125,6 +125,13 @@ impl Budget {
             .saturating_sub(self.rows_per_txn * GROWTH_PAGES_PER_ROW)
     }
 
+    /// Used pages eviction goes down to once it starts: a twentieth of the
+    /// file under [`high_water_pages`](Self::high_water_pages), so one
+    /// eviction serves many batches.
+    pub fn low_water_pages(&self) -> u64 {
+        self.high_water_pages() - self.max_page_count / 20
+    }
+
     /// Everything the feature may have on disk at once, worst case.
     pub fn worst_case_bytes(&self) -> u64 {
         self.max_page_count * PAGE + self.journal_limit_bytes() + self.settings_bytes

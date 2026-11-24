@@ -16,15 +16,12 @@
 //! events of the span between its first and last removed row are gone, since
 //! other processes' events inside it remain.
 
-use std::collections::HashMap;
-
 use rusqlite::{params_from_iter, Connection};
 
-use super::admission::SHARE_PERCENT;
 use super::ledger::{record_gap, Gap, GapCause, LedgerLimits};
 use super::measure::row_bytes_sql;
 use super::snapshots::delete_unreferenced;
-use super::writer::{Engine, TxnKind, TxnReport, WriteError, EVICTION_ROUNDS};
+use super::writer::{Engine, TxnKind, TxnReport, WriteError};
 
 /// Which rows one eviction chunk removes, oldest `(ts_ms, id)` first.
 #[derive(Debug, Clone, Copy)]
@@ -57,6 +54,9 @@ pub(super) struct Removed {
     pub(super) by_process: Vec<(String, u64)>,
     /// Bytes of the snapshots the chunk left unreferenced and deleted.
     pub(super) snapshot_bytes: u64,
+    /// `(ts_ms, id)` of the last row removed: where the next chunk of the
+    /// same victims may start.
+    pub(super) cursor: Option<(i64, i64)>,
 }
 
 impl Removed {
@@ -67,24 +67,48 @@ impl Removed {
     }
 }
 
-fn pick(conn: &Connection, victims: Victims<'_>, n: u64) -> rusqlite::Result<Vec<Picked>> {
-    let (filter, args): (&str, Vec<rusqlite::types::Value>) = match victims {
-        Victims::Oldest => ("1", vec![]),
-        Victims::Process(p) => (
-            "coalesce(process_path, '') = ?1",
-            vec![p.to_string().into()],
-        ),
-        Victims::Before(cutoff) => ("ts_ms < ?1", vec![cutoff.into()]),
+/// The query that picks a chunk of victims. Its parameters are the filter's
+/// (none, the process, or the cutoff), then with a `cursor` the `ts_ms` and
+/// `id` the previous chunk ended at, then the limit. The cursor is written so
+/// the `events_ts` index seeks to its `ts_ms` instead of reading everything
+/// older than the process's first live row again.
+pub(super) fn pick_sql(victims: Victims<'_>, cursor: bool) -> String {
+    let (filter, args) = match victims {
+        Victims::Oldest => ("1", 0),
+        Victims::Process(_) => ("coalesce(process_path, '') = ?1", 1),
+        Victims::Before(_) => ("ts_ms < ?1", 1),
     };
-    let limit = args.len() + 1;
-    let sql = format!(
-        "SELECT id, ts_ms, coalesce(process_path, ''), rule_hash, {} FROM events WHERE {filter} \
-         ORDER BY ts_ms, id LIMIT ?{limit}",
+    let after = if cursor {
+        let (ts, id) = (args + 1, args + 2);
+        format!(" AND ts_ms >= ?{ts} AND NOT (ts_ms = ?{ts} AND id <= ?{id})")
+    } else {
+        String::new()
+    };
+    let limit = args + 1 + if cursor { 2 } else { 0 };
+    format!(
+        "SELECT id, ts_ms, coalesce(process_path, ''), rule_hash, {} FROM events \
+         WHERE {filter}{after} ORDER BY ts_ms, id LIMIT ?{limit}",
         row_bytes_sql()
-    );
+    )
+}
+
+fn pick(
+    conn: &Connection,
+    victims: Victims<'_>,
+    n: u64,
+    after: Option<(i64, i64)>,
+) -> rusqlite::Result<Vec<Picked>> {
+    let mut args: Vec<rusqlite::types::Value> = match victims {
+        Victims::Oldest => vec![],
+        Victims::Process(p) => vec![p.to_string().into()],
+        Victims::Before(cutoff) => vec![cutoff.into()],
+    };
+    if let Some((ts, id)) = after {
+        args.extend([ts.into(), id.into()]);
+    }
     let n = i64::try_from(n).unwrap_or(i64::MAX);
-    let args = args.into_iter().chain([n.into()]);
-    conn.prepare(&sql)?
+    args.push(n.into());
+    conn.prepare(&pick_sql(victims, after.is_some()))?
         .query_map(params_from_iter(args), |r| {
             Ok(Picked {
                 id: r.get(0)?,
@@ -131,6 +155,7 @@ fn delete_chunk(
             removed.first_ts.min(row.ts_ms)
         };
         removed.last_ts = removed.last_ts.max(row.ts_ms);
+        removed.cursor = Some((row.ts_ms, row.id));
         match removed
             .by_process
             .iter_mut()
@@ -161,15 +186,27 @@ impl Engine {
         victims: Victims<'_>,
         limit: u64,
     ) -> Result<(TxnReport, Removed), WriteError> {
+        self.evict_victims_after(victims, limit, None)
+    }
+
+    /// [`evict_victims`](Self::evict_victims) for the victims after `after`,
+    /// the `(ts_ms, id)` the previous chunk of the same victims ended at.
+    pub(super) fn evict_victims_after(
+        &mut self,
+        victims: Victims<'_>,
+        limit: u64,
+        after: Option<(i64, i64)>,
+    ) -> Result<(TxnReport, Removed), WriteError> {
         let n = limit.min(self.budget().rows_per_txn);
         let limits = LedgerLimits::from_budget(self.budget());
         let mut removed = Removed::default();
         let report = self.transact(TxnKind::Evict, |conn| {
-            let picked = pick(conn, victims, n)?;
+            let picked = pick(conn, victims, n, after)?;
             removed = delete_chunk(conn, victims, &picked, &limits)?;
             Ok(removed.rows)
         })?;
         self.note_released(&removed);
+        self.tally.removed(&removed.by_process);
         Ok((report, removed))
     }
 
@@ -254,105 +291,6 @@ impl Engine {
             removed,
             skipped_for_jump: false,
         })
-    }
-}
-
-/// Runs a `(process, bytes)` query.
-fn group_bytes(conn: &Connection, sql: &str) -> rusqlite::Result<Vec<(String, u64)>> {
-    conn.prepare(sql)?
-        .query_map([], |r| {
-            let bytes: i64 = r.get(1)?;
-            Ok((r.get::<_, String>(0)?, u64::try_from(bytes).unwrap_or(0)))
-        })?
-        .collect()
-}
-
-impl Engine {
-    /// What each process holds in the store: its events by
-    /// [`row_bytes_sql`] and the snapshots only it refers to (D5). A bounded
-    /// scan (owner decision 2026-11-24, item 3: no index); run only under
-    /// pressure.
-    pub(super) fn process_bytes(&self) -> Result<Vec<(String, u64)>, WriteError> {
-        let conn = self.connection();
-        let mut held: HashMap<String, u64> = self.event_bytes()?.into_iter().collect();
-        // A snapshot belongs to a process only when every event that refers
-        // to it is that process's (min = max).
-        let snapshots = "SELECT p, sum(len) FROM (\
-             SELECT min(coalesce(e.process_path, '')) AS p, \
-                    max(coalesce(e.process_path, '')) AS q, \
-                    length(CAST(rs.snapshot AS BLOB)) AS len \
-             FROM rules_seen rs JOIN events e ON e.rule_hash = rs.rule_hash \
-             GROUP BY rs.rule_hash) WHERE p = q GROUP BY p";
-        for (process, bytes) in group_bytes(conn, snapshots)? {
-            *held.entry(process).or_insert(0) += bytes;
-        }
-        Ok(held.into_iter().collect())
-    }
-
-    /// What each process holds in events alone, by [`row_bytes_sql`]: what
-    /// admission's ledger counts.
-    pub fn event_bytes(&self) -> Result<Vec<(String, u64)>, WriteError> {
-        let sql = format!(
-            "SELECT coalesce(process_path, ''), sum({}) FROM events GROUP BY 1",
-            row_bytes_sql()
-        );
-        Ok(group_bytes(self.connection(), &sql)?)
-    }
-
-    /// The most a process may hold: [`SHARE_PERCENT`] of the main file.
-    pub(super) fn share_bytes(&self) -> u64 {
-        (self.budget().main_bytes / 100).saturating_mul(SHARE_PERCENT)
-    }
-
-    /// Tier 2: trims each process over its share, the biggest first, taking
-    /// its own oldest rows (and the snapshots they leave unreferenced) a
-    /// chunk at a time, until it is within its share or the store is back
-    /// under `high` used pages. Returns the rows removed.
-    pub(super) fn evict_over_share(&mut self, high: u64) -> Result<u64, WriteError> {
-        let share = self.share_bytes();
-        let mut over: Vec<(String, u64)> = self
-            .process_bytes()?
-            .into_iter()
-            .filter(|(_, bytes)| *bytes > share)
-            .collect();
-        over.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
-        let mut total = 0;
-        for (process, mut held) in over {
-            while held > share && self.used_pages()? > high {
-                let (_, chunk) = self.evict_victims(Victims::Process(&process), u64::MAX)?;
-                if chunk.rows == 0 {
-                    break;
-                }
-                total += chunk.rows;
-                held = held.saturating_sub(chunk.bytes());
-            }
-        }
-        Ok(total)
-    }
-
-    /// Evicts (and vacuums) until usage is under the high-water mark: first
-    /// each over-share process's own rows (D5), then the oldest events of
-    /// all, in short chunks. `true` when under it; `false` after
-    /// [`EVICTION_ROUNDS`] rounds of the second kind that did not get there
-    /// (the caller pauses recording and retries later).
-    pub fn make_room(&mut self) -> Result<bool, WriteError> {
-        let high = self.budget().high_water_pages();
-        if self.used_pages()? <= high {
-            return Ok(true);
-        }
-        if self.evict_over_share(high)? > 0 {
-            self.vacuum_all()?;
-        }
-        for _ in 0..EVICTION_ROUNDS {
-            if self.used_pages()? <= high {
-                return Ok(true);
-            }
-            if self.evict_chunk()?.units == 0 {
-                break;
-            }
-            self.vacuum_all()?;
-        }
-        Ok(self.used_pages()? <= high)
     }
 }
 

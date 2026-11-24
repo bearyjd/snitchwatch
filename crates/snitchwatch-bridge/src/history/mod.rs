@@ -31,6 +31,7 @@ mod pinned_queue;
 pub mod pins;
 pub mod record;
 mod retention;
+mod retention_room;
 pub mod rule_identity;
 pub mod schema;
 pub mod session;
@@ -198,6 +199,8 @@ mod replace_tests;
 mod retention_crash_tests;
 #[cfg(test)]
 mod retention_pause_tests;
+#[cfg(test)]
+mod retention_room_tests;
 #[cfg(test)]
 pub(crate) mod retention_support;
 #[cfg(test)]
