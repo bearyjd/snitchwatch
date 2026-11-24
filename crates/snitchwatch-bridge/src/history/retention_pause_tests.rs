@@ -299,3 +299,73 @@ fn recording_resumes_when_a_retry_makes_room_and_the_pause_state_clears() {
     assert!(s.lost_cap >= 1, "the first attempt had no room: {s:?}");
     assert!(!s.cap_paused, "a success ends the pause: {s:?}");
 }
+
+// ---- the shutdown drain keeps evicting until its deadline passes ------------------
+
+/// A closed, unstarted capture, an engine over high-water armed to stop as the
+/// writer's would, and one pinned one-event batch.
+fn closing(over: u64, deadline_in: Duration) -> (Capture, Rig, PinnedBatch, Arc<PinRegistry>) {
+    let mut rig = rig();
+    fill_to(&rig, over);
+    let registry = Arc::new(PinRegistry::new());
+    let config = CaptureConfig::for_budget(rig.engine.budget());
+    let capture = Capture::new_unstarted_for_test(registry.clone(), config);
+    let shared = capture.shared_for_test();
+    shared.arm_stop(&mut rig.engine);
+    shared.close_queue_for_test();
+    shared.set_drain_deadline_for_test(Instant::now() + deadline_in);
+    let batch = PinnedBatch {
+        items: vec![one_item(1_000_000)],
+        pins: vec![registry.accept().unwrap()],
+    };
+    (capture, rig, batch, registry)
+}
+
+#[test]
+fn a_closed_queue_with_drain_time_left_still_evicts_for_and_writes_its_batch() {
+    let (capture, mut rig, batch, registry) = closing(30, Duration::from_secs(60));
+    assert!(used(&rig) > high_water(&rig));
+    capture
+        .shared_for_test()
+        .write_for_test(&mut rig.engine, batch);
+    let s = capture.stats();
+    assert_eq!((s.written, s.lost_cap, s.lost_write), (1, 0, 0), "{s:?}");
+    assert!(!s.cap_paused, "{s:?}");
+    assert!(used(&rig) <= high_water(&rig));
+    assert!(count(&rig, "events") > 0);
+    assert!(registry.is_empty(), "the pin went with its row");
+}
+
+#[test]
+fn a_passed_drain_deadline_loses_the_batch_as_a_plain_write_failure_not_the_cap() {
+    let (capture, mut rig, batch, registry) = closing(200, Duration::ZERO);
+    let before = remaining(&rig);
+    capture
+        .shared_for_test()
+        .write_for_test(&mut rig.engine, batch);
+    let s = capture.stats();
+    assert_eq!((s.written, s.lost_cap, s.lost_write), (0, 0, 1), "{s:?}");
+    assert!(!s.cap_paused, "no pause for a stop: {s:?}");
+    let after = remaining(&rig);
+    assert!(
+        before.len() - after.len() <= 32,
+        "at most one chunk, not a pass"
+    );
+    let gone: Vec<i64> = before
+        .iter()
+        .filter(|row| !after.contains(row))
+        .map(|row| row.0)
+        .collect();
+    assert_removed_are_covered(&rig, &gone);
+    assert_eq!(registry.len(), 1, "held until the tally is a row");
+    let Rig {
+        location, engine, ..
+    } = rig;
+    capture.shared_for_test().run_writer_for_test(engine);
+    let failed: Vec<Gap> = db_gaps(&location)
+        .into_iter()
+        .filter(|g| g.cause == GapCause::WriteFailed)
+        .collect();
+    assert_eq!(failed.iter().map(|g| g.count).sum::<u64>(), 1, "{failed:?}");
+    assert!(registry.is_empty(), "released with its row");
+}

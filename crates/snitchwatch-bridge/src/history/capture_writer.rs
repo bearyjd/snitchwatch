@@ -57,19 +57,13 @@ impl Shared {
         let rows = engine.budget().rows_per_txn as usize;
         // A short lock wait: a locked database costs a batch, not the thread.
         let _ = engine.connection().busy_timeout(WRITER_BUSY_TIMEOUT);
-        let mut st = Loop {
-            limits: LedgerLimits::from_budget(engine.budget()),
-            pulse: gaps::Pulse::new(self.heartbeat_every, self.registry.now()),
-            backoff: RETRY_BACKOFF_MIN,
-            last_logged: None,
-            pause: Pause::new(self.pause_min, self.pause_max),
-            expiry: Schedule::new(self.expiry_every, Instant::now()),
-        };
+        let mut st = self.new_loop(&engine);
         self.seed_admission(&engine);
-        let mut deadline: Option<Instant> = None;
         while let Some(batch) = self.queue.pop_batch(&rx, rows, Duration::from_millis(200)) {
             if self.queue.is_closed() {
-                let limit = *deadline.get_or_insert_with(|| Instant::now() + SHUTDOWN_DRAIN);
+                let limit = *self
+                    .drain_deadline
+                    .get_or_init(|| Instant::now() + SHUTDOWN_DRAIN);
                 if Instant::now() >= limit {
                     self.abandon(batch, &rx);
                     break;
@@ -97,6 +91,31 @@ impl Shared {
     /// waiting) or `deadline` has passed.
     pub(in crate::history) fn expiry_stop(&self, deadline: Instant) -> impl Fn() -> bool + '_ {
         move || self.queue.is_closed() || Instant::now() >= deadline
+    }
+
+    fn new_loop(&self, engine: &Engine) -> Loop {
+        Loop {
+            limits: LedgerLimits::from_budget(engine.budget()),
+            pulse: gaps::Pulse::new(self.heartbeat_every, self.registry.now()),
+            backoff: RETRY_BACKOFF_MIN,
+            last_logged: None,
+            pause: Pause::new(self.pause_min, self.pause_max),
+            expiry: Schedule::new(self.expiry_every, Instant::now()),
+        }
+    }
+
+    /// Writes one batch as the writer loop would, for a test.
+    #[cfg(test)]
+    pub(in crate::history) fn write_for_test(&self, engine: &mut Engine, batch: PinnedBatch) {
+        let mut st = self.new_loop(engine);
+        self.write(engine, batch, &mut st);
+    }
+
+    /// Runs the writer loop on this thread over whatever is queued, for a test.
+    #[cfg(test)]
+    pub(in crate::history) fn run_writer_for_test(&self, engine: Engine) {
+        let rx = self.queue.take_receiver().expect("not yet taken");
+        self.run_writer(engine, rx, false);
     }
 
     /// Admission's ledger starts from what the store holds, not from zero.

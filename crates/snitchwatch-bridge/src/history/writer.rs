@@ -218,6 +218,10 @@ pub enum WriteError {
     Sqlite(#[from] rusqlite::Error),
     #[error("history write failed: {0}")]
     Io(#[from] std::io::Error),
+    /// A pressure pass gave way to the shutdown drain's deadline before it
+    /// had made room: not the cap, so recording does not pause.
+    #[error("the shutdown drain ended before room could be made")]
+    Stopped,
     /// The journal was larger than a full journal of the main file; the
     /// transaction was rolled back. Means a journal assumption is broken.
     #[error("a transaction's journal ({journal} bytes) exceeded its budget ({limit})")]
@@ -450,7 +454,8 @@ impl Engine {
         }
     }
 
-    /// Shutdown is waiting: a pressure pass gives way between chunks.
+    /// The shutdown drain has run out of time: a pressure pass gives way
+    /// between chunks.
     pub(super) fn stopping(&self) -> bool {
         self.stop.as_ref().is_some_and(|stop| stop())
     }
@@ -615,6 +620,8 @@ impl Engine {
     pub(super) fn ensure_room(&mut self) -> Result<(), WriteError> {
         if self.make_room()? {
             Ok(())
+        } else if self.stopping() {
+            Err(WriteError::Stopped)
         } else {
             Err(WriteError::Cap)
         }

@@ -277,7 +277,7 @@ fn the_users_retention_setting_reaches_the_capture_config() {
 }
 
 #[test]
-fn the_capture_writer_arms_its_engine_to_stop_when_the_queue_closes() {
+fn the_capture_writer_arms_its_engine_to_stop_when_the_drain_deadline_passes() {
     let mut rig = rig();
     let config = CaptureConfig::for_budget(&Budget::new(16 * 1024 * 1024).unwrap());
     let capture = Capture::new_unstarted_for_test(Arc::new(PinRegistry::new()), config);
@@ -285,5 +285,7 @@ fn the_capture_writer_arms_its_engine_to_stop_when_the_queue_closes() {
     shared.arm_stop(&mut rig.engine);
     assert!(!rig.engine.stopping());
     shared.close_queue_for_test();
-    assert!(rig.engine.stopping());
+    assert!(!rig.engine.stopping(), "closed, no drain deadline yet");
+    shared.set_drain_deadline_for_test(Instant::now());
+    assert!(rig.engine.stopping(), "the drain deadline has passed");
 }

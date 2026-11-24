@@ -61,8 +61,8 @@
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use snitchwatch_proto::protocol::{Connection, Event, Rule};
 
@@ -271,6 +271,9 @@ pub(super) struct Shared {
     no_gui_prompts: AtomicBool,
     /// The writer ends its session as `disabled`, not `clean`.
     disabling: AtomicBool,
+    /// When the shutdown drain ends: set once, by the writer, on the first
+    /// batch it takes after the queue closed.
+    drain_deadline: OnceLock<Instant>,
     counters: Counters,
     #[cfg(test)]
     probe: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -295,6 +298,7 @@ impl Shared {
             fork_marker_seen: AtomicBool::new(false),
             no_gui_prompts: AtomicBool::new(false),
             disabling: AtomicBool::new(false),
+            drain_deadline: OnceLock::new(),
             counters: Counters::default(),
             #[cfg(test)]
             probe: Mutex::new(None),
@@ -307,11 +311,23 @@ impl Shared {
         self.counters.snapshot()
     }
 
-    /// Shutdown waiting (the queue closed) ends a pressure pass between its
-    /// chunks, so the drain deadline is not overrun.
+    /// The shutdown drain's deadline has passed: a pressure pass ends
+    /// between its chunks, so the drain is not overrun. While drain time
+    /// remains the queue being closed changes nothing: batches are still
+    /// evicted-for and written.
     pub(super) fn arm_stop(self: &Arc<Self>, engine: &mut Engine) {
         let shared = self.clone();
-        engine.set_stop(Box::new(move || shared.queue.is_closed()));
+        engine.set_stop(Box::new(move || {
+            shared
+                .drain_deadline
+                .get()
+                .is_some_and(|deadline| Instant::now() >= *deadline)
+        }));
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_drain_deadline_for_test(&self, at: Instant) {
+        let _ = self.drain_deadline.set(at);
     }
 
     #[cfg(test)]
