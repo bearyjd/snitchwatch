@@ -102,9 +102,72 @@ fn crash_child() {
             assert!(engine.commit_pinned(&batch, &registry).is_err());
             engine.heartbeat(&registry).unwrap();
         }
+        // The delete of an eviction-sized chunk has spilled dirty pages into
+        // the main file (a tiny page cache with spilling on, on a second
+        // connection: the engine itself turns spilling off, so this is the
+        // state a build without that guard could reach), and the process
+        // dies before COMMIT.
+        "spilled-chunk" => {
+            fill_events(&engine, 400);
+            record_events(&engine, &location);
+            spill_then_die(&location, 300);
+        }
+        // The same, from a store filled until eviction cannot make room.
+        "spilled-paused" => {
+            fill_until_pressed(&engine);
+            record_events(&engine, &location);
+            spill_then_die(&location, 4096);
+        }
         other => panic!("unknown scenario {other}"),
     }
     kill_self();
+}
+
+/// `n` raw rows in one committed transaction.
+fn fill_events(engine: &super::writer::Engine, n: i64) {
+    let conn = engine.connection();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    for ts in 1..=n {
+        let mut e = EventRecord::new(100 + ts, Action::Allow, AnsweredBy::Rule);
+        e.process_path = Some(super::caps::ProcessPath::new(&format!("/p{}", ts % 40)));
+        insert_event(conn, &e).unwrap();
+    }
+    conn.execute_batch("COMMIT").unwrap();
+}
+
+fn fill_until_pressed(engine: &super::writer::Engine) {
+    while engine.used_pages().unwrap() <= engine.budget().high_water_pages() + 200 {
+        fill_events(engine, 32);
+    }
+}
+
+fn precount_path(location: &Location) -> std::path::PathBuf {
+    location.db_path().with_extension("precount")
+}
+
+/// Tells the parent how many events there were before the kill.
+fn record_events(engine: &super::writer::Engine, location: &Location) {
+    let n = counts(engine.connection()).0;
+    std::fs::write(precount_path(location), n.to_string()).unwrap();
+}
+
+/// Deletes the `n` oldest events on a connection that spills, checks the
+/// journal is on disk with the pages the delete touched, and returns with the
+/// transaction open.
+fn spill_then_die(location: &Location, n: i64) -> ! {
+    let conn = Connection::open(location.db_path()).unwrap();
+    conn.execute_batch("PRAGMA cache_size = 2; PRAGMA cache_spill = ON; BEGIN IMMEDIATE;")
+        .unwrap();
+    conn.execute(
+        "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY ts_ms, id LIMIT ?1)",
+        [n],
+    )
+    .unwrap();
+    let mut journal = location.db_path().into_os_string();
+    journal.push("-journal");
+    let len = std::fs::metadata(&journal).unwrap().len();
+    assert!(len > 512, "the delete's pages are in the journal: {len}");
+    kill_self()
 }
 
 /// Runs `scenario` in a child that is killed; the state it left.
@@ -196,4 +259,30 @@ fn kill_9_during_a_pause_keeps_the_file_in_budget_and_the_lost_batchs_gap_begins
         gap.start_ms <= 1000,
         "begins no later than the session: {gap:?}"
     );
+}
+
+fn assert_rolled_back(scenario: &str) {
+    let (_root, location) = crash(scenario);
+    let before: i64 = std::fs::read_to_string(precount_path(&location))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let engine = engine_at(&location); // recovers the hot journal
+    integrity(engine.connection());
+    assert_eq!(
+        counts(engine.connection()).0,
+        before,
+        "the spilled delete rolled back whole"
+    );
+    assert!(engine.file_pages().unwrap() <= engine.budget().max_page_count);
+}
+
+#[test]
+fn kill_9_after_a_chunk_delete_spilled_to_the_main_file_rolls_back_whole() {
+    assert_rolled_back("spilled-chunk");
+}
+
+#[test]
+fn kill_9_after_a_delete_spilled_in_a_full_store_rolls_back_whole() {
+    assert_rolled_back("spilled-paused");
 }

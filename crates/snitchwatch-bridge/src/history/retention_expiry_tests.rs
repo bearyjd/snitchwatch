@@ -12,13 +12,8 @@ const NOW: i64 = 400 * DAY_MS;
 
 fn old_rows(rig: &mut Rig, n: i64) -> Vec<i64> {
     let stamps: Vec<i64> = (0..n).map(|i| 1_000 + i).collect();
-    put(
-        rig,
-        stamps
-            .iter()
-            .map(|ts| plain(event(*ts, "/p", Action::Allow)))
-            .collect(),
-    );
+    // Rows of about a page each, so deleting them frees pages to vacuum.
+    put(rig, stamps.iter().map(|ts| plain(big(*ts))).collect());
     put(rig, vec![plain(event(NOW, "/p", Action::Allow))]);
     stamps
 }

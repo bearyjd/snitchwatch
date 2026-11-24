@@ -479,9 +479,11 @@ fn a_flood_from_one_process_does_not_evict_or_starve_another() {
 }
 
 #[test]
-fn a_mixed_size_flood_is_not_refused_for_its_bytes_and_others_small_records_stay() {
+fn a_mixed_size_flood_is_not_refused_at_admission_for_the_bytes_it_holds() {
     // The byte share is enforced by self-eviction under pressure (PR 8), not
-    // by refusal: nothing here is under pressure, so everything is stored.
+    // by refusal: nothing here is under pressure, so everything is stored. (That
+    // others' small rows survive a flood under pressure is
+    // `a_flood_of_large_records_cannot_evict_another_processs_small_ones`.)
     let rig = rig_with(unlimited);
     let big_path = format!("/opt/{}", "p".repeat(4000));
     let big_host = "h".repeat(250);
