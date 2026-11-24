@@ -315,7 +315,7 @@ impl Shared {
         let mut losses = self.losses.lock().unwrap_or_else(|e| e.into_inner());
         let tally = pick(&mut losses);
         if let Some(pin) = pin {
-            tally.record_pinned(&self.registry, n, pin);
+            tally.record_pinned(&self.registry, n, pin, None);
         } else {
             let _ = tally.record(&self.registry, n);
         }

@@ -463,7 +463,14 @@ impl LossCounter {
 
     /// Transfer an already pinned loss into the tally without advancing its
     /// coverage boundary to the later time at which the loss was detected.
-    pub(super) fn record_pinned(&mut self, registry: &PinRegistry, n: u64, pin: PinId) {
+    /// The gap starts at the pin's arrival, or at `floor` when that is later.
+    pub(super) fn record_pinned(
+        &mut self,
+        registry: &PinRegistry,
+        n: u64,
+        pin: PinId,
+        floor: Option<i64>,
+    ) {
         let Some(first_ms) = registry.arrival_of(&pin) else {
             return;
         };
@@ -472,7 +479,7 @@ impl LossCounter {
             Pending {
                 count: n,
                 first_ms,
-                start_ms: first_ms,
+                start_ms: floor.map_or(first_ms, |at| first_ms.max(at)),
                 pin,
             },
         );

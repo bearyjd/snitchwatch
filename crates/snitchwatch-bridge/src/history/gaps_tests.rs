@@ -380,6 +380,53 @@ fn a_ping_racing_the_close_cannot_turn_a_clean_end_unclean() {
     }
 }
 
+#[test]
+fn an_upstream_loss_after_an_outage_starts_where_the_daemon_came_back() {
+    for guarded in [true, false] {
+        let mut rig = rig(1000);
+        rig.engine
+            .begin_session(&rig.registry, &rig.limits)
+            .unwrap();
+        let losses = losses();
+        if guarded {
+            // The last ping before the outage, which holds the guard pin.
+            let ping = UpstreamLoss {
+                at_ms: Some(1000),
+                ..UpstreamLoss::default()
+            };
+            locked(&losses).upstream_loss(&rig.registry, ping);
+        }
+        rig.set(2000);
+        locked(&losses).daemon_down(&rig.registry);
+        rig.set(4000);
+        locked(&losses).daemon_up(4000);
+        rig.set(4500);
+        let first_ping = UpstreamLoss {
+            missing: 3,
+            restarted: false,
+            since_ms: Some(1000),
+            at_ms: Some(4500),
+        };
+        locked(&losses).upstream_loss(&rig.registry, first_ping);
+        rig.set(5000);
+        flush_due(&mut rig.engine, &rig.registry, &rig.limits, &losses, false).unwrap();
+        let rows = gaps(&rig);
+        let upstream = rows
+            .iter()
+            .find(|g| g.cause == GapCause::UpstreamLoss)
+            .expect("upstream-loss row");
+        let daemon = rows
+            .iter()
+            .find(|g| g.cause == GapCause::DaemonDisconnected)
+            .expect("daemon row");
+        assert_eq!(daemon.end_ms, 4000, "guarded={guarded}");
+        assert!(
+            upstream.start_ms >= daemon.end_ms,
+            "guarded={guarded}: {rows:?}"
+        );
+    }
+}
+
 // ---- 6. clock jumps --------------------------------------------------------
 
 fn jump(watch: &mut ClockWatch, wall: i64, mono: i64) -> Option<Gap> {

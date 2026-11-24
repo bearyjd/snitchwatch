@@ -58,6 +58,9 @@ pub(super) struct Losses {
     /// The open daemon gap's tally is out of its slot, being flushed: a
     /// recovery now must still close it if the flush fails and it comes back.
     disconnect_flushing: bool,
+    /// When the daemon last came back, until the next ping has used it: what
+    /// that ping reports as lost began no earlier (the outage is its own gap).
+    back_at: Option<i64>,
     /// Held from each ping's own time until the next ping, so that a crash's
     /// `bridge-down` gap begins no later than the `since_ms` the next ping
     /// reports its losses after (the pin of the loss itself arrives later).
@@ -95,6 +98,7 @@ impl Losses {
             disconnect: LossCounter::new(GapCause::DaemonDisconnected),
             disconnect_end: None,
             disconnect_flushing: false,
+            back_at: None,
             ping_guard: None,
             closed: false,
         }
@@ -130,6 +134,7 @@ impl Losses {
     pub(super) fn daemon_up(&mut self, at_ms: i64) {
         if self.disconnect.is_pending() || self.disconnect_flushing {
             self.disconnect_end = Some(at_ms);
+            self.back_at = Some(at_ms);
         }
     }
 
@@ -147,15 +152,19 @@ impl Losses {
         let next = registry.add(arrival).ok();
         let previous = std::mem::replace(&mut self.ping_guard, next);
         let n = loss.missing.saturating_add(u64::from(loss.restarted));
+        let floor = self.back_at.take();
         match (previous, n) {
             (Some(pin), 0) => {
                 let _ = registry.release(&pin);
             }
-            (Some(pin), n) => self.upstream.record_pinned(registry, n, pin),
+            (Some(pin), n) => self.upstream.record_pinned(registry, n, pin, floor),
             (None, 0) => {}
             (None, n) => {
                 let _ = match loss.since_ms {
-                    Some(since_ms) => self.upstream.record_since(registry, n, since_ms),
+                    Some(since_ms) => {
+                        let since_ms = floor.map_or(since_ms, |at| since_ms.max(at));
+                        self.upstream.record_since(registry, n, since_ms)
+                    }
                     None => self.upstream.record(registry, n),
                 };
             }
