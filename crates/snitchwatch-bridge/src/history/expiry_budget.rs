@@ -29,6 +29,7 @@ use std::time::Instant;
 
 use rusqlite::{Connection, OptionalExtension};
 
+#[cfg(test)]
 use super::writer::Engine;
 
 /// A bucket refills completely in this long, of the bridge's own uptime.

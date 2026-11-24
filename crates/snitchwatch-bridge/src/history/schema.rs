@@ -335,9 +335,12 @@ fn migration_steps(version: i64) -> Vec<String> {
 }
 
 #[cfg(test)]
+type StepHook = Option<Box<dyn FnMut(usize)>>;
+
+#[cfg(test)]
 thread_local! {
     /// Test seam: called after each migration step, inside the transaction.
-    pub(super) static AFTER_STEP: std::cell::RefCell<Option<Box<dyn FnMut(usize)>>> =
+    pub(super) static AFTER_STEP: std::cell::RefCell<StepHook> =
         const { std::cell::RefCell::new(None) };
 }
 
