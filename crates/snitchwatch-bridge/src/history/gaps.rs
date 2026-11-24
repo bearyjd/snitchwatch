@@ -52,6 +52,11 @@ pub(super) struct Losses {
     pub(super) admission: LossCounter,
     pub(super) write_failed: LossCounter,
     pub(super) upstream: LossCounter,
+    /// Upstream losses from the last ping to the outage's start; the outage
+    /// itself is the daemon gap's, and the rest is `upstream`'s.
+    upstream_pre: LossCounter,
+    /// Where `upstream_pre` ends: when the daemon went away.
+    pre_outage_end: Option<i64>,
     pub(super) disconnect: LossCounter,
     /// When the daemon came back; `None` while it is still away.
     disconnect_end: Option<i64>,
@@ -61,6 +66,8 @@ pub(super) struct Losses {
     /// When the daemon last came back, until the next ping has used it: what
     /// that ping reports as lost began no earlier (the outage is its own gap).
     back_at: Option<i64>,
+    /// When the outage that `back_at` closes began.
+    down_at: Option<i64>,
     /// Held from each ping's own time until the next ping, so that a crash's
     /// `bridge-down` gap begins no later than the `since_ms` the next ping
     /// reports its losses after (the pin of the loss itself arrives later).
@@ -78,14 +85,16 @@ enum Slot {
     Queue,
     Admission,
     WriteFailed,
+    UpstreamPre,
     Upstream,
     Disconnect,
 }
 
-const EVERY_SLOT: [Slot; 5] = [
+const EVERY_SLOT: [Slot; 6] = [
     Slot::Queue,
     Slot::Admission,
     Slot::WriteFailed,
+    Slot::UpstreamPre,
     Slot::Upstream,
     Slot::Disconnect,
 ];
@@ -97,10 +106,13 @@ impl Losses {
             admission: LossCounter::new(GapCause::AdmissionDrop),
             write_failed: LossCounter::new(GapCause::WriteFailed),
             upstream: LossCounter::bounded(GapCause::UpstreamLoss),
+            upstream_pre: LossCounter::bounded(GapCause::UpstreamLoss),
+            pre_outage_end: None,
             disconnect: LossCounter::new(GapCause::DaemonDisconnected),
             disconnect_end: None,
             disconnect_flushing: false,
             back_at: None,
+            down_at: None,
             ping_guard: None,
             closed: false,
             unguarded_pings: 0,
@@ -127,6 +139,7 @@ impl Losses {
             Slot::Queue => &mut self.queue,
             Slot::Admission => &mut self.admission,
             Slot::WriteFailed => &mut self.write_failed,
+            Slot::UpstreamPre => &mut self.upstream_pre,
             Slot::Upstream => &mut self.upstream,
             Slot::Disconnect => &mut self.disconnect,
         }
@@ -136,6 +149,12 @@ impl Losses {
     /// edge before the first closed is one longer gap, never a hole.
     pub(super) fn daemon_down(&mut self, registry: &PinRegistry) {
         self.disconnect_end = None;
+        // A new outage after one that came back unpinged starts a fresh
+        // record; a second edge before the first closed keeps the first.
+        if self.down_at.is_none() || self.back_at.is_some() {
+            self.down_at = Some(registry.now());
+            self.back_at = None;
+        }
         let _ = self.disconnect.record(registry, 1);
     }
 
@@ -153,6 +172,8 @@ impl Losses {
     /// becomes the tally's pin when something was lost: the gap then starts
     /// where the previous ping was seen, and a crash's gap cannot start later.
     pub(super) fn upstream_loss(&mut self, registry: &PinRegistry, loss: UpstreamLoss) {
+        // Deliberate: a loss reported once the session is closing is dropped,
+        // not recorded, so that the end stays clean.
         if self.closed {
             return;
         }
@@ -173,9 +194,17 @@ impl Losses {
                 None
             }
         };
-        let previous = std::mem::replace(&mut self.ping_guard, next);
+        let mut previous = std::mem::replace(&mut self.ping_guard, next);
         let n = loss.missing.saturating_add(u64::from(loss.restarted));
-        let floor = self.back_at.take();
+        let outage = self.back_at.take().zip(self.down_at.take());
+        let mut floor = outage.map(|(up, _)| up);
+        if let (Some((up, down)), true) = (outage, n > 0) {
+            if self.record_around_outage(registry, &mut previous, loss.since_ms, n, (up, down)) {
+                return;
+            }
+            // No pin for the part before the outage: overlap rather than a hole.
+            floor = None;
+        }
         match (previous, n) {
             (Some(pin), 0) => {
                 let _ = registry.release(&pin);
@@ -192,6 +221,41 @@ impl Losses {
                 };
             }
         }
+    }
+
+    /// Records a loss that straddles an outage as two rows, so that nothing
+    /// from the last ping to this one is left bare: `[ping, down]` here and
+    /// `[up, now]` in `upstream`. The count is split, not doubled (each row
+    /// needs one). False when no pin could be had for the first part.
+    fn record_around_outage(
+        &mut self,
+        registry: &PinRegistry,
+        previous: &mut Option<PinId>,
+        since_ms: Option<i64>,
+        n: u64,
+        (up, down): (i64, i64),
+    ) -> bool {
+        let start = previous
+            .as_ref()
+            .and_then(|pin| registry.arrival_of(pin))
+            .or(since_ms)
+            .filter(|start| *start < down);
+        let Some(start) = start else {
+            return false;
+        };
+        let pin = match previous.take() {
+            Some(pin) => pin,
+            None => match registry.add(start) {
+                Ok(pin) => pin,
+                Err(_) => return false,
+            },
+        };
+        self.pre_outage_end = Some(down);
+        self.upstream_pre.record_pinned(registry, 1, pin, None);
+        let _ = self
+            .upstream
+            .record_since(registry, n.saturating_sub(1).max(1), up);
+        true
     }
 
     /// The open daemon gap's end, if it closed; a heartbeat leaves it open
@@ -253,6 +317,9 @@ pub(super) fn flush_due(
                 None if closing => registry.now(),
                 None => continue,
             },
+            Slot::UpstreamPre => locked(losses)
+                .pre_outage_end
+                .unwrap_or_else(|| registry.now()),
             _ => registry.now(),
         };
         let done = flush_slot(engine, registry, limits, losses, slot, end_ms);

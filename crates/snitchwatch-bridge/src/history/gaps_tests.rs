@@ -411,20 +411,52 @@ fn an_upstream_loss_after_an_outage_starts_where_the_daemon_came_back() {
         rig.set(5000);
         flush_due(&mut rig.engine, &rig.registry, &rig.limits, &losses, false).unwrap();
         let rows = gaps(&rig);
-        let upstream = rows
-            .iter()
-            .find(|g| g.cause == GapCause::UpstreamLoss)
-            .expect("upstream-loss row");
+        assert!(
+            rows.iter().any(|g| g.cause == GapCause::UpstreamLoss),
+            "upstream-loss row"
+        );
         let daemon = rows
             .iter()
             .find(|g| g.cause == GapCause::DaemonDisconnected)
             .expect("daemon row");
         assert_eq!(daemon.end_ms, 4000, "guarded={guarded}");
-        assert!(
-            upstream.start_ms >= daemon.end_ms,
-            "guarded={guarded}: {rows:?}"
-        );
+        assert_eq!(daemon.start_ms, 2000, "guarded={guarded}");
+        // Nothing from the last ping to the first one is left without a row,
+        // and no upstream row spans the outage interior.
+        assert_covered(&rows, 1000, 4500, &format!("guarded={guarded}"));
+        let mut counted = 0;
+        for g in rows.iter().filter(|g| g.cause == GapCause::UpstreamLoss) {
+            assert!(
+                g.end_ms <= 2000 || g.start_ms >= 4000,
+                "guarded={guarded}: {rows:?}"
+            );
+            counted += g.count;
+        }
+        assert_eq!(counted, 3, "the lower bound is assigned once: {rows:?}");
     }
+}
+
+/// Every instant in `[from, to]` lies in some row (or touches the next one).
+fn assert_covered(rows: &[Gap], from: i64, to: i64, what: &str) {
+    let mut sorted: Vec<&Gap> = rows.iter().collect();
+    sorted.sort_by_key(|g| g.start_ms);
+    let mut reached = from;
+    for g in sorted {
+        if g.start_ms <= reached {
+            reached = reached.max(g.end_ms);
+        }
+    }
+    assert!(reached >= to, "{what}: covered only to {reached}: {rows:?}");
+}
+
+#[test]
+fn an_upstream_loss_reported_after_the_close_is_dropped_to_keep_the_clean_end() {
+    let rig = rig(1000);
+    let mut losses = Losses::new();
+    losses.release_ping_guard(&rig.registry);
+    losses.upstream_loss(&rig.registry, lost(3, false, 1000));
+    assert_eq!(losses.upstream.pending_count(), 0);
+    assert!(rig.registry.is_empty());
 }
 
 #[test]
