@@ -454,3 +454,164 @@ fn a_clock_that_stepped_back_expires_nothing_extra() {
     assert_eq!(aged(&mut rig, NOW - 2 * DAY_MS).removed, 0);
     assert_eq!(count(&rig, "events"), 3);
 }
+
+// ---- the per-process byte share (D5) ---------------------------------------------
+
+fn used(rig: &Rig) -> u64 {
+    rig.engine.used_pages().unwrap()
+}
+
+fn high_water(rig: &Rig) -> u64 {
+    rig.engine.budget().high_water_pages()
+}
+
+fn share_bytes(rig: &Rig) -> u64 {
+    rig.engine.budget().main_bytes / 100 * super::admission::SHARE_PERCENT
+}
+
+fn bytes_of(rig: &Rig, process: &str) -> u64 {
+    rig.engine
+        .process_bytes()
+        .unwrap()
+        .into_iter()
+        .find(|(p, _)| p == process)
+        .map_or(0, |(_, b)| b)
+}
+
+fn count_of(rig: &Rig, process: &str) -> i64 {
+    rig.engine
+        .connection()
+        .query_row(
+            "SELECT count(*) FROM events WHERE coalesce(process_path, '') = ?1",
+            [process],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// Inserts `events` in one raw transaction: no room is made, so a test can
+/// build any state up to the file's cap.
+fn fill(rig: &Rig, events: impl IntoIterator<Item = EventRecord>) {
+    let conn = rig.engine.connection();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    for e in events {
+        insert_event(conn, &e).unwrap();
+    }
+    conn.execute_batch("COMMIT").unwrap();
+}
+
+fn hostile_path() -> String {
+    format!("/opt/{}", "p".repeat(4000))
+}
+
+/// A record of worst-case size from the flooding process.
+fn big(ts: i64) -> EventRecord {
+    let mut e = event(ts, &hostile_path(), Action::Allow);
+    e.dst_host = Some(DstHost::new(&"h".repeat(250)));
+    e
+}
+
+fn small_for(ts: i64, process: &str) -> EventRecord {
+    let mut e = event(ts, process, Action::Allow);
+    e.dst_host = Some(DstHost::new(&"s".repeat(200)));
+    e
+}
+
+#[test]
+fn a_flood_of_large_records_cannot_evict_another_processs_small_ones() {
+    let mut rig = rig();
+    // The small records are the oldest of all: global order would take them
+    // first.
+    put(&mut rig, (1..=30).map(|i| plain(small_for(i, "/usr/bin/small"))).collect());
+    let mut ts = 1_000;
+    let mut evicted_any = false;
+    for _ in 0..80 {
+        assert!(rig.engine.make_room().unwrap(), "recording paused");
+        let batch: Vec<Item> = (0..32).map(|_| { ts += 1; plain(big(ts)) }).collect();
+        rig.engine.insert_batch(&batch).unwrap();
+        evicted_any |= count_of(&rig, &hostile_path()) < i64::from(ts as i32 - 1_000);
+    }
+    assert!(evicted_any, "the flood must have overrun the budget");
+    assert_eq!(count_of(&rig, "/usr/bin/small"), 30, "others stay while the flooder is over share");
+    assert!(rig.engine.file_pages().unwrap() <= rig.engine.budget().max_page_count);
+}
+
+/// Rows from `n` processes in rotation, until the file passes high-water by
+/// `over` pages. Timestamps follow insertion order.
+fn fill_rotating(rig: &Rig, n: usize, over: u64, first_ts: i64) {
+    let mut ts = first_ts;
+    while used(rig) <= high_water(rig) + over {
+        let rows: Vec<EventRecord> = (0..32)
+            .map(|i| {
+                ts += 1;
+                small_for(ts, &format!("/usr/bin/p{}", (ts as usize + i) % n))
+            })
+            .collect();
+        fill(rig, rows);
+    }
+}
+
+#[test]
+fn a_process_under_its_share_is_never_a_tier_two_victim() {
+    let mut rig = rig();
+    fill_rotating(&rig, 12, 0, 0);
+    let share = share_bytes(&rig);
+    for (p, b) in rig.engine.process_bytes().unwrap() {
+        assert!(b < share, "{p} holds {b} of a {share} share: the fixture needs all under");
+    }
+    let before = remaining(&rig);
+    assert!(!rig.engine.make_room().unwrap() || used(&rig) <= high_water(&rig));
+    let after = remaining(&rig);
+    let removed = before.len() - after.len();
+    assert!(removed > 0, "pressure must have evicted something");
+    assert_eq!(after, before[removed..].to_vec(), "global order: the oldest rows, whoever's");
+}
+
+#[test]
+fn an_over_share_process_is_trimmed_first_and_only_then_are_others_touched() {
+    let mut rig = rig();
+    let flooder = "/opt/flood";
+    // The flooder is the newest, and just over its share (tiny rows: a chunk
+    // of them frees little space, so tier three must run too).
+    let mut ts = 1_000_000;
+    while bytes_of(&rig, flooder) <= share_bytes(&rig) {
+        fill(&rig, (0..64).map(|_| { ts += 1; event(ts, flooder, Action::Allow) }));
+    }
+    fill_rotating(&rig, 12, 12, 0);
+    let (flood_before, others_before) = (count_of(&rig, flooder), count(&rig, "events") - count_of(&rig, flooder));
+    let others_oldest: Vec<(i64, i64)> = remaining(&rig).into_iter().filter(|r| r.0 < 1_000_000).take(5).collect();
+    rig.engine.make_room().unwrap();
+    assert!(bytes_of(&rig, flooder) <= share_bytes(&rig), "tier two trimmed the flooder to its share");
+    assert!(count_of(&rig, flooder) < flood_before);
+    let others_after = count(&rig, "events") - count_of(&rig, flooder);
+    assert!(others_after < others_before, "tier three then took others' rows");
+    assert!(
+        remaining(&rig).iter().all(|r| !others_oldest[..1].contains(r)),
+        "and they were the oldest ones"
+    );
+}
+
+#[test]
+fn snapshot_bytes_count_toward_a_process_only_when_attributable_to_it_alone() {
+    let mut rig = rig();
+    put(
+        &mut rig,
+        vec![
+            with_rule(event(1, "/a", Action::Allow), 1),
+            with_rule(event(2, "/a", Action::Allow), 2),
+            plain({
+                let mut e = event(3, "/b", Action::Allow);
+                e.rule_hash = Some(hash(2));
+                e
+            }),
+        ],
+    );
+    let snap = |n: u8| format!("{{\"rule\":{n}}}").len() as u64;
+    let row = row_bytes_of(&rig, "/a");
+    assert_eq!(bytes_of(&rig, "/a"), 2 * row + snap(1), "rule 1 is only /a's; rule 2 is shared");
+    assert_eq!(bytes_of(&rig, "/b"), row, "/b gets no part of the shared snapshot");
+}
+
+fn row_bytes_of(rig: &Rig, process: &str) -> u64 {
+    estimate_bytes(&event(0, process, Action::Allow))
+}

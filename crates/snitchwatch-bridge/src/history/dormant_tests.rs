@@ -354,6 +354,8 @@ const CAPTURE_OWNERS: &[&str] = &[
     "capture_tests.rs",
     "admission.rs",
     "admission_tests.rs",
+    "retention.rs",
+    "retention_tests.rs",
     "guard.rs",
     "hook_tests.rs",
     "gaps.rs",

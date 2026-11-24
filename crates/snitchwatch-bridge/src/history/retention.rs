@@ -16,12 +16,15 @@
 //! events of the span between its first and last removed row are gone, since
 //! other processes' events inside it remain.
 
+use std::collections::HashMap;
+
 use rusqlite::{params_from_iter, Connection};
 
+use super::admission::SHARE_PERCENT;
 use super::ledger::{record_gap, Gap, GapCause, LedgerLimits};
 use super::measure::row_bytes_sql;
 use super::snapshots::delete_unreferenced;
-use super::writer::{Engine, TxnKind, TxnReport, WriteError};
+use super::writer::{Engine, TxnKind, TxnReport, WriteError, EVICTION_ROUNDS};
 
 /// Which rows one eviction chunk removes, oldest `(ts_ms, id)` first.
 #[derive(Debug, Clone, Copy)]
@@ -52,6 +55,16 @@ pub(super) struct Removed {
     pub(super) last_ts: i64,
     /// Event bytes per process, by [`row_bytes_sql`].
     pub(super) by_process: Vec<(String, u64)>,
+    /// Bytes of the snapshots the chunk left unreferenced and deleted.
+    pub(super) snapshot_bytes: u64,
+}
+
+impl Removed {
+    /// Everything the chunk freed that counts toward its process's share.
+    pub(super) fn bytes(&self) -> u64 {
+        let events: u64 = self.by_process.iter().map(|(_, b)| b).sum();
+        events + self.snapshot_bytes
+    }
 }
 
 fn pick(conn: &Connection, victims: Victims<'_>, n: u64) -> rusqlite::Result<Vec<Picked>> {
@@ -123,7 +136,7 @@ fn delete_chunk(
         .iter()
         .filter_map(|r| r.rule_hash.as_deref())
         .collect();
-    delete_unreferenced(conn, &hashes)?;
+    removed.snapshot_bytes = delete_unreferenced(conn, &hashes)?;
     if removed.rows > 0 {
         let earliest: Option<i64> =
             conn.query_row("SELECT min(ts_ms) FROM events", [], |r| r.get(0))?;
@@ -245,5 +258,94 @@ impl Engine {
             removed,
             skipped_for_jump: false,
         })
+    }
+}
+
+impl Engine {
+    /// What each process holds in the store: its events by
+    /// [`row_bytes_sql`] and the snapshots only it refers to (D5). A bounded
+    /// scan (owner decision 2026-11-24, item 3: no index); run only under
+    /// pressure.
+    pub(super) fn process_bytes(&self) -> Result<Vec<(String, u64)>, WriteError> {
+        let conn = self.connection();
+        let mut held: HashMap<String, u64> = HashMap::new();
+        let events = format!(
+            "SELECT coalesce(process_path, ''), sum({}) FROM events GROUP BY 1",
+            row_bytes_sql()
+        );
+        // A snapshot belongs to a process only when every event that refers
+        // to it is that process's (min = max).
+        let snapshots = "SELECT p, sum(len) FROM (\
+             SELECT min(coalesce(e.process_path, '')) AS p, \
+                    max(coalesce(e.process_path, '')) AS q, \
+                    length(CAST(rs.snapshot AS BLOB)) AS len \
+             FROM rules_seen rs JOIN events e ON e.rule_hash = rs.rule_hash \
+             GROUP BY rs.rule_hash) WHERE p = q GROUP BY p";
+        for sql in [events.as_str(), snapshots] {
+            let rows = conn
+                .prepare(sql)?
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for (process, bytes) in rows {
+                *held.entry(process).or_insert(0) += u64::try_from(bytes).unwrap_or(0);
+            }
+        }
+        Ok(held.into_iter().collect())
+    }
+
+    /// The most a process may hold: [`SHARE_PERCENT`] of the main file.
+    pub(super) fn share_bytes(&self) -> u64 {
+        (self.budget().main_bytes / 100).saturating_mul(SHARE_PERCENT)
+    }
+
+    /// Tier 2: trims each process over its share, the biggest first, taking
+    /// its own oldest rows (and the snapshots they leave unreferenced) a
+    /// chunk at a time, until it is within its share or the store is back
+    /// under `high` used pages. Returns the rows removed.
+    pub(super) fn evict_over_share(&mut self, high: u64) -> Result<u64, WriteError> {
+        let share = self.share_bytes();
+        let mut over: Vec<(String, u64)> = self
+            .process_bytes()?
+            .into_iter()
+            .filter(|(_, bytes)| *bytes > share)
+            .collect();
+        over.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
+        let mut total = 0;
+        for (process, mut held) in over {
+            while held > share && self.used_pages()? > high {
+                let (_, chunk) = self.evict_victims(Victims::Process(&process), u64::MAX)?;
+                if chunk.rows == 0 {
+                    break;
+                }
+                total += chunk.rows;
+                held = held.saturating_sub(chunk.bytes());
+            }
+        }
+        Ok(total)
+    }
+
+    /// Evicts (and vacuums) until usage is under the high-water mark: first
+    /// each over-share process's own rows (D5), then the oldest events of
+    /// all, in short chunks. `true` when under it; `false` after
+    /// [`EVICTION_ROUNDS`] rounds of the second kind that did not get there
+    /// (the caller pauses recording and retries later).
+    pub fn make_room(&mut self) -> Result<bool, WriteError> {
+        let high = self.budget().high_water_pages();
+        if self.used_pages()? <= high {
+            return Ok(true);
+        }
+        if self.evict_over_share(high)? > 0 {
+            self.vacuum_all()?;
+        }
+        for _ in 0..EVICTION_ROUNDS {
+            if self.used_pages()? <= high {
+                return Ok(true);
+            }
+            if self.evict_chunk()?.units == 0 {
+                break;
+            }
+            self.vacuum_all()?;
+        }
+        Ok(self.used_pages()? <= high)
     }
 }

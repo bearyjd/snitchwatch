@@ -533,23 +533,6 @@ impl Engine {
         })
     }
 
-    /// Evict (and vacuum) until usage is under the high-water mark. `true`
-    /// when it is; `false` after [`EVICTION_ROUNDS`] rounds that did not get
-    /// there (the caller pauses recording and retries later, D5).
-    pub fn make_room(&mut self) -> Result<bool, WriteError> {
-        let high = self.budget.high_water_pages();
-        for _ in 0..EVICTION_ROUNDS {
-            if self.used_pages()? <= high {
-                return Ok(true);
-            }
-            if self.evict_chunk()?.units == 0 {
-                break;
-            }
-            self.vacuum_all()?;
-        }
-        Ok(self.used_pages()? <= high)
-    }
-
     /// Vacuum until no free page is left, in budgeted transactions.
     pub fn vacuum_all(&mut self) -> Result<(), WriteError> {
         while self.pragma_u64("freelist_count")? > 0 {
