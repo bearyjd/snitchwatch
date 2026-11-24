@@ -119,6 +119,55 @@ fn a_refused_record_adds_no_bytes() {
 }
 
 #[test]
+fn the_bucket_map_never_exceeds_its_cap() {
+    let mut a = Admission::new(cfg());
+    for i in 0..5000 {
+        let _ = a.admit(Some(&path(i)), 10, i as i64);
+        assert!(a.bucket_count() <= 1024, "{}", a.bucket_count());
+    }
+    assert_eq!(a.bucket_count(), 1024);
+}
+
+#[test]
+fn idle_buckets_expire_after_sixty_seconds() {
+    let mut a = Admission::new(unlimited());
+    for i in 0..1024 {
+        a.admit(Some(&path(i)), 10, 0).unwrap();
+    }
+    assert_eq!(a.bucket_count(), 1024);
+    // One new path 61 s later: every old bucket is idle and goes.
+    a.admit(Some("/usr/bin/new"), 10, 61_000).unwrap();
+    assert_eq!(a.bucket_count(), 1);
+    // Exactly 60 s idle is not yet expired.
+    let mut b = Admission::new(unlimited());
+    for i in 0..1024 {
+        b.admit(Some(&path(i)), 10, 0).unwrap();
+    }
+    b.admit(Some("/usr/bin/new"), 10, 60_000).unwrap();
+    assert_eq!(b.bucket_count(), 1024);
+}
+
+#[test]
+fn a_full_map_of_active_buckets_drops_the_least_recent_not_the_busy_one() {
+    let mut a = Admission::new(cfg());
+    for i in 0..1024 {
+        a.admit(Some(&path(i)), 10, i as i64).unwrap();
+    }
+    // The busy process spends its burst, then a stranger arrives while the
+    // map is full of active buckets.
+    for _ in 0..100 {
+        a.admit(Some(&path(1023)), 10, 2000).unwrap();
+    }
+    a.admit(Some("/usr/bin/stranger"), 10, 2001).unwrap();
+    assert_eq!(a.bucket_count(), 1024);
+    // The busy bucket survived, so its exhausted burst still refuses it.
+    assert_eq!(
+        a.admit(Some(&path(1023)), 10, 2001),
+        Err(Refusal::ProcessRate)
+    );
+}
+
+#[test]
 fn the_byte_ledger_is_capped_and_keeps_the_biggest_entries() {
     let mut a = Admission::new(AdmissionConfig {
         process_rate: 1_000_000,
@@ -133,6 +182,20 @@ fn the_byte_ledger_is_capped_and_keeps_the_biggest_entries() {
         assert!(a.byte_entries() <= 1024);
     }
     assert_eq!(a.retained_for(Some("/tmp/big")), 3 * MIB);
+}
+
+#[test]
+fn the_bytes_map_stays_within_its_cap_for_seeded_and_admitted_processes() {
+    let mut a = Admission::new(unlimited());
+    for i in 0..3000 {
+        a.seed_bytes(Some(&path(i)), 100 + i as u64);
+        assert!(a.byte_entries() <= 1024, "{}", a.byte_entries());
+    }
+    for i in 3000..6000 {
+        a.admit(Some(&path(i)), 50, 0).unwrap();
+        assert!(a.byte_entries() <= 1024, "{}", a.byte_entries());
+    }
+    assert_eq!(a.byte_entries(), 1024);
 }
 
 #[test]

@@ -195,7 +195,6 @@ impl Admission {
         }
     }
 
-    /// Retention deleted `bytes` of `process`'s rows: its share frees up.
     /// Sets what `process` holds in the store (the database at start).
     pub fn seed_bytes(&mut self, process: Option<&str>, bytes: u64) {
         let key = self.key(process);
@@ -205,6 +204,7 @@ impl Admission {
         }
     }
 
+    /// Retention deleted `bytes` of `process`'s rows: its share frees up.
     pub fn release_bytes(&mut self, process: Option<&str>, bytes: u64) {
         let key = self.key(process);
         if let Some(held) = self.bytes.get_mut(&key) {
