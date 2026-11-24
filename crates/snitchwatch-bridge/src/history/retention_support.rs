@@ -135,13 +135,6 @@ pub(super) fn assert_removed_are_covered(rig: &Rig, removed_ts: &[i64]) {
     }
 }
 
-pub(super) fn fail_once() -> Box<dyn FnMut() -> Option<WriteError> + Send> {
-    let mut armed = true;
-    Box::new(move || {
-        std::mem::take(&mut armed).then(|| WriteError::Io(std::io::Error::other("injected")))
-    })
-}
-
 pub(super) fn used(rig: &Rig) -> u64 {
     rig.engine.used_pages().unwrap()
 }

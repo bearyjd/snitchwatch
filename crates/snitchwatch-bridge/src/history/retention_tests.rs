@@ -9,7 +9,7 @@ use super::caps::{DstHost, ProcessPath, Protocol, RuleClass, RuleName};
 use super::measure::{estimate_bytes, row_bytes_sql};
 use super::record::{insert_event, Action, AnsweredBy, EventRecord};
 use super::retention_support::*;
-use super::writer::{Item, TxnKind};
+use super::writer::{Item, TxnKind, WriteError};
 
 fn full_record() -> EventRecord {
     let mut e = EventRecord::new(1, Action::Allow, AnsweredBy::Rule);
@@ -165,24 +165,43 @@ fn deleting_one_event_by_global_order_removes_its_unreferenced_snapshot() {
     assert!(snapshots(&rig).is_empty());
 }
 
+/// A fault that fires on the `n`th commit attempt (1 is the first).
+fn fail_on_commit(n: usize) -> Box<dyn FnMut() -> Option<WriteError> + Send> {
+    let mut seen = 0;
+    Box::new(move || {
+        seen += 1;
+        (seen == n).then(|| WriteError::Io(std::io::Error::other("injected")))
+    })
+}
+
 #[test]
-fn a_fault_before_commit_leaves_the_event_the_snapshot_and_no_marker_on_every_path() {
+fn a_fault_on_any_commit_leaves_all_or_nothing_of_event_snapshot_and_marker_on_every_path() {
     for path in 0..3 {
-        let mut rig = rig();
-        snapshot_fixture(&mut rig);
-        rig.engine.fault_before_commit_for_test(fail_once());
-        let outcome = match path {
-            0 => evict_before(&mut rig, 150),
-            1 => evict_process(&mut rig, "/a"),
-            _ => rig.engine.evict_chunk(),
-        };
-        assert!(outcome.is_err(), "path {path}");
-        assert_eq!(count(&rig, "events"), 3, "path {path}");
-        assert_eq!(snapshots(&rig).len(), 2, "path {path}");
-        assert!(
-            evicted(&rig).is_empty(),
-            "path {path}: no marker without the delete"
-        );
+        // A chunk is one transaction, so a fault on the second commit never
+        // fires; were the marker its own transaction, it would, and the rows
+        // would be gone without it.
+        for commit in 1..=2 {
+            let mut rig = rig();
+            snapshot_fixture(&mut rig);
+            rig.engine
+                .fault_before_commit_for_test(fail_on_commit(commit));
+            let outcome = match path {
+                0 => evict_before(&mut rig, 150),
+                1 => evict_process(&mut rig, "/a"),
+                _ => rig.engine.evict_chunk(),
+            };
+            let what = format!("path {path}, fault on commit {commit}");
+            let removed = 3 - count(&rig, "events");
+            if outcome.is_err() {
+                assert_eq!(removed, 0, "{what}: an event went with no commit");
+                assert_eq!(snapshots(&rig).len(), 2, "{what}");
+                assert!(evicted(&rig).is_empty(), "{what}: a marker with no delete");
+            } else {
+                assert!(removed > 0, "{what}");
+                let marked: u64 = evicted(&rig).iter().map(|g| g.count).sum();
+                assert_eq!(marked, removed as u64, "{what}: the delete has its marker");
+            }
+        }
     }
 }
 
