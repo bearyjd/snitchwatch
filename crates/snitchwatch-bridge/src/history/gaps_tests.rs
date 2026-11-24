@@ -10,7 +10,7 @@ use snitchwatch_proto::protocol::{Connection, Event, Rule};
 
 use super::super::capture::{Capture, CaptureConfig};
 use super::super::durable::tests::{engine_at, manual_clock, rig, Rig};
-use super::super::ledger::{read_gaps, Gap, GapCause, LossCounter};
+use super::super::ledger::{read_gaps, Gap, GapCause, LedgerLimits, LossCounter};
 use super::super::pins::PinRegistry;
 use super::super::session::{read_sessions, read_watermark, SessionEnd};
 use super::super::test_support::{state_dir, tempdir};
@@ -300,10 +300,70 @@ fn the_heartbeat_writes_a_clock_jump_row_and_keeps_it_until_it_is_durable() {
     assert!(gaps(&rig).is_empty());
     rig.set(90_500);
     beat_at(&mut rig, &losses, &mut clock, 5_500);
+    // The stepped-over time reaches back to 100 000, which is after `now`.
     assert_eq!(
         gaps(&rig),
-        vec![gap(90_000, 100_000, GapCause::ClockJump, 1)]
+        vec![gap(90_000, 90_500, GapCause::ClockJump, 1)]
     );
+}
+
+#[test]
+fn a_clock_jump_row_never_ends_after_the_registry_now() {
+    let mut rig = rig(500_000);
+    let losses = losses();
+    let mut clock = ClockWatch::new();
+    beat_at(&mut rig, &losses, &mut clock, 0);
+    // The clock was far ahead, then is set back: the stepped-over time up to
+    // the old reading lies in the future.
+    rig.set(400_000);
+    beat_at(&mut rig, &losses, &mut clock, 5_000);
+    let rows = gaps(&rig);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].cause, GapCause::ClockJump);
+    assert!(rows[0].end_ms <= 400_000, "{rows:?}");
+    assert!(rows[0].start_ms <= rows[0].end_ms);
+}
+
+#[test]
+fn a_flapping_clock_is_one_merged_row_and_cannot_collapse_other_gaps() {
+    let mut rig = rig(1_000_000);
+    rig.limits = LedgerLimits {
+        max_rows: 8,
+        max_bytes: u64::MAX,
+    };
+    let losses = losses();
+    let mut clock = ClockWatch::new();
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
+    beat_at(&mut rig, &losses, &mut clock, 0);
+    // The clock flaps every 5 s heartbeat, and each heartbeat also records an
+    // unrelated gap that merges with its own kind (so the clock-jump row is
+    // never the latest one).
+    for beat_no in 1..=40_i64 {
+        let wall = if beat_no % 2 == 0 {
+            1_000_000 + beat_no * 5_000
+        } else {
+            1_000_000 + beat_no * 5_000 - 200_000
+        };
+        rig.set(wall);
+        rig.engine
+            .record_evicted(900_000, 1, &rig.registry, &rig.limits)
+            .unwrap();
+        beat_at(&mut rig, &losses, &mut clock, beat_no * 5_000);
+    }
+    let rows = gaps(&rig);
+    let jumps: Vec<_> = rows
+        .iter()
+        .filter(|g| g.cause == GapCause::ClockJump)
+        .collect();
+    assert_eq!(jumps.len(), 1, "one merged row, got {rows:?}");
+    assert!(jumps[0].count > 1, "it counts the flaps: {jumps:?}");
+    assert!(
+        rows.iter().all(|g| g.cause != GapCause::Uncertain),
+        "nothing was collapsed: {rows:?}"
+    );
+    assert!(rows.iter().any(|g| g.cause == GapCause::Evicted));
 }
 
 // ---- evicted marker ------------------------------------------------------

@@ -253,10 +253,20 @@ pub(super) fn beat(
     mono_ms: i64,
 ) -> Result<(), DurableError> {
     clock.observe(registry.now(), mono_ms);
+    // What was stepped over can lie in the future (the clock was set back):
+    // the row never ends after now.
     let jump = match clock.unrecorded() {
-        Some(gap) => engine
-            .commit_gap(&gap, &[], registry, limits)
-            .map(|_| clock.recorded()),
+        Some(gap) => {
+            let end_ms = gap.end_ms.min(registry.now());
+            let gap = Gap {
+                start_ms: gap.start_ms.min(end_ms),
+                end_ms,
+                ..gap
+            };
+            engine
+                .commit_gap(&gap, &[], registry, limits)
+                .map(|_| clock.recorded())
+        }
         None => Ok(()),
     };
     let flushed = flush_due(engine, registry, limits, losses, false);

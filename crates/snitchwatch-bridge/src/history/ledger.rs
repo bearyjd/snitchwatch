@@ -27,6 +27,9 @@ pub const DEFAULT_MAX_ROWS: u64 = 2048;
 /// The smallest ceiling that can hold one collapsed span, the open session
 /// and a few recent rows.
 pub const MIN_CEILING: u64 = 8;
+/// Clock-jump rows closer than this merge into one, whatever rows came
+/// between: a flapping clock must not write a row per heartbeat.
+const CLOCK_JUMP_COALESCE_MS: i64 = 600_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GapCause {
@@ -130,13 +133,25 @@ struct GapRow {
 }
 
 /// Records `gap` (merging it into the latest gap when adjacent and of the same
-/// cause), then brings the ledger within `limits` by collapsing (L1).
+/// cause; a clock jump merges into the latest clock-jump row within
+/// [`CLOCK_JUMP_COALESCE_MS`], other rows in between or not), then brings the
+/// ledger within `limits` by collapsing (L1).
 pub fn record_gap(conn: &Connection, gap: &Gap, limits: &LedgerLimits) -> rusqlite::Result<()> {
-    match latest_gap(conn)? {
-        Some(prev) if mergeable(&prev.gap, gap) => merge_into(conn, &prev, gap)?,
-        _ => insert_gap(conn, gap)?,
+    let target = if gap.cause == GapCause::ClockJump {
+        latest_of_cause(conn, GapCause::ClockJump)?.filter(|p| near(&p.gap, gap))
+    } else {
+        latest_gap(conn)?.filter(|p| mergeable(&p.gap, gap))
+    };
+    match target {
+        Some(prev) => merge_into(conn, &prev, gap)?,
+        None => insert_gap(conn, gap)?,
     }
     enforce_limits(conn, limits)
+}
+
+fn near(prev: &Gap, new: &Gap) -> bool {
+    new.start_ms <= prev.end_ms.saturating_add(CLOCK_JUMP_COALESCE_MS)
+        && new.end_ms.saturating_add(CLOCK_JUMP_COALESCE_MS) >= prev.start_ms
 }
 
 fn mergeable(prev: &Gap, new: &Gap) -> bool {
@@ -209,6 +224,15 @@ fn latest_gap(conn: &Connection) -> rusqlite::Result<Option<GapRow>> {
     conn.query_row(
         &format!("SELECT {GAP_COLUMNS} FROM gaps ORDER BY id DESC LIMIT 1"),
         [],
+        gap_from_row,
+    )
+    .optional()
+}
+
+fn latest_of_cause(conn: &Connection, cause: GapCause) -> rusqlite::Result<Option<GapRow>> {
+    conn.query_row(
+        &format!("SELECT {GAP_COLUMNS} FROM gaps WHERE cause = ?1 ORDER BY id DESC LIMIT 1"),
+        [cause.as_str()],
         gap_from_row,
     )
     .optional()
