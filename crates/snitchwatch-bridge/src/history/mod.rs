@@ -17,6 +17,7 @@ pub mod admission;
 pub mod budget;
 pub mod caps;
 pub mod capture;
+mod capture_stats;
 mod correlation;
 pub mod durable;
 pub mod gaps;

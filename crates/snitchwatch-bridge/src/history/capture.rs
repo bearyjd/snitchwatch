@@ -60,7 +60,7 @@
 
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -70,6 +70,8 @@ use snitchwatch_proto::protocol::{Connection, Event, Rule};
 use super::admission::{Admission, AdmissionConfig, Refusal};
 use super::budget::Budget;
 use super::caps::{DstHost, ProcessPath, Protocol, RuleName};
+pub use super::capture_stats::CaptureStats;
+use super::capture_stats::{add, Counters};
 use super::durable::PinnedBatch;
 use super::gaps::{self, Losses, StandingLabels};
 use super::guard::{DecisionGuard, DecisionOutcome};
@@ -208,44 +210,6 @@ fn estimate_bytes(r: &EventRecord) -> u64 {
         + len(r.rule_class.as_ref().map(|v| v.as_str().len()))
 }
 
-/// Events, not records: each count is the sum of `repeat_count`s.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CaptureStats {
-    pub seen: u64,
-    pub skipped_nolog: u64,
-    pub refused_process_rate: u64,
-    pub refused_byte_share: u64,
-    pub refused_global_rate: u64,
-    pub dropped_queue: u64,
-    pub dropped_pin: u64,
-    pub written: u64,
-    pub lost_write: u64,
-    /// Matched-rule events whose rule has no identity (recorded without a
-    /// hash).
-    pub unidentified_rules: u64,
-    /// Rows stored with a rule hash but no snapshot (it could not be built).
-    pub snapshot_errors: u64,
-}
-
-#[derive(Default)]
-struct Counters {
-    seen: AtomicU64,
-    skipped_nolog: AtomicU64,
-    refused_process_rate: AtomicU64,
-    refused_byte_share: AtomicU64,
-    refused_global_rate: AtomicU64,
-    dropped_queue: AtomicU64,
-    dropped_pin: AtomicU64,
-    written: AtomicU64,
-    lost_write: AtomicU64,
-    unidentified_rules: AtomicU64,
-    snapshot_errors: AtomicU64,
-}
-
-fn add(counter: &AtomicU64, n: u64) {
-    counter.fetch_add(n, Ordering::Relaxed);
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureConfig {
     pub queue_max_bytes: usize,
@@ -323,21 +287,7 @@ impl Shared {
     }
 
     fn stats(&self) -> CaptureStats {
-        let c = &self.counters;
-        let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
-        CaptureStats {
-            seen: get(&c.seen),
-            skipped_nolog: get(&c.skipped_nolog),
-            refused_process_rate: get(&c.refused_process_rate),
-            refused_byte_share: get(&c.refused_byte_share),
-            refused_global_rate: get(&c.refused_global_rate),
-            dropped_queue: get(&c.dropped_queue),
-            dropped_pin: get(&c.dropped_pin),
-            written: get(&c.written),
-            lost_write: get(&c.lost_write),
-            unidentified_rules: get(&c.unidentified_rules),
-            snapshot_errors: get(&c.snapshot_errors),
-        }
+        self.counters.snapshot()
     }
 
     fn admit(&self, record: &EventRecord, now_ms: i64) -> Result<u64, Refusal> {
@@ -486,7 +436,7 @@ impl Shared {
     /// empty, or, once closed, until [`SHUTDOWN_DRAIN`] has passed; beat every
     /// [`CaptureConfig::heartbeat_every`]; then flush the loss tallies and end
     /// the session.
-    fn run_writer(&self, mut engine: Engine, rx: Receiver<Entry>) {
+    fn run_writer(&self, mut engine: Engine, rx: Receiver<Entry>, mut began: bool) {
         let rows = engine.budget().rows_per_txn as usize;
         // A short lock wait: a locked database costs a batch, not the thread.
         let _ = engine.connection().busy_timeout(WRITER_BUSY_TIMEOUT);
@@ -501,6 +451,18 @@ impl Shared {
                 if Instant::now() >= limit {
                     self.abandon(batch, &rx);
                     break;
+                }
+            }
+            if !began {
+                match engine.begin_session(&self.registry, &limits) {
+                    Ok(_) => began = true,
+                    Err(e) => {
+                        // Nothing is committed (not even a heartbeat) over the
+                        // previous session; what is queued is lost, loudly.
+                        log_rate_limited(&mut last_logged, &e, batch_events(&batch));
+                        self.lost_batch(batch);
+                        continue;
+                    }
                 }
             }
             if pulse.due() {
@@ -532,13 +494,18 @@ impl Shared {
                 }
             }
         }
-        self.finish(&mut engine, &limits);
+        self.finish(&mut engine, &limits, began);
     }
 
     /// The queue is closed and drained: flush every tally (an open daemon
     /// gap ends now) and end the session. A failure leaves the pins held, so
     /// the next start still reconstructs a gap from the watermark.
-    fn finish(&self, engine: &mut Engine, limits: &LedgerLimits) {
+    fn finish(&self, engine: &mut Engine, limits: &LedgerLimits, began: bool) {
+        // Never began: ending would close the previous session as this one's.
+        if !began && engine.begin_session(&self.registry, limits).is_err() {
+            tracing::error!("history never started its session; the previous one stays open");
+            return;
+        }
         let kind = if self.disabling.load(Ordering::Acquire) {
             SessionEnd::Disabled
         } else {
@@ -618,10 +585,16 @@ impl Capture {
         let mut engine = engine;
         let limits = LedgerLimits::from_budget(engine.budget());
         // The previous session's end becomes a `bridge-down` gap now. A
-        // failure leaves history recording with weaker coverage records.
-        if let Err(e) = engine.begin_session(&registry, &limits) {
-            tracing::warn!(error = %e, "history could not start its session");
-        }
+        // failure is retried by the writer before it commits anything: until
+        // the session began, a heartbeat or an end would overwrite what the
+        // crashed session left.
+        let began = match engine.begin_session(&registry, &limits) {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "history could not start its session; retrying");
+                false
+            }
+        };
         let shared = Arc::new(Shared::new(registry, config, engine.consent.clone()));
         let rx = shared
             .queue
@@ -630,7 +603,7 @@ impl Capture {
         let worker = shared.clone();
         let handle = std::thread::Builder::new()
             .name("history-writer".into())
-            .spawn(move || worker.run_writer(engine, rx))?;
+            .spawn(move || worker.run_writer(engine, rx, began))?;
         Ok(Self {
             shared,
             writer: Mutex::new(Some(handle)),

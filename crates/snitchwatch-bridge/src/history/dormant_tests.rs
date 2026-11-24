@@ -343,6 +343,7 @@ const CAPTURE_MODULES: &[&str] = &[
 /// The files that implement and test capture and admission.
 const CAPTURE_OWNERS: &[&str] = &[
     "capture.rs",
+    "capture_stats.rs",
     "capture_tests.rs",
     "admission.rs",
     "admission_tests.rs",
@@ -684,7 +685,7 @@ fn the_capture_guard_catches_a_planted_use_inside_history() {
 #[test]
 fn capture_names_cover_every_pub_item() {
     let mut missing = Vec::new();
-    for file in ["capture.rs", "admission.rs", "guard.rs"] {
+    for file in ["capture.rs", "capture_stats.rs", "admission.rs", "guard.rs"] {
         for name in pub_items(file, false) {
             let listed =
                 CAPTURE_TYPES.contains(&name.as_str()) || CAPTURE_MODULES.contains(&name.as_str());

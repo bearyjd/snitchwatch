@@ -998,3 +998,49 @@ async fn a_daemon_already_down_at_the_first_look_opens_no_gap() {
     );
     watchdog.abort();
 }
+
+// ---- 10. a session that did not begin ------------------------------------
+
+/// A crashed session whose successor's `begin_session` fails once must still
+/// become a `bridge-down` gap: nothing may heartbeat or end a session over it
+/// until the successor began.
+#[test]
+fn a_failed_session_start_is_retried_before_the_crash_is_forgotten() {
+    let root = tempdir();
+    let state = state_dir(&root);
+    let location = locate(Mode::User, Some(&state)).unwrap();
+    enable(
+        &location,
+        Consent {
+            text_id: "t".into(),
+            accepted_ms: 1,
+        },
+    )
+    .unwrap();
+    let limits = LedgerLimits::from_budget(&crate::history::budget::Budget::new(16 << 20).unwrap());
+    {
+        // The crashed session: began at 1000, last commit at 2000, no end.
+        let (ms, clock) = manual_clock(1000);
+        let registry = PinRegistry::with_clock(clock);
+        let mut engine = engine_at(&location);
+        engine.begin_session(&registry, &limits).unwrap();
+        ms.store(2000, Ordering::SeqCst);
+        engine.heartbeat(&registry).unwrap();
+    }
+    let (_ms, clock) = manual_clock(9000);
+    let mut engine = engine_at(&location);
+    engine.fault_before_commit_for_test(fail_once());
+    let mut config = crate::history::capture::CaptureConfig::for_budget(engine.budget());
+    config.heartbeat_every = Duration::from_millis(50);
+    let capture = Capture::spawn(engine, Arc::new(PinRegistry::with_clock(clock)), config).unwrap();
+    std::thread::sleep(Duration::from_millis(700));
+    capture.shutdown();
+    let conn = Db::open(location.db_path()).unwrap();
+    let rows = read_gaps(&conn).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].cause, GapCause::BridgeDown);
+    assert!(!rows[0].start_exact, "a crash has no exact start: {rows:?}");
+    assert_eq!(rows[0].start_ms, 2000, "from the last commit: {rows:?}");
+    let sessions = read_sessions(&conn).unwrap();
+    assert_eq!(sessions[0].end, Some(SessionEnd::Unclean), "{sessions:?}");
+}
