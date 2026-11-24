@@ -213,3 +213,113 @@ fn the_real_clock_refills_between_passes() {
     std::thread::sleep(Duration::from_millis(1000));
     assert!(rig.engine.expiry_debt_milli() < before, "uptime refills it");
 }
+
+/// `per_hour` events an hour for `days` days, an expiry pass every hour, and
+/// the bridge up (its monotonic clock running) for `up_hours` of every 24.
+/// Returns the age in days of the oldest event left and the event count.
+fn simulate(retention: u16, per_hour: i64, days: i64, up_hours: i64) -> (f64, i64) {
+    let mut rig = rig();
+    seed_meta(&rig);
+    rig.engine.freeze_expiry_clock();
+    rig.engine.set_retention_days(retention);
+    let hour_ms = DAY_MS / 24;
+    for hour in 0..days * 24 {
+        let wall = hour * hour_ms;
+        let items = (0..per_hour).map(|i| plain(event(wall + i, "/p", Action::Allow)));
+        put(&mut rig, items.collect());
+        pass(&mut rig, wall + per_hour);
+        if hour % 24 < up_hours {
+            rig.engine.advance_expiry_clock(Duration::from_secs(3600));
+        }
+    }
+    let oldest: i64 = rig
+        .engine
+        .connection()
+        .query_row("SELECT min(ts_ms) FROM events", [], |r| r.get(0))
+        .unwrap();
+    let age = ((days * 24 * hour_ms - oldest) as f64) / DAY_MS as f64;
+    (age, count(&rig, "events"))
+}
+
+#[test]
+fn every_retention_option_keeps_up_with_its_inflow_at_full_uptime() {
+    for retention in [7_u16, 30, 90] {
+        let window = f64::from(retention);
+        let (age, events) = simulate(retention, 4, i64::from(retention) * 4 + 30, 24);
+        assert!(
+            age <= window * 1.1,
+            "R={retention}: oldest is {age} days old"
+        );
+        assert!(
+            events as f64 <= 96.0 * window * 1.1,
+            "R={retention}: {events}"
+        );
+    }
+}
+
+#[test]
+fn at_half_uptime_a_seven_day_store_settles_a_quarter_over_its_window() {
+    // Refill per day of wall time is halved, so the store grows until the
+    // bucket (the debt counts as stored rows) matches the inflow: measured,
+    // 8.8 days for a 7-day window (13.5 days without the retention floor).
+    let (age, _) = simulate(7, 4, 90, 12);
+    assert!((8.0..=9.6).contains(&age), "settled at {age} days");
+}
+
+#[test]
+fn a_year_forward_clock_on_a_seven_day_store_leaves_over_eighty_percent() {
+    let mut rig = store(1000);
+    rig.engine.set_retention_days(7);
+    assert_eq!(pass(&mut rig, NOW), 100, "the per-pass tenth");
+    for _ in 0..50 {
+        pass(&mut rig, NOW);
+    }
+    let left = count(&rig, "events");
+    assert!(left * 100 >= 1001 * 80, "{left} of 1001 left");
+    assert_eq!(left, 822, "ceil(1.25 * 1001 / 7) = 179 rows, no refill");
+}
+
+#[test]
+fn the_bucket_of_a_ninety_day_store_stays_an_eighth() {
+    let mut rig = store(1000);
+    rig.engine.set_retention_days(90);
+    for _ in 0..50 {
+        pass(&mut rig, NOW);
+    }
+    assert_eq!(
+        count(&rig, "events"),
+        876,
+        "unchanged: the eighth is larger"
+    );
+}
+
+#[test]
+fn the_debit_is_visible_to_other_connections_the_moment_the_delete_is() {
+    // The observer runs right after the deleting COMMIT. A debit written in a
+    // second transaction would not be there yet.
+    let mut rig = store(1000);
+    let path = rig.location.db_path();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    rig.engine.set_observer(Box::new(move |report| {
+        let other = rusqlite::Connection::open(&path).unwrap();
+        let row = |sql: &str| other.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        let events = row("SELECT count(*) FROM events");
+        let debt = row("SELECT expiry_debt_milli FROM meta WHERE id = 1");
+        log.lock().unwrap().push((report.kind, events, debt));
+    }));
+    assert_eq!(pass(&mut rig, NOW), 100);
+    let seen = seen.lock().unwrap();
+    let deletes: Vec<_> = seen
+        .iter()
+        .filter(|(kind, _, _)| *kind == super::writer::TxnKind::Evict)
+        .collect();
+    assert!(!deletes.is_empty());
+    for (_, events, debt) in deletes {
+        assert_eq!(
+            *debt,
+            (1001 - events) * 1000,
+            "{events} events, debt {debt}"
+        );
+    }
+}

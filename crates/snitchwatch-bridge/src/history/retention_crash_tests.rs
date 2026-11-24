@@ -80,6 +80,16 @@ fn crash_child() {
         "after-chunk" => {
             engine.evict_chunk().unwrap();
         }
+        // An expiry pass deletes its chunk and spends the budget; the process
+        // dies the moment that transaction has committed.
+        "after-expiry-delete" => {
+            engine.set_observer(Box::new(|report| {
+                if report.kind == super::writer::TxnKind::Evict {
+                    kill_self();
+                }
+            }));
+            let _ = engine.expire_aged_until(900 * 86_400_000, false, &mut || false);
+        }
         // A batch finds no room: its pin is held; a gap and a heartbeat still
         // write from the reserve.
         "paused" => {
@@ -259,6 +269,20 @@ fn kill_9_during_a_pause_keeps_the_file_in_budget_and_the_lost_batchs_gap_begins
         gap.start_ms <= 1000,
         "begins no later than the session: {gap:?}"
     );
+}
+
+#[test]
+fn kill_9_right_after_an_expiry_delete_leaves_the_rows_and_their_debit_together() {
+    let (_root, location) = crash("after-expiry-delete");
+    let engine = engine_at(&location);
+    let conn = engine.connection();
+    let debt: i64 = conn
+        .query_row("SELECT expiry_debt_milli FROM meta WHERE id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(counts(conn).0, 0, "the three old events are gone");
+    assert_eq!(debt, 3_000, "and the debit for them survived the kill");
 }
 
 fn assert_rolled_back(scenario: &str) {

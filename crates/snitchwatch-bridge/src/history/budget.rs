@@ -129,7 +129,8 @@ impl Budget {
     /// file under [`high_water_pages`](Self::high_water_pages), so one
     /// eviction serves many batches.
     pub fn low_water_pages(&self) -> u64 {
-        self.high_water_pages() - self.max_page_count / 20
+        self.high_water_pages()
+            .saturating_sub(self.max_page_count / 20)
     }
 
     /// Everything the feature may have on disk at once, worst case.

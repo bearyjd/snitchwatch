@@ -20,7 +20,9 @@
 //! and lose the debit, and a restart resumes with the debt it had.
 //!
 //! The bucket's size follows the store: `(events + debt rows) / 8`, never
-//! under one chunk (`rows_per_txn`) so a small store still expires. Adding the
+//! under one chunk (`rows_per_txn`) so a small store still expires, and never
+//! under `ceil(1.25 * stored / retention_days)`, the rows a day that the
+//! retention window needs (more than an eighth only for 7 days). Adding the
 //! debt back approximates the event count when the window began, so
 //! spending a full bucket leaves it exactly empty rather than over-drawn by
 //! the shrinkage it caused.
@@ -36,6 +38,11 @@ use super::writer::Engine;
 const REFILL_MS: u64 = 86_400_000;
 /// The bucket holds this fraction of the events: one in eight.
 const DEPTH_DIVISOR: u64 = 8;
+/// The bucket never holds less than `HEADROOM_NUM / HEADROOM_DEN` (1.25) of
+/// the rows a day that retention needs, so 7 days (14.3% a day, over the
+/// eighth) can keep up at full uptime.
+const HEADROOM_NUM: u64 = 5;
+const HEADROOM_DEN: u64 = 4;
 /// Debt is kept in thousandths of a row, so a refill of less than a row per
 /// pass is not truncated away.
 const MILLI: u64 = 1000;
@@ -83,9 +90,20 @@ impl ExpiryBudget {
 
     /// Sizes the bucket for a store of `events` rows and returns how many rows
     /// a pass may remove at uptime `now_ms` (and which `rows_per_txn` floors).
-    pub(super) fn allowance(&mut self, now_ms: u64, events: u64, floor_rows: u64) -> u64 {
+    pub(super) fn allowance(
+        &mut self,
+        now_ms: u64,
+        events: u64,
+        floor_rows: u64,
+        retention_days: u16,
+    ) -> u64 {
         let debt_rows = (self.debt_milli / MILLI).min(events);
-        let capacity = ((events + debt_rows) / DEPTH_DIVISOR).max(floor_rows);
+        let stored = events + debt_rows;
+        // Keeping up with `R` days of retention takes `stored / R` rows a day;
+        // a quarter more than that lets a store catch up after a pause.
+        let keep_up =
+            (stored * HEADROOM_NUM).div_ceil(HEADROOM_DEN * u64::from(retention_days.max(1)));
+        let capacity = (stored / DEPTH_DIVISOR).max(keep_up).max(floor_rows);
         self.capacity_milli = capacity.saturating_mul(MILLI);
         self.debt_milli = self.debt_milli.min(self.capacity_milli);
         let debt = self.debt_at(now_ms);

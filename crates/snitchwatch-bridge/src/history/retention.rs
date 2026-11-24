@@ -284,7 +284,7 @@ impl Engine {
     }
 
     /// [`expire_aged`](Self::expire_aged), asking `stop` before each chunk and
-    /// giving way (no vacuum; the next pass carries on) when it says so.
+    /// giving way (the next pass carries on) when it says so, vacuuming included.
     pub(super) fn expire_aged_until(
         &mut self,
         now_ms: i64,
@@ -307,7 +307,10 @@ impl Engine {
         let now = self.expiry.now_ms();
         let cap = (events / PASS_DIVISOR)
             .max(floor)
-            .min(self.expiry.allowance(now, events, floor));
+            .min(
+                self.expiry
+                    .allowance(now, events, floor, self.retention_days),
+            );
         let mut removed = 0;
         let mut stopped = false;
         while removed < cap {
@@ -321,9 +324,9 @@ impl Engine {
             }
             removed += chunk.rows;
         }
-        if removed > 0 && !stopped {
-            self.vacuum_all()?;
-        }
+        // Whatever the pass freed, or an earlier one left, goes back to the
+        // filesystem, a step at a time, giving way as the chunks did.
+        stopped |= self.vacuum_all_until(stop)?;
         Ok(Expiry {
             removed,
             stopped,

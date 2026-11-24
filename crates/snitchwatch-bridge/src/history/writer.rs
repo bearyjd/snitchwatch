@@ -555,14 +555,26 @@ impl Engine {
 
     /// Vacuum until no free page is left, in budgeted transactions.
     pub fn vacuum_all(&mut self) -> Result<(), WriteError> {
+        self.vacuum_all_until(&mut || false).map(|_| ())
+    }
+
+    /// [`vacuum_all`](Self::vacuum_all), asking `stop` before each step and
+    /// giving way when it says so. `true` when it gave way with pages left.
+    pub(super) fn vacuum_all_until(
+        &mut self,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, WriteError> {
         while self.pragma_u64("freelist_count")? > 0 {
+            if stop() {
+                return Ok(true);
+            }
             let before = self.file_pages()?;
             self.vacuum_chunk()?;
             if self.file_pages()? >= before {
                 break;
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Drain `queue` once: make room, then insert one batch. `Ok(0)` when

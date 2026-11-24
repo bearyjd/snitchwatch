@@ -86,3 +86,54 @@ fn the_writers_stop_condition_is_a_closed_queue_or_the_deadline() {
     assert!(capture.shared.expiry_stop(far)(), "the queue is closed");
     capture.shutdown();
 }
+
+fn freelist(rig: &Rig) -> i64 {
+    rig.engine
+        .connection()
+        .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn vacuums(rig: &Rig) -> usize {
+    vacuums_of(&rig.reports)
+}
+
+#[test]
+fn the_vacuum_after_a_pass_asks_to_stop_between_its_steps() {
+    let mut rig = rig();
+    old_rows(&mut rig, 1500);
+    let reports = rig.reports.clone();
+    // Quiet through the chunks; told to stop once one vacuum step has run.
+    let mut stop = || vacuums_of(&reports) > 0;
+    let pass = rig.engine.expire_aged_until(NOW, false, &mut stop).unwrap();
+    assert!(pass.stopped, "the vacuum gave way");
+    assert!(pass.removed > 64, "the chunks ran whole: {}", pass.removed);
+    assert_eq!(vacuums(&rig), 1, "one step, then it asked");
+    assert!(freelist(&rig) > 0, "pages are left for the next pass");
+}
+
+#[test]
+fn a_pass_that_removes_nothing_still_returns_the_pages_an_earlier_one_left() {
+    let mut rig = rig();
+    old_rows(&mut rig, 1500);
+    let reports = rig.reports.clone();
+    let mut stop = || vacuums_of(&reports) > 0;
+    rig.engine.expire_aged_until(NOW, false, &mut stop).unwrap();
+    assert!(freelist(&rig) > 0);
+    let before = vacuums(&rig);
+    // A wall time at which nothing is old: the pass deletes nothing.
+    let next = rig.engine.expire_aged(2_000, false).unwrap();
+    assert_eq!(next.removed, 0);
+    assert!(!next.stopped);
+    assert_eq!(freelist(&rig), 0, "the leftover pages went back");
+    assert!(vacuums(&rig) > before);
+}
+
+fn vacuums_of(reports: &std::sync::Mutex<Vec<super::writer::TxnReport>>) -> usize {
+    reports
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.kind == super::writer::TxnKind::Vacuum)
+        .count()
+}
