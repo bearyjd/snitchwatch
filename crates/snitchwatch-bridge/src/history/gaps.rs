@@ -55,6 +55,9 @@ pub(super) struct Losses {
     pub(super) disconnect: LossCounter,
     /// When the daemon came back; `None` while it is still away.
     disconnect_end: Option<i64>,
+    /// The open daemon gap's tally is out of its slot, being flushed: a
+    /// recovery now must still close it if the flush fails and it comes back.
+    disconnect_flushing: bool,
     /// Held from each ping's own time until the next ping, so that a crash's
     /// `bridge-down` gap begins no later than the `since_ms` the next ping
     /// reports its losses after (the pin of the loss itself arrives later).
@@ -88,6 +91,7 @@ impl Losses {
             upstream: LossCounter::bounded(GapCause::UpstreamLoss),
             disconnect: LossCounter::new(GapCause::DaemonDisconnected),
             disconnect_end: None,
+            disconnect_flushing: false,
             ping_guard: None,
         }
     }
@@ -119,7 +123,7 @@ impl Losses {
 
     /// The daemon is back at `at_ms`: the gap closes there.
     pub(super) fn daemon_up(&mut self, at_ms: i64) {
-        if self.disconnect.is_pending() {
+        if self.disconnect.is_pending() || self.disconnect_flushing {
             self.disconnect_end = Some(at_ms);
         }
     }
@@ -172,9 +176,17 @@ fn flush_slot(
     slot: Slot,
     end_ms: i64,
 ) -> Result<(), DurableError> {
-    let mut taken = locked(losses).slot(slot).take();
+    let mut taken = {
+        let mut guard = locked(losses);
+        let taken = guard.slot(slot).take();
+        if matches!(slot, Slot::Disconnect) {
+            guard.disconnect_flushing = taken.is_pending();
+        }
+        taken
+    };
     let result = engine.flush_counter_at(&mut taken, registry, limits, end_ms);
     let mut guard = locked(losses);
+    guard.disconnect_flushing = false;
     if taken.is_pending() {
         guard.slot(slot).absorb(registry, taken);
     } else if matches!(slot, Slot::Disconnect) && !guard.disconnect.is_pending() {

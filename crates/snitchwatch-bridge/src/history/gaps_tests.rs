@@ -136,6 +136,79 @@ fn a_loss_noticed_while_a_flush_runs_joins_the_tally_that_comes_back() {
     assert_eq!(gap.start_ms, 1000);
 }
 
+/// `flush_slot` runs its commit with the losses lock free. A loss counted
+/// meanwhile must neither be written into the flushed row nor be lost.
+#[test]
+fn a_loss_counted_during_a_successful_flush_stays_for_the_next_one() {
+    let mut rig = rig(1000);
+    let (ms, read) = manual_clock(1000);
+    let registry = Arc::new(PinRegistry::with_clock(read));
+    let losses = Arc::new(losses());
+    losses.lock().unwrap().queue.record(&registry, 3).unwrap();
+    ms.store(2000, Ordering::SeqCst);
+    let (mid_flush, mid_registry, mut armed) = (losses.clone(), registry.clone(), true);
+    rig.engine.set_observer(Box::new(move |_| {
+        if std::mem::take(&mut armed) {
+            mid_flush
+                .lock()
+                .unwrap()
+                .queue
+                .record(&mid_registry, 2)
+                .unwrap();
+        }
+    }));
+    flush_slot(
+        &mut rig.engine,
+        &registry,
+        &rig.limits,
+        &losses,
+        Slot::Queue,
+        2000,
+    )
+    .unwrap();
+    assert_eq!(
+        gaps(&rig),
+        vec![gap(1000, 2000, GapCause::QueueOverflow, 3)]
+    );
+    assert_eq!(losses.lock().unwrap().queue.pending_count(), 2);
+    assert_eq!(registry.len(), 1, "the new loss holds its own pin");
+}
+
+#[test]
+fn a_loss_counted_during_a_failed_flush_joins_the_tally_that_comes_back() {
+    let mut rig = rig(1000);
+    let (ms, read) = manual_clock(1000);
+    let registry = Arc::new(PinRegistry::with_clock(read));
+    let losses = Arc::new(losses());
+    losses.lock().unwrap().queue.record(&registry, 3).unwrap();
+    ms.store(2000, Ordering::SeqCst);
+    let (mid_flush, mid_registry, mut armed) = (losses.clone(), registry.clone(), true);
+    rig.engine.fault_before_commit_for_test(Box::new(move || {
+        std::mem::take(&mut armed).then(|| {
+            mid_flush
+                .lock()
+                .unwrap()
+                .queue
+                .record(&mid_registry, 2)
+                .unwrap();
+            WriteError::Io(std::io::Error::other("injected"))
+        })
+    }));
+    let failed = flush_slot(
+        &mut rig.engine,
+        &registry,
+        &rig.limits,
+        &losses,
+        Slot::Queue,
+        2000,
+    );
+    assert!(failed.is_err());
+    assert!(gaps(&rig).is_empty());
+    assert_eq!(losses.lock().unwrap().queue.pending_count(), 5);
+    assert_eq!(registry.len(), 1, "one tally, the older pin");
+    assert_eq!(registry.oldest(), Some(1000));
+}
+
 // ---- 3. daemon-disconnected ---------------------------------------------
 
 #[test]
@@ -170,6 +243,37 @@ fn a_disconnect_still_open_at_shutdown_ends_at_the_shutdown() {
         gaps(&rig),
         vec![gap(1000, 5000, GapCause::DaemonDisconnected, 1)]
     );
+}
+
+/// The daemon comes back while a closing flush of its open gap is in flight
+/// and that flush fails: the gap must come back closed at that time, not
+/// open (a heartbeat leaves an open gap alone, so it would never be written).
+#[test]
+fn a_daemon_up_during_a_failed_flush_closes_the_gap_that_comes_back() {
+    let mut rig = rig(1000);
+    let (ms, read) = manual_clock(1000);
+    let registry = Arc::new(PinRegistry::with_clock(read));
+    let losses = Arc::new(losses());
+    ms.store(2000, Ordering::SeqCst);
+    losses.lock().unwrap().daemon_down(&registry);
+    ms.store(3000, Ordering::SeqCst);
+    let (mid_flush, mut armed) = (losses.clone(), true);
+    rig.engine.fault_before_commit_for_test(Box::new(move || {
+        std::mem::take(&mut armed).then(|| {
+            mid_flush.lock().unwrap().daemon_up(2500);
+            WriteError::Io(std::io::Error::other("injected"))
+        })
+    }));
+    let failed = flush_due(&mut rig.engine, &registry, &rig.limits, &losses, true);
+    assert!(failed.is_err());
+    // A heartbeat (not closing) writes it only if the gap is closed.
+    ms.store(4000, Ordering::SeqCst);
+    flush_due(&mut rig.engine, &registry, &rig.limits, &losses, false).unwrap();
+    assert_eq!(
+        gaps(&rig),
+        vec![gap(2000, 2500, GapCause::DaemonDisconnected, 1)]
+    );
+    assert!(registry.is_empty());
 }
 
 // ---- 4. upstream loss ----------------------------------------------------
