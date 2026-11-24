@@ -174,7 +174,11 @@ fn merge_into(conn: &Connection, prev: &GapRow, new: &Gap) -> rusqlite::Result<(
     )?;
     // Sessions that now lie wholly inside the gap (restarts within one
     // millisecond) carry no coverage; the newest session is kept, since the
-    // next start reads it.
+    // next start reads it. A clock-jump merge across a distance leaves what
+    // lies between the two rows alone: those sessions have real coverage.
+    if new.start_ms > prev.gap.end_ms {
+        return Ok(());
+    }
     delete_closed_sessions_inside(conn, prev.gap.end_ms, end)
 }
 

@@ -297,3 +297,32 @@ fn boots_whose_clock_steps_backwards_never_lock_the_ledger() {
     assert!(uncertain[0].start_ms <= 100, "covers the absorbed sessions");
     assert_eq!(gaps.iter().map(|g| g.count).sum::<u64>(), boots as u64);
 }
+
+#[test]
+fn a_session_between_two_coalesced_clock_jumps_survives_the_merge() {
+    let conn = ledger_db();
+    let l = small(64);
+    record_gap(&conn, &gap(100_000, 110_000, GapCause::ClockJump, 1), &l).unwrap();
+    // A closed session inside what a non-adjacent merge would span, then a
+    // different gap, so the first jump is no longer the latest row.
+    conn.execute(
+        "INSERT INTO sessions (start_ms, end_ms, end_kind) VALUES (120_000, 130_000, 'clean')",
+        [],
+    )
+    .unwrap();
+    record_gap(&conn, &gap(140_000, 141_000, GapCause::QueueOverflow, 1), &l).unwrap();
+    conn.execute(
+        "INSERT INTO sessions (start_ms, end_ms, end_kind) VALUES (150_000, NULL, NULL)",
+        [],
+    )
+    .unwrap();
+    record_gap(&conn, &gap(160_000, 170_000, GapCause::ClockJump, 1), &l).unwrap();
+    let merged = read_gaps(&conn).unwrap();
+    assert_eq!(merged.len(), 2, "{merged:?}");
+    assert_eq!(merged[0], gap(100_000, 170_000, GapCause::ClockJump, 2));
+    let sessions = read_sessions(&conn).unwrap();
+    assert!(
+        sessions.iter().any(|s| s.start_ms == 120_000),
+        "the session with real coverage was deleted: {sessions:?}"
+    );
+}
