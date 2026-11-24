@@ -338,6 +338,11 @@ pub struct Engine {
     pub(super) consent: Option<super::Consent>,
     journal: PathBuf,
     observer: Option<Observer>,
+    /// Age retention, in days (D5); changed by the control gate (PR 10).
+    pub(super) retention_days: u16,
+    /// Event bytes eviction removed per process since the last
+    /// [`Engine::take_released`], for admission's ledger.
+    pub(super) released: std::collections::HashMap<String, u64>,
     /// Test seam: an error to raise after a transaction's rows were written
     /// and before `COMMIT`, to prove nothing else happens when it fails.
     #[cfg(test)]
@@ -386,6 +391,8 @@ impl Engine {
             consent,
             journal: journal.into(),
             observer: None,
+            retention_days: super::settings::DEFAULT_RETENTION_DAYS,
+            released: std::collections::HashMap::new(),
             #[cfg(test)]
             fault_before_commit: None,
         };

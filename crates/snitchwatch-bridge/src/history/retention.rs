@@ -138,8 +138,9 @@ impl Engine {
     pub(super) fn evict_victims(
         &mut self,
         victims: Victims<'_>,
+        limit: u64,
     ) -> Result<(TxnReport, Removed), WriteError> {
-        let n = self.budget().rows_per_txn;
+        let n = limit.min(self.budget().rows_per_txn);
         let limits = LedgerLimits::from_budget(self.budget());
         let mut removed = Removed::default();
         let report = self.transact(TxnKind::Evict, |conn| {
@@ -147,12 +148,14 @@ impl Engine {
             removed = delete_chunk(conn, victims, &picked, &limits)?;
             Ok(removed.rows)
         })?;
+        self.note_released(&removed);
         Ok((report, removed))
     }
 
     /// One chunk of the oldest events of all (tier 3).
     pub fn evict_chunk(&mut self) -> Result<TxnReport, WriteError> {
-        self.evict_victims(Victims::Oldest).map(|(report, _)| report)
+        self.evict_victims(Victims::Oldest, u64::MAX)
+            .map(|(report, _)| report)
     }
 
     /// One chunk of the events of `process`, oldest first (tier 2).
@@ -160,13 +163,87 @@ impl Engine {
         &mut self,
         process: &str,
     ) -> Result<TxnReport, WriteError> {
-        self.evict_victims(Victims::Process(process))
+        self.evict_victims(Victims::Process(process), u64::MAX)
             .map(|(report, _)| report)
     }
 
     /// One chunk of the events older than `cutoff_ms` (tier 1).
     pub(super) fn evict_before_chunk(&mut self, cutoff_ms: i64) -> Result<TxnReport, WriteError> {
-        self.evict_victims(Victims::Before(cutoff_ms))
+        self.evict_victims(Victims::Before(cutoff_ms), u64::MAX)
             .map(|(report, _)| report)
+    }
+}
+
+/// Milliseconds in a day.
+const DAY_MS: i64 = 86_400_000;
+/// An expiry pass removes at most this share of the events (one in ten),
+/// whatever the clock says (owner decision 2026-11-24, item 4): a wall clock
+/// stepped far forward cannot erase history in one pass.
+const PASS_DIVISOR: u64 = 10;
+/// Most processes the released-bytes log keeps: admission's ledger holds no
+/// more.
+const MAX_RELEASED: usize = super::admission::MAX_BUCKETS;
+
+/// What one age-expiry pass did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Expiry {
+    pub removed: u64,
+    /// The pass was skipped because the wall clock had jumped.
+    pub skipped_for_jump: bool,
+}
+
+impl Engine {
+    /// Sets the age limit, in days.
+    pub fn set_retention_days(&mut self, days: u16) {
+        self.retention_days = days;
+    }
+
+    fn note_released(&mut self, removed: &Removed) {
+        for (process, bytes) in &removed.by_process {
+            if self.released.len() >= MAX_RELEASED && !self.released.contains_key(process) {
+                continue;
+            }
+            *self.released.entry(process.clone()).or_insert(0) += bytes;
+        }
+    }
+
+    /// The event bytes eviction removed per process since the last call.
+    pub fn take_released(&mut self) -> Vec<(String, u64)> {
+        std::mem::take(&mut self.released).into_iter().collect()
+    }
+
+    /// One age-expiry pass at wall time `now_ms` (tier 1): removes events
+    /// older than the retention limit, at most a tenth of the events, in
+    /// `rows_per_txn` chunks. Skipped while the clock is known to have
+    /// jumped (`clock_jumped`).
+    pub(super) fn expire_aged(
+        &mut self,
+        now_ms: i64,
+        clock_jumped: bool,
+    ) -> Result<Expiry, WriteError> {
+        if clock_jumped {
+            return Ok(Expiry {
+                removed: 0,
+                skipped_for_jump: true,
+            });
+        }
+        let age = i64::from(self.retention_days).saturating_mul(DAY_MS);
+        let cutoff = now_ms.saturating_sub(age);
+        let total: i64 = self
+            .connection()
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
+        let cap = (total.max(0) as u64 / PASS_DIVISOR).max(self.budget().rows_per_txn);
+        let mut removed = 0;
+        while removed < cap {
+            let (_, chunk) = self.evict_victims(Victims::Before(cutoff), cap - removed)?;
+            if chunk.rows == 0 {
+                break;
+            }
+            removed += chunk.rows;
+        }
+        Ok(Expiry {
+            removed,
+            skipped_for_jump: false,
+        })
     }
 }

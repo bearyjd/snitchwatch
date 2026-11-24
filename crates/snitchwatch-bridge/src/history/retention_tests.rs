@@ -355,3 +355,102 @@ fn a_process_eviction_marker_spans_only_what_it_removed() {
     assert_removed_are_covered(&rig, &[200, 400]);
     assert_eq!(remaining(&rig).len(), 3, "the others are untouched");
 }
+
+// ---- age retention (D5) ---------------------------------------------------------
+
+const DAY_MS: i64 = 86_400_000;
+const NOW: i64 = 400 * DAY_MS;
+
+fn aged(rig: &mut Rig, now: i64) -> super::retention::Expiry {
+    rig.engine.expire_aged(now, false).unwrap()
+}
+
+fn put_at(rig: &mut Rig, stamps: &[i64]) {
+    put(rig, stamps.iter().map(|ts| plain(event(*ts, "/p", Action::Allow))).collect());
+}
+
+#[test]
+fn the_age_limit_is_exact_for_each_retention_choice() {
+    for days in [7_u16, 30, 90] {
+        let mut rig = rig();
+        rig.engine.set_retention_days(days);
+        let cutoff = NOW - i64::from(days) * DAY_MS;
+        put_at(&mut rig, &[1, cutoff - 1, cutoff, cutoff + 1, NOW]);
+        let pass = aged(&mut rig, NOW);
+        assert_eq!(pass.removed, 2, "{days} days");
+        let left: Vec<i64> = remaining(&rig).iter().map(|r| r.0).collect();
+        assert_eq!(left, vec![cutoff, cutoff + 1, NOW], "{days} days");
+        assert_removed_are_covered(&rig, &[1, cutoff - 1]);
+    }
+}
+
+#[test]
+fn thirty_days_is_the_default() {
+    let mut rig = rig();
+    let cutoff = NOW - 30 * DAY_MS;
+    put_at(&mut rig, &[cutoff - 1, cutoff]);
+    assert_eq!(aged(&mut rig, NOW).removed, 1);
+}
+
+#[test]
+fn an_expiry_pass_works_in_rows_per_txn_chunks_and_covers_what_it_removed() {
+    let mut rig = rig();
+    let stamps: Vec<i64> = (0..100).map(|i| 1000 + i).collect();
+    put_at(&mut rig, &stamps);
+    put_at(&mut rig, &[NOW]);
+    // 101 rows: a pass may take 10%, floored at one chunk: 32.
+    rig.reports.lock().unwrap().clear();
+    assert_eq!(aged(&mut rig, NOW).removed, 32);
+    let units: Vec<u64> = rig
+        .reports
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.kind == TxnKind::Evict)
+        .map(|r| r.units)
+        .collect();
+    assert_eq!(units, vec![32]);
+    // Passes go on until nothing old is left; every chunk is within the bound.
+    rig.reports.lock().unwrap().clear();
+    while aged(&mut rig, NOW).removed > 0 {}
+    assert_eq!(remaining(&rig).len(), 1);
+    assert!(rig
+        .reports
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|r| r.kind != TxnKind::Evict || r.units <= 32));
+    assert_removed_are_covered(&rig, &stamps);
+}
+
+#[test]
+fn one_pass_expires_at_most_a_tenth_of_the_rows() {
+    let mut rig = rig();
+    let mut stamps: Vec<i64> = (0..1000).map(|i| 1000 + i).collect();
+    stamps.push(NOW);
+    put_at(&mut rig, &stamps);
+    assert_eq!(aged(&mut rig, NOW).removed, 100, "10% of 1001, rounded down");
+    assert_eq!(count(&rig, "events"), 901);
+    assert_eq!(aged(&mut rig, NOW).removed, 90);
+}
+
+#[test]
+fn a_pass_is_skipped_while_the_wall_clock_has_jumped() {
+    let mut rig = rig();
+    put_at(&mut rig, &[1000, 2000, NOW]);
+    let skipped = rig.engine.expire_aged(NOW, true).unwrap();
+    assert!(skipped.skipped_for_jump && skipped.removed == 0);
+    assert_eq!(count(&rig, "events"), 3);
+    assert!(evicted(&rig).is_empty());
+    assert_eq!(aged(&mut rig, NOW).removed, 2, "the next pass goes ahead");
+}
+
+#[test]
+fn a_clock_that_stepped_back_expires_nothing_extra() {
+    let mut rig = rig();
+    let cutoff = NOW - 30 * DAY_MS;
+    put_at(&mut rig, &[cutoff + 5, cutoff + 10, NOW]);
+    // The clock reads two days earlier than it did: the cutoff moves back too.
+    assert_eq!(aged(&mut rig, NOW - 2 * DAY_MS).removed, 0);
+    assert_eq!(count(&rig, "events"), 3);
+}
