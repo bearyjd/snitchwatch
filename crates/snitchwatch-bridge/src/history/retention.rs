@@ -247,6 +247,9 @@ impl Engine {
             }
             removed += chunk.rows;
         }
+        if removed > 0 {
+            self.vacuum_all()?;
+        }
         Ok(Expiry {
             removed,
             skipped_for_jump: false,

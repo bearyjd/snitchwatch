@@ -225,10 +225,15 @@ fn db_events(location: &Location) -> i64 {
 #[test]
 fn while_paused_events_are_lost_without_another_eviction_and_the_ledger_still_writes() {
     let live = live(200, |c| c.pause_min = Duration::from_secs(3600));
+    let filled = db_events(&live.location);
     live.capture.observe(&[&web_event("a.example")]);
     wait_for("the first loss", || live.capture.stats().lost_cap == 1);
     assert!(live.capture.stats().cap_paused);
     let rows = db_events(&live.location);
+    assert!(
+        filled - rows <= 96,
+        "one attempt is three chunks, not a retry as well"
+    );
     live.capture.observe(&[&web_event("b.example")]);
     wait_for("the second loss", || live.capture.stats().lost_cap == 2);
     assert_eq!(

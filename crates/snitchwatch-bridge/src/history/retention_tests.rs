@@ -637,3 +637,50 @@ fn a_fill_to_the_limit_a_pause_and_an_age_sweep_touch_no_other_file() {
     );
     assert!(rig.location.db_path().exists());
 }
+
+#[test]
+fn expiry_returns_the_freed_space_to_the_filesystem() {
+    let mut rig = rig();
+    let old = NOW - 60 * DAY_MS;
+    let mut ts = old;
+    for _ in 0..40 {
+        fill(
+            &rig,
+            (0..32).map(|_| {
+                ts += 1;
+                heavy(ts, 12)
+            }),
+        );
+    }
+    let before = rig.engine.file_pages().unwrap();
+    while rig.engine.expire_aged(NOW, false).unwrap().removed > 0 {}
+    assert_eq!(count(&rig, "events"), 0);
+    assert!(
+        rig.engine.file_pages().unwrap() < before / 4,
+        "S4: {} of {before}",
+        rig.engine.file_pages().unwrap()
+    );
+}
+
+#[test]
+fn tier_two_stops_trimming_once_the_store_is_under_high_water() {
+    let mut rig = rig();
+    let flooder = "/opt/flood";
+    let mut ts = 1_000_000;
+    while bytes_of(&rig, flooder) <= 2 * share_bytes(&rig) {
+        fill(
+            &rig,
+            (0..64).map(|_| {
+                ts += 1;
+                event(ts, flooder, Action::Allow)
+            }),
+        );
+    }
+    fill_rotating(&rig, 12, 3, 0);
+    assert!(rig.engine.make_room().unwrap());
+    assert!(used(&rig) <= high_water(&rig));
+    assert!(
+        bytes_of(&rig, flooder) > share_bytes(&rig),
+        "it took only what the pressure needed, not all the way to the share"
+    );
+}
