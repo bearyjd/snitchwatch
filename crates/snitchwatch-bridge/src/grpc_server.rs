@@ -332,8 +332,17 @@ impl Ui for UiService {
                 stats.uptime,
                 *self.rules.synced().borrow(),
             );
-            self.rules
-                .record_hits(&stats.events, stats.uptime, stats.rule_hits);
+            let upstream_loss =
+                self.rules
+                    .record_hits(&stats.events, stats.uptime, stats.rule_hits);
+            // In memory only; never from WS `Lagged`, which is a slow GUI.
+            // Begun here, before anything awaits, and finished once the
+            // events are queued: the previous ping's guard holds until then,
+            // and a cancelled handler's ticket counts its events as lost.
+            let ping = self
+                .history_capture
+                .as_ref()
+                .map(|capture| capture.begin_ping(upstream_loss, stats.events.len() as u64));
             // Its own statement: neither this nor `record_hits` may run under
             // the rules cache lock the next block takes.
             self.rules
@@ -375,6 +384,9 @@ impl Ui for UiService {
                 if !captured.is_empty() {
                     capture.observe(&captured);
                 }
+            }
+            if let Some(ping) = ping {
+                ping.finish();
             }
 
             // Aggregate counters from the same `Statistics` payload (issue
@@ -425,10 +437,13 @@ impl Ui for UiService {
         // and must not outlive every GUI session. With no authenticated GUI
         // the daemon applies its own default action, paused or not
         // (security review 2026-10-07, issue #47).
-        let mut admission = self
-            .client_presence
-            .admit()
-            .ok_or_else(|| Status::unavailable("no authenticated GUI session"))?;
+        let Some(mut admission) = self.client_presence.admit() else {
+            // No row exists for this prompt: a standing label, not a gap.
+            if let Some(capture) = &self.history_capture {
+                capture.note_no_gui_prompt();
+            }
+            return Err(Status::unavailable("no authenticated GUI session"));
+        };
         let decision = self
             .history_capture
             .as_ref()

@@ -287,14 +287,14 @@ impl RulesSync {
     }
 
     /// Counts the events of a ping that carried statistics, with its
-    /// `uptime` and `rule_hits`.
+    /// `uptime` and `rule_hits`; what the ping showed was never received.
     pub fn record_hits(
         &self,
         events: &[snitchwatch_proto::protocol::Event],
         uptime: u64,
         rule_hits: u64,
-    ) {
-        self.hits.record(events, uptime, rule_hits, &self.cache);
+    ) -> crate::cache::rule_hits::UpstreamLoss {
+        self.hits.record(events, uptime, rule_hits, &self.cache)
     }
 
     /// Generation bumped each time a daemon snapshot is committed.

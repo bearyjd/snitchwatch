@@ -38,7 +38,7 @@
 //! * A rule with `nolog` is not recorded (D1: "not observable"), should the
 //!   daemon ever report one. Traffic the daemon reports nothing for (`nolog`
 //!   rules, default-applied traffic on a stock daemon) leaves no row and no
-//!   fabricated gap here; the standing labels are PR 7.
+//!   fabricated gap here; [`super::gaps::StandingLabels`] says so instead.
 //!
 //! # Coalescing
 //!
@@ -51,15 +51,17 @@
 //!
 //! # Losses
 //!
-//! Counted in memory ([`CaptureStats`]); turning the counters into aggregated
-//! gap rows is PR 7. A dropped record's pin is released at once. A batch that
-//! fails to commit is lost, its pins are released **except the oldest**, which
-//! is kept so the watermark can never pass the first lost event.
+//! Counted in memory ([`CaptureStats`]) and tallied per cause, each tally
+//! holding a pin; [`super::gaps`] turns the tallies into aggregated gap rows
+//! on the writer's heartbeat, at disable and at shutdown. A dropped record's
+//! pin is released at once. A batch that fails to commit is tallied as
+//! `write-failed` under its oldest pin, so the watermark can never pass the
+//! first lost event.
 
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -68,13 +70,18 @@ use snitchwatch_proto::protocol::{Connection, Event, Rule};
 use super::admission::{Admission, AdmissionConfig, Refusal};
 use super::budget::Budget;
 use super::caps::{DstHost, ProcessPath, Protocol, RuleName};
+pub use super::capture_stats::CaptureStats;
+use super::capture_stats::{add, Counters};
 use super::durable::PinnedBatch;
+use super::gaps::{self, Losses, StandingLabels};
 use super::guard::{DecisionGuard, DecisionOutcome};
-use super::ledger::{GapCause, LossCounter};
+use super::ledger::{LedgerLimits, LossCounter};
 use super::lifecycle::Generation;
+use super::pinned_queue::{Entry, PinnedQueue};
 use super::pins::{PinId, PinRegistry};
 use super::record::{Action, AnsweredBy, EventRecord};
 use super::rule_identity::{identify, RuleClass, RuleIdentity};
+use super::session::SessionEnd;
 use super::snapshots::snapshot_for;
 use super::writer::{Engine, Item, QUEUE_MAX_BYTES, QUEUE_MAX_COUNT};
 use super::{load_state, locate, open_store, Consent, Mode, State};
@@ -202,49 +209,13 @@ fn estimate_bytes(r: &EventRecord) -> u64 {
         + len(r.rule_class.as_ref().map(|v| v.as_str().len()))
 }
 
-/// Events, not records: each count is the sum of `repeat_count`s.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CaptureStats {
-    pub seen: u64,
-    pub skipped_nolog: u64,
-    pub refused_process_rate: u64,
-    pub refused_byte_share: u64,
-    pub refused_global_rate: u64,
-    pub dropped_queue: u64,
-    pub dropped_pin: u64,
-    pub written: u64,
-    pub lost_write: u64,
-    /// Matched-rule events whose rule has no identity (recorded without a
-    /// hash).
-    pub unidentified_rules: u64,
-    /// Rows stored with a rule hash but no snapshot (it could not be built).
-    pub snapshot_errors: u64,
-}
-
-#[derive(Default)]
-struct Counters {
-    seen: AtomicU64,
-    skipped_nolog: AtomicU64,
-    refused_process_rate: AtomicU64,
-    refused_byte_share: AtomicU64,
-    refused_global_rate: AtomicU64,
-    dropped_queue: AtomicU64,
-    dropped_pin: AtomicU64,
-    written: AtomicU64,
-    lost_write: AtomicU64,
-    unidentified_rules: AtomicU64,
-    snapshot_errors: AtomicU64,
-}
-
-fn add(counter: &AtomicU64, n: u64) {
-    counter.fetch_add(n, Ordering::Relaxed);
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureConfig {
     pub queue_max_bytes: usize,
     pub queue_max_count: usize,
     pub admission: AdmissionConfig,
+    /// How often the writer commits a heartbeat and flushes its loss tallies.
+    pub heartbeat_every: Duration,
 }
 
 impl CaptureConfig {
@@ -253,15 +224,14 @@ impl CaptureConfig {
             queue_max_bytes: QUEUE_MAX_BYTES,
             queue_max_count: QUEUE_MAX_COUNT,
             admission: AdmissionConfig::for_retained_bytes(budget.main_bytes),
+            heartbeat_every: HEARTBEAT_EVERY,
         }
     }
 }
 
 /// How many queues this process has allocated: stays 0 while history is off.
-static QUEUES_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-
 pub fn queues_allocated() -> usize {
-    QUEUES_ALLOCATED.load(Ordering::Relaxed)
+    super::pinned_queue::allocated()
 }
 
 /// How long the writer waits on a lock held by another connection.
@@ -271,115 +241,10 @@ const RETRY_BACKOFF_MIN: Duration = Duration::from_millis(100);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(2);
 /// A failing writer logs at most this often.
 const ERROR_LOG_EVERY: Duration = Duration::from_secs(30);
+/// How often the writer commits a heartbeat and flushes its loss tallies.
+const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
 /// After close the writer drains for at most this long; the rest is lost.
 const SHUTDOWN_DRAIN: Duration = Duration::from_secs(2);
-
-type Entry = (Item, PinId);
-
-/// [`super::writer::Queue`] with a pin riding along with each item. A
-/// bounded channel, so a producer never takes a lock the writer holds and
-/// never waits: `try_send` either queues or says why not. The byte bound is
-/// an atomic reservation made before the send.
-struct PinnedQueue {
-    tx: SyncSender<Entry>,
-    rx: Mutex<Option<Receiver<Entry>>>,
-    bytes: AtomicUsize,
-    queued: AtomicUsize,
-    max_bytes: usize,
-    closed: AtomicBool,
-}
-
-impl PinnedQueue {
-    fn new(max_bytes: usize, max_count: usize) -> Self {
-        QUEUES_ALLOCATED.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = std::sync::mpsc::sync_channel(max_count);
-        Self {
-            tx,
-            rx: Mutex::new(Some(rx)),
-            bytes: AtomicUsize::new(0),
-            queued: AtomicUsize::new(0),
-            max_bytes,
-            closed: AtomicBool::new(false),
-        }
-    }
-
-    /// Never waits. Gives the item and its pin back when it cannot queue.
-    fn try_push(&self, item: Item, pin: PinId) -> Result<(), Box<Entry>> {
-        let size = item.queue_bytes();
-        if self.closed.load(Ordering::Acquire) {
-            return Err(Box::new((item, pin)));
-        }
-        if self.bytes.fetch_add(size, Ordering::AcqRel) + size > self.max_bytes {
-            self.bytes.fetch_sub(size, Ordering::AcqRel);
-            return Err(Box::new((item, pin)));
-        }
-        self.queued.fetch_add(1, Ordering::AcqRel);
-        self.tx.try_send((item, pin)).map_err(|e| {
-            self.bytes.fetch_sub(size, Ordering::AcqRel);
-            self.queued.fetch_sub(1, Ordering::AcqRel);
-            match e {
-                TrySendError::Full(entry) | TrySendError::Disconnected(entry) => Box::new(entry),
-            }
-        })
-    }
-
-    fn close(&self) {
-        self.closed.store(true, Ordering::Release);
-    }
-
-    fn len(&self) -> usize {
-        self.queued.load(Ordering::Acquire)
-    }
-
-    fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Acquire)
-    }
-
-    /// The writer's end, once.
-    fn take_receiver(&self) -> Option<Receiver<Entry>> {
-        self.rx.lock().unwrap_or_else(|e| e.into_inner()).take()
-    }
-
-    /// Up to `max` entries, waiting at most `wait` for the first. `None`
-    /// once closed and drained.
-    fn pop_batch(&self, rx: &Receiver<Entry>, max: usize, wait: Duration) -> Option<PinnedBatch> {
-        let mut entries: Vec<Entry> = Vec::new();
-        match rx.recv_timeout(wait) {
-            Ok(first) => entries.push(first),
-            Err(RecvTimeoutError::Timeout) => {
-                // `close` precedes the last drain: nothing queues after it.
-                return if self.closed.load(Ordering::Acquire) && self.len() == 0 {
-                    None
-                } else {
-                    Some(PinnedBatch {
-                        items: Vec::new(),
-                        pins: Vec::new(),
-                    })
-                };
-            }
-            Err(RecvTimeoutError::Disconnected) => return None,
-        }
-        while entries.len() < max {
-            match rx.try_recv() {
-                Ok(next) => entries.push(next),
-                Err(_) => break,
-            }
-        }
-        let (items, pins): (Vec<Item>, Vec<PinId>) = entries.into_iter().unzip();
-        let freed: usize = items.iter().map(Item::queue_bytes).sum();
-        self.bytes.fetch_sub(freed, Ordering::AcqRel);
-        self.queued.fetch_sub(items.len(), Ordering::AcqRel);
-        Some(PinnedBatch { items, pins })
-    }
-}
-
-/// Events that were never recorded, one tally (so one pin) per cause. Each
-/// pin holds the watermark back until the tally becomes a gap row; PR 7
-/// flushes them. Until then at most one pin per cause is ever held.
-struct Losses {
-    queue: LossCounter,
-    admission: LossCounter,
-}
 
 pub(super) struct Shared {
     // In-memory only. A control operation must change eligibility and/or
@@ -390,6 +255,12 @@ pub(super) struct Shared {
     queue: PinnedQueue,
     admission: Mutex<Admission>,
     losses: Mutex<Losses>,
+    heartbeat_every: Duration,
+    /// A fork default-action event was seen this session (D1's capability).
+    fork_marker_seen: AtomicBool,
+    no_gui_prompts: AtomicBool,
+    /// The writer ends its session as `disabled`, not `clean`.
+    disabling: AtomicBool,
     counters: Counters,
     #[cfg(test)]
     probe: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -403,10 +274,11 @@ impl Shared {
             registry,
             queue: PinnedQueue::new(config.queue_max_bytes, config.queue_max_count),
             admission: Mutex::new(Admission::new(config.admission)),
-            losses: Mutex::new(Losses {
-                queue: LossCounter::new(GapCause::QueueOverflow),
-                admission: LossCounter::new(GapCause::AdmissionDrop),
-            }),
+            losses: Mutex::new(Losses::new()),
+            heartbeat_every: config.heartbeat_every,
+            fork_marker_seen: AtomicBool::new(false),
+            no_gui_prompts: AtomicBool::new(false),
+            disabling: AtomicBool::new(false),
             counters: Counters::default(),
             #[cfg(test)]
             probe: Mutex::new(None),
@@ -414,21 +286,7 @@ impl Shared {
     }
 
     fn stats(&self) -> CaptureStats {
-        let c = &self.counters;
-        let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
-        CaptureStats {
-            seen: get(&c.seen),
-            skipped_nolog: get(&c.skipped_nolog),
-            refused_process_rate: get(&c.refused_process_rate),
-            refused_byte_share: get(&c.refused_byte_share),
-            refused_global_rate: get(&c.refused_global_rate),
-            dropped_queue: get(&c.dropped_queue),
-            dropped_pin: get(&c.dropped_pin),
-            written: get(&c.written),
-            lost_write: get(&c.lost_write),
-            unidentified_rules: get(&c.unidentified_rules),
-            snapshot_errors: get(&c.snapshot_errors),
-        }
+        self.counters.snapshot()
     }
 
     fn admit(&self, record: &EventRecord, now_ms: i64) -> Result<u64, Refusal> {
@@ -456,10 +314,17 @@ impl Shared {
         let mut losses = self.losses.lock().unwrap_or_else(|e| e.into_inner());
         let tally = pick(&mut losses);
         if let Some(pin) = pin {
-            tally.record_pinned(&self.registry, n, pin);
+            tally.record_pinned(&self.registry, n, pin, None);
         } else {
             let _ = tally.record(&self.registry, n);
         }
+    }
+
+    pub(super) fn with_losses(&self, f: impl FnOnce(&mut Losses, &PinRegistry)) {
+        f(
+            &mut self.losses.lock().unwrap_or_else(|e| e.into_inner()),
+            &self.registry,
+        );
     }
 
     /// Admit, pin and queue one record.
@@ -549,6 +414,9 @@ impl Shared {
         for event in events {
             let Some(m) = map_event(event) else { continue };
             add(&self.counters.seen, 1);
+            if m.record.answered_by == AnsweredBy::Default {
+                self.fork_marker_seen.store(true, Ordering::Relaxed);
+            }
             if m.nolog {
                 add(&self.counters.skipped_nolog, 1);
             } else {
@@ -564,13 +432,15 @@ impl Shared {
     }
 
     /// The writer thread: commit pinned batches until the queue is closed and
-    /// empty, or, once closed, until [`SHUTDOWN_DRAIN`] has passed.
-    fn run_writer(&self, mut engine: Engine, rx: Receiver<Entry>) {
+    /// empty, or, once closed, until [`SHUTDOWN_DRAIN`] has passed; beat every
+    /// [`CaptureConfig::heartbeat_every`]; then flush the loss tallies and end
+    /// the session.
+    fn run_writer(&self, mut engine: Engine, rx: Receiver<Entry>, mut began: bool) {
         let rows = engine.budget().rows_per_txn as usize;
         // A short lock wait: a locked database costs a batch, not the thread.
         let _ = engine.connection().busy_timeout(WRITER_BUSY_TIMEOUT);
-        // The oldest pin of the batches that failed, held for good.
-        let mut held: Option<PinId> = None;
+        let limits = LedgerLimits::from_budget(engine.budget());
+        let mut pulse = gaps::Pulse::new(self.heartbeat_every, self.registry.now());
         let mut backoff = RETRY_BACKOFF_MIN;
         let mut last_logged: Option<Instant> = None;
         let mut deadline: Option<Instant> = None;
@@ -578,8 +448,25 @@ impl Shared {
             if self.queue.is_closed() {
                 let limit = *deadline.get_or_insert_with(|| Instant::now() + SHUTDOWN_DRAIN);
                 if Instant::now() >= limit {
-                    self.abandon(batch, &rx, &mut held);
-                    return;
+                    self.abandon(batch, &rx);
+                    break;
+                }
+            }
+            if !began {
+                match engine.begin_session(&self.registry, &limits) {
+                    Ok(_) => began = true,
+                    Err(e) => {
+                        // Nothing is committed (not even a heartbeat) over the
+                        // previous session; what is queued is lost, loudly.
+                        log_rate_limited(&mut last_logged, &e, batch_events(&batch));
+                        self.lost_batch(batch);
+                        continue;
+                    }
+                }
+            }
+            if pulse.due() {
+                if let Err(e) = pulse.beat(&mut engine, &self.registry, &limits, &self.losses) {
+                    log_rate_limited(&mut last_logged, &e, 0);
                 }
             }
             if batch.items.is_empty() {
@@ -600,57 +487,80 @@ impl Shared {
                     backoff = RETRY_BACKOFF_MIN;
                 }
                 Err(e) => {
-                    self.lost_batch(batch, &mut held);
-                    if last_logged.is_none_or(|t| t.elapsed() >= ERROR_LOG_EVERY) {
-                        last_logged = Some(Instant::now());
-                        tracing::error!(error = %e, lost = events, "history write failed");
-                    }
+                    self.lost_batch(batch);
+                    log_rate_limited(&mut last_logged, &e, events);
                     backoff = (backoff * 2).min(RETRY_BACKOFF_MAX);
                 }
             }
         }
+        self.finish(&mut engine, &limits, began, &mut pulse);
+    }
+
+    /// The queue is closed and drained: flush every tally (an open daemon
+    /// gap ends now) and end the session. A failure leaves the pins held, so
+    /// the next start still reconstructs a gap from the watermark.
+    fn finish(
+        &self,
+        engine: &mut Engine,
+        limits: &LedgerLimits,
+        began: bool,
+        pulse: &mut gaps::Pulse,
+    ) {
+        // Never began: ending would close the previous session as this one's.
+        if !began && engine.begin_session(&self.registry, limits).is_err() {
+            tracing::error!("history never started its session; the previous one stays open");
+            return;
+        }
+        let kind = if self.disabling.load(Ordering::Acquire) {
+            SessionEnd::Disabled
+        } else {
+            SessionEnd::Clean
+        };
+        if let Err(e) = pulse.close(engine, &self.registry, limits, &self.losses, kind) {
+            tracing::error!(error = %e, "history shutdown could not record its gaps");
+        }
     }
 
     /// The batch could not be written: count it, give its admission bytes
-    /// back and keep only the oldest pin.
-    fn lost_batch(&self, batch: PinnedBatch, held: &mut Option<PinId>) {
-        add(&self.counters.lost_write, batch_events(&batch));
+    /// back, and tally it as `write-failed` under its oldest pin, which holds
+    /// the watermark until the tally is a gap row (W1).
+    fn lost_batch(&self, batch: PinnedBatch) {
+        let lost = batch_events(&batch);
+        add(&self.counters.lost_write, lost);
         for item in &batch.items {
             self.refund(&item.event, estimate_bytes(&item.event));
         }
-        self.keep_oldest_pin(batch.pins, held);
+        if let Some(oldest) = self.release_all_but_oldest(batch.pins) {
+            self.lose(|l| &mut l.write_failed, lost, Some(oldest));
+        }
     }
 
     /// Shutdown ran out of time: everything still queued is lost.
-    fn abandon(&self, batch: PinnedBatch, rx: &Receiver<Entry>, held: &mut Option<PinId>) {
+    fn abandon(&self, batch: PinnedBatch, rx: &Receiver<Entry>) {
         let (mut items, mut pins) = (batch.items, batch.pins);
         for (item, pin) in rx.try_iter() {
             items.push(item);
             pins.push(pin);
         }
-        self.lost_batch(PinnedBatch { items, pins }, held);
+        self.lost_batch(PinnedBatch { items, pins });
     }
 
-    /// Releases `pins` but the one that arrived first, unless the pin
-    /// already held is older.
-    fn keep_oldest_pin(&self, mut pins: Vec<PinId>, held: &mut Option<PinId>) {
+    /// Releases `pins` but the one that arrived first, which it returns.
+    fn release_all_but_oldest(&self, mut pins: Vec<PinId>) -> Option<PinId> {
         let arrival = |p: &PinId| self.registry.arrival_of(p).unwrap_or(i64::MAX);
-        if let Some(i) = (0..pins.len()).min_by_key(|&i| arrival(&pins[i])) {
-            let oldest = pins.swap_remove(i);
-            match held.take() {
-                Some(prev) if arrival(&prev) <= arrival(&oldest) => {
-                    pins.push(oldest);
-                    *held = Some(prev);
-                }
-                Some(prev) => {
-                    pins.push(prev);
-                    *held = Some(oldest);
-                }
-                None => *held = Some(oldest),
-            }
-        }
+        let i = (0..pins.len()).min_by_key(|&i| arrival(&pins[i]))?;
+        let oldest = pins.swap_remove(i);
         let refs: Vec<&PinId> = pins.iter().collect();
         let _ = self.registry.release_all(&refs);
+        Some(oldest)
+    }
+}
+
+/// A failing writer logs at most once per [`ERROR_LOG_EVERY`].
+fn log_rate_limited(last: &mut Option<Instant>, error: &dyn std::fmt::Display, lost: u64) {
+    if last.is_none_or(|t| t.elapsed() >= ERROR_LOG_EVERY) {
+        *last = Some(Instant::now());
+        tracing::error!(%error, lost, "history write failed");
     }
 }
 
@@ -665,7 +575,7 @@ fn batch_events(batch: &PinnedBatch) -> u64 {
 /// History capture: the admission state, the pinned queue and the writer
 /// thread. Exists only while history is enabled.
 pub struct Capture {
-    shared: Arc<Shared>,
+    pub(super) shared: Arc<Shared>,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
@@ -677,6 +587,19 @@ impl Capture {
         registry: Arc<PinRegistry>,
         config: CaptureConfig,
     ) -> io::Result<Self> {
+        let mut engine = engine;
+        let limits = LedgerLimits::from_budget(engine.budget());
+        // The previous session's end becomes a `bridge-down` gap now. A
+        // failure is retried by the writer before it commits anything: until
+        // the session began, a heartbeat or an end would overwrite what the
+        // crashed session left.
+        let began = match engine.begin_session(&registry, &limits) {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "history could not start its session; retrying");
+                false
+            }
+        };
         let shared = Arc::new(Shared::new(registry, config, engine.consent.clone()));
         let rx = shared
             .queue
@@ -685,7 +608,7 @@ impl Capture {
         let worker = shared.clone();
         let handle = std::thread::Builder::new()
             .name("history-writer".into())
-            .spawn(move || worker.run_writer(engine, rx))?;
+            .spawn(move || worker.run_writer(engine, rx, began))?;
         Ok(Self {
             shared,
             writer: Mutex::new(Some(handle)),
@@ -730,6 +653,28 @@ impl Capture {
         self.shared.stats()
     }
 
+    /// A prompt arrived with no authenticated GUI: no row can exist for it.
+    pub fn note_no_gui_prompt(&self) {
+        self.shared.no_gui_prompts.store(true, Ordering::Relaxed);
+    }
+
+    /// What history cannot observe today (standing notes, not gaps).
+    pub fn standing_labels(&self) -> StandingLabels {
+        StandingLabels {
+            // The daemon never reports `nolog` traffic: stated while history is on.
+            nolog: true,
+            stock_default_unobservable: !self.shared.fork_marker_seen.load(Ordering::Relaxed),
+            no_gui_prompts: self.shared.no_gui_prompts.load(Ordering::Relaxed),
+        }
+    }
+
+    /// History is switched off: like [`Self::shutdown`], but the session ends
+    /// `disabled`, so the next start records a `disabled` gap.
+    pub fn disable(self) -> CaptureStats {
+        self.shared.disabling.store(true, Ordering::Release);
+        self.shutdown()
+    }
+
     /// Writes what is queued, stops the writer and returns the final counts.
     pub fn shutdown(self) -> CaptureStats {
         self.stop();
@@ -761,6 +706,16 @@ impl Capture {
             shared: Arc::new(Shared::new(registry, config, None)),
             writer: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_losses_for_test<R>(&self, f: impl FnOnce(&Losses) -> R) -> R {
+        f(&self.shared.losses.lock().unwrap())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn daemon_gap_open_for_test(&self) -> bool {
+        self.with_losses_for_test(|l| l.disconnect.is_pending())
     }
 
     #[cfg(test)]

@@ -5,7 +5,7 @@
 //! can depend on this narrow type without importing from the gRPC service
 //! module itself.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tracing::warn;
@@ -31,6 +31,9 @@ use tracing::warn;
 pub struct DaemonLiveness {
     last_activity: Arc<StdMutex<Instant>>,
     open_notification_streams: Arc<AtomicUsize>,
+    /// Set by the first real activity: a bridge that started with the daemon
+    /// away has only its startup grace, which proves nothing about the daemon.
+    heard: Arc<AtomicBool>,
 }
 
 impl DaemonLiveness {
@@ -38,13 +41,20 @@ impl DaemonLiveness {
         Self {
             last_activity: Arc::new(StdMutex::new(Instant::now())),
             open_notification_streams: Arc::new(AtomicUsize::new(0)),
+            heard: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Whether the daemon was ever heard from since the bridge started.
+    pub fn heard_from_daemon(&self) -> bool {
+        self.heard.load(Ordering::SeqCst)
     }
 
     /// Record inbound gRPC activity from the daemon. Called by every
     /// daemon-facing handler (`ping`, `ask_rule`, `subscribe`, `post_alert`,
     /// `notifications` open + each inbound reply).
     pub fn touch(&self) {
+        self.heard.store(true, Ordering::SeqCst);
         *self.last_activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
     }
 
@@ -111,6 +121,7 @@ impl DaemonLiveness {
         Self {
             last_activity: Arc::new(StdMutex::new(now - age)),
             open_notification_streams: Arc::new(AtomicUsize::new(0)),
+            heard: Arc::new(AtomicBool::new(true)),
         }
     }
 }

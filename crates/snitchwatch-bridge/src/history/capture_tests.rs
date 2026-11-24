@@ -267,6 +267,7 @@ fn config_for(budget: &Budget) -> CaptureConfig {
         queue_max_bytes: super::super::writer::QUEUE_MAX_BYTES,
         queue_max_count: super::super::writer::QUEUE_MAX_COUNT,
         admission: AdmissionConfig::for_retained_bytes(budget.main_bytes),
+        heartbeat_every: std::time::Duration::from_secs(3600),
     }
 }
 
@@ -758,8 +759,9 @@ fn a_batch_that_fails_once_is_retried_and_written() {
     let mut engine = engine_at(&location);
     let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let t = tries.clone();
+    // Commit 0 is the session start; commit 1 is the batch's first try.
     engine.fault_before_commit_for_test(Box::new(move || {
-        (t.fetch_add(1, Ordering::SeqCst) == 0)
+        (t.fetch_add(1, Ordering::SeqCst) == 1)
             .then(|| super::super::writer::WriteError::Io(std::io::Error::other("injected")))
     }));
     let config = unlimited(config_for(engine.budget()));
@@ -771,7 +773,7 @@ fn a_batch_that_fails_once_is_retried_and_written() {
 }
 
 #[test]
-fn a_failed_commit_loses_the_batch_but_keeps_the_oldest_pin() {
+fn a_failed_commit_loses_the_batch_and_holds_its_oldest_pin_until_the_gap_row_commits() {
     let root = tempdir();
     let state = state_dir(&root);
     let location = locate(Mode::User, Some(&state)).unwrap();
@@ -789,8 +791,9 @@ fn a_failed_commit_loses_the_batch_but_keeps_the_oldest_pin() {
     let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let f = failed.clone();
     engine.fault_before_commit_for_test(Box::new(move || {
-        // The first batch fails its try and its retry.
-        (f.fetch_add(1, Ordering::SeqCst) < 2)
+        // Commit 0 is the session start; the first batch fails its try and
+        // its retry (commits 1 and 2).
+        matches!(f.fetch_add(1, Ordering::SeqCst), 1 | 2)
             .then(|| super::super::writer::WriteError::Io(std::io::Error::other("injected")))
     }));
     let config = unlimited(config_for(engine.budget()));
@@ -807,11 +810,24 @@ fn a_failed_commit_loses_the_batch_but_keeps_the_oldest_pin() {
     }
     clock.store(60_000, Ordering::SeqCst);
     capture.observe(&[&simple("/a", "second", 2)]);
-    let stats = capture.shutdown();
-    assert_eq!((stats.lost_write, stats.written), (1, 1));
-    // The watermark may not pass the first lost event: its pin stays, alone.
+    // The watermark may not pass the first lost event: its pin stays, alone,
+    // until the `write-failed` row that covers it commits.
+    while capture.stats().written == 0 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     assert_eq!(registry.len(), 1);
     assert_eq!(registry.oldest(), Some(50_000));
+    let stats = capture.shutdown();
+    assert_eq!((stats.lost_write, stats.written), (1, 1));
+    assert!(registry.is_empty(), "released with its gap row");
+    let db = Db::open(location.db_path()).unwrap();
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM gaps WHERE cause = 'write-failed' AND start_ms = 50000"
+        ),
+        1
+    );
 }
 
 #[test]

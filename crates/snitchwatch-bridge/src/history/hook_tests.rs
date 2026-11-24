@@ -442,3 +442,103 @@ async fn a_ping_with_no_events_never_calls_capture() {
     ping(&svc, vec![]).await;
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
+
+// ---- PR 7: upstream loss and standing labels through the hooks ----
+
+async fn ping_counting(svc: &UiService, events: Vec<Event>, rule_hits: u64) {
+    svc.ping(Request::new(PingRequest {
+        id: 7,
+        stats: Some(Statistics {
+            events,
+            uptime: 5,
+            rule_hits,
+            ..Default::default()
+        }),
+    }))
+    .await
+    .unwrap();
+}
+
+/// What a stopped capture left in its database.
+fn gaps_after_stop(
+    svc: UiService,
+    capture: Arc<Capture>,
+    root: &tempfile::TempDir,
+) -> Vec<crate::history::ledger::Gap> {
+    drop(svc);
+    Arc::try_unwrap(capture)
+        .ok()
+        .expect("no other holder")
+        .shutdown();
+    let state = root.path().canonicalize().unwrap().join("state");
+    let location = locate(Mode::User, Some(&state)).unwrap();
+    crate::history::ledger::read_gaps(&rusqlite::Connection::open(location.db_path()).unwrap())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_counter_that_outgrew_its_events_becomes_an_upstream_loss_gap_of_that_lower_bound() {
+    let (svc, _rx) = service();
+    let (capture, root) = live_capture();
+    let svc = svc.with_history_capture(capture.clone());
+    ping_counting(&svc, vec![], 10).await;
+    // The daemon's counter grew by 7 and only one event arrived.
+    ping_counting(&svc, vec![matched("a.example", "r", "always")], 17).await;
+    let gaps = gaps_after_stop(svc, capture, &root);
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(
+        gaps[0].cause,
+        crate::history::ledger::GapCause::UpstreamLoss
+    );
+    assert_eq!(gaps[0].count, 6);
+    assert!(gaps[0].is_uncertain());
+}
+
+#[tokio::test]
+async fn a_lagging_ws_subscriber_is_not_an_upstream_loss() {
+    let (tx, mut slow) = broadcast::channel(1);
+    let svc = UiService::new(
+        Arc::new(Mutex::new(ConnectionCache::new(64))),
+        tx,
+        Arc::new(TrayStatePublisher::new()),
+        Arc::new(NoticeBus::new()),
+        Arc::new(FilterPause::new()),
+    );
+    let (capture, root) = live_capture();
+    let svc = svc.with_history_capture(capture.clone());
+    ping_counting(&svc, vec![], 10).await;
+    for round in 1..=6u64 {
+        let events = vec![
+            matched("a.example", "r", "always"),
+            matched("b.example", "r", "always"),
+        ];
+        ping_counting(&svc, events, 10 + 2 * round).await;
+    }
+    assert!(
+        matches!(
+            slow.try_recv(),
+            Err(broadcast::error::TryRecvError::Lagged(_))
+        ),
+        "the subscriber fell behind"
+    );
+    let gaps = gaps_after_stop(svc, capture, &root);
+    assert_eq!(
+        gaps,
+        vec![],
+        "lag on the way to a GUI loses nothing upstream"
+    );
+}
+
+#[tokio::test]
+async fn a_prompt_with_no_gui_session_sets_its_standing_label_and_makes_no_gap() {
+    let (svc, _rx) = service();
+    let (capture, root) = live_capture();
+    let svc = svc.with_history_capture(capture.clone());
+    assert!(!capture.standing_labels().no_gui_prompts);
+    assert!(svc
+        .ask_rule(Request::new(connection("nobody-home.example")))
+        .await
+        .is_err());
+    assert!(capture.standing_labels().no_gui_prompts);
+    assert_eq!(gaps_after_stop(svc, capture, &root), vec![]);
+}

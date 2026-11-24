@@ -64,6 +64,25 @@ pub fn write_watermark(conn: &Connection, ms: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// [`write_watermark`], then lowered to `ceiling` (the oldest live pin) if it
+/// stands past it: a clock that stepped back can leave a pin older than a
+/// watermark already written, and a crash then must not treat that pin's
+/// stretch as covered. With no live pin the watermark still never moves back.
+pub(crate) fn write_watermark_capped(
+    conn: &Connection,
+    ms: i64,
+    ceiling: Option<i64>,
+) -> rusqlite::Result<()> {
+    write_watermark(conn, ms)?;
+    if let Some(ceiling) = ceiling {
+        conn.execute(
+            "UPDATE meta SET watermark_ms = ?1 WHERE id = 1 AND watermark_ms > ?1",
+            [ceiling],
+        )?;
+    }
+    Ok(())
+}
+
 /// Every session, oldest first.
 pub fn read_sessions(conn: &Connection) -> rusqlite::Result<Vec<Session>> {
     let mut stmt = conn.prepare("SELECT start_ms, end_ms, end_kind FROM sessions ORDER BY id")?;
@@ -128,7 +147,9 @@ fn close_previous(conn: &Connection, now_ms: i64) -> rusqlite::Result<Option<Gap
         ),
         _ => {
             let watermark = read_watermark(conn)?.unwrap_or(start_ms);
-            let from = watermark.max(start_ms);
+            // Not raised to `start_ms`: after a clock rewind the repaired
+            // watermark lies before it, and what follows it is uncovered.
+            let from = watermark;
             conn.execute(
                 "UPDATE sessions SET end_ms = ?1, end_kind = ?2 WHERE id = ?3",
                 params![from, SessionEnd::Unclean.as_str(), id],

@@ -27,6 +27,9 @@ pub const DEFAULT_MAX_ROWS: u64 = 2048;
 /// The smallest ceiling that can hold one collapsed span, the open session
 /// and a few recent rows.
 pub const MIN_CEILING: u64 = 8;
+/// Clock-jump rows closer than this merge into one, whatever rows came
+/// between: a flapping clock must not write a row per heartbeat.
+const CLOCK_JUMP_COALESCE_MS: i64 = 600_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GapCause {
@@ -130,13 +133,25 @@ struct GapRow {
 }
 
 /// Records `gap` (merging it into the latest gap when adjacent and of the same
-/// cause), then brings the ledger within `limits` by collapsing (L1).
+/// cause; a clock jump merges into the latest clock-jump row within
+/// [`CLOCK_JUMP_COALESCE_MS`], other rows in between or not), then brings the
+/// ledger within `limits` by collapsing (L1).
 pub fn record_gap(conn: &Connection, gap: &Gap, limits: &LedgerLimits) -> rusqlite::Result<()> {
-    match latest_gap(conn)? {
-        Some(prev) if mergeable(&prev.gap, gap) => merge_into(conn, &prev, gap)?,
-        _ => insert_gap(conn, gap)?,
+    let target = if gap.cause == GapCause::ClockJump {
+        latest_of_cause(conn, GapCause::ClockJump)?.filter(|p| near(&p.gap, gap))
+    } else {
+        latest_gap(conn)?.filter(|p| mergeable(&p.gap, gap))
+    };
+    match target {
+        Some(prev) => merge_into(conn, &prev, gap)?,
+        None => insert_gap(conn, gap)?,
     }
     enforce_limits(conn, limits)
+}
+
+fn near(prev: &Gap, new: &Gap) -> bool {
+    new.start_ms <= prev.end_ms.saturating_add(CLOCK_JUMP_COALESCE_MS)
+        && new.end_ms.saturating_add(CLOCK_JUMP_COALESCE_MS) >= prev.start_ms
 }
 
 fn mergeable(prev: &Gap, new: &Gap) -> bool {
@@ -159,7 +174,11 @@ fn merge_into(conn: &Connection, prev: &GapRow, new: &Gap) -> rusqlite::Result<(
     )?;
     // Sessions that now lie wholly inside the gap (restarts within one
     // millisecond) carry no coverage; the newest session is kept, since the
-    // next start reads it.
+    // next start reads it. A clock-jump merge across a distance leaves what
+    // lies between the two rows alone: those sessions have real coverage.
+    if new.start_ms > prev.gap.end_ms {
+        return Ok(());
+    }
     delete_closed_sessions_inside(conn, prev.gap.end_ms, end)
 }
 
@@ -209,6 +228,15 @@ fn latest_gap(conn: &Connection) -> rusqlite::Result<Option<GapRow>> {
     conn.query_row(
         &format!("SELECT {GAP_COLUMNS} FROM gaps ORDER BY id DESC LIMIT 1"),
         [],
+        gap_from_row,
+    )
+    .optional()
+}
+
+fn latest_of_cause(conn: &Connection, cause: GapCause) -> rusqlite::Result<Option<GapRow>> {
+    conn.query_row(
+        &format!("SELECT {GAP_COLUMNS} FROM gaps WHERE cause = ?1 ORDER BY id DESC LIMIT 1"),
+        [cause.as_str()],
         gap_from_row,
     )
     .optional()
@@ -365,13 +393,20 @@ pub fn row_count(conn: &Connection) -> rusqlite::Result<u64> {
 #[derive(Debug)]
 pub struct LossCounter {
     cause: GapCause,
+    /// False: the loss began somewhere after its recorded start (see
+    /// [`Self::bounded`]).
+    exact: bool,
     pending: Option<Pending>,
 }
 
 #[derive(Debug)]
 struct Pending {
     count: u64,
+    /// When the first loss was noticed: the pin's arrival.
     first_ms: i64,
+    /// Where the gap starts: `first_ms`, or earlier when the losses are known
+    /// to have begun before they were noticed.
+    start_ms: i64,
     pin: PinId,
 }
 
@@ -379,7 +414,17 @@ impl LossCounter {
     pub fn new(cause: GapCause) -> Self {
         Self {
             cause,
+            exact: true,
             pending: None,
+        }
+    }
+
+    /// A tally whose gap start is only a bound: the losses happened somewhere
+    /// after it ([`Self::record_since`]).
+    pub fn bounded(cause: GapCause) -> Self {
+        Self {
+            exact: false,
+            ..Self::new(cause)
         }
     }
 
@@ -392,6 +437,7 @@ impl LossCounter {
                 self.pending = Some(Pending {
                     count: n,
                     first_ms,
+                    start_ms: first_ms,
                     pin,
                 });
             }
@@ -399,30 +445,93 @@ impl LossCounter {
         Ok(())
     }
 
+    /// [`record`](Self::record) for losses known to lie after `since_ms`
+    /// (earlier than they were noticed): the gap starts there. The pin still
+    /// arrives now, which is what W1 can honour.
+    pub fn record_since(
+        &mut self,
+        registry: &PinRegistry,
+        n: u64,
+        since_ms: i64,
+    ) -> Result<(), PinError> {
+        self.record(registry, n)?;
+        if let Some(p) = self.pending.as_mut() {
+            p.start_ms = p.start_ms.min(since_ms);
+        }
+        Ok(())
+    }
+
     /// Transfer an already pinned loss into the tally without advancing its
     /// coverage boundary to the later time at which the loss was detected.
-    pub(super) fn record_pinned(&mut self, registry: &PinRegistry, n: u64, pin: PinId) {
+    /// The gap starts at the pin's arrival, or at `floor` when that is later.
+    pub(super) fn record_pinned(
+        &mut self,
+        registry: &PinRegistry,
+        n: u64,
+        pin: PinId,
+        floor: Option<i64>,
+    ) {
         let Some(first_ms) = registry.arrival_of(&pin) else {
             return;
         };
-        let count = match self.pending.take() {
-            Some(mut pending) if pending.first_ms <= first_ms => {
-                pending.count = pending.count.saturating_add(n);
-                self.pending = Some(pending);
-                let _ = registry.release(&pin);
-                return;
+        self.merge(
+            registry,
+            Pending {
+                count: n,
+                first_ms,
+                start_ms: floor.map_or(first_ms, |at| first_ms.max(at)),
+                pin,
+            },
+        );
+    }
+
+    /// Moves `other`'s tally into this one, keeping the older pin (W1) and
+    /// releasing the other. Puts a flush that failed back.
+    pub(crate) fn absorb(&mut self, registry: &PinRegistry, other: Self) {
+        if let Some(pending) = other.pending {
+            self.merge(registry, pending);
+        }
+    }
+
+    fn merge(&mut self, registry: &PinRegistry, incoming: Pending) {
+        let merged = match self.pending.take() {
+            Some(mut kept) if kept.first_ms <= incoming.first_ms => {
+                kept.count = kept.count.saturating_add(incoming.count);
+                kept.start_ms = kept.start_ms.min(incoming.start_ms);
+                let _ = registry.release(&incoming.pin);
+                kept
             }
-            Some(pending) => {
-                let _ = registry.release(&pending.pin);
-                pending.count.saturating_add(n)
+            Some(kept) => {
+                let _ = registry.release(&kept.pin);
+                Pending {
+                    count: kept.count.saturating_add(incoming.count),
+                    start_ms: kept.start_ms.min(incoming.start_ms),
+                    ..incoming
+                }
             }
-            None => n,
+            None => incoming,
         };
-        self.pending = Some(Pending {
-            count,
-            first_ms,
-            pin,
-        });
+        self.pending = Some(merged);
+    }
+
+    /// Moves the tally out, leaving this one empty, so that its flush can
+    /// run without the lock that guards new losses.
+    pub(crate) fn take(&mut self) -> Self {
+        Self {
+            cause: self.cause,
+            exact: self.exact,
+            pending: self.pending.take(),
+        }
+    }
+
+    /// Whether a tally (and so a pin) is waiting to be flushed.
+    pub(crate) fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// When the first pending loss was noticed: its pin's own reading.
+    pub(crate) fn first_ms(&self) -> Option<i64> {
+        self.pending.as_ref().map(|p| p.first_ms)
     }
 
     /// Unflushed losses, if any.
@@ -435,9 +544,9 @@ impl LossCounter {
         self.pending.as_ref().map(|p| {
             (
                 Gap {
-                    start_ms: p.first_ms,
+                    start_ms: p.start_ms,
                     end_ms: end_ms.max(p.first_ms),
-                    start_exact: true,
+                    start_exact: self.exact,
                     cause: self.cause,
                     count: p.count.max(1),
                 },

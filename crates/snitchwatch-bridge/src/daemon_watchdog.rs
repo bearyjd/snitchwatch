@@ -39,14 +39,71 @@ pub async fn run(
     diagnostics_ctx: Arc<crate::diagnostics::DiagnosticsCtx>,
     broadcast_tx: broadcast::Sender<crate::ws_messages::ServerMessage>,
 ) {
-    let mut interval = tokio::time::interval(WATCHDOG_TICK);
+    run_with_history(
+        liveness,
+        tray_pub,
+        cache,
+        diagnostics_ctx,
+        broadcast_tx,
+        None,
+    )
+    .await;
+}
+
+/// [`run`], also telling connection history about each down and up edge
+/// (its `daemon-disconnected` gaps).
+pub async fn run_with_history(
+    liveness: DaemonLiveness,
+    tray_pub: Arc<TrayStatePublisher>,
+    cache: Arc<TokioMutex<ConnectionCache>>,
+    diagnostics_ctx: Arc<crate::diagnostics::DiagnosticsCtx>,
+    broadcast_tx: broadcast::Sender<crate::ws_messages::ServerMessage>,
+    recorder: Option<Arc<crate::history::capture::Capture>>,
+) {
+    run_with_history_timing(
+        liveness,
+        tray_pub,
+        cache,
+        diagnostics_ctx,
+        broadcast_tx,
+        recorder,
+        (WATCHDOG_TICK, DAEMON_DOWN_TIMEOUT),
+    )
+    .await;
+}
+
+/// [`run_with_history`] with its poll interval and down timeout given, for
+/// tests that need a real clock to run out quickly.
+pub(crate) async fn run_with_history_timing(
+    liveness: DaemonLiveness,
+    tray_pub: Arc<TrayStatePublisher>,
+    cache: Arc<TokioMutex<ConnectionCache>>,
+    diagnostics_ctx: Arc<crate::diagnostics::DiagnosticsCtx>,
+    broadcast_tx: broadcast::Sender<crate::ws_messages::ServerMessage>,
+    recorder: Option<Arc<crate::history::capture::Capture>>,
+    (tick, timeout): (Duration, Duration),
+) {
+    let mut interval = tokio::time::interval(tick);
     let mut was_down = false;
+    // History's gap opens only for an outage seen to begin: a daemon that
+    // was already away at the first look has no observed start.
+    let mut seen_up = false;
     loop {
         interval.tick().await;
 
         let sampled_at = Instant::now();
-        let down_now = liveness.is_down(sampled_at, DAEMON_DOWN_TIMEOUT);
+        let down_now = liveness.is_down(sampled_at, timeout);
 
+        // Connection history's `daemon-disconnected` gap: open at the down
+        // edge, closed at recovery. In memory only; the writer commits it.
+        seen_up |= !down_now && liveness.heard_from_daemon();
+        if let Some(recorder) = recorder.as_ref().filter(|_| down_now != was_down) {
+            if !down_now {
+                recorder.daemon_up();
+            } else if seen_up {
+                recorder.daemon_down();
+            }
+        }
         if down_now && !was_down {
             {
                 let mut cache = cache.lock().await;

@@ -34,7 +34,7 @@ use snitchwatch_proto::protocol::Event;
 use tokio::sync::broadcast;
 use tracing::{error, warn};
 
-use crate::cache::rule_hits::RuleHits;
+use crate::cache::rule_hits::{RuleHits, UpstreamLoss};
 use crate::cache::rule_hits_file;
 use crate::cache::rules::{RulesCache, SharedRulesCache};
 use crate::daemon_commands::DaemonTransport;
@@ -127,13 +127,22 @@ impl RuleHitsHandle {
 
     /// Counts the events of a ping that carried statistics, with its
     /// `uptime` and `rule_hits`. `rules` is the bridge's copy of the daemon's
-    /// list; it is locked first.
-    pub fn record(&self, events: &[Event], uptime: u64, rule_hits: u64, rules: &SharedRulesCache) {
+    /// list; it is locked first. Returns what the ping showed was never
+    /// received (connection history's `upstream-loss`).
+    pub fn record(
+        &self,
+        events: &[Event],
+        uptime: u64,
+        rule_hits: u64,
+        rules: &SharedRulesCache,
+    ) -> UpstreamLoss {
         // Before waiting on any lock: the judgement compares it with the
         // daemon's uptime.
         let now = now_ms();
         let cache = lock(rules);
-        lock(&self.inner.state).record(events, uptime, rule_hits, now, |name| cache.contains(name));
+        let (_, loss) =
+            lock(&self.inner.state)
+                .record_with_loss(events, uptime, rule_hits, now, |name| cache.contains(name));
         drop(cache);
         // After the state changed, so a stop save that read the state before
         // it is seen to have set `stopped`. The gRPC server stops after the
@@ -144,6 +153,7 @@ impl RuleHitsHandle {
         if lock(&self.inner.persistence).stopped {
             self.save(SaveKind::AfterStop);
         }
+        loss
     }
 
     /// A snapshot was committed: call with the cache locked, after it holds
