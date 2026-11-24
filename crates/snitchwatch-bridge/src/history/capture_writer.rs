@@ -27,6 +27,9 @@ const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(2);
 const ERROR_LOG_EVERY: Duration = Duration::from_secs(30);
 /// After close the writer drains for at most this long; the rest is lost.
 const SHUTDOWN_DRAIN: Duration = Duration::from_secs(2);
+/// An expiry pass gives way after this long (the next one carries on), so it
+/// never holds the writer from its queue, or from a shutdown, for longer.
+const EXPIRY_PASS_LIMIT: Duration = Duration::from_secs(1);
 
 /// What the writer thread keeps between batches.
 struct Loop {
@@ -90,6 +93,12 @@ impl Shared {
         self.finish(&mut engine, &st.limits, began, &mut st.pulse);
     }
 
+    /// When an expiry pass gives way: the queue is closed (shutdown is
+    /// waiting) or `deadline` has passed.
+    pub(in crate::history) fn expiry_stop(&self, deadline: Instant) -> impl Fn() -> bool + '_ {
+        move || self.queue.is_closed() || Instant::now() >= deadline
+    }
+
     /// Admission's ledger starts from what the store holds, not from zero.
     fn seed_admission(&self, engine: &Engine) {
         match engine.event_bytes() {
@@ -110,15 +119,24 @@ impl Shared {
             let beat = st
                 .pulse
                 .beat(engine, &self.registry, &st.limits, &self.losses);
-            if let Err(e) = beat {
-                log_rate_limited(&mut st.last_logged, &e, 0);
+            match beat {
+                Ok(_) => add(&self.counters.heartbeats, 1),
+                Err(e) => log_rate_limited(&mut st.last_logged, &e, 0),
             }
         }
-        if st.expiry.due(Instant::now()) {
+        let due = st.expiry.due(Instant::now());
+        #[cfg(test)]
+        let due = self.force_expiry.swap(false, Ordering::SeqCst) || due;
+        if due {
             let jumped = st.pulse.take_jumped();
-            match engine.expire_aged(self.registry.now(), jumped) {
-                Ok(pass) if pass.skipped_for_jump => add(&self.counters.expiry_skipped, 1),
-                Ok(_) => {}
+            let stop = self.expiry_stop(Instant::now() + EXPIRY_PASS_LIMIT);
+            match engine.expire_aged_until(self.registry.now(), jumped, &mut || stop()) {
+                Ok(pass) => {
+                    if pass.skipped_for_jump {
+                        add(&self.counters.expiry_skipped, 1);
+                    }
+                    add(&self.counters.expiry_passes, 1);
+                }
                 Err(e) => log_rate_limited(&mut st.last_logged, &e, 0),
             }
         }

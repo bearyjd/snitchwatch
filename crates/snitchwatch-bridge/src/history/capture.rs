@@ -274,6 +274,9 @@ pub(super) struct Shared {
     counters: Counters,
     #[cfg(test)]
     probe: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// Test seam: run an expiry pass at the writer's next turn.
+    #[cfg(test)]
+    force_expiry: AtomicBool,
 }
 
 impl Shared {
@@ -295,11 +298,18 @@ impl Shared {
             counters: Counters::default(),
             #[cfg(test)]
             probe: Mutex::new(None),
+            #[cfg(test)]
+            force_expiry: AtomicBool::new(false),
         }
     }
 
     fn stats(&self) -> CaptureStats {
         self.counters.snapshot()
+    }
+
+    #[cfg(test)]
+    pub(super) fn close_queue_for_test(&self) {
+        self.queue.close();
     }
 
     fn admit(&self, record: &EventRecord, now_ms: i64) -> Result<u64, Refusal> {
@@ -589,6 +599,23 @@ impl Capture {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retained_for(Some(process))
+    }
+
+    #[cfg(test)]
+    pub(super) fn close_queue_for_test(&self) {
+        self.shared.close_queue_for_test();
+    }
+
+    /// Runs an age-expiry pass at the writer's next turn.
+    #[cfg(test)]
+    pub(super) fn expire_now_for_test(&self) {
+        self.shared.force_expiry.store(true, Ordering::SeqCst);
+    }
+
+    /// The shared state, for a test's observer on the writer thread.
+    #[cfg(test)]
+    pub(super) fn shared_for_test(&self) -> Arc<Shared> {
+        self.shared.clone()
     }
 
     #[cfg(test)]

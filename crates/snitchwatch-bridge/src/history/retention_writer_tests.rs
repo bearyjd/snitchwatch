@@ -92,26 +92,35 @@ struct Live {
     capture: Capture,
 }
 
-/// A capture at wall time `NOW` over a store holding `old` rows of
-/// `/old/p` at time `old_ts` and one recent row.
-fn live_at(old_ts: i64, old: i64, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
+/// A capture at wall time `NOW` over a store holding `rows` (`(ts, count)`
+/// pairs, all of `/old/p`) and one recent row. Passes run when a test says
+/// so (`expire_now_for_test`), not on a timer.
+fn live_rows(rows: &[(i64, i64)], tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
+    live_with(rows, tweak, |_| {})
+}
+
+fn live_with(
+    rows: &[(i64, i64)],
+    tweak: impl FnOnce(&mut CaptureConfig),
+    prepare: impl FnOnce(&mut super::writer::Engine),
+) -> Live {
     let rig = rig();
-    fill(
-        &rig,
-        (0..old).map(|_| event(old_ts, "/old/p", Action::Allow)),
-    );
+    for (ts, n) in rows {
+        fill(&rig, (0..*n).map(|_| event(*ts, "/old/p", Action::Allow)));
+    }
     fill(&rig, [event(NOW, "/new/p", Action::Allow)]);
     let Rig {
         _root,
         location,
-        engine,
+        mut engine,
         ..
     } = rig;
+    prepare(&mut engine);
     let (clock, read) = manual_clock(NOW);
     let registry = Arc::new(PinRegistry::with_clock(read));
     let mut config = CaptureConfig::for_budget(engine.budget());
     config.heartbeat_every = Duration::from_millis(10);
-    config.expiry_every = Duration::from_millis(100);
+    config.expiry_every = Duration::from_secs(3600);
     tweak(&mut config);
     let capture = Capture::spawn(engine, registry, config).unwrap();
     Live {
@@ -123,7 +132,18 @@ fn live_at(old_ts: i64, old: i64, tweak: impl FnOnce(&mut CaptureConfig)) -> Liv
 }
 
 fn live(old: i64, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
-    live_at(1_000, old, tweak)
+    live_rows(&[(1_000, old)], tweak)
+}
+
+impl Live {
+    /// Runs one expiry pass and waits until the writer has finished it.
+    fn pass(&self) {
+        let done = self.capture.stats().expiry_passes;
+        self.capture.expire_now_for_test();
+        wait_for("the expiry pass", || {
+            self.capture.stats().expiry_passes > done
+        });
+    }
 }
 
 fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
@@ -143,12 +163,13 @@ fn db_events(location: &Location) -> i64 {
 
 #[test]
 fn the_writer_seeds_admission_from_the_database_then_expires_and_releases() {
-    let live = live(4, |c| c.expiry_every = Duration::from_millis(300));
+    let live = live(4, |_| {});
     let row = row_bytes_of("/old/p");
     wait_for("the seed", || {
         live.capture.retained_for_test("/old/p") == 4 * row
     });
-    wait_for("the expiry pass", || db_events(&live.location) == 1);
+    live.pass();
+    assert_eq!(db_events(&live.location), 1);
     wait_for("the release", || {
         live.capture.retained_for_test("/old/p") == 0
     });
@@ -165,30 +186,78 @@ fn the_writer_seeds_admission_from_the_database_then_expires_and_releases() {
 
 #[test]
 fn a_pass_after_a_clock_jump_is_skipped_and_the_next_one_goes_ahead() {
-    let live = live(4, |c| c.expiry_every = Duration::from_millis(800));
-    // The writer takes its clock baseline as it starts; the jump comes after.
-    std::thread::sleep(Duration::from_millis(250));
+    let live = live(4, |_| {});
+    // The writer has taken its clock baseline once it has beaten twice.
+    wait_for("the baseline", || live.capture.stats().heartbeats >= 2);
     live.clock.store(NOW + 365 * DAY_MS, Ordering::SeqCst);
-    wait_for("the skipped pass", || {
-        live.capture.stats().expiry_skipped == 1
+    let beats = live.capture.stats().heartbeats;
+    wait_for("a beat after the jump", || {
+        live.capture.stats().heartbeats >= beats + 2
     });
+    live.pass();
+    assert_eq!(live.capture.stats().expiry_skipped, 1);
     assert_eq!(
         db_events(&live.location),
         5,
         "nothing was expired by the jumped pass"
     );
-    wait_for("the next pass", || db_events(&live.location) < 5);
+    live.pass();
+    assert_eq!(live.capture.stats().expiry_skipped, 1, "only the one");
+    assert_eq!(
+        db_events(&live.location),
+        0,
+        "the next pass went ahead (and a year on, the recent row is old too)"
+    );
 }
 
 #[test]
 fn the_capture_expires_by_the_retention_it_is_configured_with() {
-    // Eight days old: kept at the default 30 days, expired at 7.
-    let eight_days_ago = NOW - 8 * DAY_MS;
-    let kept = live_at(eight_days_ago, 4, |_| {});
-    std::thread::sleep(Duration::from_millis(600));
-    assert_eq!(db_events(&kept.location), 5, "30 days keeps them");
-    let expired = live_at(eight_days_ago, 4, |c| c.retention_days = 7);
-    wait_for("the 7-day pass", || db_events(&expired.location) == 1);
+    // Eight days old, with a forty-day-old row beside them: 30 days (the
+    // default) expires the old one and keeps these; 7 days expires both.
+    let rows = [(NOW - 8 * DAY_MS, 4), (NOW - 40 * DAY_MS, 1)];
+    let kept = live_rows(&rows, |_| {});
+    kept.pass();
+    assert_eq!(
+        db_events(&kept.location),
+        5,
+        "the forty-day row went; the four eight-day rows and the new one stay"
+    );
+    let expired = live_rows(&rows, |c| c.retention_days = 7);
+    expired.pass();
+    assert_eq!(db_events(&expired.location), 1);
+}
+
+#[test]
+fn an_expiry_pass_gives_way_when_the_queue_closes_between_chunks() {
+    use super::capture::Shared;
+    use super::writer::TxnKind;
+    use std::sync::Mutex;
+    let cell: Arc<Mutex<Option<Arc<Shared>>>> = Arc::new(Mutex::new(None));
+    let seen = cell.clone();
+    let live = live_with(
+        &[(1_000, 3_000)],
+        |_| {},
+        |engine| {
+            engine.set_observer(Box::new(move |r| {
+                if r.kind == TxnKind::Evict {
+                    if let Some(shared) = seen.lock().unwrap().as_ref() {
+                        shared.close_queue_for_test();
+                    }
+                }
+            }));
+        },
+    );
+    *cell.lock().unwrap() = Some(live.capture.shared_for_test());
+    live.capture.expire_now_for_test();
+    wait_for("the first chunk", || db_events(&live.location) < 3_001);
+    let stats = live.capture.shutdown();
+    // 10% of 3,001 would be 300 rows; one chunk of 32 went before it stopped.
+    assert_eq!(stats.expiry_passes, 1);
+    assert_eq!(
+        db_events(&live.location),
+        3_001 - 32,
+        "the pass gave way after its first chunk"
+    );
 }
 
 #[test]

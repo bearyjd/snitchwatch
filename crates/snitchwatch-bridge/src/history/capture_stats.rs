@@ -26,6 +26,10 @@ pub struct CaptureStats {
     pub cap_paused: bool,
     /// Age-expiry passes skipped because the wall clock had jumped.
     pub expiry_skipped: u64,
+    /// Heartbeats the writer committed.
+    pub heartbeats: u64,
+    /// Age-expiry passes the writer finished (skipped ones included).
+    pub expiry_passes: u64,
 }
 
 #[derive(Default)]
@@ -43,6 +47,8 @@ pub(super) struct Counters {
     pub(super) lost_cap: AtomicU64,
     pub(super) cap_paused: AtomicBool,
     pub(super) expiry_skipped: AtomicU64,
+    pub(super) heartbeats: AtomicU64,
+    pub(super) expiry_passes: AtomicU64,
 }
 
 pub(super) fn add(counter: &AtomicU64, n: u64) {
@@ -67,6 +73,8 @@ impl Counters {
             lost_cap: get(&c.lost_cap),
             cap_paused: c.cap_paused.load(Ordering::Relaxed),
             expiry_skipped: get(&c.expiry_skipped),
+            heartbeats: get(&c.heartbeats),
+            expiry_passes: get(&c.expiry_passes),
         }
     }
 }

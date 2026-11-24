@@ -233,6 +233,8 @@ pub struct Expiry {
     pub removed: u64,
     /// The pass was skipped because the wall clock had jumped.
     pub skipped_for_jump: bool,
+    /// The pass gave way before it was done: shutdown or its time limit.
+    pub stopped: bool,
 }
 
 impl Engine {
@@ -259,15 +261,27 @@ impl Engine {
     /// older than the retention limit, at most a tenth of the events, in
     /// `rows_per_txn` chunks. Skipped while the clock is known to have
     /// jumped (`clock_jumped`).
+    #[cfg(test)]
     pub(super) fn expire_aged(
         &mut self,
         now_ms: i64,
         clock_jumped: bool,
     ) -> Result<Expiry, WriteError> {
+        self.expire_aged_until(now_ms, clock_jumped, &mut || false)
+    }
+
+    /// [`expire_aged`](Self::expire_aged), asking `stop` before each chunk and
+    /// giving way (no vacuum; the next pass carries on) when it says so.
+    pub(super) fn expire_aged_until(
+        &mut self,
+        now_ms: i64,
+        clock_jumped: bool,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> Result<Expiry, WriteError> {
         if clock_jumped {
             return Ok(Expiry {
-                removed: 0,
                 skipped_for_jump: true,
+                ..Expiry::default()
             });
         }
         let age = i64::from(self.retention_days).saturating_mul(DAY_MS);
@@ -277,19 +291,25 @@ impl Engine {
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
         let cap = (total.max(0) as u64 / PASS_DIVISOR).max(self.budget().rows_per_txn);
         let mut removed = 0;
+        let mut stopped = false;
         while removed < cap {
+            if stop() {
+                stopped = true;
+                break;
+            }
             let (_, chunk) = self.evict_victims(Victims::Before(cutoff), cap - removed)?;
             if chunk.rows == 0 {
                 break;
             }
             removed += chunk.rows;
         }
-        if removed > 0 {
+        if removed > 0 && !stopped {
             self.vacuum_all()?;
         }
         Ok(Expiry {
             removed,
-            skipped_for_jump: false,
+            stopped,
+            ..Expiry::default()
         })
     }
 }

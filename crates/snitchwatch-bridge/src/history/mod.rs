@@ -198,6 +198,8 @@ mod replace_tests;
 #[cfg(test)]
 mod retention_crash_tests;
 #[cfg(test)]
+mod retention_expiry_tests;
+#[cfg(test)]
 mod retention_pause_tests;
 #[cfg(test)]
 mod retention_room_tests;
