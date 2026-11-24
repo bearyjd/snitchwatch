@@ -356,6 +356,8 @@ pub struct Engine {
     pub(super) released: std::collections::HashMap<String, u64>,
     /// Who holds what, for tier 2's gate.
     pub(super) tally: super::retention_room::Tally,
+    /// What tier 1 may still remove (F1); its debt is kept in `meta`.
+    pub(super) expiry: super::expiry_budget::ExpiryBudget,
     /// Test seam: an error to raise after a transaction's rows were written
     /// and before `COMMIT`, to prove nothing else happens when it fails.
     #[cfg(test)]
@@ -396,6 +398,7 @@ impl Engine {
                 "cache_spill could not be turned off",
             )));
         }
+        let expiry = super::expiry_budget::ExpiryBudget::load(&conn)?;
         let mut journal = location.db_path().into_os_string();
         journal.push("-journal");
         let engine = Self {
@@ -407,6 +410,7 @@ impl Engine {
             retention_days: super::settings::DEFAULT_RETENTION_DAYS,
             released: std::collections::HashMap::new(),
             tally: super::retention_room::Tally::default(),
+            expiry,
             #[cfg(test)]
             fault_before_commit: None,
         };

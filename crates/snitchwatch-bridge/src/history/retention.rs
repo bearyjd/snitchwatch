@@ -18,6 +18,7 @@
 
 use rusqlite::{params_from_iter, Connection};
 
+use super::expiry_budget::{write_debt, ExpiryBudget};
 use super::ledger::{record_gap, Gap, GapCause, LedgerLimits};
 use super::measure::row_bytes_sql;
 use super::snapshots::delete_unreferenced;
@@ -200,11 +201,23 @@ impl Engine {
         let n = limit.min(self.budget().rows_per_txn);
         let limits = LedgerLimits::from_budget(self.budget());
         let mut removed = Removed::default();
+        // Tier 1 spends the expiry budget in the transaction that deletes.
+        let (now_ms, spends) = (self.expiry.now_ms(), matches!(victims, Victims::Before(_)));
+        let base = self.expiry.debt_at(now_ms);
+        let mut debt = None;
         let report = self.transact(TxnKind::Evict, |conn| {
             let picked = pick(conn, victims, n, after)?;
             removed = delete_chunk(conn, victims, &picked, &limits)?;
+            if spends && removed.rows > 0 {
+                let after = ExpiryBudget::debt_after(base, removed.rows);
+                write_debt(conn, after)?;
+                debt = Some(after);
+            }
             Ok(removed.rows)
         })?;
+        if let Some(debt) = debt {
+            self.expiry.settle(debt, now_ms);
+        }
         self.note_released(&removed);
         self.tally.removed(&removed.by_process);
         Ok((report, removed))
@@ -289,7 +302,12 @@ impl Engine {
         let total: i64 = self
             .connection()
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
-        let cap = (total.max(0) as u64 / PASS_DIVISOR).max(self.budget().rows_per_txn);
+        let floor = self.budget().rows_per_txn;
+        let events = total.max(0) as u64;
+        let now = self.expiry.now_ms();
+        let cap = (events / PASS_DIVISOR)
+            .max(floor)
+            .min(self.expiry.allowance(now, events, floor));
         let mut removed = 0;
         let mut stopped = false;
         while removed < cap {

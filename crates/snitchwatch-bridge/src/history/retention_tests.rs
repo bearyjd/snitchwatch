@@ -333,7 +333,7 @@ fn an_expiry_pass_works_in_rows_per_txn_chunks_and_covers_what_it_removed() {
     assert_eq!(units, vec![32]);
     // Passes go on until nothing old is left; every chunk is within the bound.
     rig.reports.lock().unwrap().clear();
-    while aged(&mut rig, NOW).removed > 0 {}
+    expire_all(&mut rig, NOW);
     assert_eq!(remaining(&rig).len(), 1);
     assert!(rig
         .reports
@@ -356,7 +356,13 @@ fn one_pass_expires_at_most_a_tenth_of_the_rows() {
         "10% of 1001, rounded down"
     );
     assert_eq!(count(&rig, "events"), 901);
-    assert_eq!(aged(&mut rig, NOW).removed, 90);
+    // The budget holds an eighth: 125 less the 100 just spent.
+    assert_eq!(aged(&mut rig, NOW).removed, 25);
+    // A day of uptime refills it, and the pass is a tenth again.
+    rig.engine.freeze_expiry_clock();
+    rig.engine
+        .advance_expiry_clock(std::time::Duration::from_secs(86_400));
+    assert_eq!(aged(&mut rig, NOW).removed, 87, "a tenth of 876");
 }
 
 #[test]
@@ -623,7 +629,7 @@ fn a_fill_to_the_limit_a_pause_and_an_age_sweep_touch_no_other_file() {
         rig.engine.insert_batch(&batch).unwrap();
     }
     rig.engine.set_retention_days(7);
-    while rig.engine.expire_aged(NOW, false).unwrap().removed > 0 {}
+    expire_all(&mut rig, NOW);
     fill_until_paused(&mut rig);
     for (i, path) in canaries.iter().enumerate() {
         assert_eq!(
@@ -653,7 +659,7 @@ fn expiry_returns_the_freed_space_to_the_filesystem() {
         );
     }
     let before = rig.engine.file_pages().unwrap();
-    while rig.engine.expire_aged(NOW, false).unwrap().removed > 0 {}
+    expire_all(&mut rig, NOW);
     assert_eq!(count(&rig, "events"), 0);
     assert!(
         rig.engine.file_pages().unwrap() < before / 4,

@@ -242,3 +242,16 @@ pub(super) fn fill_until_paused(rig: &mut Rig) {
     }
     assert!(!rig.engine.make_room().unwrap());
 }
+
+/// Expiry passes, a day of uptime apart so each finds the bucket full, until
+/// nothing old is left (F1: a rapid run of passes is bounded by the budget).
+pub(super) fn expire_all(rig: &mut Rig, now_ms: i64) {
+    rig.engine.freeze_expiry_clock();
+    loop {
+        rig.engine
+            .advance_expiry_clock(std::time::Duration::from_secs(86_400));
+        if rig.engine.expire_aged(now_ms, false).unwrap().removed == 0 {
+            break;
+        }
+    }
+}

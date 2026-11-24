@@ -20,6 +20,7 @@ pub mod capture;
 mod capture_stats;
 mod correlation;
 pub mod durable;
+mod expiry_budget;
 pub mod gaps;
 pub mod guard;
 pub mod ledger;
@@ -191,6 +192,8 @@ mod caps_tests;
 mod crash_tests;
 #[cfg(test)]
 mod dormant_tests;
+#[cfg(test)]
+mod expiry_budget_tests;
 #[cfg(test)]
 mod identity_dormant_tests;
 #[cfg(test)]
