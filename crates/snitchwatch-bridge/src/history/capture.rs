@@ -80,6 +80,7 @@ use super::pinned_queue::PinnedQueue;
 use super::pins::{PinId, PinRegistry};
 use super::record::{Action, AnsweredBy, EventRecord};
 use super::rule_identity::{identify, RuleClass, RuleIdentity};
+use super::settings::{Settings, DEFAULT_RETENTION_DAYS};
 use super::snapshots::snapshot_for;
 use super::writer::{Engine, Item, QUEUE_MAX_BYTES, QUEUE_MAX_COUNT};
 use super::{load_state, locate, open_store, Consent, Mode, State};
@@ -208,6 +209,8 @@ pub struct CaptureConfig {
     pub pause_max: Duration,
     /// How often the writer runs an age-expiry pass.
     pub expiry_every: Duration,
+    /// Age retention, in days (D5).
+    pub retention_days: u16,
 }
 
 impl CaptureConfig {
@@ -222,6 +225,15 @@ impl CaptureConfig {
             pause_min: PAUSE_MIN,
             pause_max: PAUSE_MAX,
             expiry_every: EXPIRY_EVERY,
+            retention_days: DEFAULT_RETENTION_DAYS,
+        }
+    }
+
+    /// [`for_budget`](Self::for_budget) with the user's retention.
+    pub fn for_settings(budget: &Budget, settings: &Settings) -> Self {
+        Self {
+            retention_days: settings.retention_days,
+            ..Self::for_budget(budget)
         }
     }
 }
@@ -430,7 +442,6 @@ impl Shared {
             self.enqueue(record, now_ms, None);
         }
     }
-
 }
 
 /// History capture: the admission state, the pinned queue and the writer
@@ -449,6 +460,7 @@ impl Capture {
         config: CaptureConfig,
     ) -> io::Result<Self> {
         let mut engine = engine;
+        engine.set_retention_days(config.retention_days);
         let limits = LedgerLimits::from_budget(engine.budget());
         // The previous session's end becomes a `bridge-down` gap now. A
         // failure is retried by the writer before it commits anything: until
@@ -635,7 +647,7 @@ pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
     let capture = Capture::spawn(
         engine,
         Arc::new(PinRegistry::new()),
-        CaptureConfig::for_budget(&budget),
+        CaptureConfig::for_settings(&budget, &settings),
     );
     match capture {
         Ok(capture) => Some(Arc::new(capture)),

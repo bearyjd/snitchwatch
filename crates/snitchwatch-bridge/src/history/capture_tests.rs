@@ -271,6 +271,7 @@ fn config_for(_budget: &Budget) -> CaptureConfig {
         pause_min: std::time::Duration::from_millis(500),
         pause_max: std::time::Duration::from_secs(60),
         expiry_every: std::time::Duration::from_secs(600),
+        retention_days: 30,
     }
 }
 

@@ -7,8 +7,8 @@ use super::budget::Budget;
 use super::caps::{DstHost, ProcessPath, Snapshot, RULE_HASH};
 use super::ledger::{read_gaps, Gap, GapCause};
 use super::measure::estimate_bytes;
-use super::retention::Victims;
 use super::record::{insert_event, Action, AnsweredBy, EventRecord, SnapshotRecord};
+use super::retention::Victims;
 use super::test_support::{state_dir, tempdir};
 use super::writer::{Engine, Item, TxnReport, WriteError};
 use super::{enable, locate, open_store, Consent, Location, Mode};
@@ -233,4 +233,19 @@ pub(super) fn evict_process(rig: &mut Rig, process: &str) -> Result<TxnReport, W
     rig.engine
         .evict_victims(Victims::Process(process), u64::MAX)
         .map(|(report, _)| report)
+}
+
+/// Tiny rows from many processes until eviction cannot make room.
+pub(super) fn fill_until_paused(rig: &mut Rig) {
+    let mut ts = 0;
+    while used(rig) <= high_water(rig) + 200 {
+        fill(
+            rig,
+            (0..32).map(|_| {
+                ts += 1;
+                event(ts, &format!("/usr/bin/p{}", ts % 40), Action::Allow)
+            }),
+        );
+    }
+    assert!(!rig.engine.make_room().unwrap());
 }

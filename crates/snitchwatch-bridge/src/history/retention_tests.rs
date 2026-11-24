@@ -22,12 +22,15 @@ fn full_record() -> EventRecord {
 }
 
 fn sql_bytes(conn: &Connection) -> Vec<u64> {
-    conn.prepare(&format!("SELECT {} FROM events ORDER BY id", row_bytes_sql()))
-        .unwrap()
-        .query_map([], |r| r.get::<_, i64>(0))
-        .unwrap()
-        .map(|v| v.unwrap() as u64)
-        .collect()
+    conn.prepare(&format!(
+        "SELECT {} FROM events ORDER BY id",
+        row_bytes_sql()
+    ))
+    .unwrap()
+    .query_map([], |r| r.get::<_, i64>(0))
+    .unwrap()
+    .map(|v| v.unwrap() as u64)
+    .collect()
 }
 
 // ---- the shared byte measure (decision 2c) ---------------------------------
@@ -73,7 +76,12 @@ fn global_eviction_is_strictly_by_time_then_id_whatever_the_verdict() {
 #[test]
 fn one_eviction_transaction_deletes_at_most_rows_per_txn() {
     let mut rig = rig();
-    put(&mut rig, (0..100).map(|i| plain(event(i, "/p", Action::Allow))).collect());
+    put(
+        &mut rig,
+        (0..100)
+            .map(|i| plain(event(i, "/p", Action::Allow)))
+            .collect(),
+    );
     let n = rig.engine.budget().rows_per_txn;
     rig.reports.lock().unwrap().clear();
     while count(&rig, "events") > 0 {
@@ -117,10 +125,18 @@ fn deleting_one_event_by_age_removes_its_unreferenced_snapshot_and_keeps_shared_
     snapshot_fixture(&mut rig);
     evict_before(&mut rig, 150).unwrap();
     assert_eq!(count(&rig, "events"), 2);
-    assert_eq!(snapshots(&rig), vec![hash(2).to_vec()], "rule 1 went, 2 is shared");
+    assert_eq!(
+        snapshots(&rig),
+        vec![hash(2).to_vec()],
+        "rule 1 went, 2 is shared"
+    );
     evict_before(&mut rig, 250).unwrap();
     assert_eq!(count(&rig, "events"), 1);
-    assert_eq!(snapshots(&rig), vec![hash(2).to_vec()], "still referenced by /c");
+    assert_eq!(
+        snapshots(&rig),
+        vec![hash(2).to_vec()],
+        "still referenced by /c"
+    );
 }
 
 #[test]
@@ -131,7 +147,11 @@ fn deleting_one_event_by_process_share_removes_its_unreferenced_snapshot() {
     assert_eq!(count(&rig, "events"), 2);
     assert_eq!(snapshots(&rig), vec![hash(2).to_vec()]);
     evict_process(&mut rig, "/b").unwrap();
-    assert_eq!(snapshots(&rig), vec![hash(2).to_vec()], "/c still uses rule 2");
+    assert_eq!(
+        snapshots(&rig),
+        vec![hash(2).to_vec()],
+        "/c still uses rule 2"
+    );
     evict_process(&mut rig, "/c").unwrap();
     assert!(snapshots(&rig).is_empty());
 }
@@ -159,7 +179,10 @@ fn a_fault_before_commit_leaves_the_event_the_snapshot_and_no_marker_on_every_pa
         assert!(outcome.is_err(), "path {path}");
         assert_eq!(count(&rig, "events"), 3, "path {path}");
         assert_eq!(snapshots(&rig).len(), 2, "path {path}");
-        assert!(evicted(&rig).is_empty(), "path {path}: no marker without the delete");
+        assert!(
+            evicted(&rig).is_empty(),
+            "path {path}: no marker without the delete"
+        );
     }
 }
 
@@ -168,7 +191,12 @@ fn a_fault_before_commit_leaves_the_event_the_snapshot_and_no_marker_on_every_pa
 #[test]
 fn the_marker_is_written_in_the_deleting_transaction_with_the_earliest_remaining_time() {
     let mut rig = rig();
-    put(&mut rig, (1..=40).map(|i| plain(event(i * 10, "/p", Action::Allow))).collect());
+    put(
+        &mut rig,
+        (1..=40)
+            .map(|i| plain(event(i * 10, "/p", Action::Allow)))
+            .collect(),
+    );
     let removed: Vec<i64> = remaining(&rig).iter().take(32).map(|r| r.0).collect();
     rig.engine.evict_chunk().unwrap();
     let rows = evicted(&rig);
@@ -184,7 +212,12 @@ fn the_marker_is_written_in_the_deleting_transaction_with_the_earliest_remaining
 #[test]
 fn consecutive_markers_merge_and_still_cover_everything_removed() {
     let mut rig = rig();
-    put(&mut rig, (1..=100).map(|i| plain(event(i * 10, "/p", Action::Allow))).collect());
+    put(
+        &mut rig,
+        (1..=100)
+            .map(|i| plain(event(i * 10, "/p", Action::Allow)))
+            .collect(),
+    );
     let all: Vec<i64> = remaining(&rig).iter().map(|r| r.0).collect();
     while count(&rig, "events") > 0 {
         rig.engine.evict_chunk().unwrap();
@@ -211,7 +244,10 @@ fn a_process_eviction_marker_spans_only_what_it_removed() {
     evict_process(&mut rig, "/flood").unwrap();
     let rows = evicted(&rig);
     assert_eq!(rows.len(), 1);
-    assert_eq!((rows[0].start_ms, rows[0].end_ms, rows[0].count), (200, 400, 2));
+    assert_eq!(
+        (rows[0].start_ms, rows[0].end_ms, rows[0].count),
+        (200, 400, 2)
+    );
     assert_removed_are_covered(&rig, &[200, 400]);
     assert_eq!(remaining(&rig).len(), 3, "the others are untouched");
 }
@@ -226,7 +262,13 @@ fn aged(rig: &mut Rig, now: i64) -> super::retention::Expiry {
 }
 
 fn put_at(rig: &mut Rig, stamps: &[i64]) {
-    put(rig, stamps.iter().map(|ts| plain(event(*ts, "/p", Action::Allow))).collect());
+    put(
+        rig,
+        stamps
+            .iter()
+            .map(|ts| plain(event(*ts, "/p", Action::Allow)))
+            .collect(),
+    );
 }
 
 #[test]
@@ -289,7 +331,11 @@ fn one_pass_expires_at_most_a_tenth_of_the_rows() {
     let mut stamps: Vec<i64> = (0..1000).map(|i| 1000 + i).collect();
     stamps.push(NOW);
     put_at(&mut rig, &stamps);
-    assert_eq!(aged(&mut rig, NOW).removed, 100, "10% of 1001, rounded down");
+    assert_eq!(
+        aged(&mut rig, NOW).removed,
+        100,
+        "10% of 1001, rounded down"
+    );
     assert_eq!(count(&rig, "events"), 901);
     assert_eq!(aged(&mut rig, NOW).removed, 90);
 }
@@ -322,17 +368,31 @@ fn a_flood_of_large_records_cannot_evict_another_processs_small_ones() {
     let mut rig = rig();
     // The small records are the oldest of all: global order would take them
     // first.
-    put(&mut rig, (1..=30).map(|i| plain(small_for(i, "/usr/bin/small"))).collect());
+    put(
+        &mut rig,
+        (1..=30)
+            .map(|i| plain(small_for(i, "/usr/bin/small")))
+            .collect(),
+    );
     let mut ts = 1_000;
     let mut evicted_any = false;
     for _ in 0..80 {
         assert!(rig.engine.make_room().unwrap(), "recording paused");
-        let batch: Vec<Item> = (0..32).map(|_| { ts += 1; plain(big(ts)) }).collect();
+        let batch: Vec<Item> = (0..32)
+            .map(|_| {
+                ts += 1;
+                plain(big(ts))
+            })
+            .collect();
         rig.engine.insert_batch(&batch).unwrap();
         evicted_any |= count_of(&rig, &hostile_path()) < i64::from(ts as i32 - 1_000);
     }
     assert!(evicted_any, "the flood must have overrun the budget");
-    assert_eq!(count_of(&rig, "/usr/bin/small"), 30, "others stay while the flooder is over share");
+    assert_eq!(
+        count_of(&rig, "/usr/bin/small"),
+        30,
+        "others stay while the flooder is over share"
+    );
     assert!(rig.engine.file_pages().unwrap() <= rig.engine.budget().max_page_count);
 }
 
@@ -342,14 +402,21 @@ fn a_process_under_its_share_is_never_a_tier_two_victim() {
     fill_rotating(&rig, 12, 0, 0);
     let share = share_bytes(&rig);
     for (p, b) in rig.engine.process_bytes().unwrap() {
-        assert!(b < share, "{p} holds {b} of a {share} share: the fixture needs all under");
+        assert!(
+            b < share,
+            "{p} holds {b} of a {share} share: the fixture needs all under"
+        );
     }
     let before = remaining(&rig);
     assert!(!rig.engine.make_room().unwrap() || used(&rig) <= high_water(&rig));
     let after = remaining(&rig);
     let removed = before.len() - after.len();
     assert!(removed > 0, "pressure must have evicted something");
-    assert_eq!(after, before[removed..].to_vec(), "global order: the oldest rows, whoever's");
+    assert_eq!(
+        after,
+        before[removed..].to_vec(),
+        "global order: the oldest rows, whoever's"
+    );
 }
 
 #[test]
@@ -360,18 +427,39 @@ fn an_over_share_process_is_trimmed_first_and_only_then_are_others_touched() {
     // of them frees little space, so tier three must run too).
     let mut ts = 1_000_000;
     while bytes_of(&rig, flooder) <= share_bytes(&rig) {
-        fill(&rig, (0..64).map(|_| { ts += 1; event(ts, flooder, Action::Allow) }));
+        fill(
+            &rig,
+            (0..64).map(|_| {
+                ts += 1;
+                event(ts, flooder, Action::Allow)
+            }),
+        );
     }
     fill_rotating(&rig, 12, 12, 0);
-    let (flood_before, others_before) = (count_of(&rig, flooder), count(&rig, "events") - count_of(&rig, flooder));
-    let others_oldest: Vec<(i64, i64)> = remaining(&rig).into_iter().filter(|r| r.0 < 1_000_000).take(5).collect();
+    let (flood_before, others_before) = (
+        count_of(&rig, flooder),
+        count(&rig, "events") - count_of(&rig, flooder),
+    );
+    let others_oldest: Vec<(i64, i64)> = remaining(&rig)
+        .into_iter()
+        .filter(|r| r.0 < 1_000_000)
+        .take(5)
+        .collect();
     rig.engine.make_room().unwrap();
-    assert!(bytes_of(&rig, flooder) <= share_bytes(&rig), "tier two trimmed the flooder to its share");
+    assert!(
+        bytes_of(&rig, flooder) <= share_bytes(&rig),
+        "tier two trimmed the flooder to its share"
+    );
     assert!(count_of(&rig, flooder) < flood_before);
     let others_after = count(&rig, "events") - count_of(&rig, flooder);
-    assert!(others_after < others_before, "tier three then took others' rows");
     assert!(
-        remaining(&rig).iter().all(|r| !others_oldest[..1].contains(r)),
+        others_after < others_before,
+        "tier three then took others' rows"
+    );
+    assert!(
+        remaining(&rig)
+            .iter()
+            .all(|r| !others_oldest[..1].contains(r)),
         "and they were the oldest ones"
     );
 }
@@ -393,7 +481,140 @@ fn snapshot_bytes_count_toward_a_process_only_when_attributable_to_it_alone() {
     );
     let snap = |n: u8| format!("{{\"rule\":{n}}}").len() as u64;
     let row = row_bytes_of("/a");
-    assert_eq!(bytes_of(&rig, "/a"), 2 * row + snap(1), "rule 1 is only /a's; rule 2 is shared");
-    assert_eq!(bytes_of(&rig, "/b"), row, "/b gets no part of the shared snapshot");
+    assert_eq!(
+        bytes_of(&rig, "/a"),
+        2 * row + snap(1),
+        "rule 1 is only /a's; rule 2 is shared"
+    );
+    assert_eq!(
+        bytes_of(&rig, "/b"),
+        row,
+        "/b gets no part of the shared snapshot"
+    );
 }
 
+// ---- the size limit, the journal bound and S4 -----------------------------------
+
+/// A worst-case-ish row (long host and rule name) from one of `n` processes.
+fn heavy(ts: i64, n: i64) -> EventRecord {
+    let mut e = event(ts, &format!("/usr/bin/p{}", ts % n), Action::Allow);
+    e.dst_host = Some(DstHost::new(&"h".repeat(250)));
+    e.rule_name = Some(RuleName::new(&"r".repeat(250)));
+    e
+}
+
+#[test]
+fn the_size_limit_takes_the_oldest_chunks_and_never_lets_the_file_or_journal_pass_the_budget() {
+    let mut rig = rig();
+    let budget = *rig.engine.budget();
+    let mut ts = 0;
+    let mut evictions = 0;
+    for _ in 0..900 {
+        assert!(
+            rig.engine.make_room().unwrap(),
+            "recording paused at row {ts}"
+        );
+        let batch: Vec<Item> = (0..32)
+            .map(|_| {
+                ts += 1;
+                plain(heavy(ts, 12))
+            })
+            .collect();
+        rig.engine.insert_batch(&batch).unwrap();
+        evictions += usize::from(count(&rig, "events") < ts);
+        assert!(rig.engine.file_pages().unwrap() <= budget.max_page_count);
+    }
+    assert!(
+        evictions > 100,
+        "the run must have been under pressure: {evictions}"
+    );
+    let reports = rig.reports.lock().unwrap().clone();
+    for r in &reports {
+        assert!(r.journal_bytes <= budget.journal_limit_bytes(), "{r:?}");
+        if r.kind == TxnKind::Evict {
+            assert!(r.units <= budget.rows_per_txn, "{r:?}");
+        }
+    }
+    // Only the oldest went, in whole chunks: what is left is the newest run.
+    let left: Vec<i64> = remaining(&rig).iter().map(|r| r.0).collect();
+    let first = left[0];
+    assert!(
+        left.iter().copied().eq(first..=ts),
+        "a contiguous newest run"
+    );
+    assert_removed_are_covered(&rig, &(1..first).collect::<Vec<_>>());
+}
+
+#[test]
+fn deleting_ninety_percent_returns_the_space_without_a_journal_over_the_limit() {
+    let mut rig = rig();
+    let budget = *rig.engine.budget();
+    let target = budget.max_page_count - budget.ledger_pages - 20;
+    let mut ts = 0;
+    while rig.engine.file_pages().unwrap() < target {
+        fill(
+            &rig,
+            (0..32).map(|_| {
+                ts += 1;
+                heavy(ts, 12)
+            }),
+        );
+    }
+    let (before, rows) = (rig.engine.file_pages().unwrap(), count(&rig, "events"));
+    rig.reports.lock().unwrap().clear();
+    while count(&rig, "events") > rows / 10 {
+        rig.engine.evict_chunk().unwrap();
+    }
+    rig.engine.vacuum_all().unwrap();
+    let after = rig.engine.file_pages().unwrap();
+    assert!(
+        after < before / 5,
+        "the file shrank from {before} to {after} pages"
+    );
+    for r in rig.reports.lock().unwrap().iter() {
+        assert!(r.journal_bytes <= budget.journal_limit_bytes(), "{r:?}");
+    }
+}
+
+// ---- eviction deletes nothing but rows of its own database -----------------------
+
+#[test]
+fn a_fill_to_the_limit_a_pause_and_an_age_sweep_touch_no_other_file() {
+    let mut rig = rig();
+    let dir = rig.location.db_path().parent().unwrap().to_path_buf();
+    let canaries = [
+        dir.join("history.db.bak"),
+        dir.join("notes.txt"),
+        dir.join("sub").join("inner.txt"),
+    ];
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    for (i, path) in canaries.iter().enumerate() {
+        std::fs::write(path, format!("canary {i}")).unwrap();
+    }
+    let settings = std::fs::read(rig.location.settings_path()).unwrap();
+    let mut ts = NOW - 40 * DAY_MS;
+    for _ in 0..500 {
+        assert!(rig.engine.make_room().unwrap());
+        let batch: Vec<Item> = (0..32)
+            .map(|_| {
+                ts += 60_000;
+                plain(heavy(ts, 12))
+            })
+            .collect();
+        rig.engine.insert_batch(&batch).unwrap();
+    }
+    rig.engine.set_retention_days(7);
+    while rig.engine.expire_aged(NOW, false).unwrap().removed > 0 {}
+    fill_until_paused(&mut rig);
+    for (i, path) in canaries.iter().enumerate() {
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            format!("canary {i}")
+        );
+    }
+    assert_eq!(
+        std::fs::read(rig.location.settings_path()).unwrap(),
+        settings
+    );
+    assert!(rig.location.db_path().exists());
+}

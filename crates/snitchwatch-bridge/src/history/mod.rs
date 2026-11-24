@@ -195,15 +195,17 @@ mod identity_dormant_tests;
 #[cfg(test)]
 mod replace_tests;
 #[cfg(test)]
-mod rule_identity_fuzz_tests;
+mod retention_crash_tests;
 #[cfg(test)]
 mod retention_pause_tests;
-#[cfg(test)]
-mod retention_writer_tests;
 #[cfg(test)]
 pub(crate) mod retention_support;
 #[cfg(test)]
 mod retention_tests;
+#[cfg(test)]
+mod retention_writer_tests;
+#[cfg(test)]
+mod rule_identity_fuzz_tests;
 #[cfg(test)]
 mod rule_identity_tests;
 #[cfg(test)]

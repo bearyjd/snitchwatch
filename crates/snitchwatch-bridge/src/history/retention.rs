@@ -125,9 +125,17 @@ fn delete_chunk(
     for row in picked {
         delete.execute([row.id])?;
         removed.rows += 1;
-        removed.first_ts = if removed.rows == 1 { row.ts_ms } else { removed.first_ts.min(row.ts_ms) };
+        removed.first_ts = if removed.rows == 1 {
+            row.ts_ms
+        } else {
+            removed.first_ts.min(row.ts_ms)
+        };
         removed.last_ts = removed.last_ts.max(row.ts_ms);
-        match removed.by_process.iter_mut().find(|(p, _)| *p == row.process) {
+        match removed
+            .by_process
+            .iter_mut()
+            .find(|(p, _)| *p == row.process)
+        {
             Some((_, bytes)) => *bytes += row.bytes,
             None => removed.by_process.push((row.process.clone(), row.bytes)),
         }

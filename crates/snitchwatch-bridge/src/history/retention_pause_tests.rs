@@ -60,7 +60,10 @@ fn eviction_that_cannot_reach_high_water_in_three_rounds_reports_not_made() {
     let before = count(&rig, "events");
     assert!(!rig.engine.make_room().unwrap());
     let taken = before - count(&rig, "events");
-    assert!(taken > 0 && taken <= 3 * 32, "three chunks of at most 32: {taken}");
+    assert!(
+        taken > 0 && taken <= 3 * 32,
+        "three chunks of at most 32: {taken}"
+    );
     assert!(used(&rig) > high_water(&rig));
     assert!(rig.engine.file_pages().unwrap() <= rig.engine.budget().max_page_count);
 }
@@ -107,9 +110,16 @@ fn gap_and_heartbeat_writes_keep_working_from_the_ledger_reserve_while_events_ar
         items: vec![one_item(1)],
         pins: vec![registry.accept().unwrap()],
     };
-    assert!(rig.engine.commit_pinned(&batch, &registry).is_err(), "events are paused");
+    assert!(
+        rig.engine.commit_pinned(&batch, &registry).is_err(),
+        "events are paused"
+    );
     // The ledger fills to its ceiling with rows that cannot merge.
-    let causes = [GapCause::QueueOverflow, GapCause::AdmissionDrop, GapCause::WriteFailed];
+    let causes = [
+        GapCause::QueueOverflow,
+        GapCause::AdmissionDrop,
+        GapCause::WriteFailed,
+    ];
     for i in 0..(limits.ceiling() as i64 + 20) {
         let gap = Gap {
             start_ms: i * 1_000,
@@ -123,7 +133,10 @@ fn gap_and_heartbeat_writes_keep_working_from_the_ledger_reserve_while_events_ar
             .unwrap_or_else(|e| panic!("gap {i} could not be written: {e}"));
         rig.engine.heartbeat(&registry).unwrap();
     }
-    assert!(rig.engine.file_pages().unwrap() <= cap, "never past max_page_count");
+    assert!(
+        rig.engine.file_pages().unwrap() <= cap,
+        "never past max_page_count"
+    );
 }
 
 // ---- the running writer pauses ---------------------------------------------------
@@ -218,7 +231,11 @@ fn while_paused_events_are_lost_without_another_eviction_and_the_ledger_still_wr
     let rows = db_events(&live.location);
     live.capture.observe(&[&web_event("b.example")]);
     wait_for("the second loss", || live.capture.stats().lost_cap == 2);
-    assert_eq!(db_events(&live.location), rows, "a paused writer does not evict");
+    assert_eq!(
+        db_events(&live.location),
+        rows,
+        "a paused writer does not evict"
+    );
     assert_eq!(live.capture.stats().written, 0);
     // The heartbeat flushes the losses into a gap row from the ledger reserve
     // while events stay paused, and releases their pins in that transaction.
@@ -230,15 +247,29 @@ fn while_paused_events_are_lost_without_another_eviction_and_the_ledger_still_wr
     });
     wait_for("the pin release", || live.registry.is_empty());
     let gaps = db_gaps(&live.location);
-    let failed: Vec<&Gap> = gaps.iter().filter(|g| g.cause == GapCause::WriteFailed).collect();
+    let failed: Vec<&Gap> = gaps
+        .iter()
+        .filter(|g| g.cause == GapCause::WriteFailed)
+        .collect();
     assert_eq!(failed.iter().map(|g| g.count).sum::<u64>(), 2, "{gaps:?}");
-    assert_eq!(failed.iter().map(|g| g.start_ms).min(), Some(50_000), "from the first loss");
+    assert_eq!(
+        failed.iter().map(|g| g.start_ms).min(),
+        Some(50_000),
+        "from the first loss"
+    );
     assert!(live.capture.stats().cap_paused);
     let location = live.location.clone();
     live.capture.shutdown();
     let conn = rusqlite::Connection::open(location.db_path()).unwrap();
-    let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap();
-    assert!(pages as u64 <= super::budget::Budget::new(16 * 1024 * 1024).unwrap().max_page_count);
+    let pages: i64 = conn
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        pages as u64
+            <= super::budget::Budget::new(16 * 1024 * 1024)
+                .unwrap()
+                .max_page_count
+    );
 }
 
 #[test]
@@ -247,7 +278,8 @@ fn recording_resumes_when_a_retry_makes_room_and_the_pause_state_clears() {
     let mut sent = 0;
     wait_for("recording to resume", || {
         sent += 1;
-        live.capture.observe(&[&web_event(&format!("h{sent}.example"))]);
+        live.capture
+            .observe(&[&web_event(&format!("h{sent}.example"))]);
         std::thread::sleep(Duration::from_millis(15));
         live.capture.stats().written > 0
     });

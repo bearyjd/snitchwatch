@@ -22,7 +22,10 @@ const NOW: i64 = 400 * DAY_MS;
 fn a_pass_is_due_once_per_period_after_the_start() {
     let t0 = Instant::now();
     let mut schedule = Schedule::new(Duration::from_secs(600), t0);
-    assert!(!schedule.due(t0), "not at the start: a jump is given a heartbeat to be seen");
+    assert!(
+        !schedule.due(t0),
+        "not at the start: a jump is given a heartbeat to be seen"
+    );
     assert!(!schedule.due(t0 + Duration::from_secs(599)));
     assert!(schedule.due(t0 + Duration::from_secs(600)));
     assert!(!schedule.due(t0 + Duration::from_secs(601)));
@@ -57,7 +60,10 @@ fn eviction_reports_the_event_bytes_it_removed_per_process_for_admission() {
     let mut released = rig.engine.take_released();
     released.sort();
     let row = row_bytes_of("/a");
-    assert_eq!(released, vec![("/a".to_string(), 2 * row), ("/b".to_string(), row)]);
+    assert_eq!(
+        released,
+        vec![("/a".to_string(), 2 * row), ("/b".to_string(), row)]
+    );
     assert!(rig.engine.take_released().is_empty(), "taken once");
 }
 
@@ -87,10 +93,13 @@ struct Live {
 }
 
 /// A capture at wall time `NOW` over a store holding `old` rows of
-/// `/old/p` at time 1000 and one recent row.
-fn live(old: i64, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
+/// `/old/p` at time `old_ts` and one recent row.
+fn live_at(old_ts: i64, old: i64, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
     let rig = rig();
-    fill(&rig, (0..old).map(|_| event(1_000, "/old/p", Action::Allow)));
+    fill(
+        &rig,
+        (0..old).map(|_| event(old_ts, "/old/p", Action::Allow)),
+    );
     fill(&rig, [event(NOW, "/new/p", Action::Allow)]);
     let Rig {
         _root,
@@ -113,6 +122,10 @@ fn live(old: i64, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
     }
 }
 
+fn live(old: i64, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
+    live_at(1_000, old, tweak)
+}
+
 fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !done() {
@@ -132,13 +145,19 @@ fn db_events(location: &Location) -> i64 {
 fn the_writer_seeds_admission_from_the_database_then_expires_and_releases() {
     let live = live(4, |c| c.expiry_every = Duration::from_millis(300));
     let row = row_bytes_of("/old/p");
-    wait_for("the seed", || live.capture.retained_for_test("/old/p") == 4 * row);
+    wait_for("the seed", || {
+        live.capture.retained_for_test("/old/p") == 4 * row
+    });
     wait_for("the expiry pass", || db_events(&live.location) == 1);
-    wait_for("the release", || live.capture.retained_for_test("/old/p") == 0);
+    wait_for("the release", || {
+        live.capture.retained_for_test("/old/p") == 0
+    });
     let gaps = read_gaps(&rusqlite::Connection::open(live.location.db_path()).unwrap()).unwrap();
     assert!(
-        gaps.iter()
-            .any(|g| g.cause == GapCause::Evicted && g.start_ms <= 1_000 && 1_000 <= g.end_ms && g.count == 4),
+        gaps.iter().any(|g| g.cause == GapCause::Evicted
+            && g.start_ms <= 1_000
+            && 1_000 <= g.end_ms
+            && g.count == 4),
         "{gaps:?}"
     );
     assert_eq!(live.capture.stats().expiry_skipped, 0);
@@ -150,7 +169,39 @@ fn a_pass_after_a_clock_jump_is_skipped_and_the_next_one_goes_ahead() {
     // The writer takes its clock baseline as it starts; the jump comes after.
     std::thread::sleep(Duration::from_millis(250));
     live.clock.store(NOW + 365 * DAY_MS, Ordering::SeqCst);
-    wait_for("the skipped pass", || live.capture.stats().expiry_skipped == 1);
-    assert_eq!(db_events(&live.location), 5, "nothing was expired by the jumped pass");
+    wait_for("the skipped pass", || {
+        live.capture.stats().expiry_skipped == 1
+    });
+    assert_eq!(
+        db_events(&live.location),
+        5,
+        "nothing was expired by the jumped pass"
+    );
     wait_for("the next pass", || db_events(&live.location) < 5);
+}
+
+#[test]
+fn the_capture_expires_by_the_retention_it_is_configured_with() {
+    // Eight days old: kept at the default 30 days, expired at 7.
+    let eight_days_ago = NOW - 8 * DAY_MS;
+    let kept = live_at(eight_days_ago, 4, |_| {});
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(db_events(&kept.location), 5, "30 days keeps them");
+    let expired = live_at(eight_days_ago, 4, |c| c.retention_days = 7);
+    wait_for("the 7-day pass", || db_events(&expired.location) == 1);
+}
+
+#[test]
+fn the_users_retention_setting_reaches_the_capture_config() {
+    let budget = super::budget::Budget::new(16 * 1024 * 1024).unwrap();
+    for days in [7_u16, 30, 90] {
+        let settings = super::settings::Settings {
+            retention_days: days,
+            ..Default::default()
+        };
+        assert_eq!(
+            CaptureConfig::for_settings(&budget, &settings).retention_days,
+            days
+        );
+    }
 }

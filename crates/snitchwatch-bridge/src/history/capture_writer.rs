@@ -107,7 +107,9 @@ impl Shared {
     /// and giving admission back the bytes eviction removed.
     fn housekeeping(&self, engine: &mut Engine, st: &mut Loop) {
         if st.pulse.due() {
-            let beat = st.pulse.beat(engine, &self.registry, &st.limits, &self.losses);
+            let beat = st
+                .pulse
+                .beat(engine, &self.registry, &st.limits, &self.losses);
             if let Err(e) = beat {
                 log_rate_limited(&mut st.last_logged, &e, 0);
             }
@@ -156,7 +158,11 @@ impl Shared {
             Err(e) if is_cap(&e) => {
                 let delay = st.pause.enter(Instant::now());
                 self.counters.cap_paused.store(true, Ordering::Relaxed);
-                log_rate_limited(&mut st.last_logged, &format_args!("{e}; retrying in {delay:?}"), events);
+                log_rate_limited(
+                    &mut st.last_logged,
+                    &format_args!("{e}; retrying in {delay:?}"),
+                    events,
+                );
                 self.lose_to_cap(batch);
             }
             Err(e) => {
