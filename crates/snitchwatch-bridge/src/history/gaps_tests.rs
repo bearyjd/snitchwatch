@@ -936,3 +936,65 @@ async fn history_gets_the_down_and_up_edges_as_one_exact_gap() {
     assert_eq!((gaps[0].start_ms, gaps[0].end_ms), (52_000, 58_000));
     assert!(gaps[0].start_exact);
 }
+
+/// An outage the bridge never saw begin (the daemon was already unreachable
+/// at the watchdog's first look) is not a `daemon-disconnected` gap: the
+/// `bridge-down` row and the session cover that time.
+#[tokio::test(start_paused = true)]
+async fn a_daemon_already_down_at_the_first_look_opens_no_gap() {
+    let root = tempdir();
+    let state = state_dir(&root);
+    let location = locate(Mode::User, Some(&state)).unwrap();
+    enable(
+        &location,
+        Consent {
+            text_id: "t".into(),
+            accepted_ms: 1,
+        },
+    )
+    .unwrap();
+    let (_ms, clock) = manual_clock(50_000);
+    let engine = engine_at(&location);
+    let mut config = crate::history::capture::CaptureConfig::for_budget(engine.budget());
+    config.heartbeat_every = Duration::from_secs(3600);
+    let capture = Arc::new(
+        crate::history::capture::Capture::spawn(
+            engine,
+            Arc::new(PinRegistry::with_clock(clock)),
+            config,
+        )
+        .unwrap(),
+    );
+    let liveness = crate::daemon_liveness::DaemonLiveness::new_stale_for_test(
+        std::time::Instant::now(),
+        Duration::from_secs(3600),
+    );
+    let tray_pub = Arc::new(crate::tray_state::TrayStatePublisher::new());
+    let cache = Arc::new(tokio::sync::Mutex::new(
+        crate::cache::connections::ConnectionCache::with_tray_publisher(64, tray_pub.clone()),
+    ));
+    let mut rx = tray_pub.subscribe();
+    let (broadcast_tx, _) = tokio::sync::broadcast::channel(16);
+    let diagnostics_ctx = Arc::new(crate::diagnostics::DiagnosticsCtx::new(
+        liveness.clone(),
+        Arc::new(Mutex::new(None)),
+        Arc::new(crate::diagnostics::kernel_probe::testing::FakeKernelProbe::all_ok()),
+        Arc::new(crate::daemon_alerts::DaemonAlertStore::new()),
+    ));
+    let watchdog = tokio::spawn(crate::daemon_watchdog::run_with_history(
+        liveness,
+        tray_pub,
+        cache,
+        diagnostics_ctx,
+        broadcast_tx,
+        Some(capture.clone()),
+    ));
+
+    rx.changed().await.unwrap();
+    assert_eq!(*rx.borrow(), crate::tray_state::TrayState::DaemonDown);
+    assert!(
+        !capture.daemon_gap_open_for_test(),
+        "an outage nobody saw begin is no gap"
+    );
+    watchdog.abort();
+}

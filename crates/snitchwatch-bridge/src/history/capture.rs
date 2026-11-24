@@ -755,6 +755,11 @@ impl Capture {
     }
 
     #[cfg(test)]
+    pub(crate) fn daemon_gap_open_for_test(&self) -> bool {
+        self.with_losses_for_test(|l| l.disconnect.is_pending())
+    }
+
+    #[cfg(test)]
     pub(crate) fn queued_for_test(&self) -> usize {
         self.shared.queue.len()
     }

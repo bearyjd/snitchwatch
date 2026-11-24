@@ -62,6 +62,9 @@ pub async fn run_with_history(
 ) {
     let mut interval = tokio::time::interval(WATCHDOG_TICK);
     let mut was_down = false;
+    // History's gap opens only for an outage seen to begin: a daemon that
+    // was already away at the first look has no observed start.
+    let mut seen_up = false;
     loop {
         interval.tick().await;
 
@@ -70,11 +73,12 @@ pub async fn run_with_history(
 
         // Connection history's `daemon-disconnected` gap: open at the down
         // edge, closed at recovery. In memory only; the writer commits it.
+        seen_up |= !down_now;
         if let Some(recorder) = recorder.as_ref().filter(|_| down_now != was_down) {
-            if down_now {
-                recorder.daemon_down();
-            } else {
+            if !down_now {
                 recorder.daemon_up();
+            } else if seen_up {
+                recorder.daemon_down();
             }
         }
         if down_now && !was_down {
