@@ -170,21 +170,6 @@ impl Engine {
         self.evict_victims(Victims::Oldest, u64::MAX)
             .map(|(report, _)| report)
     }
-
-    /// One chunk of the events of `process`, oldest first (tier 2).
-    pub(super) fn evict_process_chunk(
-        &mut self,
-        process: &str,
-    ) -> Result<TxnReport, WriteError> {
-        self.evict_victims(Victims::Process(process), u64::MAX)
-            .map(|(report, _)| report)
-    }
-
-    /// One chunk of the events older than `cutoff_ms` (tier 1).
-    pub(super) fn evict_before_chunk(&mut self, cutoff_ms: i64) -> Result<TxnReport, WriteError> {
-        self.evict_victims(Victims::Before(cutoff_ms), u64::MAX)
-            .map(|(report, _)| report)
-    }
 }
 
 /// Milliseconds in a day.
@@ -261,6 +246,16 @@ impl Engine {
     }
 }
 
+/// Runs a `(process, bytes)` query.
+fn group_bytes(conn: &Connection, sql: &str) -> rusqlite::Result<Vec<(String, u64)>> {
+    conn.prepare(sql)?
+        .query_map([], |r| {
+            let bytes: i64 = r.get(1)?;
+            Ok((r.get::<_, String>(0)?, u64::try_from(bytes).unwrap_or(0)))
+        })?
+        .collect()
+}
+
 impl Engine {
     /// What each process holds in the store: its events by
     /// [`row_bytes_sql`] and the snapshots only it refers to (D5). A bounded
@@ -268,11 +263,7 @@ impl Engine {
     /// pressure.
     pub(super) fn process_bytes(&self) -> Result<Vec<(String, u64)>, WriteError> {
         let conn = self.connection();
-        let mut held: HashMap<String, u64> = HashMap::new();
-        let events = format!(
-            "SELECT coalesce(process_path, ''), sum({}) FROM events GROUP BY 1",
-            row_bytes_sql()
-        );
+        let mut held: HashMap<String, u64> = self.event_bytes()?.into_iter().collect();
         // A snapshot belongs to a process only when every event that refers
         // to it is that process's (min = max).
         let snapshots = "SELECT p, sum(len) FROM (\
@@ -281,16 +272,20 @@ impl Engine {
                     length(CAST(rs.snapshot AS BLOB)) AS len \
              FROM rules_seen rs JOIN events e ON e.rule_hash = rs.rule_hash \
              GROUP BY rs.rule_hash) WHERE p = q GROUP BY p";
-        for sql in [events.as_str(), snapshots] {
-            let rows = conn
-                .prepare(sql)?
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            for (process, bytes) in rows {
-                *held.entry(process).or_insert(0) += u64::try_from(bytes).unwrap_or(0);
-            }
+        for (process, bytes) in group_bytes(conn, snapshots)? {
+            *held.entry(process).or_insert(0) += bytes;
         }
         Ok(held.into_iter().collect())
+    }
+
+    /// What each process holds in events alone, by [`row_bytes_sql`]: what
+    /// admission's ledger counts.
+    pub fn event_bytes(&self) -> Result<Vec<(String, u64)>, WriteError> {
+        let sql = format!(
+            "SELECT coalesce(process_path, ''), sum({}) FROM events GROUP BY 1",
+            row_bytes_sql()
+        );
+        Ok(group_bytes(self.connection(), &sql)?)
     }
 
     /// The most a process may hold: [`SHARE_PERCENT`] of the main file.
@@ -347,5 +342,73 @@ impl Engine {
             self.vacuum_all()?;
         }
         Ok(self.used_pages()? <= high)
+    }
+}
+
+/// The pause after eviction could not make room (D5): recording stops for
+/// `delay`, which doubles on each failed attempt up to `max` and starts over
+/// after a success.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Pause {
+    min: std::time::Duration,
+    max: std::time::Duration,
+    next: std::time::Duration,
+    until: Option<std::time::Instant>,
+}
+
+impl Pause {
+    pub(super) fn new(min: std::time::Duration, max: std::time::Duration) -> Self {
+        Self {
+            min,
+            max,
+            next: min,
+            until: None,
+        }
+    }
+
+    /// Whether recording is paused at `now`.
+    pub(super) fn active(&self, now: std::time::Instant) -> bool {
+        self.until.is_some_and(|until| now < until)
+    }
+
+    /// An attempt failed at `now`: pause for the next delay, which is
+    /// returned.
+    pub(super) fn enter(&mut self, now: std::time::Instant) -> std::time::Duration {
+        let delay = self.next;
+        self.until = Some(now + delay);
+        self.next = delay.saturating_mul(2).min(self.max);
+        delay
+    }
+
+    /// A batch was written: the next failure starts from the minimum again.
+    /// Whether recording had been paused.
+    pub(super) fn reset(&mut self) -> bool {
+        let was = self.until.is_some();
+        self.next = self.min;
+        self.until = None;
+        was
+    }
+}
+
+/// When the writer next runs an age-expiry pass: every `every` after the
+/// start (a clock that jumped is given a heartbeat to be noticed first).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Schedule {
+    every: std::time::Duration,
+    last: std::time::Instant,
+}
+
+impl Schedule {
+    pub(super) fn new(every: std::time::Duration, start: std::time::Instant) -> Self {
+        Self { every, last: start }
+    }
+
+    /// Whether a pass is due at `now`; asking again starts the next period.
+    pub(super) fn due(&mut self, now: std::time::Instant) -> bool {
+        let due = now.saturating_duration_since(self.last) >= self.every;
+        if due {
+            self.last = now;
+        }
+        due
     }
 }

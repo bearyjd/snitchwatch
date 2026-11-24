@@ -8,7 +8,7 @@
 //! | `upstream-loss` | [`UpstreamLoss`] of each ping | the same |
 //! | `daemon-disconnected` | the watchdog's down and up edges | the up edge (or shutdown) |
 //! | `clock-jump` | [`ClockWatch`], once per heartbeat | the heartbeat that saw it |
-//! | `evicted` | [`Engine::record_evicted`] (PR 8 calls it) | at once |
+//! | `evicted` | the eviction transaction itself (`retention.rs`) | the same transaction |
 //!
 //! W1 holds throughout: a counter's pin is released only by the transaction
 //! that writes its gap row ([`Engine::flush_counter_at`]); a flush that fails
@@ -546,6 +546,8 @@ pub struct ClockWatch {
     /// Held at the start of `unrecorded` until its row is durable, so that no
     /// commit in between lets the watermark pass the jump.
     pin: Option<PinId>,
+    /// A jump was seen and no expiry pass has asked since.
+    jumped: bool,
 }
 
 impl ClockWatch {
@@ -570,6 +572,7 @@ impl ClockWatch {
         if (-CLOCK_SLEW_TOLERANCE_MS..=CLOCK_JUMP_THRESHOLD_MS).contains(&drift) {
             return;
         }
+        self.jumped = true;
         let (start_ms, end_ms) = (last_wall.min(wall_ms), last_wall.max(wall_ms));
         self.unrecorded = Some(match self.unrecorded {
             Some(kept) => Gap {
@@ -586,6 +589,12 @@ impl ClockWatch {
                 count: 1,
             },
         });
+    }
+
+    /// Whether a jump was seen since the last call (sticky until taken): age
+    /// expiry skips the pass that follows one.
+    pub fn take_jumped(&mut self) -> bool {
+        std::mem::take(&mut self.jumped)
     }
 
     /// The jump seen and not yet [`recorded`](Self::recorded).
@@ -726,6 +735,11 @@ impl Pulse {
         close(engine, registry, limits, losses, &mut self.clock, kind)
     }
 
+    /// See [`ClockWatch::take_jumped`].
+    pub(super) fn take_jumped(&mut self) -> bool {
+        self.clock.take_jumped()
+    }
+
     fn mono_ms(&self) -> i64 {
         i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX)
     }
@@ -749,33 +763,6 @@ pub(super) fn close(
     let flushed = flush_due(engine, registry, limits, losses, true);
     let ended = engine.end_session(registry, kind);
     jump.and(flushed).and(ended)
-}
-
-impl Engine {
-    /// Retention removed `removed` events, the oldest remaining being at
-    /// `earliest_remaining_ms`. PR 8's eviction calls this in the transaction
-    /// that deletes them.
-    pub fn record_evicted(
-        &mut self,
-        earliest_remaining_ms: i64,
-        removed: u64,
-        registry: &PinRegistry,
-        limits: &LedgerLimits,
-    ) -> Result<(), DurableError> {
-        if removed == 0 {
-            return Ok(());
-        }
-        // What was removed is older than everything left; where it began is
-        // unknown, so the marker has no exact start.
-        let gap = Gap {
-            start_ms: 0,
-            end_ms: earliest_remaining_ms,
-            start_exact: false,
-            cause: GapCause::Evicted,
-            count: removed,
-        };
-        self.commit_gap(&gap, &[], registry, limits).map(|_| ())
-    }
 }
 
 #[cfg(test)]

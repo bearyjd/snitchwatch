@@ -243,6 +243,13 @@ pub enum WriteError {
     /// was written.
     #[error("an item's snapshot does not belong to its event's rule hash")]
     SnapshotMismatch,
+    /// Eviction could not bring the store under its high-water mark within
+    /// [`EVICTION_ROUNDS`] rounds: recording is paused and retried with
+    /// backoff (D5). Lives in this error and the logs only (owner decision
+    /// 2026-11-24, item 5): the lost events become a plain `write-failed`
+    /// gap.
+    #[error("history is at its disk budget and eviction could not make room; recording is paused")]
+    Cap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -567,12 +574,10 @@ impl Engine {
     /// [`make_room`](Self::make_room), as an error when it could not.
     pub(super) fn ensure_room(&mut self) -> Result<(), WriteError> {
         if self.make_room()? {
-            return Ok(());
+            Ok(())
+        } else {
+            Err(WriteError::Cap)
         }
-        Err(WriteError::Sqlite(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
-            Some("history is over its disk budget".into()),
-        )))
     }
 }
 

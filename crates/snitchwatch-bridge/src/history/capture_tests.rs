@@ -268,6 +268,9 @@ fn config_for(_budget: &Budget) -> CaptureConfig {
         queue_max_count: super::super::writer::QUEUE_MAX_COUNT,
         admission: AdmissionConfig::standard(),
         heartbeat_every: std::time::Duration::from_secs(3600),
+        pause_min: std::time::Duration::from_millis(500),
+        pause_max: std::time::Duration::from_secs(60),
+        expiry_every: std::time::Duration::from_secs(600),
     }
 }
 

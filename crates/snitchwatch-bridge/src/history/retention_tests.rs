@@ -8,6 +8,8 @@ use rusqlite::Connection;
 use super::caps::{DstHost, ProcessPath, Protocol, RuleClass, RuleName};
 use super::measure::{estimate_bytes, row_bytes_sql};
 use super::record::{insert_event, Action, AnsweredBy, EventRecord};
+use super::retention_support::*;
+use super::writer::{Item, TxnKind};
 
 fn full_record() -> EventRecord {
     let mut e = EventRecord::new(1, Action::Allow, AnsweredBy::Rule);
@@ -44,148 +46,6 @@ fn the_sql_row_measure_equals_the_admission_estimate_for_every_shape() {
     let rust: Vec<u64> = rows.iter().map(estimate_bytes).collect();
     assert_eq!(sql_bytes(&conn), rust);
     assert!(rust[0] > rust[1], "multi-byte text counts by bytes");
-}
-
-// ---- the rig ---------------------------------------------------------------
-
-use std::sync::{Arc, Mutex};
-
-use super::budget::Budget;
-use super::caps::{Snapshot, RULE_HASH};
-use super::ledger::{read_gaps, Gap, GapCause};
-use super::record::SnapshotRecord;
-use super::test_support::{state_dir, tempdir};
-use super::writer::{Engine, Item, TxnKind, TxnReport, WriteError};
-use super::{enable, locate, open_store, Consent, Location, Mode};
-
-struct Rig {
-    _root: tempfile::TempDir,
-    #[allow(dead_code)]
-    location: Location,
-    engine: Engine,
-    reports: Arc<Mutex<Vec<TxnReport>>>,
-}
-
-fn rig() -> Rig {
-    rig_with(16 * 1024 * 1024)
-}
-
-fn rig_with(total: u64) -> Rig {
-    let root = tempdir();
-    let state = state_dir(&root);
-    let location = locate(Mode::User, Some(&state)).unwrap();
-    let consent = Consent {
-        text_id: "t".into(),
-        accepted_ms: 1,
-    };
-    enable(&location, consent).unwrap();
-    let store = open_store(&location).unwrap();
-    let mut engine = Engine::new(store, &location, Budget::new(total).unwrap()).unwrap();
-    engine
-        .connection()
-        .pragma_update(None, "synchronous", "OFF")
-        .unwrap();
-    let reports = Arc::new(Mutex::new(Vec::new()));
-    let sink = reports.clone();
-    engine.set_observer(Box::new(move |r| sink.lock().unwrap().push(*r)));
-    Rig {
-        _root: root,
-        location,
-        engine,
-        reports,
-    }
-}
-
-fn hash(n: u8) -> [u8; RULE_HASH] {
-    [n; RULE_HASH]
-}
-
-fn event(ts: i64, process: &str, action: Action) -> EventRecord {
-    let mut e = EventRecord::new(ts, action, AnsweredBy::Rule);
-    e.process_path = Some(ProcessPath::new(process));
-    e
-}
-
-fn with_rule(mut e: EventRecord, n: u8) -> Item {
-    e.rule_hash = Some(hash(n));
-    Item {
-        snapshot: Some(SnapshotRecord::for_test(
-            hash(n),
-            Snapshot::new(&format!("{{\"rule\":{n}}}")).unwrap(),
-            e.ts_ms,
-        )),
-        event: e,
-    }
-}
-
-fn plain(e: EventRecord) -> Item {
-    Item {
-        event: e,
-        snapshot: None,
-    }
-}
-
-/// Inserts `items` through the writer, `rows_per_txn` at a time.
-fn put(rig: &mut Rig, items: Vec<Item>) {
-    for chunk in items.chunks(rig.engine.budget().rows_per_txn as usize) {
-        rig.engine.insert_batch(chunk).unwrap();
-    }
-}
-
-fn count(rig: &Rig, table: &str) -> i64 {
-    rig.engine
-        .connection()
-        .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
-        .unwrap()
-}
-
-fn remaining(rig: &Rig) -> Vec<(i64, i64)> {
-    rig.engine
-        .connection()
-        .prepare("SELECT ts_ms, id FROM events ORDER BY ts_ms, id")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect()
-}
-
-fn snapshots(rig: &Rig) -> Vec<Vec<u8>> {
-    rig.engine
-        .connection()
-        .prepare("SELECT rule_hash FROM rules_seen ORDER BY id")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(Result::unwrap)
-        .collect()
-}
-
-fn evicted(rig: &Rig) -> Vec<Gap> {
-    read_gaps(rig.engine.connection())
-        .unwrap()
-        .into_iter()
-        .filter(|g| g.cause == GapCause::Evicted)
-        .collect()
-}
-
-/// Every removed event's instant lies inside some `evicted` row: the view
-/// never shows a silent empty interval where events used to be.
-fn assert_removed_are_covered(rig: &Rig, removed_ts: &[i64]) {
-    let rows = evicted(rig);
-    for ts in removed_ts {
-        assert!(
-            rows.iter().any(|g| g.start_ms <= *ts && *ts <= g.end_ms),
-            "event at {ts} was removed without an evicted row covering it: {rows:?}"
-        );
-    }
-}
-
-fn fail_once() -> Box<dyn FnMut() -> Option<WriteError> + Send> {
-    let mut armed = true;
-    Box::new(move || {
-        std::mem::take(&mut armed).then(|| WriteError::Io(std::io::Error::other("injected")))
-    })
 }
 
 // ---- order and chunking (D5) ---------------------------------------------------
@@ -255,10 +115,10 @@ fn snapshot_fixture(rig: &mut Rig) {
 fn deleting_one_event_by_age_removes_its_unreferenced_snapshot_and_keeps_shared_ones() {
     let mut rig = rig();
     snapshot_fixture(&mut rig);
-    rig.engine.evict_before_chunk(150).unwrap();
+    evict_before(&mut rig, 150).unwrap();
     assert_eq!(count(&rig, "events"), 2);
     assert_eq!(snapshots(&rig), vec![hash(2).to_vec()], "rule 1 went, 2 is shared");
-    rig.engine.evict_before_chunk(250).unwrap();
+    evict_before(&mut rig, 250).unwrap();
     assert_eq!(count(&rig, "events"), 1);
     assert_eq!(snapshots(&rig), vec![hash(2).to_vec()], "still referenced by /c");
 }
@@ -267,12 +127,12 @@ fn deleting_one_event_by_age_removes_its_unreferenced_snapshot_and_keeps_shared_
 fn deleting_one_event_by_process_share_removes_its_unreferenced_snapshot() {
     let mut rig = rig();
     snapshot_fixture(&mut rig);
-    rig.engine.evict_process_chunk("/a").unwrap();
+    evict_process(&mut rig, "/a").unwrap();
     assert_eq!(count(&rig, "events"), 2);
     assert_eq!(snapshots(&rig), vec![hash(2).to_vec()]);
-    rig.engine.evict_process_chunk("/b").unwrap();
+    evict_process(&mut rig, "/b").unwrap();
     assert_eq!(snapshots(&rig), vec![hash(2).to_vec()], "/c still uses rule 2");
-    rig.engine.evict_process_chunk("/c").unwrap();
+    evict_process(&mut rig, "/c").unwrap();
     assert!(snapshots(&rig).is_empty());
 }
 
@@ -292,8 +152,8 @@ fn a_fault_before_commit_leaves_the_event_the_snapshot_and_no_marker_on_every_pa
         snapshot_fixture(&mut rig);
         rig.engine.fault_before_commit_for_test(fail_once());
         let outcome = match path {
-            0 => rig.engine.evict_before_chunk(150),
-            1 => rig.engine.evict_process_chunk("/a"),
+            0 => evict_before(&mut rig, 150),
+            1 => evict_process(&mut rig, "/a"),
             _ => rig.engine.evict_chunk(),
         };
         assert!(outcome.is_err(), "path {path}");
@@ -348,7 +208,7 @@ fn a_process_eviction_marker_spans_only_what_it_removed() {
             plain(event(500, "/other", Action::Allow)),
         ],
     );
-    rig.engine.evict_process_chunk("/flood").unwrap();
+    evict_process(&mut rig, "/flood").unwrap();
     let rows = evicted(&rig);
     assert_eq!(rows.len(), 1);
     assert_eq!((rows[0].start_ms, rows[0].end_ms, rows[0].count), (200, 400, 2));
@@ -457,66 +317,6 @@ fn a_clock_that_stepped_back_expires_nothing_extra() {
 
 // ---- the per-process byte share (D5) ---------------------------------------------
 
-fn used(rig: &Rig) -> u64 {
-    rig.engine.used_pages().unwrap()
-}
-
-fn high_water(rig: &Rig) -> u64 {
-    rig.engine.budget().high_water_pages()
-}
-
-fn share_bytes(rig: &Rig) -> u64 {
-    rig.engine.budget().main_bytes / 100 * super::admission::SHARE_PERCENT
-}
-
-fn bytes_of(rig: &Rig, process: &str) -> u64 {
-    rig.engine
-        .process_bytes()
-        .unwrap()
-        .into_iter()
-        .find(|(p, _)| p == process)
-        .map_or(0, |(_, b)| b)
-}
-
-fn count_of(rig: &Rig, process: &str) -> i64 {
-    rig.engine
-        .connection()
-        .query_row(
-            "SELECT count(*) FROM events WHERE coalesce(process_path, '') = ?1",
-            [process],
-            |r| r.get(0),
-        )
-        .unwrap()
-}
-
-/// Inserts `events` in one raw transaction: no room is made, so a test can
-/// build any state up to the file's cap.
-fn fill(rig: &Rig, events: impl IntoIterator<Item = EventRecord>) {
-    let conn = rig.engine.connection();
-    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
-    for e in events {
-        insert_event(conn, &e).unwrap();
-    }
-    conn.execute_batch("COMMIT").unwrap();
-}
-
-fn hostile_path() -> String {
-    format!("/opt/{}", "p".repeat(4000))
-}
-
-/// A record of worst-case size from the flooding process.
-fn big(ts: i64) -> EventRecord {
-    let mut e = event(ts, &hostile_path(), Action::Allow);
-    e.dst_host = Some(DstHost::new(&"h".repeat(250)));
-    e
-}
-
-fn small_for(ts: i64, process: &str) -> EventRecord {
-    let mut e = event(ts, process, Action::Allow);
-    e.dst_host = Some(DstHost::new(&"s".repeat(200)));
-    e
-}
-
 #[test]
 fn a_flood_of_large_records_cannot_evict_another_processs_small_ones() {
     let mut rig = rig();
@@ -534,21 +334,6 @@ fn a_flood_of_large_records_cannot_evict_another_processs_small_ones() {
     assert!(evicted_any, "the flood must have overrun the budget");
     assert_eq!(count_of(&rig, "/usr/bin/small"), 30, "others stay while the flooder is over share");
     assert!(rig.engine.file_pages().unwrap() <= rig.engine.budget().max_page_count);
-}
-
-/// Rows from `n` processes in rotation, until the file passes high-water by
-/// `over` pages. Timestamps follow insertion order.
-fn fill_rotating(rig: &Rig, n: usize, over: u64, first_ts: i64) {
-    let mut ts = first_ts;
-    while used(rig) <= high_water(rig) + over {
-        let rows: Vec<EventRecord> = (0..32)
-            .map(|i| {
-                ts += 1;
-                small_for(ts, &format!("/usr/bin/p{}", (ts as usize + i) % n))
-            })
-            .collect();
-        fill(rig, rows);
-    }
 }
 
 #[test]
@@ -607,11 +392,8 @@ fn snapshot_bytes_count_toward_a_process_only_when_attributable_to_it_alone() {
         ],
     );
     let snap = |n: u8| format!("{{\"rule\":{n}}}").len() as u64;
-    let row = row_bytes_of(&rig, "/a");
+    let row = row_bytes_of("/a");
     assert_eq!(bytes_of(&rig, "/a"), 2 * row + snap(1), "rule 1 is only /a's; rule 2 is shared");
     assert_eq!(bytes_of(&rig, "/b"), row, "/b gets no part of the shared snapshot");
 }
 
-fn row_bytes_of(rig: &Rig, process: &str) -> u64 {
-    estimate_bytes(&event(0, process, Action::Allow))
-}

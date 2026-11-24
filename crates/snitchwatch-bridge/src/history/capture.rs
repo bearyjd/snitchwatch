@@ -202,6 +202,12 @@ pub struct CaptureConfig {
     pub admission: AdmissionConfig,
     /// How often the writer commits a heartbeat and flushes its loss tallies.
     pub heartbeat_every: Duration,
+    /// The first pause after eviction could not make room, doubling up to
+    /// [`pause_max`](Self::pause_max) (D5).
+    pub pause_min: Duration,
+    pub pause_max: Duration,
+    /// How often the writer runs an age-expiry pass.
+    pub expiry_every: Duration,
 }
 
 impl CaptureConfig {
@@ -213,6 +219,9 @@ impl CaptureConfig {
             queue_max_count: QUEUE_MAX_COUNT,
             admission: AdmissionConfig::standard(),
             heartbeat_every: HEARTBEAT_EVERY,
+            pause_min: PAUSE_MIN,
+            pause_max: PAUSE_MAX,
+            expiry_every: EXPIRY_EVERY,
         }
     }
 }
@@ -224,6 +233,13 @@ pub fn queues_allocated() -> usize {
 
 /// How often the writer commits a heartbeat and flushes its loss tallies.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
+/// Recording pauses this long after eviction could not make room, doubling
+/// per failed attempt up to the maximum (D5).
+const PAUSE_MIN: Duration = Duration::from_millis(500);
+const PAUSE_MAX: Duration = Duration::from_secs(60);
+/// Age expiry runs this often: a pass takes at most a tenth of the rows, so
+/// a wall clock stepped far forward erodes history slowly, not at once.
+const EXPIRY_EVERY: Duration = Duration::from_secs(600);
 
 pub(super) struct Shared {
     // In-memory only. A control operation must change eligibility and/or
@@ -235,6 +251,9 @@ pub(super) struct Shared {
     admission: Mutex<Admission>,
     losses: Mutex<Losses>,
     heartbeat_every: Duration,
+    pause_min: Duration,
+    pause_max: Duration,
+    expiry_every: Duration,
     /// A fork default-action event was seen this session (D1's capability).
     fork_marker_seen: AtomicBool,
     no_gui_prompts: AtomicBool,
@@ -255,6 +274,9 @@ impl Shared {
             admission: Mutex::new(Admission::new(config.admission)),
             losses: Mutex::new(Losses::new()),
             heartbeat_every: config.heartbeat_every,
+            pause_min: config.pause_min,
+            pause_max: config.pause_max,
+            expiry_every: config.expiry_every,
             fork_marker_seen: AtomicBool::new(false),
             no_gui_prompts: AtomicBool::new(false),
             disabling: AtomicBool::new(false),
@@ -545,6 +567,16 @@ impl Capture {
             shared: Arc::new(Shared::new(registry, config, None)),
             writer: Mutex::new(None),
         }
+    }
+
+    /// What admission's ledger holds for `process`.
+    #[cfg(test)]
+    pub(super) fn retained_for_test(&self, process: &str) -> u64 {
+        self.shared
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retained_for(Some(process))
     }
 
     #[cfg(test)]
