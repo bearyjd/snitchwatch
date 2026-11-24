@@ -495,6 +495,33 @@ fn a_flapping_clock_is_one_merged_row_and_cannot_collapse_other_gaps() {
     assert!(rows.iter().any(|g| g.cause == GapCause::Evicted));
 }
 
+#[test]
+fn clock_jump_rows_merge_only_within_the_coalescing_window() {
+    let mut rig = rig(1_000);
+    let mut commit = |g: Gap| {
+        rig.engine
+            .commit_gap(&g, &[], &rig.registry, &rig.limits)
+            .unwrap();
+    };
+    commit(gap(100_000, 110_000, GapCause::ClockJump, 1));
+    commit(gap(0, 50_000, GapCause::Evicted, 1));
+    // Apart from the first by 90 s: merged, though another row came between.
+    commit(gap(200_000, 210_000, GapCause::ClockJump, 1));
+    // Apart by more than the window: its own row.
+    commit(gap(5_000_000, 5_010_000, GapCause::ClockJump, 1));
+    let jumps: Vec<_> = gaps(&rig)
+        .into_iter()
+        .filter(|g| g.cause == GapCause::ClockJump)
+        .collect();
+    assert_eq!(
+        jumps,
+        vec![
+            gap(100_000, 210_000, GapCause::ClockJump, 2),
+            gap(5_000_000, 5_010_000, GapCause::ClockJump, 1)
+        ]
+    );
+}
+
 // ---- evicted marker ------------------------------------------------------
 
 #[test]
