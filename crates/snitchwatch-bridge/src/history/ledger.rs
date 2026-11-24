@@ -365,13 +365,20 @@ pub fn row_count(conn: &Connection) -> rusqlite::Result<u64> {
 #[derive(Debug)]
 pub struct LossCounter {
     cause: GapCause,
+    /// False: the loss began somewhere after its recorded start (see
+    /// [`Self::bounded`]).
+    exact: bool,
     pending: Option<Pending>,
 }
 
 #[derive(Debug)]
 struct Pending {
     count: u64,
+    /// When the first loss was noticed: the pin's arrival.
     first_ms: i64,
+    /// Where the gap starts: `first_ms`, or earlier when the losses are known
+    /// to have begun before they were noticed.
+    start_ms: i64,
     pin: PinId,
 }
 
@@ -379,7 +386,17 @@ impl LossCounter {
     pub fn new(cause: GapCause) -> Self {
         Self {
             cause,
+            exact: true,
             pending: None,
+        }
+    }
+
+    /// A tally whose gap start is only a bound: the losses happened somewhere
+    /// after it ([`Self::record_since`]).
+    pub fn bounded(cause: GapCause) -> Self {
+        Self {
+            exact: false,
+            ..Self::new(cause)
         }
     }
 
@@ -392,9 +409,26 @@ impl LossCounter {
                 self.pending = Some(Pending {
                     count: n,
                     first_ms,
+                    start_ms: first_ms,
                     pin,
                 });
             }
+        }
+        Ok(())
+    }
+
+    /// [`record`](Self::record) for losses known to lie after `since_ms`
+    /// (earlier than they were noticed): the gap starts there. The pin still
+    /// arrives now, which is what W1 can honour.
+    pub fn record_since(
+        &mut self,
+        registry: &PinRegistry,
+        n: u64,
+        since_ms: i64,
+    ) -> Result<(), PinError> {
+        self.record(registry, n)?;
+        if let Some(p) = self.pending.as_mut() {
+            p.start_ms = p.start_ms.min(since_ms);
         }
         Ok(())
     }
@@ -405,24 +439,59 @@ impl LossCounter {
         let Some(first_ms) = registry.arrival_of(&pin) else {
             return;
         };
-        let count = match self.pending.take() {
-            Some(mut pending) if pending.first_ms <= first_ms => {
-                pending.count = pending.count.saturating_add(n);
-                self.pending = Some(pending);
-                let _ = registry.release(&pin);
-                return;
+        self.merge(
+            registry,
+            Pending {
+                count: n,
+                first_ms,
+                start_ms: first_ms,
+                pin,
+            },
+        );
+    }
+
+    /// Moves `other`'s tally into this one, keeping the older pin (W1) and
+    /// releasing the other. Puts a flush that failed back.
+    pub(crate) fn absorb(&mut self, registry: &PinRegistry, other: Self) {
+        if let Some(pending) = other.pending {
+            self.merge(registry, pending);
+        }
+    }
+
+    fn merge(&mut self, registry: &PinRegistry, incoming: Pending) {
+        let merged = match self.pending.take() {
+            Some(mut kept) if kept.first_ms <= incoming.first_ms => {
+                kept.count = kept.count.saturating_add(incoming.count);
+                kept.start_ms = kept.start_ms.min(incoming.start_ms);
+                let _ = registry.release(&incoming.pin);
+                kept
             }
-            Some(pending) => {
-                let _ = registry.release(&pending.pin);
-                pending.count.saturating_add(n)
+            Some(kept) => {
+                let _ = registry.release(&kept.pin);
+                Pending {
+                    count: kept.count.saturating_add(incoming.count),
+                    start_ms: kept.start_ms.min(incoming.start_ms),
+                    ..incoming
+                }
             }
-            None => n,
+            None => incoming,
         };
-        self.pending = Some(Pending {
-            count,
-            first_ms,
-            pin,
-        });
+        self.pending = Some(merged);
+    }
+
+    /// Moves the tally out, leaving this one empty, so that its flush can
+    /// run without the lock that guards new losses.
+    pub(crate) fn take(&mut self) -> Self {
+        Self {
+            cause: self.cause,
+            exact: self.exact,
+            pending: self.pending.take(),
+        }
+    }
+
+    /// Whether a tally (and so a pin) is waiting to be flushed.
+    pub(crate) fn is_pending(&self) -> bool {
+        self.pending.is_some()
     }
 
     /// Unflushed losses, if any.
@@ -435,9 +504,9 @@ impl LossCounter {
         self.pending.as_ref().map(|p| {
             (
                 Gap {
-                    start_ms: p.first_ms,
+                    start_ms: p.start_ms,
                     end_ms: end_ms.max(p.first_ms),
-                    start_exact: true,
+                    start_exact: self.exact,
                     cause: self.cause,
                     count: p.count.max(1),
                 },

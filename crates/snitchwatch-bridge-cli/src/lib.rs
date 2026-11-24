@@ -287,7 +287,8 @@ where
     // Connection history is off unless the owner enabled it: `start` reads
     // the state (creating nothing) and gives `None` for off, so a bridge with
     // history off starts no writer, makes no directory and allocates no queue.
-    let ui_service_inner = match history_capture(&options) {
+    let recorder = history_capture(&options);
+    let ui_service_inner = match recorder.clone() {
         Some(capture) => ui_service_inner.with_history_capture(capture),
         None => ui_service_inner,
     };
@@ -497,12 +498,13 @@ where
     // goes unreachable (no gRPC activity and no open Notifications stream),
     // and resyncs to the cache's real Idle/Pending(n) once it's reachable
     // again. See daemon_watchdog's module doc for the timeout rationale.
-    let watchdog_handle = tokio::spawn(snitchwatch_bridge::daemon_watchdog::run(
+    let watchdog_handle = tokio::spawn(snitchwatch_bridge::daemon_watchdog::run_with_history(
         liveness,
         tray_pub.clone(),
         cache.clone(),
         diagnostics_ctx.clone(),
         broadcast_tx.clone(),
+        recorder,
     ));
 
     tokio::spawn(async move {

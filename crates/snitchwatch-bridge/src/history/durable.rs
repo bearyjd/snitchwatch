@@ -115,7 +115,18 @@ impl Engine {
         registry: &PinRegistry,
         limits: &LedgerLimits,
     ) -> Result<bool, DurableError> {
-        let Some((gap, pin)) = counter.pending_gap(registry.now()) else {
+        self.flush_counter_at(counter, registry, limits, registry.now())
+    }
+
+    /// [`flush_counter`](Self::flush_counter) for a gap that ended at `end_ms`.
+    pub fn flush_counter_at(
+        &mut self,
+        counter: &mut LossCounter,
+        registry: &PinRegistry,
+        limits: &LedgerLimits,
+        end_ms: i64,
+    ) -> Result<bool, DurableError> {
+        let Some((gap, pin)) = counter.pending_gap(end_ms) else {
             return Ok(false);
         };
         self.commit_gap(&gap, &[pin], registry, limits)?;

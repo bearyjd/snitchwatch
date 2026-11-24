@@ -160,6 +160,9 @@ const OWNERS: &[&str] = &[
     "ledger.rs",
     "ledger_tests.rs",
     "crash_tests.rs",
+    "gaps.rs",
+    "gaps_tests.rs",
+    "pinned_queue.rs",
     "dormant_tests.rs",
 ];
 
@@ -254,7 +257,7 @@ const WIRING_HISTORY_ONLY: [&str; 1] = ["Writer"];
 /// The 3b names with no other use in the workspace: types and functions of
 /// `ledger`, `session` and `durable`. Whole identifiers, anywhere in code.
 /// `durable_names_cover_every_pub_item` keeps this and the next list complete.
-const DURABLE_TYPES: [&str; 17] = [
+const DURABLE_TYPES: [&str; 18] = [
     "LossCounter",
     "LedgerLimits",
     "LedgerOverflow",
@@ -271,6 +274,7 @@ const DURABLE_TYPES: [&str; 17] = [
     "commit_pinned",
     "commit_gap",
     "flush_counter",
+    "flush_counter_at",
     "begin_session",
 ];
 /// The other 3b names: the modules and common words (`session`, `Gap`,
@@ -290,7 +294,7 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 11] = [
+const DURABLE_OWNERS: [&str; 14] = [
     "capture.rs",
     "capture_tests.rs",
     "hook_tests.rs",
@@ -301,6 +305,9 @@ const DURABLE_OWNERS: [&str; 11] = [
     "durable.rs",
     "durable_tests.rs",
     "crash_tests.rs",
+    "gaps.rs",
+    "gaps_tests.rs",
+    "pinned_queue.rs",
     "dormant_tests.rs",
 ];
 
@@ -341,14 +348,21 @@ const CAPTURE_OWNERS: &[&str] = &[
     "admission_tests.rs",
     "guard.rs",
     "hook_tests.rs",
+    "gaps.rs",
+    "gaps_tests.rs",
     "dormant_tests.rs",
     "mod.rs",
 ];
 
-/// The two production hook sites PR 5 wires, and the only paths each may name:
+/// The production hook sites PR 5 and PR 7 wire (the watchdog's down and up
+/// edges), and the only paths each may name:
 /// `UiService` holds the capture and uses it for pings and prompt outcomes.
 /// The bridge binary asks `start` for one.
-const HOOK_FILES: [(&str, &[&str]); 2] = [
+const HOOK_FILES: [(&str, &[&str]); 3] = [
+    (
+        "snitchwatch-bridge/src/daemon_watchdog.rs",
+        &["history::capture::Capture"],
+    ),
     (
         "snitchwatch-bridge/src/grpc_server.rs",
         &[
@@ -568,7 +582,7 @@ fn durable_names_cover_every_pub_item() {
             let listed = DURABLE_TYPES.contains(&name.as_str())
                 || DURABLE_MODULES.contains(&name.as_str())
                 // Methods of `LossCounter` and `Engine` used through values.
-                || ["new", "record", "pending_count", "as_str", "parse", "ceiling", "from_budget", "is_uncertain"]
+                || ["new", "record", "pending_count", "as_str", "parse", "ceiling", "from_budget", "is_uncertain", "bounded", "record_since"]
                     .contains(&name.as_str())
                 || ["DEFAULT_MAX_ROWS", "MIN_CEILING"].contains(&name.as_str());
             if !listed {

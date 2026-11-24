@@ -203,6 +203,20 @@ struct Deferred {
     first_ping_unix_ms: i64,
 }
 
+/// What one ping showed the bridge never received, for connection history's
+/// `upstream-loss` gaps. A lower bound: independent of the WS `Lagged`
+/// signal, which measures a slow GUI and not the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UpstreamLoss {
+    /// `max(0, Δrule_hits - received)`.
+    pub missing: u64,
+    /// A counter reset or an uptime that went down: the daemon restarted and
+    /// what happened in between is unknown.
+    pub restarted: bool,
+    /// The ping before this one: the loss lies after it.
+    pub since_ms: Option<i64>,
+}
+
 /// The counts. Pure: times and the rule cache's membership are passed in.
 #[derive(Debug, Default)]
 pub struct RuleHits {
@@ -238,6 +252,19 @@ impl RuleHits {
         now_ms: i64,
         known: impl Fn(&str) -> bool,
     ) -> bool {
+        self.record_with_loss(events, uptime, rule_hits, now_ms, known)
+            .0
+    }
+
+    /// [`Self::record`], also saying what the ping showed was never received.
+    pub fn record_with_loss(
+        &mut self,
+        events: &[Event],
+        uptime: u64,
+        rule_hits: u64,
+        now_ms: i64,
+        known: impl Fn(&str) -> bool,
+    ) -> (bool, UpstreamLoss) {
         let before = self.revision;
         if self.since_unix_ms.is_none() {
             self.since_unix_ms = Some(now_ms);
@@ -287,7 +314,8 @@ impl RuleHits {
                 }
             }
         }
-        if self.missed_events(received, uptime, rule_hits, now_ms) {
+        let (missed, loss) = self.missed_events(received, uptime, rule_hits, now_ms);
+        if missed {
             self.note_gap(now_ms);
         }
         for event in events {
@@ -309,24 +337,40 @@ impl RuleHits {
             };
             self.count(&rule.name, at, now_ms, known(&rule.name));
         }
-        self.revision != before
+        (self.revision != before, loss)
     }
 
     /// Whether a ping that brought `received` events (all of them, with a
     /// rule or not, except default-action ones) shows events that never
     /// arrived, or a daemon restart; see the module doc. Moves the baselines
     /// to this ping.
-    fn missed_events(&mut self, received: usize, uptime: u64, rule_hits: u64, now_ms: i64) -> bool {
-        let restarted = self.last_uptime.is_some_and(|previous| uptime < previous);
-        let missed = self.last_rule_hits.is_some_and(|previous| {
-            rule_hits
-                .checked_sub(previous)
-                .is_none_or(|grown| grown != received as u64)
-        });
+    fn missed_events(
+        &mut self,
+        received: usize,
+        uptime: u64,
+        rule_hits: u64,
+        now_ms: i64,
+    ) -> (bool, UpstreamLoss) {
+        let since_ms = self.last_ping_unix_ms;
+        let uptime_fell = self.last_uptime.is_some_and(|previous| uptime < previous);
+        // `Some(None)`: the counter went down.
+        let grown = self
+            .last_rule_hits
+            .map(|previous| rule_hits.checked_sub(previous));
+        let reset = grown == Some(None);
+        let missed = grown.is_some_and(|g| g.is_none_or(|grown| grown != received as u64));
+        let missing = grown
+            .flatten()
+            .map_or(0, |grown| grown.saturating_sub(received as u64));
         self.last_uptime = Some(uptime);
         self.last_rule_hits = Some(rule_hits);
         self.last_ping_unix_ms = Some(now_ms);
-        restarted || missed
+        let loss = UpstreamLoss {
+            missing,
+            restarted: uptime_fell || reset,
+            since_ms,
+        };
+        (uptime_fell || missed, loss)
     }
 
     fn count(&mut self, name: &str, at_ms: i64, now_ms: i64, known: bool) {
@@ -644,6 +688,9 @@ fn wire(name: &str, stat: &Stat) -> RuleHitWire {
     }
 }
 
+#[cfg(test)]
+#[path = "rule_hits/loss_tests.rs"]
+mod loss_tests;
 #[cfg(test)]
 #[path = "rule_hits/tests.rs"]
 mod tests;

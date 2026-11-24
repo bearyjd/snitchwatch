@@ -39,6 +39,27 @@ pub async fn run(
     diagnostics_ctx: Arc<crate::diagnostics::DiagnosticsCtx>,
     broadcast_tx: broadcast::Sender<crate::ws_messages::ServerMessage>,
 ) {
+    run_with_history(
+        liveness,
+        tray_pub,
+        cache,
+        diagnostics_ctx,
+        broadcast_tx,
+        None,
+    )
+    .await;
+}
+
+/// [`run`], also telling connection history about each down and up edge
+/// (its `daemon-disconnected` gaps).
+pub async fn run_with_history(
+    liveness: DaemonLiveness,
+    tray_pub: Arc<TrayStatePublisher>,
+    cache: Arc<TokioMutex<ConnectionCache>>,
+    diagnostics_ctx: Arc<crate::diagnostics::DiagnosticsCtx>,
+    broadcast_tx: broadcast::Sender<crate::ws_messages::ServerMessage>,
+    recorder: Option<Arc<crate::history::capture::Capture>>,
+) {
     let mut interval = tokio::time::interval(WATCHDOG_TICK);
     let mut was_down = false;
     loop {
@@ -47,6 +68,15 @@ pub async fn run(
         let sampled_at = Instant::now();
         let down_now = liveness.is_down(sampled_at, DAEMON_DOWN_TIMEOUT);
 
+        // Connection history's `daemon-disconnected` gap: open at the down
+        // edge, closed at recovery. In memory only; the writer commits it.
+        if let Some(recorder) = recorder.as_ref().filter(|_| down_now != was_down) {
+            if down_now {
+                recorder.daemon_down();
+            } else {
+                recorder.daemon_up();
+            }
+        }
         if down_now && !was_down {
             {
                 let mut cache = cache.lock().await;

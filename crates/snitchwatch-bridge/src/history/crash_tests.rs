@@ -10,6 +10,7 @@ use std::sync::Arc;
 use super::budget::Budget;
 use super::durable::tests::{engine_at, manual_clock};
 use super::durable::PinnedBatch;
+use super::gaps::Losses;
 use super::ledger::{read_gaps, Gap, GapCause, LedgerLimits, LossCounter};
 use super::pins::PinRegistry;
 use super::record::{Action, AnsweredBy, EventRecord};
@@ -17,6 +18,7 @@ use super::session::{read_sessions, read_watermark, SessionEnd};
 use super::test_support::{state_dir, tempdir};
 use super::writer::Item;
 use super::{enable, locate, Consent, Mode};
+use crate::cache::rule_hits::UpstreamLoss;
 
 const SCENARIO: &str = "SW_HISTORY_CRASH_SCENARIO";
 const STATE: &str = "SW_HISTORY_CRASH_STATE";
@@ -49,6 +51,7 @@ fn crash_child() {
     ms.store(2000, std::sync::atomic::Ordering::SeqCst);
     // What the process holds in memory when it dies.
     let _held_pin;
+    let mut losses = Losses::new();
     let mut counter = LossCounter::new(GapCause::QueueOverflow);
     match scenario.as_str() {
         // (a) a queued daemon event: accepted, not yet written.
@@ -66,6 +69,27 @@ fn crash_child() {
         // (c) an unflushed drop counter.
         "drop-counter" => {
             counter.record(&registry, 7).unwrap();
+            _held_pin = None;
+        }
+        // (d) an open daemon-disconnected gap, an unflushed upstream tally
+        // and a write-failed tally: each holds its own pin.
+        "open-disconnect" => {
+            losses.daemon_down(&registry);
+            _held_pin = None;
+        }
+        "upstream-tally" => {
+            losses.upstream_loss(
+                &registry,
+                UpstreamLoss {
+                    missing: 4,
+                    restarted: false,
+                    since_ms: Some(1500),
+                },
+            );
+            _held_pin = None;
+        }
+        "write-failed-tally" => {
+            losses.write_failed.record(&registry, 3).unwrap();
             _held_pin = None;
         }
         // Nothing held: the watermark is simply the last commit.
@@ -157,6 +181,24 @@ fn kill_9_with_a_pending_prompt_the_gap_begins_no_later_than_its_arrival() {
 #[test]
 fn kill_9_with_an_unflushed_drop_counter_the_gap_begins_no_later_than_its_first_loss() {
     let (gap, _) = crash_and_recover("drop-counter");
+    assert_uncertain_crash_gap(&gap, 2000);
+}
+
+#[test]
+fn kill_9_with_an_open_daemon_gap_leaves_an_uncertain_gap_from_the_down_edge() {
+    let (gap, _) = crash_and_recover("open-disconnect");
+    assert_uncertain_crash_gap(&gap, 2000);
+}
+
+#[test]
+fn kill_9_with_an_unflushed_upstream_tally_the_gap_begins_no_later_than_its_pin() {
+    let (gap, _) = crash_and_recover("upstream-tally");
+    assert_uncertain_crash_gap(&gap, 2000);
+}
+
+#[test]
+fn kill_9_with_an_unflushed_write_failed_tally_the_gap_begins_no_later_than_its_pin() {
+    let (gap, _) = crash_and_recover("write-failed-tally");
     assert_uncertain_crash_gap(&gap, 2000);
 }
 
