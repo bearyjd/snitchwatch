@@ -310,7 +310,12 @@ fn a_session_between_two_coalesced_clock_jumps_survives_the_merge() {
         [],
     )
     .unwrap();
-    record_gap(&conn, &gap(140_000, 141_000, GapCause::QueueOverflow, 1), &l).unwrap();
+    record_gap(
+        &conn,
+        &gap(140_000, 141_000, GapCause::QueueOverflow, 1),
+        &l,
+    )
+    .unwrap();
     conn.execute(
         "INSERT INTO sessions (start_ms, end_ms, end_kind) VALUES (150_000, NULL, NULL)",
         [],

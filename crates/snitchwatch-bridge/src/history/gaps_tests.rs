@@ -427,6 +427,18 @@ fn an_upstream_loss_after_an_outage_starts_where_the_daemon_came_back() {
     }
 }
 
+#[test]
+fn a_ping_whose_guard_pin_cannot_be_taken_is_counted_and_changes_nothing_else() {
+    let registry = PinRegistry::with_next_id(u64::MAX);
+    let mut losses = Losses::new();
+    for _ in 0..5 {
+        losses.upstream_loss(&registry, lost(2, false, 0));
+    }
+    assert_eq!(losses.unguarded_pings(), 5);
+    assert_eq!(losses.upstream.pending_count(), 0);
+    assert!(registry.is_empty());
+}
+
 // ---- 6. clock jumps --------------------------------------------------------
 
 fn jump(watch: &mut ClockWatch, wall: i64, mono: i64) -> Option<Gap> {

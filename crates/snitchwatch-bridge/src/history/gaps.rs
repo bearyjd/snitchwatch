@@ -68,6 +68,8 @@ pub(super) struct Losses {
     /// The session is ending: a ping after this would pin again and make the
     /// end `unclean`, so it is ignored.
     closed: bool,
+    /// Pings whose guard pin could not be taken (pin ids exhausted).
+    unguarded_pings: u64,
 }
 
 /// The tallies a flush walks through.
@@ -101,6 +103,7 @@ impl Losses {
             back_at: None,
             ping_guard: None,
             closed: false,
+            unguarded_pings: 0,
         }
     }
 
@@ -111,6 +114,12 @@ impl Losses {
         if let Some(pin) = self.ping_guard.take() {
             let _ = registry.release(&pin);
         }
+    }
+
+    /// Pings that went unguarded because no pin could be taken.
+    #[cfg(test)]
+    pub(super) fn unguarded_pings(&self) -> u64 {
+        self.unguarded_pings
     }
 
     fn slot(&mut self, slot: Slot) -> &mut LossCounter {
@@ -149,7 +158,21 @@ impl Losses {
         }
         let now = registry.now();
         let arrival = loss.at_ms.map_or(now, |at| at.min(now));
-        let next = registry.add(arrival).ok();
+        let next = match registry.add(arrival) {
+            Ok(pin) => Some(pin),
+            Err(error) => {
+                self.unguarded_pings = self.unguarded_pings.saturating_add(1);
+                // Powers of two only: a stuck registry must not flood the log.
+                if self.unguarded_pings.is_power_of_two() {
+                    tracing::warn!(
+                        %error,
+                        unguarded = self.unguarded_pings,
+                        "history could not pin a ping; a crash's gap may start late"
+                    );
+                }
+                None
+            }
+        };
         let previous = std::mem::replace(&mut self.ping_guard, next);
         let n = loss.missing.saturating_add(u64::from(loss.restarted));
         let floor = self.back_at.take();
