@@ -159,6 +159,9 @@ fn mergeable(prev: &Gap, new: &Gap) -> bool {
         && prev.start_exact == new.start_exact
         && new.start_ms <= prev.end_ms
         && new.end_ms >= prev.start_ms
+        // A prefix marker and a process's marker differ in start: merged,
+        // the prefix would stretch over events that survive.
+        && (new.cause != GapCause::Evicted || new.start_ms == prev.start_ms)
 }
 
 fn merge_into(conn: &Connection, prev: &GapRow, new: &Gap) -> rusqlite::Result<()> {

@@ -205,6 +205,8 @@ mod retention_expiry_tests;
 #[cfg(test)]
 mod retention_pause_tests;
 #[cfg(test)]
+mod retention_repair_tests;
+#[cfg(test)]
 mod retention_room_tests;
 #[cfg(test)]
 pub(crate) mod retention_support;

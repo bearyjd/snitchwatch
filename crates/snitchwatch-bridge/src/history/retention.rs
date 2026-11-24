@@ -126,7 +126,12 @@ fn pick(
 fn marker(victims: Victims<'_>, removed: &Removed, earliest_remaining: Option<i64>) -> Gap {
     let (start_ms, end_ms) = match victims {
         Victims::Process(_) => (removed.first_ts, removed.last_ts),
-        _ => (0, earliest_remaining.unwrap_or(removed.last_ts)),
+        // A prefix: everything before the earliest survivor, pre-epoch
+        // events (a bad clock) included.
+        _ => (
+            removed.first_ts.min(0),
+            earliest_remaining.unwrap_or(removed.last_ts),
+        ),
     };
     Gap {
         start_ms,

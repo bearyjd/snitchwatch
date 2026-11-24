@@ -307,6 +307,13 @@ impl Shared {
         self.counters.snapshot()
     }
 
+    /// Shutdown waiting (the queue closed) ends a pressure pass between its
+    /// chunks, so the drain deadline is not overrun.
+    pub(super) fn arm_stop(self: &Arc<Self>, engine: &mut Engine) {
+        let shared = self.clone();
+        engine.set_stop(Box::new(move || shared.queue.is_closed()));
+    }
+
     #[cfg(test)]
     pub(super) fn close_queue_for_test(&self) {
         self.queue.close();
@@ -491,7 +498,11 @@ impl Capture {
         let worker = shared.clone();
         let handle = std::thread::Builder::new()
             .name("history-writer".into())
-            .spawn(move || worker.run_writer(engine, rx, began))?;
+            .spawn(move || {
+                let mut engine = engine;
+                worker.arm_stop(&mut engine);
+                worker.run_writer(engine, rx, began)
+            })?;
         Ok(Self {
             shared,
             writer: Mutex::new(Some(handle)),

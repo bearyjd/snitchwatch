@@ -184,7 +184,11 @@ impl Engine {
         let share = self.share_bytes();
         for (process, mut held) in self.over_share()? {
             let mut cursor = None;
-            while held > share && *chunks < EVICTION_ROUNDS && self.used_pages()? > low {
+            while held > share
+                && *chunks < EVICTION_ROUNDS
+                && !self.stopping()
+                && self.used_pages()? > low
+            {
                 let (_, chunk) =
                     self.evict_victims_after(Victims::Process(&process), u64::MAX, cursor)?;
                 if chunk.rows == 0 {
@@ -211,14 +215,18 @@ impl Engine {
         let low = self.budget().low_water_pages();
         let mut chunks = 0;
         self.evict_over_share(low, &mut chunks)?;
-        while chunks < EVICTION_ROUNDS && self.used_pages()? > low {
+        while chunks < EVICTION_ROUNDS && !self.stopping() && self.used_pages()? > low {
             if self.evict_chunk()?.units == 0 {
                 break;
             }
             chunks += 1;
         }
         if chunks > 0 {
-            self.vacuum_all()?;
+            // Shutdown waiting: the vacuum gives way too, as expiry's does.
+            let stop = self.stop.take();
+            let vacuumed = self.vacuum_all_until(&mut || stop.as_ref().is_some_and(|stop| stop()));
+            self.stop = stop;
+            vacuumed?;
         }
         Ok(self.used_pages()? <= high)
     }

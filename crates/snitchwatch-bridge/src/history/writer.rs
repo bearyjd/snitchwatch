@@ -349,6 +349,8 @@ pub struct Engine {
     pub(super) consent: Option<super::Consent>,
     journal: PathBuf,
     observer: Option<Observer>,
+    /// Asked between eviction chunks: `true` once shutdown is waiting.
+    pub(super) stop: Option<Box<dyn Fn() -> bool + Send>>,
     /// Age retention, in days (D5); changed by the control gate (PR 10).
     pub(super) retention_days: u16,
     /// Event bytes eviction removed per process since the last
@@ -392,6 +394,9 @@ impl Engine {
         // No mid-transaction spill: a spill syncs the journal and starts a
         // second header, which the full-journal bound does not allow for.
         conn.pragma_update(None, "cache_spill", "OFF")?;
+        // The per-process scans must not spill to a temp file: an unwritable
+        // temp volume would fail every batch at pressure.
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         let spill: i64 = conn.query_row("PRAGMA cache_spill", [], |r| r.get(0))?;
         if spill != 0 {
             return Err(WriteError::Io(std::io::Error::other(
@@ -407,6 +412,7 @@ impl Engine {
             consent,
             journal: journal.into(),
             observer: None,
+            stop: None,
             retention_days: super::settings::DEFAULT_RETENTION_DAYS,
             released: std::collections::HashMap::new(),
             tally: super::retention_room::Tally::default(),
@@ -442,6 +448,15 @@ impl Engine {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
             Err(e) => Err(WriteError::Io(e)),
         }
+    }
+
+    /// Shutdown is waiting: a pressure pass gives way between chunks.
+    pub(super) fn stopping(&self) -> bool {
+        self.stop.as_ref().is_some_and(|stop| stop())
+    }
+
+    pub fn set_stop(&mut self, stop: Box<dyn Fn() -> bool + Send>) {
+        self.stop = Some(stop);
     }
 
     pub fn set_observer(&mut self, observer: Observer) {

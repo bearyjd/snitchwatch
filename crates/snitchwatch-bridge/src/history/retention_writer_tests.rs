@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::budget::Budget;
 use super::capture::{Capture, CaptureConfig};
 use super::durable::tests::manual_clock;
 use super::gaps::ClockWatch;
@@ -273,4 +274,16 @@ fn the_users_retention_setting_reaches_the_capture_config() {
             days
         );
     }
+}
+
+#[test]
+fn the_capture_writer_arms_its_engine_to_stop_when_the_queue_closes() {
+    let mut rig = rig();
+    let config = CaptureConfig::for_budget(&Budget::new(16 * 1024 * 1024).unwrap());
+    let capture = Capture::new_unstarted_for_test(Arc::new(PinRegistry::new()), config);
+    let shared = capture.shared_for_test();
+    shared.arm_stop(&mut rig.engine);
+    assert!(!rig.engine.stopping());
+    shared.close_queue_for_test();
+    assert!(rig.engine.stopping());
 }
