@@ -208,11 +208,13 @@ pub struct CaptureConfig {
 }
 
 impl CaptureConfig {
-    pub fn for_budget(budget: &Budget) -> Self {
+    /// The defaults for a store of `_budget` (nothing depends on its size
+    /// since the byte share moved to retention).
+    pub fn for_budget(_budget: &Budget) -> Self {
         Self {
             queue_max_bytes: QUEUE_MAX_BYTES,
             queue_max_count: QUEUE_MAX_COUNT,
-            admission: AdmissionConfig::for_retained_bytes(budget.main_bytes),
+            admission: AdmissionConfig::standard(),
             heartbeat_every: HEARTBEAT_EVERY,
         }
     }
@@ -325,7 +327,6 @@ impl Shared {
             Err(refusal) => {
                 let counter = match refusal {
                     Refusal::ProcessRate => &counters.refused_process_rate,
-                    Refusal::ByteShare => &counters.refused_byte_share,
                     Refusal::GlobalRate => &counters.refused_global_rate,
                 };
                 add(counter, n);

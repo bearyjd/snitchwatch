@@ -262,11 +262,11 @@ struct Rig {
     capture: Capture,
 }
 
-fn config_for(budget: &Budget) -> CaptureConfig {
+fn config_for(_budget: &Budget) -> CaptureConfig {
     CaptureConfig {
         queue_max_bytes: super::super::writer::QUEUE_MAX_BYTES,
         queue_max_count: super::super::writer::QUEUE_MAX_COUNT,
-        admission: AdmissionConfig::for_retained_bytes(budget.main_bytes),
+        admission: AdmissionConfig::standard(),
         heartbeat_every: std::time::Duration::from_secs(3600),
     }
 }
@@ -443,7 +443,6 @@ fn every_event_is_a_row_count_or_a_counted_drop() {
         s.written
             + s.skipped_nolog
             + s.refused_process_rate
-            + s.refused_byte_share
             + s.refused_global_rate
             + s.dropped_queue
             + s.dropped_pin
@@ -476,13 +475,10 @@ fn a_flood_from_one_process_does_not_evict_or_starve_another() {
 }
 
 #[test]
-fn a_mixed_size_flood_stops_at_its_byte_share_and_others_small_records_stay() {
-    // 64 KiB retained: a 16 KiB share.
-    let rig = rig_with(|c| {
-        let mut c = unlimited(c);
-        c.admission.retained_bytes = 64 * 1024;
-        c
-    });
+fn a_mixed_size_flood_is_not_refused_for_its_bytes_and_others_small_records_stay() {
+    // The byte share is enforced by self-eviction under pressure (PR 8), not
+    // by refusal: nothing here is under pressure, so everything is stored.
+    let rig = rig_with(unlimited);
     let big_path = format!("/opt/{}", "p".repeat(4000));
     let big_host = "h".repeat(250);
     let mut events: Vec<Event> = (0..100)
@@ -495,22 +491,14 @@ fn a_mixed_size_flood_stops_at_its_byte_share_and_others_small_records_stay() {
     events.extend((0..20).map(|i| simple("/usr/bin/small", &format!("s{i}"), 500 + i)));
     rig.send(&events);
     let done = rig.finish();
-    let big = done
-        .rows
-        .iter()
-        .filter(|r| r.process_path.as_deref() == Some(big_path.as_str()))
-        .count();
-    let small = done
-        .rows
-        .iter()
-        .filter(|r| r.process_path.as_deref() == Some("/usr/bin/small"))
-        .count();
-    assert!(
-        (1..=4).contains(&big),
-        "{big} large rows within a 16 KiB share"
-    );
-    assert_eq!(small, 20);
-    assert!(done.stats.refused_byte_share >= 96);
+    let by = |path: &str| {
+        done.rows
+            .iter()
+            .filter(|r| r.process_path.as_deref() == Some(path))
+            .count()
+    };
+    assert_eq!(by(big_path.as_str()), 100, "no refusal for held bytes");
+    assert_eq!(by("/usr/bin/small"), 20);
 }
 
 #[test]

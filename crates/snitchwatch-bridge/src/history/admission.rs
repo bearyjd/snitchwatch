@@ -21,11 +21,14 @@
 //! not panic, and does not stall admission: refilling resumes from the new
 //! time.
 //!
-//! The byte ledger counts what this module admitted. It shrinks only through
-//! [`Admission::release_bytes`], which retention (PR 8) calls as it deletes
-//! rows; until then a process that reached its share stays refused for the
-//! rest of the run. Refusals are returned to the caller, which counts them
-//! (in memory; the aggregated gap row is PR 7).
+//! The byte ledger counts the event bytes each process holds in the store:
+//! charged here, refunded by capture when a batch is lost, seeded from the
+//! database at start and shrunk by [`Admission::release_bytes`] as retention
+//! deletes rows. **It is not a gate**: the per-process byte share is enforced
+//! by self-eviction (`retention.rs`, owner decision 2026-11-24, item 1), so a
+//! process is never refused for the bytes it holds, only for its rates.
+//! Refusals are returned to the caller, which counts them (in memory; the
+//! aggregated gap row is PR 7).
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
@@ -45,46 +48,29 @@ const TOKEN: u64 = 1000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     ProcessRate,
-    ByteShare,
     GlobalRate,
 }
 
-// KNOWN GAP (D5), BLOCKING PR 8 / the consent PR: the byte share is only a
-// refusal of what is admitted this run. Until (1) self-eviction replaces
-// refusal, (2) the ledger is loaded from the DB at start, and (3) retained
-// bytes are accounted (snapshot bytes included, `release_bytes` called by
-// retention), a process's share is not what the store really holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdmissionConfig {
     pub global_rate: u64,
     pub global_burst: u64,
     pub process_rate: u64,
     pub process_burst: u64,
-    pub share_percent: u64,
-    /// What the share is a percentage of: the bytes the store may retain.
-    pub retained_bytes: u64,
     pub max_buckets: usize,
     pub idle_ms: i64,
 }
 
 impl AdmissionConfig {
-    pub fn for_retained_bytes(retained_bytes: u64) -> Self {
+    pub fn standard() -> Self {
         Self {
             global_rate: GLOBAL_RATE,
             global_burst: GLOBAL_BURST,
             process_rate: PROCESS_RATE,
             process_burst: PROCESS_BURST,
-            share_percent: SHARE_PERCENT,
-            retained_bytes,
             max_buckets: MAX_BUCKETS,
             idle_ms: IDLE_MS,
         }
-    }
-
-    fn share_bytes(&self) -> u64 {
-        // Divide first: `retained_bytes` is at most a few hundred MiB, but
-        // nothing here should be able to overflow.
-        (self.retained_bytes / 100).saturating_mul(self.share_percent)
     }
 }
 
@@ -167,10 +153,6 @@ impl Admission {
         if !bucket.has_token() {
             return Err(Refusal::ProcessRate);
         }
-        let held = self.bytes.get(&key).copied().unwrap_or(0);
-        if held.saturating_add(bytes) > self.config.share_bytes() {
-            return Err(Refusal::ByteShare);
-        }
         self.global
             .refill(self.config.global_rate, self.config.global_burst, now_ms);
         if !self.global.has_token() {
@@ -214,6 +196,15 @@ impl Admission {
     }
 
     /// Retention deleted `bytes` of `process`'s rows: its share frees up.
+    /// Sets what `process` holds in the store (the database at start).
+    pub fn seed_bytes(&mut self, process: Option<&str>, bytes: u64) {
+        let key = self.key(process);
+        self.bytes.remove(&key);
+        if bytes > 0 {
+            self.charge(key, bytes);
+        }
+    }
+
     pub fn release_bytes(&mut self, process: Option<&str>, bytes: u64) {
         let key = self.key(process);
         if let Some(held) = self.bytes.get_mut(&key) {
