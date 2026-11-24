@@ -217,6 +217,8 @@ mod rule_identity_tests;
 pub(crate) mod test_support;
 
 #[cfg(test)]
+mod schema_v4_tests;
+#[cfg(test)]
 mod snapshots_tests;
 #[cfg(test)]
 mod tests;

@@ -881,5 +881,9 @@ fn the_ledger_tables_hold_only_times_counts_and_enums() {
         columns("sessions"),
         ["id", "start_ms", "end_ms", "end_kind"]
     );
-    assert_eq!(columns("meta"), ["id", "watermark_ms"]);
+    assert_eq!(
+        columns("meta"),
+        ["id", "watermark_ms", "expiry_debt_milli"],
+        "the expiry budget is a count, no time and no text"
+    );
 }
