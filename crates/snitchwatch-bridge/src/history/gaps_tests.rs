@@ -354,6 +354,32 @@ fn a_ping_that_lost_nothing_makes_no_tally_and_holds_one_guard_pin_until_the_sto
     );
 }
 
+#[test]
+fn a_ping_racing_the_close_cannot_turn_a_clean_end_unclean() {
+    for missing in [0, 3] {
+        let mut rig = rig(1000);
+        rig.engine
+            .begin_session(&rig.registry, &rig.limits)
+            .unwrap();
+        let losses = losses();
+        // The window inside `close`: the guard is released, the session not
+        // yet ended, and the lock is not held.
+        locked(&losses).release_ping_guard(&rig.registry);
+        rig.set(1100);
+        locked(&losses).upstream_loss(&rig.registry, lost(missing, false, 1000));
+        flush_due(&mut rig.engine, &rig.registry, &rig.limits, &losses, true).unwrap();
+        rig.engine
+            .end_session(&rig.registry, SessionEnd::Clean)
+            .unwrap();
+        assert!(rig.registry.is_empty(), "missing={missing}");
+        assert_eq!(
+            read_sessions(rig.engine.connection()).unwrap()[0].end,
+            Some(SessionEnd::Clean),
+            "missing={missing}"
+        );
+    }
+}
+
 // ---- 6. clock jumps --------------------------------------------------------
 
 fn jump(watch: &mut ClockWatch, wall: i64, mono: i64) -> Option<Gap> {

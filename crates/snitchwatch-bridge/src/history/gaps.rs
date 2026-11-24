@@ -62,6 +62,9 @@ pub(super) struct Losses {
     /// `bridge-down` gap begins no later than the `since_ms` the next ping
     /// reports its losses after (the pin of the loss itself arrives later).
     ping_guard: Option<PinId>,
+    /// The session is ending: a ping after this would pin again and make the
+    /// end `unclean`, so it is ignored.
+    closed: bool,
 }
 
 /// The tallies a flush walks through.
@@ -93,12 +96,14 @@ impl Losses {
             disconnect_end: None,
             disconnect_flushing: false,
             ping_guard: None,
+            closed: false,
         }
     }
 
     /// Lets the watermark pass the last ping: a clean stop has nothing left
     /// to cover. Called before the session ends.
     pub(super) fn release_ping_guard(&mut self, registry: &PinRegistry) {
+        self.closed = true;
         if let Some(pin) = self.ping_guard.take() {
             let _ = registry.release(&pin);
         }
@@ -134,6 +139,9 @@ impl Losses {
     /// becomes the tally's pin when something was lost: the gap then starts
     /// where the previous ping was seen, and a crash's gap cannot start later.
     pub(super) fn upstream_loss(&mut self, registry: &PinRegistry, loss: UpstreamLoss) {
+        if self.closed {
+            return;
+        }
         let now = registry.now();
         let arrival = loss.at_ms.map_or(now, |at| at.min(now));
         let next = registry.add(arrival).ok();
