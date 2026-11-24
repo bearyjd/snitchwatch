@@ -61,8 +61,7 @@
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use snitchwatch_proto::protocol::{Connection, Event, Rule};
@@ -72,22 +71,20 @@ use super::budget::Budget;
 use super::caps::{DstHost, ProcessPath, Protocol, RuleName};
 pub use super::capture_stats::CaptureStats;
 use super::capture_stats::{add, Counters};
-use super::durable::PinnedBatch;
-use super::gaps::{self, Losses, StandingLabels};
+use super::gaps::{Losses, StandingLabels};
 use super::guard::{DecisionGuard, DecisionOutcome};
 use super::ledger::{LedgerLimits, LossCounter};
 use super::lifecycle::Generation;
-use super::pinned_queue::{Entry, PinnedQueue};
+use super::measure::estimate_bytes;
+use super::pinned_queue::PinnedQueue;
 use super::pins::{PinId, PinRegistry};
 use super::record::{Action, AnsweredBy, EventRecord};
 use super::rule_identity::{identify, RuleClass, RuleIdentity};
-use super::session::SessionEnd;
+use super::settings::{Settings, DEFAULT_RETENTION_DAYS};
 use super::snapshots::snapshot_for;
 use super::writer::{Engine, Item, QUEUE_MAX_BYTES, QUEUE_MAX_COUNT};
 use super::{load_state, locate, open_store, Consent, Mode, State};
 
-/// Bytes a record counts for against its process's share, before its strings.
-const ROW_OVERHEAD: u64 = 160;
 /// Events whose first is no more than this many ms before them coalesce.
 const COALESCE_WINDOW_MS: i64 = 1000;
 
@@ -199,16 +196,6 @@ pub(crate) fn coalesce(mapped: Vec<Mapped>) -> Vec<Mapped> {
     out
 }
 
-fn estimate_bytes(r: &EventRecord) -> u64 {
-    let len = |n: Option<usize>| n.unwrap_or(0) as u64;
-    ROW_OVERHEAD
-        + len(r.process_path.as_ref().map(|v| v.as_str().len()))
-        + len(r.dst_host.as_ref().map(|v| v.as_str().len()))
-        + len(r.rule_name.as_ref().map(|v| v.as_str().len()))
-        + len(r.protocol.as_ref().map(|v| v.as_str().len()))
-        + len(r.rule_class.as_ref().map(|v| v.as_str().len()))
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureConfig {
     pub queue_max_bytes: usize,
@@ -216,15 +203,37 @@ pub struct CaptureConfig {
     pub admission: AdmissionConfig,
     /// How often the writer commits a heartbeat and flushes its loss tallies.
     pub heartbeat_every: Duration,
+    /// The first pause after eviction could not make room, doubling up to
+    /// [`pause_max`](Self::pause_max) (D5).
+    pub pause_min: Duration,
+    pub pause_max: Duration,
+    /// How often the writer runs an age-expiry pass.
+    pub expiry_every: Duration,
+    /// Age retention, in days (D5).
+    pub retention_days: u16,
 }
 
 impl CaptureConfig {
-    pub fn for_budget(budget: &Budget) -> Self {
+    /// The defaults for a store of `_budget` (nothing depends on its size
+    /// since the byte share moved to retention).
+    pub fn for_budget(_budget: &Budget) -> Self {
         Self {
             queue_max_bytes: QUEUE_MAX_BYTES,
             queue_max_count: QUEUE_MAX_COUNT,
-            admission: AdmissionConfig::for_retained_bytes(budget.main_bytes),
+            admission: AdmissionConfig::standard(),
             heartbeat_every: HEARTBEAT_EVERY,
+            pause_min: PAUSE_MIN,
+            pause_max: PAUSE_MAX,
+            expiry_every: EXPIRY_EVERY,
+            retention_days: DEFAULT_RETENTION_DAYS,
+        }
+    }
+
+    /// [`for_budget`](Self::for_budget) with the user's retention.
+    pub fn for_settings(budget: &Budget, settings: &Settings) -> Self {
+        Self {
+            retention_days: settings.retention_days,
+            ..Self::for_budget(budget)
         }
     }
 }
@@ -234,17 +243,15 @@ pub fn queues_allocated() -> usize {
     super::pinned_queue::allocated()
 }
 
-/// How long the writer waits on a lock held by another connection.
-const WRITER_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
-/// Wait before the one retry of a failed batch, doubling per lost batch.
-const RETRY_BACKOFF_MIN: Duration = Duration::from_millis(100);
-const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(2);
-/// A failing writer logs at most this often.
-const ERROR_LOG_EVERY: Duration = Duration::from_secs(30);
 /// How often the writer commits a heartbeat and flushes its loss tallies.
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
-/// After close the writer drains for at most this long; the rest is lost.
-const SHUTDOWN_DRAIN: Duration = Duration::from_secs(2);
+/// Recording pauses this long after eviction could not make room, doubling
+/// per failed attempt up to the maximum (D5).
+const PAUSE_MIN: Duration = Duration::from_millis(500);
+const PAUSE_MAX: Duration = Duration::from_secs(60);
+/// Age expiry runs this often: a pass takes at most a tenth of the rows, so
+/// a wall clock stepped far forward erodes history slowly, not at once.
+const EXPIRY_EVERY: Duration = Duration::from_secs(600);
 
 pub(super) struct Shared {
     // In-memory only. A control operation must change eligibility and/or
@@ -256,14 +263,23 @@ pub(super) struct Shared {
     admission: Mutex<Admission>,
     losses: Mutex<Losses>,
     heartbeat_every: Duration,
+    pause_min: Duration,
+    pause_max: Duration,
+    expiry_every: Duration,
     /// A fork default-action event was seen this session (D1's capability).
     fork_marker_seen: AtomicBool,
     no_gui_prompts: AtomicBool,
     /// The writer ends its session as `disabled`, not `clean`.
     disabling: AtomicBool,
+    /// When the shutdown drain ends: set once, by the writer, on the first
+    /// batch it takes after the queue closed.
+    drain_deadline: OnceLock<Instant>,
     counters: Counters,
     #[cfg(test)]
     probe: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// Test seam: run an expiry pass at the writer's next turn.
+    #[cfg(test)]
+    force_expiry: AtomicBool,
 }
 
 impl Shared {
@@ -276,17 +292,47 @@ impl Shared {
             admission: Mutex::new(Admission::new(config.admission)),
             losses: Mutex::new(Losses::new()),
             heartbeat_every: config.heartbeat_every,
+            pause_min: config.pause_min,
+            pause_max: config.pause_max,
+            expiry_every: config.expiry_every,
             fork_marker_seen: AtomicBool::new(false),
             no_gui_prompts: AtomicBool::new(false),
             disabling: AtomicBool::new(false),
+            drain_deadline: OnceLock::new(),
             counters: Counters::default(),
             #[cfg(test)]
             probe: Mutex::new(None),
+            #[cfg(test)]
+            force_expiry: AtomicBool::new(false),
         }
     }
 
     fn stats(&self) -> CaptureStats {
         self.counters.snapshot()
+    }
+
+    /// The shutdown drain's deadline has passed: a pressure pass ends
+    /// between its chunks, so the drain is not overrun. While drain time
+    /// remains the queue being closed changes nothing: batches are still
+    /// evicted-for and written.
+    pub(super) fn arm_stop(self: &Arc<Self>, engine: &mut Engine) {
+        let shared = self.clone();
+        engine.set_stop(Box::new(move || {
+            shared
+                .drain_deadline
+                .get()
+                .is_some_and(|deadline| Instant::now() >= *deadline)
+        }));
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_drain_deadline_for_test(&self, at: Instant) {
+        let _ = self.drain_deadline.set(at);
+    }
+
+    #[cfg(test)]
+    pub(super) fn close_queue_for_test(&self) {
+        self.queue.close();
     }
 
     fn admit(&self, record: &EventRecord, now_ms: i64) -> Result<u64, Refusal> {
@@ -336,7 +382,6 @@ impl Shared {
             Err(refusal) => {
                 let counter = match refusal {
                     Refusal::ProcessRate => &counters.refused_process_rate,
-                    Refusal::ByteShare => &counters.refused_byte_share,
                     Refusal::GlobalRate => &counters.refused_global_rate,
                 };
                 add(counter, n);
@@ -430,146 +475,6 @@ impl Shared {
             self.enqueue(record, now_ms, None);
         }
     }
-
-    /// The writer thread: commit pinned batches until the queue is closed and
-    /// empty, or, once closed, until [`SHUTDOWN_DRAIN`] has passed; beat every
-    /// [`CaptureConfig::heartbeat_every`]; then flush the loss tallies and end
-    /// the session.
-    fn run_writer(&self, mut engine: Engine, rx: Receiver<Entry>, mut began: bool) {
-        let rows = engine.budget().rows_per_txn as usize;
-        // A short lock wait: a locked database costs a batch, not the thread.
-        let _ = engine.connection().busy_timeout(WRITER_BUSY_TIMEOUT);
-        let limits = LedgerLimits::from_budget(engine.budget());
-        let mut pulse = gaps::Pulse::new(self.heartbeat_every, self.registry.now());
-        let mut backoff = RETRY_BACKOFF_MIN;
-        let mut last_logged: Option<Instant> = None;
-        let mut deadline: Option<Instant> = None;
-        while let Some(batch) = self.queue.pop_batch(&rx, rows, Duration::from_millis(200)) {
-            if self.queue.is_closed() {
-                let limit = *deadline.get_or_insert_with(|| Instant::now() + SHUTDOWN_DRAIN);
-                if Instant::now() >= limit {
-                    self.abandon(batch, &rx);
-                    break;
-                }
-            }
-            if !began {
-                match engine.begin_session(&self.registry, &limits) {
-                    Ok(_) => began = true,
-                    Err(e) => {
-                        // Nothing is committed (not even a heartbeat) over the
-                        // previous session; what is queued is lost, loudly.
-                        log_rate_limited(&mut last_logged, &e, batch_events(&batch));
-                        self.lost_batch(batch);
-                        continue;
-                    }
-                }
-            }
-            if pulse.due() {
-                if let Err(e) = pulse.beat(&mut engine, &self.registry, &limits, &self.losses) {
-                    log_rate_limited(&mut last_logged, &e, 0);
-                }
-            }
-            if batch.items.is_empty() {
-                continue;
-            }
-            let mut result = engine.commit_pinned(&batch, &self.registry);
-            if result.is_err() {
-                // Once closed there is no time to wait: the retry is immediate.
-                if !self.queue.is_closed() {
-                    std::thread::sleep(backoff);
-                }
-                result = engine.commit_pinned(&batch, &self.registry);
-            }
-            let events = batch_events(&batch);
-            match result {
-                Ok(_) => {
-                    add(&self.counters.written, events);
-                    backoff = RETRY_BACKOFF_MIN;
-                }
-                Err(e) => {
-                    self.lost_batch(batch);
-                    log_rate_limited(&mut last_logged, &e, events);
-                    backoff = (backoff * 2).min(RETRY_BACKOFF_MAX);
-                }
-            }
-        }
-        self.finish(&mut engine, &limits, began, &mut pulse);
-    }
-
-    /// The queue is closed and drained: flush every tally (an open daemon
-    /// gap ends now) and end the session. A failure leaves the pins held, so
-    /// the next start still reconstructs a gap from the watermark.
-    fn finish(
-        &self,
-        engine: &mut Engine,
-        limits: &LedgerLimits,
-        began: bool,
-        pulse: &mut gaps::Pulse,
-    ) {
-        // Never began: ending would close the previous session as this one's.
-        if !began && engine.begin_session(&self.registry, limits).is_err() {
-            tracing::error!("history never started its session; the previous one stays open");
-            return;
-        }
-        let kind = if self.disabling.load(Ordering::Acquire) {
-            SessionEnd::Disabled
-        } else {
-            SessionEnd::Clean
-        };
-        if let Err(e) = pulse.close(engine, &self.registry, limits, &self.losses, kind) {
-            tracing::error!(error = %e, "history shutdown could not record its gaps");
-        }
-    }
-
-    /// The batch could not be written: count it, give its admission bytes
-    /// back, and tally it as `write-failed` under its oldest pin, which holds
-    /// the watermark until the tally is a gap row (W1).
-    fn lost_batch(&self, batch: PinnedBatch) {
-        let lost = batch_events(&batch);
-        add(&self.counters.lost_write, lost);
-        for item in &batch.items {
-            self.refund(&item.event, estimate_bytes(&item.event));
-        }
-        if let Some(oldest) = self.release_all_but_oldest(batch.pins) {
-            self.lose(|l| &mut l.write_failed, lost, Some(oldest));
-        }
-    }
-
-    /// Shutdown ran out of time: everything still queued is lost.
-    fn abandon(&self, batch: PinnedBatch, rx: &Receiver<Entry>) {
-        let (mut items, mut pins) = (batch.items, batch.pins);
-        for (item, pin) in rx.try_iter() {
-            items.push(item);
-            pins.push(pin);
-        }
-        self.lost_batch(PinnedBatch { items, pins });
-    }
-
-    /// Releases `pins` but the one that arrived first, which it returns.
-    fn release_all_but_oldest(&self, mut pins: Vec<PinId>) -> Option<PinId> {
-        let arrival = |p: &PinId| self.registry.arrival_of(p).unwrap_or(i64::MAX);
-        let i = (0..pins.len()).min_by_key(|&i| arrival(&pins[i]))?;
-        let oldest = pins.swap_remove(i);
-        let refs: Vec<&PinId> = pins.iter().collect();
-        let _ = self.registry.release_all(&refs);
-        Some(oldest)
-    }
-}
-
-/// A failing writer logs at most once per [`ERROR_LOG_EVERY`].
-fn log_rate_limited(last: &mut Option<Instant>, error: &dyn std::fmt::Display, lost: u64) {
-    if last.is_none_or(|t| t.elapsed() >= ERROR_LOG_EVERY) {
-        *last = Some(Instant::now());
-        tracing::error!(%error, lost, "history write failed");
-    }
-}
-
-fn batch_events(batch: &PinnedBatch) -> u64 {
-    batch
-        .items
-        .iter()
-        .map(|i| u64::from(i.event.repeat_count))
-        .sum()
 }
 
 /// History capture: the admission state, the pinned queue and the writer
@@ -588,6 +493,7 @@ impl Capture {
         config: CaptureConfig,
     ) -> io::Result<Self> {
         let mut engine = engine;
+        engine.set_retention_days(config.retention_days);
         let limits = LedgerLimits::from_budget(engine.budget());
         // The previous session's end becomes a `bridge-down` gap now. A
         // failure is retried by the writer before it commits anything: until
@@ -608,7 +514,11 @@ impl Capture {
         let worker = shared.clone();
         let handle = std::thread::Builder::new()
             .name("history-writer".into())
-            .spawn(move || worker.run_writer(engine, rx, began))?;
+            .spawn(move || {
+                let mut engine = engine;
+                worker.arm_stop(&mut engine);
+                worker.run_writer(engine, rx, began)
+            })?;
         Ok(Self {
             shared,
             writer: Mutex::new(Some(handle)),
@@ -708,6 +618,33 @@ impl Capture {
         }
     }
 
+    /// What admission's ledger holds for `process`.
+    #[cfg(test)]
+    pub(super) fn retained_for_test(&self, process: &str) -> u64 {
+        self.shared
+            .admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retained_for(Some(process))
+    }
+
+    #[cfg(test)]
+    pub(super) fn close_queue_for_test(&self) {
+        self.shared.close_queue_for_test();
+    }
+
+    /// Runs an age-expiry pass at the writer's next turn.
+    #[cfg(test)]
+    pub(super) fn expire_now_for_test(&self) {
+        self.shared.force_expiry.store(true, Ordering::SeqCst);
+    }
+
+    /// The shared state, for a test's observer on the writer thread.
+    #[cfg(test)]
+    pub(super) fn shared_for_test(&self) -> Arc<Shared> {
+        self.shared.clone()
+    }
+
     #[cfg(test)]
     pub(super) fn with_losses_for_test<R>(&self, f: impl FnOnce(&Losses) -> R) -> R {
         f(&self.shared.losses.lock().unwrap())
@@ -764,7 +701,7 @@ pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
     let capture = Capture::spawn(
         engine,
         Arc::new(PinRegistry::new()),
-        CaptureConfig::for_budget(&budget),
+        CaptureConfig::for_settings(&budget, &settings),
     );
     match capture {
         Ok(capture) => Some(Arc::new(capture)),
@@ -774,6 +711,9 @@ pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
         }
     }
 }
+
+#[path = "capture_writer.rs"]
+mod writer_loop;
 
 #[cfg(test)]
 #[path = "capture_tests.rs"]

@@ -80,7 +80,7 @@ impl Engine {
         registry.check_release(&pins)?;
         self.ensure_room()?;
         let limits = SnapshotLimits::from_budget(self.budget());
-        self.durable_txn(registry, &pins, TxnKind::Insert, |conn, _| {
+        let report = self.durable_txn(registry, &pins, TxnKind::Insert, |conn, _| {
             let mut usage = SnapshotUsage::load(conn)?;
             for item in &batch.items {
                 if let Some(snapshot) = &item.snapshot {
@@ -89,7 +89,9 @@ impl Engine {
                 insert_event(conn, &item.event)?;
             }
             Ok(batch.items.len() as u64)
-        })
+        })?;
+        self.tally.inserted(&batch.items);
+        Ok(report)
     }
 
     /// Writes `gap` and releases `pins` in the same transaction.

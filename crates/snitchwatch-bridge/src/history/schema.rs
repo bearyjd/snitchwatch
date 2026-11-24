@@ -21,7 +21,9 @@
 //! the coverage watermark arrive in version 2 ([`v2_additions_sql`]); the
 //! consent record is in the settings file.
 //!
-//! **Migration:** v3 adds the prompt outcome and correlation views. The
+//! **Migration:** v3 adds the prompt outcome and correlation views; v4 adds
+//! `meta.expiry_debt_milli`, the persisted expiry budget (a build that knows
+//! only v3 refuses a v4 file by its version, as v3 did a v4). The
 //! SQL for each previous version is frozen because `require_known_schema`
 //! compares it with `sqlite_master`. An older file is checked against its
 //! existing version, then all needed changes and the new version are
@@ -43,7 +45,7 @@ use super::Unavailable;
 pub const PAGE_SIZE: u32 = 4096;
 /// `PRAGMA auto_vacuum` value for INCREMENTAL.
 pub const AUTO_VACUUM_INCREMENTAL: i64 = 2;
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 fn text_cap(column: &str, cap: usize) -> String {
     format!("CHECK ({column} IS NULL OR length(CAST({column} AS BLOB)) <= {cap})")
@@ -155,10 +157,15 @@ CREATE TABLE meta (
 
 /// The `CREATE` statements of [`SCHEMA_VERSION`].
 pub fn schema_sql() -> String {
+    v3_sql() + &v4_additions_sql()
+}
+
+/// Version 3 as it was frozen, which is what a v3 file is compared with.
+pub(super) fn v3_sql() -> String {
     v2_sql() + &v3_additions_sql()
 }
 
-fn v2_sql() -> String {
+pub(super) fn v2_sql() -> String {
     v1_sql() + &v2_additions_sql()
 }
 
@@ -170,11 +177,21 @@ fn v3_additions_sql() -> String {
     )
 }
 
+/// What version 4 adds (PR 8, F1): the persisted expiry budget, in thousandths
+/// of a row spent and not yet refilled (see `expiry_budget`). It lives in
+/// `meta` because the schema and `meta` already carry the other durable
+/// coverage state; an added column keeps `meta` one row. No object is added.
+pub(super) fn v4_additions_sql() -> String {
+    "ALTER TABLE meta ADD COLUMN expiry_debt_milli INTEGER NOT NULL DEFAULT 0 \
+     CHECK (expiry_debt_milli >= 0);\n"
+        .to_string()
+}
+
 /// `sqlite_master` rows a complete v1 database has.
 const OBJECTS_V1: i64 = 5;
 /// Version 2 adds `gaps`, `sessions`, `meta`.
 const OBJECTS_V2: i64 = OBJECTS_V1 + 3;
-/// Version 3 adds the settlement index and two views.
+/// Version 3 adds the settlement index and two views; version 4 adds none.
 const OBJECTS: i64 = OBJECTS_V2 + 3;
 
 fn refuse(e: impl std::fmt::Display) -> Unavailable {
@@ -216,6 +233,12 @@ pub(crate) fn prepare(path: &Path, budget: &Budget) -> Result<Connection, Unavai
                 return Err(refuse("the schema is incomplete"));
             }
         }
+        3 => {
+            crate::sqlite_file::require_known_schema(&conn, &v3_sql()).map_err(refuse)?;
+            if objects != OBJECTS {
+                return Err(refuse("the schema is incomplete"));
+            }
+        }
         SCHEMA_VERSION => {
             crate::sqlite_file::require_known_schema(&conn, &schema).map_err(refuse)?;
             if objects != OBJECTS {
@@ -244,7 +267,7 @@ pub(crate) fn prepare(path: &Path, budget: &Budget) -> Result<Connection, Unavai
         return Err(refuse("secure_delete could not be enabled"));
     }
     // Last, so a file that is refused for its layout is never modified.
-    if version == 1 || version == 2 {
+    if version < SCHEMA_VERSION && version > 0 {
         migrate(&conn, budget.max_page_count)?;
     }
     Ok(conn)
@@ -253,7 +276,7 @@ pub(crate) fn prepare(path: &Path, budget: &Budget) -> Result<Connection, Unavai
 /// Apply all required additions in one transaction. A failure rolls them back.
 /// The version is read again
 /// once the write lock is held, so a migrator that lost the race does nothing.
-fn migrate(conn: &Connection, max_page_count: u64) -> Result<(), Unavailable> {
+pub(super) fn migrate(conn: &Connection, max_page_count: u64) -> Result<(), Unavailable> {
     // Match the writer's full-journal bound. In-memory temp storage also
     // prevents the index build from spilling a sort file to disk.
     conn.execute_batch("PRAGMA cache_spill = OFF; PRAGMA temp_store = MEMORY; BEGIN IMMEDIATE;")
@@ -277,16 +300,14 @@ fn migrate(conn: &Connection, max_page_count: u64) -> Result<(), Unavailable> {
         {
             return Err("could not set migration page and journal bounds".into());
         }
-        conn.execute_batch(&format!(
-            "{} {} PRAGMA user_version = {SCHEMA_VERSION};",
-            if version == 1 {
-                v2_additions_sql()
-            } else {
-                String::new()
-            },
-            v3_additions_sql()
-        ))
-        .map_err(|e| e.to_string())
+        for (i, sql) in migration_steps(version).iter().enumerate() {
+            conn.execute_batch(sql).map_err(|e| e.to_string())?;
+            #[cfg(test)]
+            after_step_hook(i);
+            #[cfg(not(test))]
+            let _ = i;
+        }
+        Ok(())
     })();
     match step.and_then(|()| conn.execute_batch("COMMIT;").map_err(|e| e.to_string())) {
         Ok(()) => Ok(()),
@@ -296,6 +317,40 @@ fn migrate(conn: &Connection, max_page_count: u64) -> Result<(), Unavailable> {
             Err(refuse(format!("migrating the history schema: {e}")))
         }
     }
+}
+
+/// What `migrate` runs on a file at `version`, one statement group per step.
+/// The version comes last, so a step that did not run never claims it did.
+fn migration_steps(version: i64) -> Vec<String> {
+    let mut steps = Vec::new();
+    if version == 1 {
+        steps.push(v2_additions_sql());
+    }
+    if version <= 2 {
+        steps.push(v3_additions_sql());
+    }
+    steps.push(v4_additions_sql());
+    steps.push(format!("PRAGMA user_version = {SCHEMA_VERSION};"));
+    steps
+}
+
+#[cfg(test)]
+type StepHook = Option<Box<dyn FnMut(usize)>>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: called after each migration step, inside the transaction.
+    pub(super) static AFTER_STEP: std::cell::RefCell<StepHook> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn after_step_hook(step: usize) {
+    AFTER_STEP.with(|hook| {
+        if let Some(f) = hook.borrow_mut().as_mut() {
+            f(step);
+        }
+    });
 }
 
 /// A new file: the layout pragmas (they take effect only before the first

@@ -6,7 +6,7 @@ use super::*;
 const MIB: u64 = 1024 * 1024;
 
 fn cfg() -> AdmissionConfig {
-    AdmissionConfig::for_retained_bytes(16 * MIB)
+    AdmissionConfig::standard()
 }
 
 /// Rates that never refuse, to test the bookkeeping alone.
@@ -29,7 +29,6 @@ fn the_defaults_are_the_owners_numbers() {
     let c = cfg();
     assert_eq!((c.global_rate, c.process_rate), (200, 20));
     assert_eq!((c.global_burst, c.process_burst), (1000, 100));
-    assert_eq!(c.share_percent, 25);
     assert_eq!((c.max_buckets, c.idle_ms), (1024, 60_000));
 }
 
@@ -93,53 +92,30 @@ fn the_global_rate_caps_many_polite_processes() {
 }
 
 #[test]
-fn a_mixed_size_flood_stops_at_the_byte_share_and_leaves_room_for_others() {
-    // 16 MiB retained, 25% share: 4 MiB for one process.
-    let mut a = Admission::new(AdmissionConfig {
-        process_rate: 1_000_000,
-        process_burst: 1_000_000,
-        global_rate: 1_000_000,
-        global_burst: 1_000_000,
-        ..cfg()
-    });
+fn a_byte_flood_is_not_refused_at_admission_and_the_ledger_follows_it() {
+    // The share is enforced by self-eviction (PR 8, owner decision 2026-11-24,
+    // item 1), so a process is never refused for the bytes it holds.
+    let mut a = Admission::new(unlimited());
     let big = 4600; // a worst-case row
-    let mut admitted = 0u64;
-    let mut refused = None;
     for _ in 0..10_000 {
-        match a.admit(Some("/tmp/flood"), big, 0) {
-            Ok(()) => admitted += big,
-            Err(r) => {
-                refused = Some(r);
-                break;
-            }
-        }
+        assert_eq!(a.admit(Some("/tmp/flood"), big, 0), Ok(()));
     }
-    assert_eq!(refused, Some(Refusal::ByteShare));
-    assert!(
-        admitted <= 4 * MIB && admitted > 4 * MIB - big,
-        "{admitted}"
-    );
-    assert_eq!(a.retained_for(Some("/tmp/flood")), admitted);
-    // Another process's small records are untouched by that flood.
-    for _ in 0..1000 {
-        assert_eq!(a.admit(Some("/usr/bin/firefox"), 200, 0), Ok(()));
-    }
-    // Releasing the flooder's bytes (retention, PR 8) admits it again.
+    assert_eq!(a.retained_for(Some("/tmp/flood")), 10_000 * big);
+    assert_eq!(a.admit(Some("/usr/bin/firefox"), 200, 0), Ok(()));
+    // Retention releases what it deletes.
     a.release_bytes(Some("/tmp/flood"), 2 * MIB);
-    assert_eq!(a.admit(Some("/tmp/flood"), big, 0), Ok(()));
+    assert_eq!(a.retained_for(Some("/tmp/flood")), 10_000 * big - 2 * MIB);
 }
 
 #[test]
 fn a_refused_record_adds_no_bytes() {
     let mut a = Admission::new(AdmissionConfig {
-        retained_bytes: 4000,
+        process_burst: 1,
         ..cfg()
     });
-    // Share is 1,000 bytes.
     assert_eq!(a.admit(Some("p"), 900, 0), Ok(()));
-    assert_eq!(a.admit(Some("p"), 200, 0), Err(Refusal::ByteShare));
+    assert_eq!(a.admit(Some("p"), 200, 0), Err(Refusal::ProcessRate));
     assert_eq!(a.retained_for(Some("p")), 900);
-    assert_eq!(a.admit(Some("p"), 100, 0), Ok(()));
 }
 
 #[test]
@@ -206,6 +182,20 @@ fn the_byte_ledger_is_capped_and_keeps_the_biggest_entries() {
         assert!(a.byte_entries() <= 1024);
     }
     assert_eq!(a.retained_for(Some("/tmp/big")), 3 * MIB);
+}
+
+#[test]
+fn the_bytes_map_stays_within_its_cap_for_seeded_and_admitted_processes() {
+    let mut a = Admission::new(unlimited());
+    for i in 0..3000 {
+        a.seed_bytes(Some(&path(i)), 100 + i as u64);
+        assert!(a.byte_entries() <= 1024, "{}", a.byte_entries());
+    }
+    for i in 3000..6000 {
+        a.admit(Some(&path(i)), 50, 0).unwrap();
+        assert!(a.byte_entries() <= 1024, "{}", a.byte_entries());
+    }
+    assert_eq!(a.byte_entries(), 1024);
 }
 
 #[test]

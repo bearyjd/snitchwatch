@@ -1,7 +1,7 @@
 //! L1: the ledger is bounded in rows and bytes, collapses instead of
 //! dropping, and never loses a gap silently.
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 use super::super::budget::Budget;
 use super::super::schema::{schema_sql, GAP_CAUSES};
@@ -329,5 +329,39 @@ fn a_session_between_two_coalesced_clock_jumps_survives_the_merge() {
     assert!(
         sessions.iter().any(|s| s.start_ms == 120_000),
         "the session with real coverage was deleted: {sessions:?}"
+    );
+}
+
+fn evicted(start: i64, end: i64, count: u64) -> Gap {
+    Gap {
+        start_exact: false,
+        ..gap(start, end, GapCause::Evicted, count)
+    }
+}
+
+#[test]
+fn a_process_marker_is_not_merged_into_a_prefix_marker() {
+    let conn = ledger_db();
+    let l = small(64);
+    // The oldest surviving event is at 300; an unrelated event sits at 350.
+    record_gap(&conn, &evicted(0, 300, 5), &l).unwrap();
+    for (s, e) in [(320, Some(380)), (500, None)] {
+        conn.execute(
+            "INSERT INTO sessions (start_ms, end_ms, end_kind) VALUES (?1, ?2, ?3)",
+            params![s, e, e.map(|_| "clean")],
+        )
+        .unwrap();
+    }
+    record_gap(&conn, &evicted(200, 400, 3), &l).unwrap();
+    let gaps = read_gaps(&conn).unwrap();
+    assert!(
+        !gaps.iter().any(|g| g.start_ms <= 0 && g.end_ms >= 400),
+        "the prefix marker was stretched over surviving events: {gaps:?}"
+    );
+    assert!(covered(&gaps, 250, 350), "{gaps:?}");
+    let sessions = read_sessions(&conn).unwrap();
+    assert!(
+        sessions.iter().any(|s| s.start_ms == 320),
+        "a session with coverage was deleted: {sessions:?}"
     );
 }

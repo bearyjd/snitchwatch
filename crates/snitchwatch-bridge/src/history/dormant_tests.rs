@@ -147,6 +147,7 @@ fn offending(src: &str) -> Vec<String> {
 /// the durable half (PR 3b), which holds and releases pins.
 const OWNERS: &[&str] = &[
     "capture.rs",
+    "capture_writer.rs",
     "capture_tests.rs",
     "guard.rs",
     "hook_tests.rs",
@@ -164,6 +165,15 @@ const OWNERS: &[&str] = &[
     "gaps_tests.rs",
     "gaps_repair_tests.rs",
     "pinned_queue.rs",
+    "retention.rs",
+    "retention_room.rs",
+    "retention_tests.rs",
+    "retention_expiry_tests.rs",
+    "retention_pause_tests.rs",
+    "retention_room_tests.rs",
+    "retention_crash_tests.rs",
+    "retention_writer_tests.rs",
+    "retention_support.rs",
     "dormant_tests.rs",
 ];
 
@@ -295,8 +305,9 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 15] = [
+const DURABLE_OWNERS: [&str; 25] = [
     "capture.rs",
+    "capture_writer.rs",
     "capture_tests.rs",
     "hook_tests.rs",
     "snapshots_tests.rs",
@@ -310,6 +321,15 @@ const DURABLE_OWNERS: [&str; 15] = [
     "gaps_tests.rs",
     "gaps_repair_tests.rs",
     "pinned_queue.rs",
+    "retention.rs",
+    "retention_room.rs",
+    "retention_tests.rs",
+    "retention_expiry_tests.rs",
+    "retention_pause_tests.rs",
+    "retention_room_tests.rs",
+    "retention_crash_tests.rs",
+    "retention_writer_tests.rs",
+    "retention_support.rs",
     "dormant_tests.rs",
 ];
 
@@ -346,10 +366,20 @@ const CAPTURE_MODULES: &[&str] = &[
 const CAPTURE_OWNERS: &[&str] = &[
     "ping.rs",
     "capture.rs",
+    "capture_writer.rs",
     "capture_stats.rs",
     "capture_tests.rs",
     "admission.rs",
     "admission_tests.rs",
+    "retention.rs",
+    "retention_room.rs",
+    "retention_tests.rs",
+    "retention_expiry_tests.rs",
+    "retention_pause_tests.rs",
+    "retention_room_tests.rs",
+    "retention_crash_tests.rs",
+    "retention_writer_tests.rs",
+    "retention_support.rs",
     "guard.rs",
     "hook_tests.rs",
     "gaps.rs",

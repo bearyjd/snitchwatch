@@ -28,15 +28,18 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use super::budget::Budget;
 use super::record::{insert_event, EventRecord, SnapshotRecord};
-use super::snapshots::{admit_snapshot, delete_oldest_events, SnapshotLimits, SnapshotUsage};
+use super::snapshots::{admit_snapshot, SnapshotLimits, SnapshotUsage};
 use super::{Location, Store};
 
 /// Default queue bounds (D5).
 pub const QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const QUEUE_MAX_COUNT: usize = 4096;
-/// Eviction rounds that may fail to bring usage under the high-water mark
-/// before recording pauses (D5).
-pub const EVICTION_ROUNDS: u32 = 3;
+/// Most eviction chunks (of `rows_per_txn` rows) one attempt to make room
+/// takes, while each removes rows: enough to go down to the low-water mark
+/// from a full file, few enough that the writer is back to its queue (and to
+/// a shutdown) in about a second. Recording pauses (D5) when the store is
+/// still over high water after them.
+pub const EVICTION_ROUNDS: u32 = 128;
 
 /// One event and the rule snapshot it refers to, if that is new.
 #[derive(Debug, Clone)]
@@ -215,6 +218,10 @@ pub enum WriteError {
     Sqlite(#[from] rusqlite::Error),
     #[error("history write failed: {0}")]
     Io(#[from] std::io::Error),
+    /// A pressure pass gave way to the shutdown drain's deadline before it
+    /// had made room: not the cap, so recording does not pause.
+    #[error("the shutdown drain ended before room could be made")]
+    Stopped,
     /// The journal was larger than a full journal of the main file; the
     /// transaction was rolled back. Means a journal assumption is broken.
     #[error("a transaction's journal ({journal} bytes) exceeded its budget ({limit})")]
@@ -243,6 +250,14 @@ pub enum WriteError {
     /// was written.
     #[error("an item's snapshot does not belong to its event's rule hash")]
     SnapshotMismatch,
+    /// Eviction could not bring the store under its high-water mark within
+    /// [`EVICTION_ROUNDS`] chunks, or a chunk removed nothing: recording is
+    /// paused and retried with
+    /// backoff (D5). Lives in this error and the logs only (owner decision
+    /// 2026-11-24, item 5): the lost events become a plain `write-failed`
+    /// gap.
+    #[error("history is at its disk budget and eviction could not make room; recording is paused")]
+    Cap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,6 +353,17 @@ pub struct Engine {
     pub(super) consent: Option<super::Consent>,
     journal: PathBuf,
     observer: Option<Observer>,
+    /// Asked between eviction chunks: `true` once shutdown is waiting.
+    pub(super) stop: Option<Box<dyn Fn() -> bool + Send>>,
+    /// Age retention, in days (D5); changed by the control gate (PR 10).
+    pub(super) retention_days: u16,
+    /// Event bytes eviction removed per process since the last
+    /// [`Engine::take_released`], for admission's ledger.
+    pub(super) released: std::collections::HashMap<String, u64>,
+    /// Who holds what, for tier 2's gate.
+    pub(super) tally: super::retention_room::Tally,
+    /// What tier 1 may still remove (F1); its debt is kept in `meta`.
+    pub(super) expiry: super::expiry_budget::ExpiryBudget,
     /// Test seam: an error to raise after a transaction's rows were written
     /// and before `COMMIT`, to prove nothing else happens when it fails.
     #[cfg(test)]
@@ -372,12 +398,16 @@ impl Engine {
         // No mid-transaction spill: a spill syncs the journal and starts a
         // second header, which the full-journal bound does not allow for.
         conn.pragma_update(None, "cache_spill", "OFF")?;
+        // The per-process scans must not spill to a temp file: an unwritable
+        // temp volume would fail every batch at pressure.
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         let spill: i64 = conn.query_row("PRAGMA cache_spill", [], |r| r.get(0))?;
         if spill != 0 {
             return Err(WriteError::Io(std::io::Error::other(
                 "cache_spill could not be turned off",
             )));
         }
+        let expiry = super::expiry_budget::ExpiryBudget::load(&conn)?;
         let mut journal = location.db_path().into_os_string();
         journal.push("-journal");
         let engine = Self {
@@ -386,6 +416,11 @@ impl Engine {
             consent,
             journal: journal.into(),
             observer: None,
+            stop: None,
+            retention_days: super::settings::DEFAULT_RETENTION_DAYS,
+            released: std::collections::HashMap::new(),
+            tally: super::retention_room::Tally::default(),
+            expiry,
             #[cfg(test)]
             fault_before_commit: None,
         };
@@ -417,6 +452,16 @@ impl Engine {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
             Err(e) => Err(WriteError::Io(e)),
         }
+    }
+
+    /// The shutdown drain has run out of time: a pressure pass gives way
+    /// between chunks.
+    pub(super) fn stopping(&self) -> bool {
+        self.stop.as_ref().is_some_and(|stop| stop())
+    }
+
+    pub fn set_stop(&mut self, stop: Box<dyn Fn() -> bool + Send>) {
+        self.stop = Some(stop);
     }
 
     pub fn set_observer(&mut self, observer: Observer) {
@@ -505,7 +550,7 @@ impl Engine {
         }
         items.iter().try_for_each(Item::check_snapshot)?;
         let limits = SnapshotLimits::from_budget(&self.budget);
-        self.transact(TxnKind::Insert, |conn| {
+        let report = self.transact(TxnKind::Insert, |conn| {
             let mut usage = SnapshotUsage::load(conn)?;
             for item in items {
                 if let Some(snapshot) = &item.snapshot {
@@ -514,14 +559,9 @@ impl Engine {
                 insert_event(conn, &item.event)?;
             }
             Ok(items.len() as u64)
-        })
-    }
-
-    /// Delete the oldest `rows_per_txn` events and, in the same transaction,
-    /// every snapshot that none of the remaining events refers to.
-    pub fn evict_chunk(&mut self) -> Result<TxnReport, WriteError> {
-        let n = self.budget.rows_per_txn;
-        self.transact(TxnKind::Evict, |conn| Ok(delete_oldest_events(conn, n)?))
+        })?;
+        self.tally.inserted(items);
+        Ok(report)
     }
 
     /// Return up to `vacuum_steps_per_txn` free pages to the filesystem.
@@ -533,33 +573,28 @@ impl Engine {
         })
     }
 
-    /// Evict (and vacuum) until usage is under the high-water mark. `true`
-    /// when it is; `false` after [`EVICTION_ROUNDS`] rounds that did not get
-    /// there (the caller pauses recording and retries later, D5).
-    pub fn make_room(&mut self) -> Result<bool, WriteError> {
-        let high = self.budget.high_water_pages();
-        for _ in 0..EVICTION_ROUNDS {
-            if self.used_pages()? <= high {
-                return Ok(true);
-            }
-            if self.evict_chunk()?.units == 0 {
-                break;
-            }
-            self.vacuum_all()?;
-        }
-        Ok(self.used_pages()? <= high)
-    }
-
     /// Vacuum until no free page is left, in budgeted transactions.
     pub fn vacuum_all(&mut self) -> Result<(), WriteError> {
+        self.vacuum_all_until(&mut || false).map(|_| ())
+    }
+
+    /// [`vacuum_all`](Self::vacuum_all), asking `stop` before each step and
+    /// giving way when it says so. `true` when it gave way with pages left.
+    pub(super) fn vacuum_all_until(
+        &mut self,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, WriteError> {
         while self.pragma_u64("freelist_count")? > 0 {
+            if stop() {
+                return Ok(true);
+            }
             let before = self.file_pages()?;
             self.vacuum_chunk()?;
             if self.file_pages()? >= before {
                 break;
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Drain `queue` once: make room, then insert one batch. `Ok(0)` when
@@ -584,12 +619,12 @@ impl Engine {
     /// [`make_room`](Self::make_room), as an error when it could not.
     pub(super) fn ensure_room(&mut self) -> Result<(), WriteError> {
         if self.make_room()? {
-            return Ok(());
+            Ok(())
+        } else if self.stopping() {
+            Err(WriteError::Stopped)
+        } else {
+            Err(WriteError::Cap)
         }
-        Err(WriteError::Sqlite(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
-            Some("history is over its disk budget".into()),
-        )))
     }
 }
 

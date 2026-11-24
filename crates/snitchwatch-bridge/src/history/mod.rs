@@ -20,15 +20,19 @@ pub mod capture;
 mod capture_stats;
 mod correlation;
 pub mod durable;
+mod expiry_budget;
 pub mod gaps;
 pub mod guard;
 pub mod ledger;
 pub mod lifecycle;
+mod measure;
 pub mod open;
 pub mod ping;
 mod pinned_queue;
 pub mod pins;
 pub mod record;
+mod retention;
+mod retention_room;
 pub mod rule_identity;
 pub mod schema;
 pub mod session;
@@ -189,9 +193,27 @@ mod crash_tests;
 #[cfg(test)]
 mod dormant_tests;
 #[cfg(test)]
+mod expiry_budget_tests;
+#[cfg(test)]
 mod identity_dormant_tests;
 #[cfg(test)]
 mod replace_tests;
+#[cfg(test)]
+mod retention_crash_tests;
+#[cfg(test)]
+mod retention_expiry_tests;
+#[cfg(test)]
+mod retention_pause_tests;
+#[cfg(test)]
+mod retention_repair_tests;
+#[cfg(test)]
+mod retention_room_tests;
+#[cfg(test)]
+pub(crate) mod retention_support;
+#[cfg(test)]
+mod retention_tests;
+#[cfg(test)]
+mod retention_writer_tests;
 #[cfg(test)]
 mod rule_identity_fuzz_tests;
 #[cfg(test)]
@@ -199,6 +221,8 @@ mod rule_identity_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+#[cfg(test)]
+mod schema_v4_tests;
 #[cfg(test)]
 mod snapshots_tests;
 #[cfg(test)]

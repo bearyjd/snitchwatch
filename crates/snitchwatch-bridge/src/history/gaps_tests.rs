@@ -638,7 +638,7 @@ fn a_flapping_clock_is_one_merged_row_and_cannot_collapse_other_gaps() {
         };
         rig.set(wall);
         rig.engine
-            .record_evicted(900_000, 1, &rig.registry, &rig.limits)
+            .commit_gap(&evicted_marker(900_000, 1), &[], &rig.registry, &rig.limits)
             .unwrap();
         beat_at(&mut rig, &losses, &mut clock, beat_no * 5_000);
     }
@@ -685,15 +685,28 @@ fn clock_jump_rows_merge_only_within_the_coalescing_window() {
 
 // ---- evicted marker ------------------------------------------------------
 
+/// What an eviction chunk writes (`retention.rs` writes it in the deleting
+/// transaction): everything before `earliest_remaining_ms` is gone, start
+/// unknown.
+fn evicted_marker(earliest_remaining_ms: i64, removed: u64) -> Gap {
+    Gap {
+        start_ms: 0,
+        end_ms: earliest_remaining_ms,
+        start_exact: false,
+        cause: GapCause::Evicted,
+        count: removed,
+    }
+}
+
 #[test]
 fn eviction_leaves_a_marker_with_the_earliest_remaining_time_and_the_count() {
     let mut rig = rig(1000);
     rig.set(9000);
     rig.engine
-        .record_evicted(5000, 40, &rig.registry, &rig.limits)
+        .commit_gap(&evicted_marker(5000, 40), &[], &rig.registry, &rig.limits)
         .unwrap();
     rig.engine
-        .record_evicted(7000, 10, &rig.registry, &rig.limits)
+        .commit_gap(&evicted_marker(7000, 10), &[], &rig.registry, &rig.limits)
         .unwrap();
     let found = gaps(&rig);
     assert_eq!(found.len(), 1, "adjacent markers merge");

@@ -58,3 +58,22 @@ fn batch_sizes_are_constants_not_derived_from_the_budget() {
         assert!(budget.high_water_pages() < budget.max_page_count);
     }
 }
+
+#[test]
+fn the_smallest_usable_budgets_never_wrap_the_low_water_mark() {
+    // Just above ledger + one batch of growth, a twentieth of the file is more
+    // than the high-water mark: the low-water mark is 0, not a wrapped number.
+    let mut tried = 0;
+    for total in (0..8 * 1024 * 1024).step_by(4096) {
+        let Ok(budget) = Budget::new(total) else {
+            continue;
+        };
+        tried += 1;
+        let (low, high) = (budget.low_water_pages(), budget.high_water_pages());
+        assert!(low <= high, "{total}: low {low}, high {high}");
+        if tried == 1 {
+            assert_eq!(low, 0, "the smallest budget: {budget:?}");
+        }
+    }
+    assert!(tried > 100);
+}

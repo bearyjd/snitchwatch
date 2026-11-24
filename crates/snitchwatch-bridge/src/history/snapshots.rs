@@ -321,6 +321,33 @@ pub fn admit_snapshot(
     Ok(SnapshotOutcome::Stored)
 }
 
+/// Deletes, on `conn`, each snapshot in `hashes` that no remaining event
+/// refers to (D7: the one cleanup every deletion path calls, so none can
+/// leave a snapshot behind). Returns the snapshot bytes freed.
+pub(super) fn delete_unreferenced(conn: &Connection, hashes: &[&[u8]]) -> rusqlite::Result<u64> {
+    let mut freed = 0u64;
+    let mut seen: Vec<&[u8]> = Vec::new();
+    for hash in hashes {
+        if seen.contains(hash) {
+            continue;
+        }
+        seen.push(hash);
+        let bytes: Option<i64> = conn
+            .query_row(
+                "SELECT length(CAST(snapshot AS BLOB)) FROM rules_seen WHERE rule_hash = ?1 \
+                 AND NOT EXISTS (SELECT 1 FROM events WHERE events.rule_hash = ?1)",
+                [hash],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(bytes) = bytes {
+            conn.execute("DELETE FROM rules_seen WHERE rule_hash = ?1", [hash])?;
+            freed += bytes.max(0) as u64;
+        }
+    }
+    Ok(freed)
+}
+
 /// Deletes the oldest `n` events and, on the same connection, every snapshot
 /// that none of the remaining events refers to. Returns the events deleted.
 pub fn delete_oldest_events(conn: &Connection, n: u64) -> rusqlite::Result<u64> {
@@ -338,12 +365,7 @@ pub fn delete_oldest_events(conn: &Connection, n: u64) -> rusqlite::Result<u64> 
          (SELECT id FROM events ORDER BY ts_ms, id LIMIT ?1)",
         [n],
     )?;
-    for hash in hashes {
-        conn.execute(
-            "DELETE FROM rules_seen WHERE rule_hash = ?1 AND NOT EXISTS \
-             (SELECT 1 FROM events WHERE events.rule_hash = ?1)",
-            [hash],
-        )?;
-    }
+    let hashes: Vec<&[u8]> = hashes.iter().map(Vec::as_slice).collect();
+    delete_unreferenced(conn, &hashes)?;
     Ok(deleted as u64)
 }
