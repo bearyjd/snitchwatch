@@ -3,7 +3,7 @@
 Parent plan: `2026-10-28-connection-history-implementation.md` (PR 9 section; PR 10 and PR 11 for what the reader must serve).
 Spec: `docs/superpowers/specs/2026-10-27-connection-history-design.md` D8 (509-536), D6/L1/W1 (310-376), C1/H02, D5 (reserve, S2/S3).
 Branch: `feat/history-pr9-reader`, from `origin/main` (2ad2d886, PR 8 merged). Bridge only, dormant (history is off by default). No wire change (that is PR 11).
-Status: PLAN ONLY, awaiting owner answers to "Open decisions". Nothing is implemented.
+Status: APPROVED 2026-11-24. The owner accepted all eight recommendations in "Decisions" below. Implementation follows.
 Issues folded in: #419 (gap count semantics), #430 (marker kinds). Not folded in, but the reader must be correct while they stay open: #418, #421-#424, #429.
 
 ## Goal
@@ -123,7 +123,11 @@ Permit lifetimes and lock ownership; that the reader has no write path (one read
 
 `CARGO_TARGET_DIR=/home/user/.sw-pr9-target TMPDIR=/home/user/.sw-pr9-tmp just check` and `just test-bridge`, then `just test`, before calling it done. `cargo fmt --all`; no function over 50 lines, no file over 800. No push and no PR from this branch without instruction. Tell the tower: no wire change in this PR.
 
-## Open decisions (not guessed; owner to decide)
+## Decisions (owner accepted every recommended option on 2026-11-24)
+
+Each item below keeps its option text; the option marked recommended is the decision. Summary: (1) newest-first, time cursor only, no filters; (2) #419 handled at read time (pair the rows, count sum minus 1, never over-report), no schema change; (3) #430: every `evicted` row means "some events removed", never an empty span, no discriminator column; (4) standing labels for earlier sessions are `unknown`, not `false`; (5) a response slot is released when the page is sent or after a 5 s send deadline (to confirm in PR 11); (6) reader limits are constants in `reader.rs`; (7) refusal during a control operation is a distinct "unavailable: control operation in progress"; (8) a fresh read connection per query.
+
+## Decision text (as proposed)
 
 1. **Sort order and filters in v1.** Options: (a) newest-first, time-range cursor only; (b) newest-first plus an optional process-path and verdict filter; (c) both directions. Recommendation: (a) plus a forward `direction` on the cursor type only if PR 13 asks for it. Why: D8 and PR 13 specify only paged history; filters multiply the scan bound and the plan tests, and the cursor/`scanned_to` design already admits a filter later without a format change.
 2. **#419: how a displayed lower bound avoids the pair overcount.** Options: (a) schema v5: allow `count = 0` on the pre-outage row (coverage only) and migrate; (b) read-time pairing rule (`sum - 1`) as designed above, no schema change; (c) accept the overcount and label it. Recommendation: (b) now, and fold (a) into one later v5 together with #430 if the owner wants exact rows. Why: the overcount is one event on an already-uncertain row, a v5 migration is a durable format change for a display total, and (b) can only under-report, which a lower bound allows.
