@@ -56,6 +56,8 @@ mod tests {
             dst_ip: "93.184.216.34".into(),
             dst_port: 443,
             protocol: "tcp".into(),
+            src_ip: None,
+            src_port: None,
             direction: "outgoing".into(),
             action: action.map(str::to_string),
             bytes_sent: 0,

@@ -15,15 +15,17 @@
 //!
 //! **Shape.** Fewer b-trees mean less write amplification, so the schema has
 //! as few as it can: rowid tables, and only fixed-width columns are indexed
-//! (`ts_ms`, the 16-byte `rule_hash`). Nothing indexes `process_path` or `dst_host`. The `gaps` and
+//! (`ts_ms`, `decided_ts_ms` for prompts, and the 16-byte `rule_hash`).
+//! Nothing indexes `process_path` or `dst_host`. The `gaps` and
 //! `sessions` tables of the design (D6) and the one-row `meta` table holding
 //! the coverage watermark arrive in version 2 ([`v2_additions_sql`]); the
 //! consent record is in the settings file.
 //!
-//! **Migration** (v1 to v2): the v1 text ([`v1_sql`]) is frozen byte for byte,
-//! since `sqlite_master` keeps it and `require_known_schema` compares it. An
-//! existing v1 file is checked against it, then the additions and
-//! `user_version = 2` go in one transaction, so a failure leaves a v1 file.
+//! **Migration:** v3 adds the prompt outcome and correlation views. The
+//! SQL for each previous version is frozen because `require_known_schema`
+//! compares it with `sqlite_master`. An older file is checked against its
+//! existing version, then all needed changes and the new version are
+//! applied in one transaction.
 //! Only `open_store` reaches this, and it refuses unless history is enabled:
 //! with history off nothing is opened, created or migrated.
 
@@ -31,16 +33,17 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+use super::budget::Budget;
 use super::caps::{
     DST_HOST, IP_TEXT, PROCESS_PATH, PROTOCOL, RULE_CLASS, RULE_HASH, RULE_NAME, SNAPSHOT,
 };
-use super::record::{ACTIONS, ANSWERED_BY};
+use super::record::{ACTIONS, ANSWERED_BY, PROMPT_OUTCOMES};
 use super::Unavailable;
 
 pub const PAGE_SIZE: u32 = 4096;
 /// `PRAGMA auto_vacuum` value for INCREMENTAL.
 pub const AUTO_VACUUM_INCREMENTAL: i64 = 2;
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 fn text_cap(column: &str, cap: usize) -> String {
     format!("CHECK ({column} IS NULL OR length(CAST({column} AS BLOB)) <= {cap})")
@@ -152,13 +155,27 @@ CREATE TABLE meta (
 
 /// The `CREATE` statements of [`SCHEMA_VERSION`].
 pub fn schema_sql() -> String {
+    v2_sql() + &v3_additions_sql()
+}
+
+fn v2_sql() -> String {
     v1_sql() + &v2_additions_sql()
+}
+
+fn v3_additions_sql() -> String {
+    format!(
+        "ALTER TABLE events ADD COLUMN prompt_outcome TEXT CHECK (prompt_outcome IN ({}));\n{}",
+        one_of(&PROMPT_OUTCOMES),
+        super::correlation::VIEW_SQL,
+    )
 }
 
 /// `sqlite_master` rows a complete v1 database has.
 const OBJECTS_V1: i64 = 5;
-/// ... and a complete v2 one: v1 plus `gaps`, `sessions`, `meta`.
-const OBJECTS: i64 = OBJECTS_V1 + 3;
+/// Version 2 adds `gaps`, `sessions`, `meta`.
+const OBJECTS_V2: i64 = OBJECTS_V1 + 3;
+/// Version 3 adds the settlement index and two views.
+const OBJECTS: i64 = OBJECTS_V2 + 3;
 
 fn refuse(e: impl std::fmt::Display) -> Unavailable {
     Unavailable::new(format!("history database: {e}"))
@@ -171,7 +188,7 @@ fn int(conn: &Connection, pragma: &str) -> Result<i64, Unavailable> {
 
 /// Open (creating a new file) and verify `path`; the connection comes back
 /// with the per-connection pragmas set.
-pub(crate) fn prepare(path: &Path) -> Result<Connection, Unavailable> {
+pub(crate) fn prepare(path: &Path, budget: &Budget) -> Result<Connection, Unavailable> {
     super::open::tighten_sidecars(path).map_err(refuse)?;
     let conn = crate::sqlite_file::open_owner_only(path).map_err(refuse)?;
     let version = int(&conn, "user_version")?;
@@ -190,6 +207,12 @@ pub(crate) fn prepare(path: &Path) -> Result<Connection, Unavailable> {
         1 => {
             crate::sqlite_file::require_known_schema(&conn, &v1_sql()).map_err(refuse)?;
             if objects != OBJECTS_V1 {
+                return Err(refuse("the schema is incomplete"));
+            }
+        }
+        2 => {
+            crate::sqlite_file::require_known_schema(&conn, &v2_sql()).map_err(refuse)?;
+            if objects != OBJECTS_V2 {
                 return Err(refuse("the schema is incomplete"));
             }
         }
@@ -221,25 +244,47 @@ pub(crate) fn prepare(path: &Path) -> Result<Connection, Unavailable> {
         return Err(refuse("secure_delete could not be enabled"));
     }
     // Last, so a file that is refused for its layout is never modified.
-    if version == 1 {
-        migrate_v1_to_v2(&conn)?;
+    if version == 1 || version == 2 {
+        migrate(&conn, budget.max_page_count)?;
     }
     Ok(conn)
 }
 
-/// Version 1 to 2: the additions and the new version in one transaction. A
-/// failure rolls back, leaving the v1 file as it was. The version is read again
+/// Apply all required additions in one transaction. A failure rolls them back.
+/// The version is read again
 /// once the write lock is held, so a migrator that lost the race does nothing.
-fn migrate_v1_to_v2(conn: &Connection) -> Result<(), Unavailable> {
-    conn.execute_batch("BEGIN IMMEDIATE;")
-        .map_err(|e| refuse(format!("migrating the schema to version 2: {e}")))?;
+fn migrate(conn: &Connection, max_page_count: u64) -> Result<(), Unavailable> {
+    // Match the writer's full-journal bound. In-memory temp storage also
+    // prevents the index build from spilling a sort file to disk.
+    conn.execute_batch("PRAGMA cache_spill = OFF; PRAGMA temp_store = MEMORY; BEGIN IMMEDIATE;")
+        .map_err(|e| refuse(format!("migrating the history schema: {e}")))?;
     let step = (|| {
-        if int(conn, "user_version").map_err(|e| e.to_string())? >= SCHEMA_VERSION {
+        let version = int(conn, "user_version").map_err(|e| e.to_string())?;
+        if version >= SCHEMA_VERSION {
             return Ok(());
         }
+        let pages = int(conn, "page_count").map_err(|e| e.to_string())?;
+        let max_page_count = max_page_count as i64;
+        if pages > max_page_count {
+            return Err(format!(
+                "the database has {pages} pages, over the {max_page_count}-page budget"
+            ));
+        }
+        conn.pragma_update(None, "max_page_count", max_page_count)
+            .map_err(|e| e.to_string())?;
+        if int(conn, "max_page_count").map_err(|e| e.to_string())? != max_page_count
+            || int(conn, "cache_spill").map_err(|e| e.to_string())? != 0
+        {
+            return Err("could not set migration page and journal bounds".into());
+        }
         conn.execute_batch(&format!(
-            "{} PRAGMA user_version = {SCHEMA_VERSION};",
-            v2_additions_sql()
+            "{} {} PRAGMA user_version = {SCHEMA_VERSION};",
+            if version == 1 {
+                v2_additions_sql()
+            } else {
+                String::new()
+            },
+            v3_additions_sql()
         ))
         .map_err(|e| e.to_string())
     })();
@@ -248,7 +293,7 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<(), Unavailable> {
         Err(e) => {
             // Best effort: the connection is dropped on error, which rolls back too.
             let _ = conn.execute_batch("ROLLBACK;");
-            Err(refuse(format!("migrating the schema to version 2: {e}")))
+            Err(refuse(format!("migrating the history schema: {e}")))
         }
     }
 }
@@ -314,7 +359,7 @@ mod tests {
         // `gaps` and `sessions` are created before the statement that fails.
         conn.execute_batch("CREATE VIEW meta AS SELECT 1 AS id;")
             .unwrap();
-        assert!(migrate_v1_to_v2(&conn).is_err());
+        assert!(migrate(&conn, 2048).is_err());
         assert_eq!(int(&conn, "user_version").unwrap(), 1);
         assert_eq!(tables(&conn), before, "no half-migrated table is left");
         assert!(conn.is_autocommit(), "no transaction is left open");
@@ -323,16 +368,47 @@ mod tests {
             .unwrap();
         assert_eq!(events, 1, "the v1 rows are intact");
         conn.execute_batch("DROP VIEW meta;").unwrap();
-        migrate_v1_to_v2(&conn).unwrap();
+        migrate(&conn, 2048).unwrap();
         assert_eq!(int(&conn, "user_version").unwrap(), SCHEMA_VERSION);
         assert_eq!(tables(&conn).len(), before.len() + 3);
     }
 
     #[test]
+    fn a_v2_migration_that_hits_the_page_cap_restores_v2() {
+        let conn = v1_file();
+        conn.execute_batch(&v2_additions_sql()).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        let pages = int(&conn, "page_count").unwrap();
+        assert!(migrate(&conn, pages as u64).is_err());
+        assert_eq!(int(&conn, "user_version").unwrap(), 2);
+        assert_eq!(int(&conn, "page_count").unwrap(), pages);
+        assert!(conn.is_autocommit());
+        crate::sqlite_file::require_known_schema(&conn, &v2_sql()).unwrap();
+        migrate(&conn, 2048).unwrap();
+    }
+
+    #[test]
+    fn version_two_migration_preserves_an_existing_event() {
+        let conn = v1_file();
+        conn.execute_batch(&v2_additions_sql()).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        migrate(&conn, 2048).unwrap();
+        assert_eq!(int(&conn, "user_version").unwrap(), SCHEMA_VERSION);
+        let (ts, outcome, duplicate): (i64, Option<String>, bool) = conn
+            .query_row(
+                "SELECT ts_ms, prompt_outcome, possible_duplicate FROM history_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((ts, outcome, duplicate), (1234, None, false));
+    }
+
+    #[test]
     fn migrating_a_file_another_migrator_already_moved_to_v2_does_nothing() {
         let conn = v1_file();
-        migrate_v1_to_v2(&conn).unwrap();
-        migrate_v1_to_v2(&conn).unwrap();
+        migrate(&conn, 2048).unwrap();
+        migrate(&conn, 2048).unwrap();
         assert_eq!(int(&conn, "user_version").unwrap(), SCHEMA_VERSION);
     }
 }

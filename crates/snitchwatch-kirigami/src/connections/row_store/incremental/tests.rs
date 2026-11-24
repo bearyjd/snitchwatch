@@ -15,6 +15,8 @@ fn row(id: &str, handled: bool) -> ConnectionRow {
         dst_ip: "10.0.0.1".to_string(),
         dst_port: 123,
         protocol: "udp".to_string(),
+        src_ip: None,
+        src_port: None,
         direction: "outgoing".to_string(),
         action: Some(if handled { "allow" } else { "deny" }.to_string()),
         bytes_sent: 0,

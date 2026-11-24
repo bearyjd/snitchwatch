@@ -67,6 +67,8 @@ fn row(id: &str, action: Option<&str>) -> ConnectionRow {
         dst_ip: "1.1.1.1".into(),
         dst_port: 1,
         protocol: "tcp".into(),
+        src_ip: None,
+        src_port: None,
         direction: "outgoing".into(),
         action: action.map(str::to_string),
         bytes_sent: 0,

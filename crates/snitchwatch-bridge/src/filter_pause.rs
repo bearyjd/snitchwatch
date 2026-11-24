@@ -509,6 +509,8 @@ mod tests {
             dst_ip: "93.184.216.34".to_string(),
             dst_port: 443,
             protocol: "tcp".to_string(),
+            src_ip: None,
+            src_port: None,
             direction: "outgoing".to_string(),
             action: None,
             bytes_sent: 0,

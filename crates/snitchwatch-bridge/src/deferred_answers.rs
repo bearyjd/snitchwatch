@@ -45,18 +45,16 @@ pub(crate) fn with_answer_deadline(row: ConnectionRow, timeout: Duration) -> Con
     }
 }
 
-/// The timeout: put the prompt off and tell every GUI. False when a verdict
-/// won first; the caller then takes that verdict.
-pub(crate) async fn answer_unanswered(
-    cache: &Mutex<ConnectionCache>,
+/// Put the prompt off and tell every GUI if it was still waiting.
+pub(crate) fn answer_unanswered(
+    cache: &mut ConnectionCache,
     daemon_config: &SharedDaemonConfig,
     broadcast_tx: &broadcast::Sender<ServerMessage>,
     row_id: &str,
-) -> bool {
-    let mut cache = cache.lock().await;
+) {
     let action = daemon_config.default_row_action();
     let Some(row) = cache.defer_pending(row_id, action, Some(AutoAnswer::NoAnswer)) else {
-        return false;
+        return;
     };
     tracing::info!(
         %row_id,
@@ -64,7 +62,6 @@ pub(crate) async fn answer_unanswered(
         "nobody answered the prompt; the daemon applies its default action"
     );
     let _ = broadcast_tx.send(ServerMessage::UpdateConnectionRows { rows: vec![row] });
-    true
 }
 
 /// Who asked and for what, for the journal: the bridge's log is otherwise the

@@ -121,9 +121,8 @@ struct Representative {
     key: CollapseKey,
     first_seen_ms: i64,
     last_seen_ms: i64,
-    /// The absorbed rows, in arrival order. Only id and start are kept:
-    /// every other field shown matches `row` (same key), so a released or
-    /// promoted row is rebuilt from it ([`Representative::member_row`]).
+    /// The absorbed rows, in arrival order. Keep each row's identity, start
+    /// time and source endpoint for release or promotion.
     members: Vec<Member>,
 }
 
@@ -131,6 +130,8 @@ struct Representative {
 struct Member {
     id: String,
     started_at_ms: i64,
+    src_ip: Option<std::net::IpAddr>,
+    src_port: Option<u16>,
 }
 
 impl Member {
@@ -138,6 +139,8 @@ impl Member {
         Self {
             id: row.id.clone(),
             started_at_ms: row.started_at_ms,
+            src_ip: row.src_ip,
+            src_port: row.src_port,
         }
     }
 }
@@ -157,6 +160,8 @@ impl Representative {
         ConnectionRow {
             id: member.id.clone(),
             started_at_ms: member.started_at_ms,
+            src_ip: member.src_ip,
+            src_port: member.src_port,
             ..self.row.clone()
         }
     }

@@ -9,6 +9,8 @@ fn event(id: &str, at: i64, action: &str) -> ConnectionRow {
         dst_ip: "93.184.216.34".into(),
         dst_port: 443,
         protocol: "tcp".into(),
+        src_ip: None,
+        src_port: None,
         direction: "outgoing".into(),
         action: Some(action.to_string()),
         bytes_sent: 0,
@@ -306,20 +308,38 @@ fn a_twin_needs_a_decided_ask_and_the_answer_window() {
 #[test]
 fn a_folded_twin_is_released_when_the_ask_row_changes() {
     let mut c = RowCollapse::default();
-    let ids = shown(
-        &mut c,
-        vec![
-            insert(vec![ask("ask-1", 1_000, Some("allow"))]),
-            insert(vec![answer_event("event-2", 2_000)]),
-            ServerMessage::UpdateConnectionRows {
-                rows: vec![ConnectionRow {
-                    action: Some("deny".into()),
-                    ..ask("ask-1", 1_000, Some("allow"))
-                }],
-            },
-        ],
-    );
+    let mut store = super::super::row_store::RowStore::new();
+    let first = ConnectionRow {
+        src_ip: Some("192.0.2.1".parse().unwrap()),
+        src_port: Some(51544),
+        ..ask("ask-1", 1_000, Some("allow"))
+    };
+    let twin = ConnectionRow {
+        src_ip: Some("192.0.2.2".parse().unwrap()),
+        src_port: Some(51545),
+        ..answer_event("event-2", 2_000)
+    };
+    for message in [
+        insert(vec![first.clone()]),
+        insert(vec![twin.clone()]),
+        ServerMessage::UpdateConnectionRows {
+            rows: vec![ConnectionRow {
+                action: Some("deny".into()),
+                ..first
+            }],
+        },
+    ] {
+        for output in c.rewrite(message) {
+            store.apply(output);
+        }
+    }
+    let ids: Vec<&str> = store.rows().iter().map(|row| row.id.as_str()).collect();
     assert_eq!(ids, ["ask-1", "event-2"]);
+    let released = &store.rows()[1];
+    assert_eq!(
+        (released.src_ip, released.src_port),
+        (twin.src_ip, twin.src_port)
+    );
     assert_eq!(c.repeat_count("ask-1"), 1);
 }
 

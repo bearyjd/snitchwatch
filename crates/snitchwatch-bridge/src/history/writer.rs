@@ -335,6 +335,7 @@ fn remove_settings_leftovers(location: &Location) -> Result<(), WriteError> {
 pub struct Engine {
     conn: Connection,
     budget: Budget,
+    pub(super) consent: Option<super::Consent>,
     journal: PathBuf,
     observer: Option<Observer>,
     /// Test seam: an error to raise after a transaction's rows were written
@@ -345,6 +346,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(store: Store, location: &Location, budget: Budget) -> Result<Self, WriteError> {
+        let consent = store.consent.clone();
         let conn = store.into_connection();
         let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
         let pages = pages.max(0) as u64;
@@ -381,6 +383,7 @@ impl Engine {
         let engine = Self {
             conn,
             budget,
+            consent,
             journal: journal.into(),
             observer: None,
             #[cfg(test)]

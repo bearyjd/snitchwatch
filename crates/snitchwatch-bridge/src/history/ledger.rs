@@ -399,6 +399,32 @@ impl LossCounter {
         Ok(())
     }
 
+    /// Transfer an already pinned loss into the tally without advancing its
+    /// coverage boundary to the later time at which the loss was detected.
+    pub(super) fn record_pinned(&mut self, registry: &PinRegistry, n: u64, pin: PinId) {
+        let Some(first_ms) = registry.arrival_of(&pin) else {
+            return;
+        };
+        let count = match self.pending.take() {
+            Some(mut pending) if pending.first_ms <= first_ms => {
+                pending.count = pending.count.saturating_add(n);
+                self.pending = Some(pending);
+                let _ = registry.release(&pin);
+                return;
+            }
+            Some(pending) => {
+                let _ = registry.release(&pending.pin);
+                pending.count.saturating_add(n)
+            }
+            None => n,
+        };
+        self.pending = Some(Pending {
+            count,
+            first_ms,
+            pin,
+        });
+    }
+
     /// Unflushed losses, if any.
     pub fn pending_count(&self) -> u64 {
         self.pending.as_ref().map_or(0, |p| p.count)

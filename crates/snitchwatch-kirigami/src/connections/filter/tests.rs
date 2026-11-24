@@ -9,6 +9,8 @@ fn row(id: &str, process: &str, host: &str, port: u16, action: Option<&str>) -> 
         dst_ip: "10.0.0.1".to_string(),
         dst_port: port,
         protocol: "tcp".to_string(),
+        src_ip: None,
+        src_port: None,
         direction: "outgoing".to_string(),
         action: action.map(|s| s.to_string()),
         bytes_sent: 0,

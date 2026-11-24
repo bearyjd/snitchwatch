@@ -23,6 +23,8 @@ fn row(time: i64) -> ConnectionRow {
         dst_ip: "192.0.2.1".into(),
         dst_port: 443,
         protocol: "tcp".into(),
+        src_ip: None,
+        src_port: None,
         direction: "outgoing".into(),
         action: None,
         bytes_sent: u64::MAX,
@@ -55,6 +57,8 @@ fn snapshot_ignores_unused_fields_and_reports_bounds() {
     huge.direction = "d".repeat(100 * 1024 * 1024);
     huge.process = "ignored".repeat(1000); // Path is present: label isn't needed.
     huge.dst_ip = "ignored".repeat(1000); // Host is present: IP isn't needed.
+    huge.src_ip = Some("2001:db8::1".parse().unwrap());
+    huge.src_port = Some(51544);
     let snapshot = capture(&[huge], 123, &control()).unwrap();
     assert_eq!(snapshot.source.accepted_snapshot, 1);
     assert_eq!(
@@ -338,7 +342,7 @@ fn filter_contract_preserves_exact_selectors_and_rejects_invalid_values() {
 }
 
 #[test]
-fn source_shape_guard_lists_all_seventeen_fields() {
+fn source_shape_guard_lists_all_fields() {
     let source = include_str!("../ws_messages/verdict_wire.rs");
     let body = source
         .split("pub struct ConnectionRow {")
@@ -365,6 +369,8 @@ fn source_shape_guard_lists_all_seventeen_fields() {
             "dst_ip",
             "dst_port",
             "protocol",
+            "src_ip",
+            "src_port",
             "direction",
             "action",
             "bytes_sent",

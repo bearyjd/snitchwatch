@@ -3,6 +3,7 @@
 //! C, `crate::deferred_answers`).
 
 use super::*;
+use crate::cache::connections::{PendingVerdict, UnansweredVerdict};
 use crate::client_presence::Admission;
 use crate::deferred_answers::{answer_unanswered, NO_ANSWER};
 use tokio::sync::oneshot;
@@ -13,16 +14,17 @@ use tokio::sync::oneshot;
 pub(super) enum Unanswered {
     /// The last authenticated GUI session left.
     GuiLost,
-    /// Nobody answered in time, "Decide later" put it off, or it was
-    /// cancelled.
-    NoAnswer,
+    /// The cache settled the prompt without a verdict.
+    Settled(UnansweredVerdict),
+    /// The sender closed without a verdict or an elapsed deadline.
+    Closed,
 }
 
 impl Unanswered {
     pub(super) fn into_status(self) -> Status {
         match self {
             Self::GuiLost => Status::unavailable("last authenticated GUI session disconnected"),
-            Self::NoAnswer => Status::unavailable(NO_ANSWER),
+            Self::Settled(_) | Self::Closed => Status::unavailable(NO_ANSWER),
         }
     }
 }
@@ -34,9 +36,9 @@ impl UiService {
         &self,
         row_id: &str,
         admission: &mut Admission,
-        mut verdict_rx: oneshot::Receiver<VerdictResolution>,
+        mut verdict_rx: oneshot::Receiver<PendingVerdict>,
     ) -> Result<VerdictResolution, Unanswered> {
-        tokio::select! {
+        let outcome = tokio::select! {
             resolution = &mut verdict_rx => resolution,
             _ = admission.lost() => {
                 if self.cache.lock().await.cancel_pending(row_id) {
@@ -46,14 +48,19 @@ impl UiService {
                 verdict_rx.await
             }
             _ = tokio::time::sleep(self.answer_timeout) => {
-                if answer_unanswered(&self.cache, &self.daemon_config, &self.broadcast, row_id).await {
-                    return Err(Unanswered::NoAnswer);
+                {
+                    let mut cache = self.cache.lock().await;
+                    if admission.while_current(|| {
+                        answer_unanswered(&mut cache, &self.daemon_config, &self.broadcast, row_id);
+                    }).is_none() && cache.cancel_pending(row_id) {
+                        return Err(Unanswered::GuiLost);
+                    }
                 }
                 verdict_rx.await
             }
-        }
-        // The sender is gone without a verdict: put off by "Decide later"
-        // (`deferred_answers::decide_later`) or cancelled.
-        .map_err(|_| Unanswered::NoAnswer)
+        };
+        outcome
+            .map_err(|_| Unanswered::Closed)?
+            .map_err(Unanswered::Settled)
     }
 }

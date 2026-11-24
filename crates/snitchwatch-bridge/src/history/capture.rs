@@ -22,8 +22,8 @@
 //! Only the allowlisted fields of [`EventRecord`]: the process path, the
 //! destination, the protocol, the action and who decided it, the rule's name
 //! and class, and its hash. `process_args`, the environment, the working
-//! directory, checksums, the process tree, `uid`, pid, byte counters and the
-//! source address and port are never read. (`src_ip` and `src_port` are PR 6.)
+//! directory, checksums, the process tree, `uid`, pid, and byte counters are
+//! never read. Source address and port support prompt-to-ping correlation.
 //!
 //! # Rules
 //!
@@ -63,19 +63,21 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use snitchwatch_proto::protocol::Event;
+use snitchwatch_proto::protocol::{Connection, Event, Rule};
 
 use super::admission::{Admission, AdmissionConfig, Refusal};
 use super::budget::Budget;
 use super::caps::{DstHost, ProcessPath, Protocol, RuleName};
 use super::durable::PinnedBatch;
+use super::guard::{DecisionGuard, DecisionOutcome};
 use super::ledger::{GapCause, LossCounter};
+use super::lifecycle::Generation;
 use super::pins::{PinId, PinRegistry};
 use super::record::{Action, AnsweredBy, EventRecord};
 use super::rule_identity::{identify, RuleClass, RuleIdentity};
 use super::snapshots::snapshot_for;
 use super::writer::{Engine, Item, QUEUE_MAX_BYTES, QUEUE_MAX_COUNT};
-use super::{load_state, locate, open_store, Mode, State};
+use super::{load_state, locate, open_store, Consent, Mode, State};
 
 /// Bytes a record counts for against its process's share, before its strings.
 const ROW_OVERHEAD: u64 = 160;
@@ -105,14 +107,9 @@ pub(crate) fn map_event(event: &Event) -> Option<Mapped> {
             AnsweredBy::Rule
         },
     );
-    record.process_path = nonempty(&conn.process_path).map(ProcessPath::new);
-    record.dst_host = nonempty(&conn.dst_host).map(DstHost::new);
-    record.dst_ip = conn.dst_ip.parse().ok();
-    record.dst_port = u16::try_from(conn.dst_port).ok();
-    record.protocol = nonempty(&conn.protocol).map(Protocol::new);
-    let allow = rule.action == "allow";
+    map_connection(&mut record, conn);
     if by_default {
-        record.action = if allow {
+        record.action = if rule.action == "allow" {
             Action::DefaultAllow
         } else {
             Action::DefaultDeny
@@ -123,6 +120,21 @@ pub(crate) fn map_event(event: &Event) -> Option<Mapped> {
             nolog: rule.nolog,
         });
     }
+    Some(map_rule(record, rule))
+}
+
+fn map_connection(record: &mut EventRecord, conn: &Connection) {
+    record.src_ip = conn.src_ip.parse().ok();
+    record.src_port = u16::try_from(conn.src_port).ok().filter(|port| *port != 0);
+    record.process_path = nonempty(&conn.process_path).map(ProcessPath::new);
+    record.dst_host = nonempty(&conn.dst_host).map(DstHost::new);
+    record.dst_ip = conn.dst_ip.parse().ok();
+    record.dst_port = u16::try_from(conn.dst_port).ok();
+    record.protocol = nonempty(&conn.protocol).map(Protocol::new);
+}
+
+pub(super) fn map_rule(mut record: EventRecord, rule: &Rule) -> Mapped {
+    let allow = rule.action == "allow";
     let class = RuleClass::of(&rule.name);
     record.action = match (allow, class) {
         (true, _) => Action::Allow,
@@ -134,11 +146,11 @@ pub(crate) fn map_event(event: &Event) -> Option<Mapped> {
     let identity = identify(rule).ok();
     record.rule_hash = identity.as_ref().map(|i| i.hash);
     record.rule_class = Some(super::caps::RuleClass::new(class.as_str()));
-    Some(Mapped {
+    Mapped {
         record,
         identity,
         nolog: rule.nolog,
-    })
+    }
 }
 
 fn nonempty(s: &str) -> Option<&str> {
@@ -146,7 +158,9 @@ fn nonempty(s: &str) -> Option<&str> {
 }
 
 fn same_event(a: &EventRecord, b: &EventRecord) -> bool {
-    a.process_path == b.process_path
+    a.src_ip == b.src_ip
+        && a.src_port == b.src_port
+        && a.process_path == b.process_path
         && a.dst_host == b.dst_host
         && a.dst_ip == b.dst_ip
         && a.dst_port == b.dst_port
@@ -367,7 +381,11 @@ struct Losses {
     admission: LossCounter,
 }
 
-struct Shared {
+pub(super) struct Shared {
+    // In-memory only. A control operation must change eligibility and/or
+    // advance the generation under this gate before clearing queued work.
+    control: Mutex<Option<Arc<Consent>>>,
+    generation: Generation,
     registry: Arc<PinRegistry>,
     queue: PinnedQueue,
     admission: Mutex<Admission>,
@@ -378,8 +396,10 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(registry: Arc<PinRegistry>, config: CaptureConfig) -> Self {
+    fn new(registry: Arc<PinRegistry>, config: CaptureConfig, consent: Option<Consent>) -> Self {
         Self {
+            control: Mutex::new(consent.map(Arc::new)),
+            generation: Generation::new(0),
             registry,
             queue: PinnedQueue::new(config.queue_max_bytes, config.queue_max_count),
             admission: Mutex::new(Admission::new(config.admission)),
@@ -432,13 +452,18 @@ impl Shared {
     /// Tallies `n` events that will never be recorded, holding a pin for the
     /// cause until a gap row is durable. When even that pin cannot be taken
     /// (the registry is exhausted) only the counters know.
-    fn lose(&self, pick: impl FnOnce(&mut Losses) -> &mut LossCounter, n: u64) {
+    fn lose(&self, pick: impl FnOnce(&mut Losses) -> &mut LossCounter, n: u64, pin: Option<PinId>) {
         let mut losses = self.losses.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = pick(&mut losses).record(&self.registry, n);
+        let tally = pick(&mut losses);
+        if let Some(pin) = pin {
+            tally.record_pinned(&self.registry, n, pin);
+        } else {
+            let _ = tally.record(&self.registry, n);
+        }
     }
 
     /// Admit, pin and queue one record.
-    fn enqueue(&self, mapped: Mapped, now_ms: i64) {
+    fn enqueue(&self, mapped: Mapped, now_ms: i64, arrival_pin: Option<PinId>) {
         let n = u64::from(mapped.record.repeat_count);
         let counters = &self.counters;
         let bytes = match self.admit(&mapped.record, now_ms) {
@@ -450,7 +475,8 @@ impl Shared {
                     Refusal::GlobalRate => &counters.refused_global_rate,
                 };
                 add(counter, n);
-                return self.lose(|l| &mut l.admission, n);
+                self.lose(|l| &mut l.admission, n, arrival_pin);
+                return;
             }
         };
         let Mapped {
@@ -469,22 +495,43 @@ impl Shared {
             event: record,
             snapshot,
         };
-        let pin = match self.registry.accept() {
+        let pin = match arrival_pin.map_or_else(|| self.registry.accept(), Ok) {
             Ok(pin) => pin,
             Err(_) => {
                 self.refund(&item.event, bytes);
                 add(&counters.dropped_pin, n);
-                return self.lose(|l| &mut l.queue, n);
+                return self.lose(|l| &mut l.queue, n, None);
             }
         };
         if let Err(entry) = self.queue.try_push(item, pin) {
             let (item, pin) = *entry;
             // Nothing will ever commit it; the loss tally holds a pin for it.
-            self.lose(|l| &mut l.queue, n);
-            let _ = self.registry.release(&pin);
+            self.lose(|l| &mut l.queue, n, Some(pin));
             self.refund(&item.event, bytes);
             add(&counters.dropped_queue, n);
         }
+    }
+
+    pub(super) fn settle(
+        &self,
+        record: EventRecord,
+        consent: &Consent,
+        generation: u64,
+        pin: PinId,
+        outcome: DecisionOutcome<'_>,
+    ) {
+        let now = self.registry.now();
+        let mapped = outcome.map(record, now);
+        let control = self.control.lock().unwrap_or_else(|e| e.into_inner());
+        if control.as_deref() != Some(consent) || self.generation.current() != generation {
+            let _ = self.registry.release(&pin);
+            return;
+        }
+        add(&self.counters.seen, 1);
+        if mapped.record.rule_name.is_some() && mapped.identity.is_none() {
+            add(&self.counters.unidentified_rules, 1);
+        }
+        self.enqueue(mapped, now, Some(pin));
     }
 
     fn observe(&self, events: &[&Event]) {
@@ -512,7 +559,7 @@ impl Shared {
             }
         }
         for record in coalesce(mapped) {
-            self.enqueue(record, now_ms);
+            self.enqueue(record, now_ms, None);
         }
     }
 
@@ -630,7 +677,7 @@ impl Capture {
         registry: Arc<PinRegistry>,
         config: CaptureConfig,
     ) -> io::Result<Self> {
-        let shared = Arc::new(Shared::new(registry, config));
+        let shared = Arc::new(Shared::new(registry, config, engine.consent.clone()));
         let rx = shared
             .queue
             .take_receiver()
@@ -643,6 +690,35 @@ impl Capture {
             shared,
             writer: Mutex::new(Some(handle)),
         })
+    }
+
+    /// Capture eligibility, generation and the arrival pin at prompt acceptance.
+    pub fn begin_decision(&self, connection: &Connection) -> Option<DecisionGuard> {
+        let control = self
+            .shared
+            .control
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let consent = Arc::clone(control.as_ref()?);
+        let generation = self.shared.generation.current();
+        let (pin, arrival) = match self.shared.registry.accept_timed() {
+            Ok(accepted) => accepted,
+            Err(_) => {
+                add(&self.shared.counters.dropped_pin, 1);
+                self.shared.lose(|l| &mut l.queue, 1, None);
+                return None;
+            }
+        };
+        drop(control);
+        let mut record = EventRecord::new(arrival, Action::PendingUnanswered, AnsweredBy::Unknown);
+        map_connection(&mut record, connection);
+        Some(DecisionGuard::new(
+            self.shared.clone(),
+            record,
+            consent,
+            generation,
+            pin,
+        ))
     }
 
     /// The decided events of one `Ping`. Call with no lock held; never waits.
@@ -661,7 +737,15 @@ impl Capture {
     }
 
     fn stop(&self) {
-        self.shared.queue.close();
+        {
+            let mut control = self
+                .shared
+                .control
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *control = None;
+            self.shared.queue.close();
+        }
         let handle = self.writer.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(handle) = handle {
             let _ = handle.join();
@@ -674,7 +758,7 @@ impl Capture {
         config: CaptureConfig,
     ) -> Self {
         Self {
-            shared: Arc::new(Shared::new(registry, config)),
+            shared: Arc::new(Shared::new(registry, config, None)),
             writer: Mutex::new(None),
         }
     }

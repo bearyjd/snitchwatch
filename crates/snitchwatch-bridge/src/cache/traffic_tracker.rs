@@ -66,6 +66,8 @@ mod tests {
             dst_ip: "1.2.3.4".into(),
             dst_port: 443,
             protocol: "tcp".into(),
+            src_ip: None,
+            src_port: None,
             direction: "outgoing".into(),
             action: None,
             bytes_sent,

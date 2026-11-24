@@ -459,7 +459,7 @@ mod tests {
     fn make_pending(
         cache: &mut ConnectionCache,
         id: &str,
-    ) -> tokio::sync::oneshot::Receiver<crate::cache::connections::VerdictResolution> {
+    ) -> tokio::sync::oneshot::Receiver<crate::cache::connections::PendingVerdict> {
         cache.insert_pending(ConnectionRow {
             id: id.to_string(),
             process: "p".to_string(),
@@ -468,6 +468,8 @@ mod tests {
             dst_ip: "1.1.1.1".to_string(),
             dst_port: 443,
             protocol: "tcp".to_string(),
+            src_ip: None,
+            src_port: None,
             direction: "outgoing".to_string(),
             action: None,
             bytes_sent: 0,

@@ -4,7 +4,7 @@
 //! Replaces the M1 dial-out flow that lived in the now-deleted
 //! `grpc_client.rs` and `translator/downstream.rs` envelope hack.
 
-use crate::cache::connections::{ConnectionCache, Verdict, VerdictResolution};
+use crate::cache::connections::{ConnectionCache, UnansweredVerdict, Verdict, VerdictResolution};
 use crate::cache::rules::{RulesSync, SharedRulesCache};
 use crate::client_presence::ClientPresence;
 use crate::daemon_alerts::DaemonAlertStore;
@@ -12,11 +12,13 @@ use crate::daemon_commands::{DaemonCommands, DaemonTransport};
 use crate::daemon_liveness::StreamGuard;
 use crate::diagnostics::DiagnosticsCtx;
 use crate::filter_pause::FilterPause;
+use crate::history::guard::DecisionOutcome;
+use crate::history::record::AnsweredBy;
 use crate::notice::NoticeBus;
 use crate::translator::connection::{connection_to_row, event_to_row};
 use crate::translator::verdict::{once_rule, verdict_to_rule};
 use crate::tray_state::{TrayState, TrayStatePublisher};
-use crate::ws_messages::{ConnectionRow, ServerMessage};
+use crate::ws_messages::{AutoAnswer, ConnectionRow, ServerMessage};
 use snitchwatch_proto::protocol::ui_server::{Ui, UiServer};
 use snitchwatch_proto::protocol::{
     Action, Alert, ClientConfig, Connection, MsgResponse, Notification, NotificationReply,
@@ -127,8 +129,8 @@ pub struct UiService {
     /// tests unless one sets a fake.
     account_lookup: Option<crate::accounts::AccountLookup>,
     /// Connection history capture (`crate::history::capture`). `None`, the
-    /// only value production code gives it while history is off, is the whole
-    /// off switch: `ping` tests it and does nothing else.
+    /// only value production code gives it while history is off, bypasses
+    /// capture for both pings and prompts.
     history_capture: Option<Arc<crate::history::capture::Capture>>,
 }
 
@@ -427,6 +429,10 @@ impl Ui for UiService {
             .client_presence
             .admit()
             .ok_or_else(|| Status::unavailable("no authenticated GUI session"))?;
+        let decision = self
+            .history_capture
+            .as_ref()
+            .and_then(|capture| capture.begin_decision(&conn));
 
         let row = connection_to_row(&conn, ask_id);
         // Captured before `row` moves into the broadcast message below.
@@ -461,21 +467,34 @@ impl Ui for UiService {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
-                return Ok(Response::new(once_rule(
+                let rule = once_rule(
                     Verdict::Allow,
                     crate::ws_messages::VerdictScope::ThisHost,
                     &conn,
                     now_secs,
-                )));
+                );
+                if let Some(decision) = decision {
+                    decision.settle(DecisionOutcome::Replied {
+                        rule: &rule,
+                        answered_by: AnsweredBy::FilterPaused,
+                    });
+                }
+                return Ok(Response::new(rule));
             }
             // Pending from here: the bridge answers it at this deadline if
             // nobody does (`deferred_answers`).
             let row = crate::deferred_answers::with_answer_deadline(row, self.answer_timeout);
-            let receiver = cache
-                .insert_admitted(row.clone(), admission.clone(), self.broadcast.clone())
-                .ok_or_else(|| {
-                    Status::unavailable("authenticated GUI session lost before admission")
-                })?;
+            let Some(receiver) =
+                cache.insert_admitted(row.clone(), admission.clone(), self.broadcast.clone())
+            else {
+                drop(cache);
+                if let Some(decision) = decision {
+                    decision.settle(DecisionOutcome::Error { action: None });
+                }
+                return Err(Status::unavailable(
+                    "authenticated GUI session lost before admission",
+                ));
+            };
             // Publish insertion under the settlement mutex so cancellation
             // cannot publish removal first and leave a stale prompt behind.
             let _ = self
@@ -492,10 +511,31 @@ impl Ui for UiService {
         let _pending_cleanup = PendingCleanup::hold(self, row_id.clone(), ask_id, slot_what);
         // Moved in after cleanup is held, so cancellation drops the receiver
         // first.
-        let resolution = self
+        let resolution = match self
             .wait_for_answer(&row_id, &mut admission, verdict_rx)
             .await
-            .map_err(answer_wait::Unanswered::into_status)?;
+        {
+            Ok(resolution) => resolution,
+            Err(unanswered) => {
+                if let Some(decision) = decision {
+                    let outcome = match unanswered {
+                        answer_wait::Unanswered::GuiLost
+                        | answer_wait::Unanswered::Settled(UnansweredVerdict::GuiLost) => {
+                            DecisionOutcome::GuiLost
+                        }
+                        answer_wait::Unanswered::Settled(UnansweredVerdict::TimedOut(action)) => {
+                            DecisionOutcome::Timeout { action }
+                        }
+                        answer_wait::Unanswered::Settled(UnansweredVerdict::Deferred(action)) => {
+                            DecisionOutcome::Error { action }
+                        }
+                        answer_wait::Unanswered::Closed => DecisionOutcome::Error { action: None },
+                    };
+                    decision.settle(outcome);
+                }
+                return Err(unanswered.into_status());
+            }
+        };
 
         if resolution.verdict == Verdict::Deny {
             self.publish_recent_block(safe_what.clone()).await;
@@ -544,9 +584,19 @@ impl Ui for UiService {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        Ok(Response::new(self.verdict_reply(
-            resolution, &conn, row_id, ask_id, now_secs,
-        )))
+        let rule = self.verdict_reply(resolution, &conn, row_id, ask_id, now_secs);
+        if let Some(decision) = decision {
+            let answered_by = match resolution.auto_answer {
+                None => AnsweredBy::Gui,
+                Some(AutoAnswer::FilterPaused) => AnsweredBy::FilterPaused,
+                Some(_) => AnsweredBy::Unknown,
+            };
+            decision.settle(DecisionOutcome::Replied {
+                rule: &rule,
+                answered_by,
+            });
+        }
+        Ok(Response::new(rule))
     }
 
     async fn subscribe(

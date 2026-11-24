@@ -147,6 +147,8 @@ mod tests {
                     dst_ip: "140.82.112.3".to_string(),
                     dst_port: 443,
                     protocol: "tcp".to_string(),
+                    src_ip: None,
+                    src_port: None,
                     direction: "outgoing".to_string(),
                     action: None,
                     bytes_sent: 0,

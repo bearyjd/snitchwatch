@@ -69,6 +69,8 @@ async fn source_selector_and_artifact_canaries_never_enter_application_logs() {
         dst_ip: "203.0.113.7".into(),
         dst_port: 443,
         protocol: "tcp".into(),
+        src_ip: None,
+        src_port: None,
         direction: "out".into(),
         action: Some("allow".into()),
         bytes_sent: 0,
