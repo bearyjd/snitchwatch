@@ -176,7 +176,11 @@ impl Engine {
     /// its own oldest rows (and the snapshots they leave unreferenced) a
     /// chunk at a time, until it is within its share or the store is down to
     /// `low` used pages. `chunks` counts the chunks of this attempt.
-    pub(super) fn evict_over_share(&mut self, low: u64, chunks: &mut u32) -> Result<(), WriteError> {
+    pub(super) fn evict_over_share(
+        &mut self,
+        low: u64,
+        chunks: &mut u32,
+    ) -> Result<(), WriteError> {
         let share = self.share_bytes();
         for (process, mut held) in self.over_share()? {
             let mut cursor = None;

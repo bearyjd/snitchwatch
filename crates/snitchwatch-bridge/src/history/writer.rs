@@ -518,7 +518,6 @@ impl Engine {
 
     /// Insert up to `rows_per_txn` items in one transaction.
     pub fn insert_batch(&mut self, items: &[Item]) -> Result<TxnReport, WriteError> {
-
         if items.len() as u64 > self.budget.rows_per_txn {
             return Err(WriteError::BatchTooLarge {
                 got: items.len(),

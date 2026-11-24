@@ -52,11 +52,17 @@ fn a_pass_told_to_stop_at_once_removes_nothing_and_does_not_vacuum() {
     let mut rig = rig();
     old_rows(&mut rig, 100);
     rig.reports.lock().unwrap().clear();
-    let pass = rig.engine.expire_aged_until(NOW, false, &mut || true).unwrap();
+    let pass = rig
+        .engine
+        .expire_aged_until(NOW, false, &mut || true)
+        .unwrap();
     assert!(pass.stopped);
     assert_eq!(pass.removed, 0);
     assert_eq!(count(&rig, "events"), 101);
-    assert!(rig.reports.lock().unwrap().is_empty(), "no transaction at all");
+    assert!(
+        rig.reports.lock().unwrap().is_empty(),
+        "no transaction at all"
+    );
 }
 
 #[test]
@@ -65,15 +71,15 @@ fn the_writers_stop_condition_is_a_closed_queue_or_the_deadline() {
     use super::pins::PinRegistry;
     use std::sync::Arc;
     let rig = rig();
-    let Rig {
-        _root, engine, ..
-    } = rig;
+    let Rig { _root, engine, .. } = rig;
     let config = CaptureConfig::for_budget(engine.budget());
     let capture = Capture::spawn(engine, Arc::new(PinRegistry::new()), config).unwrap();
     let far = Instant::now() + Duration::from_secs(3600);
     assert!(!capture.shared.expiry_stop(far)(), "open and in time");
     assert!(
-        capture.shared.expiry_stop(Instant::now() - Duration::from_millis(1))(),
+        capture
+            .shared
+            .expiry_stop(Instant::now() - Duration::from_millis(1))(),
         "past its deadline"
     );
     capture.close_queue_for_test();

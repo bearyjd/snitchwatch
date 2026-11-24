@@ -41,9 +41,7 @@ fn flooder_at(rig: &Rig, flooder: &str, times: u64) {
 }
 
 fn batch_of(ts: i64, process: &str) -> Vec<Item> {
-    (0..32)
-        .map(|i| plain(small_for(ts + i, process)))
-        .collect()
+    (0..32).map(|i| plain(small_for(ts + i, process))).collect()
 }
 
 // ---- the low-water mark -----------------------------------------------------------
@@ -84,7 +82,10 @@ fn the_per_process_scan_is_amortised_over_many_pressured_batches() {
         batches += 1;
     }
     let scans = rig.engine.tier2_scans();
-    assert!(evict_runs(&rig) >= 4, "pressure came back: {batches} batches");
+    assert!(
+        evict_runs(&rig) >= 4,
+        "pressure came back: {batches} batches"
+    );
     assert!(scans >= 1, "the flooder is over its share, so tier 2 ran");
     assert!(
         batches >= 20 * scans,
@@ -127,7 +128,10 @@ fn no_scan_runs_while_no_process_can_be_over_its_share() {
         ts += 100;
         batches += 1;
     }
-    assert!(evict_runs(&rig) >= 12, "pressure came back: {batches} batches");
+    assert!(
+        evict_runs(&rig) >= 12,
+        "pressure came back: {batches} batches"
+    );
     assert!(
         rig.engine.tier2_scans() <= 1,
         "one scan to learn who holds what, then none: {}",
@@ -170,7 +174,10 @@ fn a_process_pushed_over_its_share_only_by_its_snapshots_is_still_trimmed() {
         }
     }
     put(&mut rig, items);
-    put(&mut rig, vec![fat_rule(small_for(ts + 1, process), 9, 3_000)]);
+    put(
+        &mut rig,
+        vec![fat_rule(small_for(ts + 1, process), 9, 3_000)],
+    );
     let events_only: u64 = rig
         .engine
         .event_bytes()
@@ -244,7 +251,7 @@ fn grows_over_its_share_after_the_tally_was_learnt(push: fn(&mut Rig, Vec<Item>)
 
 #[test]
 fn rows_a_batch_insert_adds_are_in_the_tally_that_gates_tier_two() {
-    grows_over_its_share_after_the_tally_was_learnt(|rig, items| put(rig, items));
+    grows_over_its_share_after_the_tally_was_learnt(put);
 }
 
 #[test]
@@ -270,7 +277,10 @@ fn eviction_goes_on_while_it_makes_progress_and_stops_at_the_chunk_limit() {
     rig.reports.lock().unwrap().clear();
     assert!(rig.engine.make_room().unwrap());
     let chunks = evict_reports(&rig);
-    assert!(chunks > 3, "progress carried on past three chunks: {chunks}");
+    assert!(
+        chunks > 3,
+        "progress carried on past three chunks: {chunks}"
+    );
     assert!(chunks <= EVICTION_ROUNDS as usize, "{chunks}");
     assert_eq!(
         count(&rig, "events") - count_of(&rig, "/opt/flood"),
@@ -323,9 +333,15 @@ fn a_later_chunk_does_not_rescan_the_rows_the_first_one_skipped() {
         &rig,
         (1..=4000).map(|ts| small_for(ts, &format!("/usr/bin/p{}", ts % 7))),
     );
-    fill(&rig, (10_000..10_200).map(|ts| small_for(ts, "/opt/target")));
+    fill(
+        &rig,
+        (10_000..10_200).map(|ts| small_for(ts, "/opt/target")),
+    );
     let victims = Victims::Process("/opt/target");
-    let (_, first) = rig.engine.evict_victims_after(victims, u64::MAX, None).unwrap();
+    let (_, first) = rig
+        .engine
+        .evict_victims_after(victims, u64::MAX, None)
+        .unwrap();
     let cursor = first.cursor.expect("the chunk says where it ended");
     let p = |v: &str| rusqlite::types::Value::from(v.to_string());
     let int = |n: i64| rusqlite::types::Value::from(n);
@@ -335,7 +351,11 @@ fn a_later_chunk_does_not_rescan_the_rows_the_first_one_skipped() {
         victims,
         &[p("/opt/target"), int(cursor.0), int(cursor.1), int(32)],
     );
-    assert_eq!((plain_rows, seek_rows), (32, 32), "the same rows either way");
+    assert_eq!(
+        (plain_rows, seek_rows),
+        (32, 32),
+        "the same rows either way"
+    );
     assert!(
         seek_steps * 3 < plain_steps,
         "without the cursor {plain_steps} steps, with it {seek_steps}"

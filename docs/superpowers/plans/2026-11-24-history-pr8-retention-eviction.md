@@ -93,3 +93,23 @@ Eviction never deletes unrelated files and never lets the file or journal grow p
 ## Verification
 
 `CARGO_TARGET_DIR=/home/user/.sw-pr8-target TMPDIR=/home/user/.sw-pr8-tmp just check` and `just test-bridge`, then `just test` before calling it done. Review by `code-reviewer` plus `security-reviewer` (filesystem deletion), separate from the author pass. No push, no PR from this branch without instruction.
+
+## Repair pass (three independent reviews, 2026-11-24)
+
+What changed after review, and what is deliberately not fixed. This supersedes the text above where they differ.
+
+- **Pause rule (design item 4, test 9).** The "three rounds" rule is gone. `make_room` evicts in chunks of `rows_per_txn` while each chunk removes rows, up to `EVICTION_ROUNDS` (now 128 chunks, about 4,096 rows, about a second), and the pause happens only when the store is still over high water after that or a chunk removed nothing. Reason: going down to the low-water mark below cannot be done in three chunks, and a pause while progress is being made throws events away for nothing.
+- **Hysteresis.** Eviction goes down to the low-water mark (`Budget::low_water_pages`: high water minus a twentieth of the file), so one eviction serves many batches; before, the headroom was about 32 rows, so every pressured batch evicted again. Cost: an eviction takes up to about 5% of the file's history (the oldest, or an over-share process's own) earlier than the high-water rule alone would.
+- **Tier 2 on cheap state.** The two full-table aggregates of tier 2 run only when `largest per-process event tally + all snapshot bytes > share`. The tally (`retention_room.rs`) is learnt by one scan at the first pressure, kept current by both insert paths and by eviction, and dropped (so the next pressure scans) past 1,024 processes.
+- **Victims::Process cursor.** A later chunk of the same process starts after the `(ts_ms, id)` the previous one ended at, seeking through the `events_ts` index, instead of reading all older rows of other processes again. Tier 2 also stops at the chunk limit.
+- **Age expiry** gives way between chunks when the queue is closed (shutdown) or after one second; a pass that gave way does not vacuum, and the next pass carries on.
+
+### Not done: forward clock erosion (finding F1), needs an owner decision
+
+After a persistent forward clock step (a wrong clock from boot, a step while the bridge was down, or one inside the five seconds between a heartbeat and a pass) the jump flag skips one pass and each later pass takes `max(total/10, 32)` rows: about 8% of the history is left after four hours of passes, nothing after a day. The planned remedy is an expiry budget independent of the detector: at most 25% of the stored event rows may expire per rolling 24 hours, kept across restarts. It needs a place to persist, and none exists without a schema change: `meta` is `STRICT` with one column (`watermark_ms`) and the schema is compared byte for byte on open; `settings.json` has `deny_unknown_fields` and a format version and survives clearing the database; `PRAGMA application_id` and `user_version` are header fields with other jobs. Proposed shape if the owner agrees to a v4: `ALTER TABLE meta ADD COLUMN expiry_window_start_ms INTEGER NOT NULL DEFAULT 0` and `expiry_window_removed INTEGER NOT NULL DEFAULT 0`, updated in the deleting transaction of each tier-1 chunk, a bucket of 12.5% refilling over 24 hours (so at most 25% per rolling day), clamped when the stored window lies in the future of a clock that stepped back, with a migration test and the frozen-schema test updated. Fallback if no schema change is wanted: the same budget in memory (resets on restart, so a wrong clock at boot costs one allowance per boot).
+
+### Known limits (documented, not fixed)
+
+- A flooder that spreads over four or more distinct paths, each under 25% of the main file, bypasses the share tier; it is then limited only by admission's rates and by tier 3 (oldest first), which takes other processes' history too.
+- Owner decision 1b removed `Refusal::ByteShare`: admission no longer caps how much of the store one process's old history holds, and so other processes' old history is no longer protected by admission either; only tier 2 (under pressure) trims an over-share process.
+- Persisted L1 gap-ledger compaction is not folded into the evicted marker; `note_released` forgets processes past 1,024; rows dated in the future by a wrong clock are not expired until the clock catches up.
