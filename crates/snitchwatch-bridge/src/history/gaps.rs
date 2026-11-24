@@ -74,8 +74,12 @@ pub(super) struct Losses {
     /// that reports its losses after that time has its events queued, so that
     /// a crash's `bridge-down` gap begins no later than that `since_ms` (the
     /// pin of the loss itself arrives later). Normally one; more only while
-    /// pings overlap.
-    guards: Vec<(i64, PinId)>,
+    /// pings overlap. The third field names the ping that took it while that
+    /// ping is between begin and finish: no other ping may take or release it
+    /// then, for its events are not queued yet.
+    guards: Vec<(i64, PinId, Option<u64>)>,
+    /// The id the next ping takes, so a guard names its owner.
+    next_ping: u64,
     /// The `since` of every ping between begin and finish (`i64::MAX` when it
     /// has none): guards at or above the lowest are still some ping's own.
     in_flight: Vec<i64>,
@@ -125,6 +129,7 @@ impl Losses {
             back_at: None,
             down_at: None,
             guards: Vec::new(),
+            next_ping: 0,
             in_flight: Vec::new(),
             closed: false,
             unguarded_pings: 0,
@@ -137,7 +142,7 @@ impl Losses {
     /// to cover. Called before the session ends.
     pub(super) fn release_ping_guard(&mut self, registry: &PinRegistry) {
         self.closed = true;
-        for (_, pin) in self.guards.drain(..) {
+        for (_, pin, _) in self.guards.drain(..) {
             let _ = registry.release(&pin);
         }
     }
@@ -209,7 +214,9 @@ impl Losses {
             previous: None,
             outage: None,
             in_flight: None,
+            seq: self.next_ping,
         };
+        self.next_ping = self.next_ping.wrapping_add(1);
         if self.closed {
             return begun;
         }
@@ -226,7 +233,7 @@ impl Losses {
         begun.in_flight = Some(since);
         let key = loss.at_ms.unwrap_or(arrival);
         match registry.add(arrival) {
-            Ok(pin) => self.guards.push((key, pin)),
+            Ok(pin) => self.guards.push((key, pin, Some(begun.seq))),
             Err(error) => {
                 self.unguarded_pings = self.unguarded_pings.saturating_add(1);
                 // Powers of two only: a stuck registry must not flood the log.
@@ -250,12 +257,15 @@ impl Losses {
     /// [`release_unneeded_guards`](Self::release_unneeded_guards).
     fn take_guard_for(&mut self, since_ms: Option<i64>) -> Option<PinId> {
         let position = match since_ms {
-            Some(since) => self.guards.iter().position(|(key, _)| *key == since),
+            Some(since) => self
+                .guards
+                .iter()
+                .position(|(key, _, owner)| *key == since && owner.is_none()),
             None if self.in_flight.is_empty() => self
                 .guards
                 .iter()
                 .enumerate()
-                .max_by_key(|(_, (key, _))| *key)
+                .max_by_key(|(_, (key, _, _))| *key)
                 .map(|(i, _)| i),
             None => None,
         }?;
@@ -270,16 +280,18 @@ impl Losses {
         let Some(anchor) = self
             .guards
             .iter()
-            .map(|(key, _)| *key)
+            .map(|(key, _, _)| *key)
             .filter(|key| *key <= bound)
             .max()
         else {
             return;
         };
-        let (obsolete, kept): (Vec<_>, Vec<_>) =
-            self.guards.drain(..).partition(|(key, _)| *key < anchor);
+        let (obsolete, kept): (Vec<_>, Vec<_>) = self
+            .guards
+            .drain(..)
+            .partition(|(key, _, owner)| *key < anchor && owner.is_none());
         self.guards = kept;
-        for (_, pin) in obsolete {
+        for (_, pin, _) in obsolete {
             let _ = registry.release(&pin);
         }
     }
@@ -291,6 +303,11 @@ impl Losses {
         if let Some(since) = begun.in_flight {
             if let Some(i) = self.in_flight.iter().position(|s| *s == since) {
                 self.in_flight.swap_remove(i);
+            }
+        }
+        for (_, _, owner) in &mut self.guards {
+            if *owner == Some(begun.seq) {
+                *owner = None;
             }
         }
         self.tally_ping(registry, begun);
@@ -402,6 +419,8 @@ pub(super) struct PingBegun {
     outage: Option<(i64, i64)>,
     /// What this ping registered in [`Losses::in_flight`], if it did.
     in_flight: Option<i64>,
+    /// The id its own guard carries until [`Losses::finish_ping`].
+    seq: u64,
 }
 
 impl PingBegun {
@@ -689,7 +708,7 @@ impl Pulse {
         limits: &LedgerLimits,
         losses: &Mutex<Losses>,
     ) -> Result<(), DurableError> {
-        let mono_ms = i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let mono_ms = self.mono_ms();
         beat(engine, registry, limits, losses, &mut self.clock, mono_ms)
     }
 
@@ -701,7 +720,14 @@ impl Pulse {
         losses: &Mutex<Losses>,
         kind: SessionEnd,
     ) -> Result<(), DurableError> {
+        // A jump after the last heartbeat is seen now, before the end is
+        // written over it.
+        self.clock.observe(registry.now(), self.mono_ms());
         close(engine, registry, limits, losses, &mut self.clock, kind)
+    }
+
+    fn mono_ms(&self) -> i64 {
+        i64::try_from(self.started.elapsed().as_millis()).unwrap_or(i64::MAX)
     }
 }
 

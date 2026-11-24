@@ -147,7 +147,9 @@ fn close_previous(conn: &Connection, now_ms: i64) -> rusqlite::Result<Option<Gap
         ),
         _ => {
             let watermark = read_watermark(conn)?.unwrap_or(start_ms);
-            let from = watermark.max(start_ms);
+            // Not raised to `start_ms`: after a clock rewind the repaired
+            // watermark lies before it, and what follows it is uncovered.
+            let from = watermark;
             conn.execute(
                 "UPDATE sessions SET end_ms = ?1, end_kind = ?2 WHERE id = ?3",
                 params![from, SessionEnd::Unclean.as_str(), id],

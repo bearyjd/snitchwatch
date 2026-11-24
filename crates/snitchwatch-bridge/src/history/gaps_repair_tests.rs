@@ -541,3 +541,79 @@ fn a_late_watchdog_up_edge_leaves_no_stale_outage_end() {
     let next = l.begin_ping(&rig.registry, ping(2, Some(4500), 5000), 0);
     assert_eq!(next.outage, None, "the outage was closed once already");
 }
+
+// ---- 9. PR 7 sixth repair pass ----------------------------------------------
+
+/// A crash after a clock rewind: the pin cap lowered the persisted watermark
+/// below the session's own start, and recovery must start the gap there.
+#[test]
+fn a_crash_after_a_clock_rewind_starts_the_gap_at_the_repaired_watermark() {
+    let mut rig = rig(1_000_000);
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
+    let (losses, mut clock) = (losses(), ClockWatch::new());
+    rig.set(995_000); // the wall clock stepped back
+    let _queued = rig.registry.accept().unwrap(); // a pending prompt pins it
+    rig.set(996_000);
+    beat_ok(&mut rig, &losses, &mut clock, 1_000);
+    let mark = read_watermark(rig.engine.connection()).unwrap();
+    assert!(
+        mark < Some(1_000_000),
+        "the pin capped the watermark: {mark:?}"
+    );
+    let after = rows_after_a_crash(&rig, 1_009_000);
+    assert_covered(&after, 995_000, 1_009_000, "from the repaired watermark");
+}
+
+/// A forward clock jump after the last heartbeat is seen by the close, so the
+/// clean end is not written over an unrecorded jump.
+#[test]
+fn a_clean_stop_records_a_forward_jump_after_the_last_heartbeat() {
+    let mut rig = rig(1000);
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
+    let losses = losses();
+    let mut pulse = Pulse::new(Duration::from_secs(1), 1000);
+    rig.set(1000 + 3_600_000); // an hour forward, no heartbeat since
+    pulse
+        .close(
+            &mut rig.engine,
+            &rig.registry,
+            &rig.limits,
+            &losses,
+            SessionEnd::Clean,
+        )
+        .unwrap();
+    let found = rows(&rig);
+    assert!(
+        found.iter().any(|g| g.cause == GapCause::ClockJump),
+        "{found:?}"
+    );
+}
+
+/// The next ping must not release the pin the first ping's events still need.
+#[test]
+fn the_next_ping_leaves_a_ping_in_flights_only_pin() {
+    let mut rig = rig(1000);
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
+    let (losses, mut clock) = (losses(), ClockWatch::new());
+    let a = locked(&losses).begin_ping(&rig.registry, ping(0, None, 1000), 0);
+    rig.set(2000);
+    {
+        let mut l = locked(&losses);
+        let b = l.begin_ping(&rig.registry, ping(0, Some(1000), 2000), 0);
+        l.finish_ping(&rig.registry, b);
+    }
+    assert_eq!(rig.registry.oldest(), Some(1000), "A's pin is still live");
+    rig.set(3000);
+    beat_ok(&mut rig, &losses, &mut clock, 0);
+    assert_watermark_held(&rig, "A still in flight");
+    let after = rows_after_a_crash(&rig, 3500);
+    assert_covered(&after, 1000, 3500, "a crash before A queued its events");
+    locked(&losses).finish_ping(&rig.registry, a);
+    assert_eq!(rig.registry.len(), 1, "then only B's guard remains");
+}

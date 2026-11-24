@@ -1121,7 +1121,13 @@ async fn history_gets_the_down_and_up_edges_as_one_exact_gap() {
         .ok()
         .expect("the watchdog is gone")
         .shutdown();
-    let gaps = read_gaps(&rusqlite::Connection::open(location.db_path()).unwrap()).unwrap();
+    // The mock wall clock moved less than the real monotonic one did, which
+    // the shutdown's own clock check reads as a step back: not this test's gap.
+    let gaps: Vec<_> = read_gaps(&rusqlite::Connection::open(location.db_path()).unwrap())
+        .unwrap()
+        .into_iter()
+        .filter(|g| g.cause != GapCause::ClockJump)
+        .collect();
     assert_eq!(gaps.len(), 1, "{gaps:?}");
     assert_eq!(gaps[0].cause, GapCause::DaemonDisconnected);
     assert_eq!((gaps[0].start_ms, gaps[0].end_ms), (52_000, 58_000));
