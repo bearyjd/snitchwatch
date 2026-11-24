@@ -77,6 +77,7 @@ use super::gaps::{self, Losses, StandingLabels};
 use super::guard::{DecisionGuard, DecisionOutcome};
 use super::ledger::{LedgerLimits, LossCounter};
 use super::lifecycle::Generation;
+use super::measure::estimate_bytes;
 use super::pinned_queue::{Entry, PinnedQueue};
 use super::pins::{PinId, PinRegistry};
 use super::record::{Action, AnsweredBy, EventRecord};
@@ -86,8 +87,6 @@ use super::snapshots::snapshot_for;
 use super::writer::{Engine, Item, QUEUE_MAX_BYTES, QUEUE_MAX_COUNT};
 use super::{load_state, locate, open_store, Consent, Mode, State};
 
-/// Bytes a record counts for against its process's share, before its strings.
-const ROW_OVERHEAD: u64 = 160;
 /// Events whose first is no more than this many ms before them coalesce.
 const COALESCE_WINDOW_MS: i64 = 1000;
 
@@ -197,16 +196,6 @@ pub(crate) fn coalesce(mapped: Vec<Mapped>) -> Vec<Mapped> {
         }
     }
     out
-}
-
-fn estimate_bytes(r: &EventRecord) -> u64 {
-    let len = |n: Option<usize>| n.unwrap_or(0) as u64;
-    ROW_OVERHEAD
-        + len(r.process_path.as_ref().map(|v| v.as_str().len()))
-        + len(r.dst_host.as_ref().map(|v| v.as_str().len()))
-        + len(r.rule_name.as_ref().map(|v| v.as_str().len()))
-        + len(r.protocol.as_ref().map(|v| v.as_str().len()))
-        + len(r.rule_class.as_ref().map(|v| v.as_str().len()))
 }
 
 #[derive(Debug, Clone, Copy)]

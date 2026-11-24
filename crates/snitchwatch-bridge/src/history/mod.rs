@@ -24,11 +24,13 @@ pub mod gaps;
 pub mod guard;
 pub mod ledger;
 pub mod lifecycle;
+mod measure;
 pub mod open;
 pub mod ping;
 mod pinned_queue;
 pub mod pins;
 pub mod record;
+mod retention;
 pub mod rule_identity;
 pub mod schema;
 pub mod session;
@@ -194,6 +196,8 @@ mod identity_dormant_tests;
 mod replace_tests;
 #[cfg(test)]
 mod rule_identity_fuzz_tests;
+#[cfg(test)]
+mod retention_tests;
 #[cfg(test)]
 mod rule_identity_tests;
 #[cfg(test)]

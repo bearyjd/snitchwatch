@@ -164,6 +164,8 @@ const OWNERS: &[&str] = &[
     "gaps_tests.rs",
     "gaps_repair_tests.rs",
     "pinned_queue.rs",
+    "retention.rs",
+    "retention_tests.rs",
     "dormant_tests.rs",
 ];
 
@@ -295,7 +297,7 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 15] = [
+const DURABLE_OWNERS: [&str; 17] = [
     "capture.rs",
     "capture_tests.rs",
     "hook_tests.rs",
@@ -310,6 +312,8 @@ const DURABLE_OWNERS: [&str; 15] = [
     "gaps_tests.rs",
     "gaps_repair_tests.rs",
     "pinned_queue.rs",
+    "retention.rs",
+    "retention_tests.rs",
     "dormant_tests.rs",
 ];
 

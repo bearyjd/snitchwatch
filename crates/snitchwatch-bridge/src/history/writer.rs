@@ -28,7 +28,7 @@ use rusqlite::{Connection, TransactionBehavior};
 
 use super::budget::Budget;
 use super::record::{insert_event, EventRecord, SnapshotRecord};
-use super::snapshots::{admit_snapshot, delete_oldest_events, SnapshotLimits, SnapshotUsage};
+use super::snapshots::{admit_snapshot, SnapshotLimits, SnapshotUsage};
 use super::{Location, Store};
 
 /// Default queue bounds (D5).
@@ -515,13 +515,6 @@ impl Engine {
             }
             Ok(items.len() as u64)
         })
-    }
-
-    /// Delete the oldest `rows_per_txn` events and, in the same transaction,
-    /// every snapshot that none of the remaining events refers to.
-    pub fn evict_chunk(&mut self) -> Result<TxnReport, WriteError> {
-        let n = self.budget.rows_per_txn;
-        self.transact(TxnKind::Evict, |conn| Ok(delete_oldest_events(conn, n)?))
     }
 
     /// Return up to `vacuum_steps_per_txn` free pages to the filesystem.
