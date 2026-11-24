@@ -147,6 +147,7 @@ fn offending(src: &str) -> Vec<String> {
 /// the durable half (PR 3b), which holds and releases pins.
 const OWNERS: &[&str] = &[
     "capture.rs",
+    "capture_writer.rs",
     "capture_tests.rs",
     "guard.rs",
     "hook_tests.rs",
@@ -297,8 +298,9 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 17] = [
+const DURABLE_OWNERS: [&str; 18] = [
     "capture.rs",
+    "capture_writer.rs",
     "capture_tests.rs",
     "hook_tests.rs",
     "snapshots_tests.rs",
@@ -350,6 +352,7 @@ const CAPTURE_MODULES: &[&str] = &[
 const CAPTURE_OWNERS: &[&str] = &[
     "ping.rs",
     "capture.rs",
+    "capture_writer.rs",
     "capture_stats.rs",
     "capture_tests.rs",
     "admission.rs",
