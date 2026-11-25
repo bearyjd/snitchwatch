@@ -68,10 +68,11 @@ pub enum Refused {
     /// settings could not be removed".
     #[error("history was removed but the delete did not finish: {0}; recording stays off")]
     Incomplete(String),
-    /// A delete passed the rename but the tombstone could not be unlinked:
-    /// every recorded row is still on disk, recording stays off, and
-    /// retrying the delete finishes the job.
-    #[error("deleted history is still on disk; retry delete: {0}; recording stays off")]
+    /// A removal passed the rename but the tombstone could not be unlinked
+    /// (or a retry could not unlink it): the rows in it are still on disk
+    /// and retrying the delete finishes the job. The text says whether
+    /// recording stays off; a clear resumes it on a new store.
+    #[error("deleted history is still on disk; retry delete: {0}")]
     DataLeft(String),
 }
 

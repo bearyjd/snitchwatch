@@ -69,7 +69,7 @@ fn a_delete_that_fails_after_the_store_is_gone_keeps_recording_off() {
 }
 
 #[test]
-fn a_clear_that_fails_after_the_store_is_gone_still_records_as_before() {
+fn a_clear_that_fails_after_the_store_is_gone_says_data_left_and_still_records() {
     let rig = gate_rig(Limits::default());
     feed_canary(&rig, 1);
     wait_rows(&rig, 1);
@@ -83,7 +83,7 @@ fn a_clear_that_fails_after_the_store_is_gone_still_records_as_before() {
             fs::create_dir(&tombstone).unwrap();
         }
     });
-    assert!(matches!(result, Err(Refused::Files(_))), "{result:?}");
+    assert!(matches!(result, Err(Refused::DataLeft(_))), "{result:?}");
     assert!(rig.gate.slot().get().is_some(), "recording is back");
     let settings = settings_json(&rig);
     assert!(settings.contains("\"enabled\":true"), "{settings}");

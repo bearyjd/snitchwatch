@@ -1,4 +1,4 @@
-//! PR 10: preview. Counts what a clear or delete would remove, changes
+//! PR 10: preview. Counts what a clear or delete would remove, changes no row
 //! nothing, and hands back a token the gate remembers (at most
 //! [`MAX_TOKENS`] live, each expiring) so that a confirm can only name a
 //! preview this process issued, under the generation it was issued in.
@@ -9,13 +9,14 @@
 //! control operation's quiesce cancels it). The authoritative checksum is
 //! recomputed at confirm, with the writer stopped.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 
 use super::control::{ControlGate, Refused};
-use super::reader_registry::NotAdmitted;
+use super::reader_registry::{NotAdmitted, ReaderTicket};
 
 /// Live preview tokens at once; the oldest is dropped for a new one.
 pub const MAX_TOKENS: usize = 4;
@@ -34,7 +35,8 @@ pub struct Preview {
     /// An estimate: the size of the store file.
     pub approx_bytes: u64,
     /// A tombstone of a removal that did not finish is still on disk: its
-    /// rows are counted above and a clear or delete removes it.
+    /// rows are counted above (unless it could not be scanned, then the
+    /// count is short) and a clear or delete removes it.
     pub leftover: bool,
     pub token: TokenId,
 }
@@ -54,10 +56,24 @@ pub(super) struct Scan {
     pub to_ms: Option<i64>,
 }
 
+/// What a preview saw of the tombstone, checked again at confirm before the
+/// tombstone is unlinked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Leftover {
+    /// None was there: one that appears since is a change.
+    Absent,
+    /// One was there that could not be scanned: finishing it needs no
+    /// recheck, so a retry can still start.
+    Unchecked,
+    /// One was there and these rows were counted.
+    Counted(Checksum),
+}
+
 pub(super) struct Token {
     pub generation: u64,
     pub max_id: i64,
     pub checksum: Checksum,
+    pub leftover: Leftover,
 }
 
 struct Entry {
@@ -180,34 +196,49 @@ fn add_window(conn: &Connection, scan: &mut Scan, low: i64, high: i64) -> Result
     Ok(())
 }
 
-/// The file a preview counts, and whether a tombstone is on disk. With no
-/// store but a tombstone, its rows are what is still to remove, so they are
-/// counted: an empty history is never reported over data that is still there.
-fn scan_target(location: &super::Location) -> (std::path::PathBuf, bool) {
-    let tombstone = location.dir().join(super::control_files::TOMBSTONE);
-    let leftover = tombstone.symlink_metadata().is_ok();
-    let db = location.db_path();
-    if leftover && db.symlink_metadata().is_err() {
-        (tombstone, true)
+fn empty_scan() -> Scan {
+    Scan {
+        max_id: 0,
+        checksum: Checksum::default(),
+        from_ms: None,
+        to_ms: None,
+    }
+}
+
+/// At confirm, before the tombstone is unlinked: it still holds the rows the
+/// preview counted. Runs with the readers quiesced, so it is not bounded.
+pub(super) fn recheck_tombstone(location: &super::Location, token: &Token) -> Result<(), Refused> {
+    let path = location.dir().join(super::control_files::TOMBSTONE);
+    let present = path.symlink_metadata().is_ok();
+    let want = match (token.leftover, present) {
+        (Leftover::Unchecked, _) | (Leftover::Absent, false) => return Ok(()),
+        (Leftover::Absent, true) => return Err(Refused::Changed),
+        (Leftover::Counted(want), _) => want,
+    };
+    let have = if present {
+        let mut conn = crate::sqlite_file::open_owner_only_readonly(&path)
+            .map_err(|e| Refused::Unavailable(e.to_string()))?;
+        scan_events(&mut conn, None, Arc::new(|| false), None)
+            .map_err(|e| match e {
+                ScanError::Cancelled => Refused::Busy,
+                ScanError::Failed(reason) => Refused::Unavailable(reason),
+            })?
+            .checksum
     } else {
-        (db, leftover)
+        Checksum::default()
+    };
+    if have == want {
+        Ok(())
+    } else {
+        Err(Refused::Changed)
     }
 }
 
 impl ControlGate {
-    /// Counts what a clear would remove. Takes a reader slot while it scans,
-    /// so a control operation sees it (and cancels it); writes nothing,
-    /// pins nothing and numbers nothing.
-    pub fn preview(&self) -> Result<Preview, Refused> {
-        let location = &self.owned_location()?;
-        let ticket = self.0.registry.try_acquire().map_err(|e| match e {
-            NotAdmitted::Busy => Refused::Busy,
-            NotAdmitted::ControlOperation => Refused::InProgress,
-        })?;
-        let generation = self.0.generation.current();
-        let (path, leftover) = scan_target(location);
-        let approx_bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
-        let scan = match crate::sqlite_file::open_owner_only_readonly(&path) {
+    /// Scans one file with a reader slot's cancel token; a missing file is
+    /// an empty scan.
+    fn scan_file(&self, ticket: &ReaderTicket, path: &Path) -> Result<Scan, Refused> {
+        match crate::sqlite_file::open_owner_only_readonly(path) {
             Ok(mut conn) => {
                 let _ = conn.busy_timeout(Duration::from_millis(20));
                 let cancel = ticket.cancel_token();
@@ -222,32 +253,76 @@ impl ControlGate {
                 .map_err(|e| match e {
                     ScanError::Cancelled => Refused::Busy,
                     ScanError::Failed(reason) => Refused::Unavailable(reason),
-                })?
+                })
             }
             Err(crate::sqlite_file::OpenError::Io(e))
                 if e.kind() == std::io::ErrorKind::NotFound =>
             {
-                Scan {
-                    max_id: 0,
-                    checksum: Checksum::default(),
-                    from_ms: None,
-                    to_ms: None,
-                }
+                Ok(empty_scan())
             }
-            Err(e) => return Err(Refused::Unavailable(e.to_string())),
-        };
-        let count = u64::try_from(scan.checksum.repeat_sum).unwrap_or(0);
+            Err(e) => Err(Refused::Unavailable(e.to_string())),
+        }
+    }
+
+    /// The tombstone's scan, if there is one. One that cannot be scanned (a
+    /// second link, a failure, a timeout) is reported unchecked and
+    /// uncounted rather than refused: the delete that `DataLeft` says to
+    /// retry must be able to start.
+    fn scan_tombstone(
+        &self,
+        ticket: &ReaderTicket,
+        location: &super::Location,
+    ) -> Result<(Scan, Leftover), Refused> {
+        let path = location.dir().join(super::control_files::TOMBSTONE);
+        if path.symlink_metadata().is_err() {
+            return Ok((empty_scan(), Leftover::Absent));
+        }
+        match self.scan_file(ticket, &path) {
+            Ok(scan) => {
+                let counted = Leftover::Counted(scan.checksum);
+                Ok((scan, counted))
+            }
+            Err(Refused::Busy) if ticket.cancel_token().is_cancelled() => Err(Refused::Busy),
+            Err(Refused::Busy | Refused::Unavailable(_)) => Ok((empty_scan(), Leftover::Unchecked)),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Counts what a clear would remove: the store and a tombstone beside
+    /// it. Takes a reader slot while it scans, so a control operation sees
+    /// it (and cancels it); changes no row, pins nothing and numbers
+    /// nothing. It may run [`recover`](super::control_files::recover) and
+    /// resume recording, as any first use of the gate does (the writer lock
+    /// is taken lazily).
+    pub fn preview(&self) -> Result<Preview, Refused> {
+        let location = &self.owned_location()?;
+        let ticket = self.0.registry.try_acquire().map_err(|e| match e {
+            NotAdmitted::Busy => Refused::Busy,
+            NotAdmitted::ControlOperation => Refused::InProgress,
+        })?;
+        let generation = self.0.generation.current();
+        let db = location.db_path();
+        let tomb = location.dir().join(super::control_files::TOMBSTONE);
+        let approx_bytes = [&db, &tomb]
+            .iter()
+            .map(|p| std::fs::metadata(p).map_or(0, |m| m.len()))
+            .sum();
+        let store = self.scan_file(&ticket, &db)?;
+        let (left, leftover) = self.scan_tombstone(&ticket, location)?;
+        let rows = |s: &Scan| u64::try_from(s.checksum.repeat_sum).unwrap_or(0);
+        let count = rows(&store) + rows(&left);
         let token = self.0.tokens.issue(Token {
             generation,
-            max_id: scan.max_id,
-            checksum: scan.checksum,
+            max_id: store.max_id,
+            checksum: store.checksum,
+            leftover,
         });
         Ok(Preview {
             count,
-            from_ms: scan.from_ms,
-            to_ms: scan.to_ms,
+            from_ms: [store.from_ms, left.from_ms].into_iter().flatten().min(),
+            to_ms: [store.to_ms, left.to_ms].into_iter().flatten().max(),
             approx_bytes,
-            leftover,
+            leftover: leftover != Leftover::Absent,
             token,
         })
     }
