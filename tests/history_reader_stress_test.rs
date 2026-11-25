@@ -296,10 +296,12 @@ fn quiesce_then_unlink(bump: bool) {
         }
         registry.close();
         registry.cancel_all();
-        assert!(
-            registry.wait_idle(Duration::from_secs(20)),
-            "stopped before the unlink"
-        );
+        let idle = registry.wait_idle(Duration::from_secs(20));
+        if !idle {
+            // Let the worker go, so the failure is reported instead of hanging.
+            token.cancel();
+        }
+        assert!(idle, "the reader stopped before the unlink");
         std::fs::remove_file(&db).unwrap();
         assert_eq!(
             worker.join().unwrap(),
