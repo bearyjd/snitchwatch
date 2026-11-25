@@ -18,6 +18,11 @@ pub mod budget;
 pub mod caps;
 pub mod capture;
 mod capture_stats;
+pub mod control;
+mod control_clear;
+mod control_files;
+mod control_lock;
+pub mod control_preview;
 mod correlation;
 pub mod durable;
 mod expiry_budget;
@@ -28,6 +33,7 @@ pub mod ledger;
 pub mod lifecycle;
 mod measure;
 pub mod open;
+mod pending;
 pub mod ping;
 mod pinned_queue;
 pub mod pins;
@@ -243,6 +249,46 @@ pub(crate) fn open_store_as(location: &Location, euid: u32) -> Result<Store, Una
 mod budget_tests;
 #[cfg(test)]
 mod caps_tests;
+#[cfg(test)]
+mod control_clear_tests;
+#[cfg(test)]
+mod control_crash_tests;
+#[cfg(test)]
+mod control_e2e_tests;
+#[cfg(test)]
+mod control_epoch_tests;
+#[cfg(test)]
+mod control_files_tests;
+#[cfg(test)]
+mod control_incomplete_tests;
+#[cfg(test)]
+mod control_lazy_tests;
+#[cfg(test)]
+mod control_leftover_tests;
+#[cfg(test)]
+mod control_lock_tests;
+#[cfg(test)]
+mod control_outage_tests;
+#[cfg(test)]
+mod control_owner_tests;
+#[cfg(test)]
+mod control_preview_tests;
+#[cfg(test)]
+mod control_prompts_tests;
+#[cfg(test)]
+mod control_reader_tests;
+#[cfg(test)]
+mod control_recheck_tests;
+#[cfg(test)]
+mod control_refusal_tests;
+#[cfg(test)]
+pub(crate) mod control_support;
+#[cfg(test)]
+mod control_tests;
+#[cfg(test)]
+mod control_two_bridge_tests;
+#[cfg(test)]
+mod control_wiring_tests;
 #[cfg(test)]
 mod crash_tests;
 #[cfg(test)]

@@ -551,11 +551,22 @@ retention change; nothing for disable (which keeps history by default). Enforcem
    validation fails, the operation is rejected and **nothing has changed**:
    queued events, pending guards and pins are untouched and ingestion was
    never closed.
-2. Increment the generation under the queue gate. Events accepted from now on
-   carry the new generation. Guards created earlier are handled by G1.
-3. **Close read admission** (D8 gate refuses new queries with `busy`),
-   **cancel and join every reader worker, and close every SQLite handle**,
-   including the read-only connection.
+2. **Close read admission, then wait for the readers** (D8 gate refuses new
+   queries with `busy`): **cancel and join every reader worker, and close
+   every SQLite handle**, including the read-only connection, as one step
+   (`ReaderRegistry::quiesce`). A reader that does not stop in time means the
+   operation fails closed with nothing changed.
+3. **Then** increment the generation, under the queue gate (the only way to
+   do it is through the quiesced registry's guard). Events accepted from now
+   on carry the new generation. Guards created earlier are handled by G1.
+   *Erratum (PR 10, 2026-11-25): this was steps 2 and 3 the other way round.
+   A reader admitted between the bump and the close would read the old
+   database and tag its cursor with the new generation, which the
+   replacement would then accept. PR 9's design 7 repeats the old order; it
+   is superseded by this one. The mode change that can be refused (saving
+   `enabled = false`, for disable and delete) is made after step 2 and
+   before this bump: a refusal after the bump leaves every pending prompt
+   stale, its pin held, so a refusal must change nothing.*
 4. **Split the queue by scope; do not discard wholesale.**
    - *Queued events* outside the scope are kept. Moving them across the
      boundary does not rewrite anything about how they were accepted: the
@@ -566,16 +577,21 @@ retention change; nothing for disable (which keeps history by default). Enforcem
      therefore never "re-stamped": it settles only if its acceptance
      generation still equals the current one.
    - **Disable invalidates every pending guard**, including under
-     disable-and-keep, whose deletion scope is otherwise empty. Each such
-     guard is invalidated, a durable gap row covering its arrival is
-     committed, and its pin is released in the same transaction (W1). A
+     disable-and-keep, whose deletion scope is otherwise empty. The guards
+     are invalidated together: **one** durable `disabled` gap row, from the
+     earliest pending arrival, counting the guards, is committed, and all
+     their pins are released in that same transaction (W1). (Erratum, PR 10:
+     one row for all pending guards, not one row per guard.) A
      later re-enable under the same consent cannot revive it: its acceptance
      generation is older, so its outcome is discarded at settlement.
    - For clear and retention change, guards outside the scope also keep their
      original acceptance generation; whether they can still settle is decided
      by G1 against the current generation, so a control operation that
      increments the generation invalidates the guards it supersedes (each
-     with its durable gap before its pin is released), and operations that
+     with its durable gap before its pin is released; for clear and delete
+     the gap would live in a file that is being removed, so the pending
+     prompts are discarded with the old store and their pins go with it,
+     owner decision 2026-11-25), and operations that
      must not interrupt recording (a rejected preview) never reach this step.
    - *Queued events and snapshots inside the scope* are discarded together.
      Any accepted item discarded outside an approved scope first gets a
@@ -623,7 +639,13 @@ Tests (each with a blocked writer and a non-empty queue):
   after the preview, leave the checksum and maximum row id unchanged, and be
   discarded by a clear whose scope is "everything". At confirmation, under the
   control barrier and **before** any destructive step (C1 step 1), the bridge
-  refuses if the current acceptance sequence is above the recorded boundary. A cutoff row id alone does not fix the set, because
+  refuses if the current acceptance sequence is above the recorded boundary.
+  *Amended (PR 10, owner decision 2 of 2026-11-25): it does not refuse. The
+  scope is exactly what was previewed (rows up to the token's maximum id,
+  confirmed by the checksum); an item accepted after the boundary is outside
+  the scope, is **kept**, and a clear carries it into the new store (the
+  confirmation says so). The token, its checksum and expiry are enforced as
+  written.* A cutoff row id alone does not fix the set, because
   retention can remove rows and coalescing can raise a `repeat_count` before
   the user confirms. On confirm the bridge recomputes the checksum; if it
   differs, or the token expired, nothing is deleted and the user is shown a

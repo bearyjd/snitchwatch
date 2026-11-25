@@ -26,7 +26,7 @@ use crate::tray_state::TrayStatePublisher;
 /// assumption documented here, not a measured SLA.
 pub const DAEMON_DOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-const WATCHDOG_TICK: Duration = Duration::from_secs(2);
+pub(crate) const WATCHDOG_TICK: Duration = Duration::from_secs(2);
 
 /// Poll `liveness` every [`WATCHDOG_TICK`] and keep the tray's `DaemonDown`
 /// state in sync with it. Runs until the task is dropped/aborted by its
@@ -45,7 +45,7 @@ pub async fn run(
         cache,
         diagnostics_ctx,
         broadcast_tx,
-        None,
+        None::<crate::history::control::CaptureSlot>,
     )
     .await;
 }
@@ -58,7 +58,7 @@ pub async fn run_with_history(
     cache: Arc<TokioMutex<ConnectionCache>>,
     diagnostics_ctx: Arc<crate::diagnostics::DiagnosticsCtx>,
     broadcast_tx: broadcast::Sender<crate::ws_messages::ServerMessage>,
-    recorder: Option<Arc<crate::history::capture::Capture>>,
+    recorder: Option<impl Into<crate::history::control::CaptureSlot>>,
 ) {
     run_with_history_timing(
         liveness,
@@ -80,14 +80,18 @@ pub(crate) async fn run_with_history_timing(
     cache: Arc<TokioMutex<ConnectionCache>>,
     diagnostics_ctx: Arc<crate::diagnostics::DiagnosticsCtx>,
     broadcast_tx: broadcast::Sender<crate::ws_messages::ServerMessage>,
-    recorder: Option<Arc<crate::history::capture::Capture>>,
+    recorder: Option<impl Into<crate::history::control::CaptureSlot>>,
     (tick, timeout): (Duration, Duration),
 ) {
+    let recorder: Option<crate::history::control::CaptureSlot> = recorder.map(Into::into);
     let mut interval = tokio::time::interval(tick);
     let mut was_down = false;
     // History's gap opens only for an outage seen to begin: a daemon that
     // was already away at the first look has no observed start.
     let mut seen_up = false;
+    // The capture last told about the daemon: a capture a control operation
+    // swaps into the slot has not been, whatever the edge says.
+    let mut told: std::sync::Weak<crate::history::capture::Capture> = std::sync::Weak::new();
     loop {
         interval.tick().await;
 
@@ -97,12 +101,8 @@ pub(crate) async fn run_with_history_timing(
         // Connection history's `daemon-disconnected` gap: open at the down
         // edge, closed at recovery. In memory only; the writer commits it.
         seen_up |= !down_now && liveness.heard_from_daemon();
-        if let Some(recorder) = recorder.as_ref().filter(|_| down_now != was_down) {
-            if !down_now {
-                recorder.daemon_up();
-            } else if seen_up {
-                recorder.daemon_down();
-            }
+        if let Some(slot) = &recorder {
+            told = tell_capture(slot, told, (down_now, was_down, seen_up));
         }
         if down_now && !was_down {
             {
@@ -134,6 +134,33 @@ pub(crate) async fn run_with_history_timing(
         }
         was_down = down_now;
     }
+}
+
+/// Tells the capture now in the slot what it needs to know about the daemon.
+/// A capture seen for the first time is told the level (the daemon is away,
+/// if it is, and its start was seen); one already told hears the edges only.
+/// Returns the capture that was told.
+fn tell_capture(
+    slot: &crate::history::control::CaptureSlot,
+    told: std::sync::Weak<crate::history::capture::Capture>,
+    (down_now, was_down, seen_up): (bool, bool, bool),
+) -> std::sync::Weak<crate::history::capture::Capture> {
+    let Some(capture) = slot.get() else {
+        return told;
+    };
+    let current = Arc::downgrade(&capture);
+    if current.ptr_eq(&told) {
+        if down_now != was_down {
+            if !down_now {
+                capture.daemon_up();
+            } else if seen_up {
+                capture.daemon_down();
+            }
+        }
+    } else if down_now && seen_up {
+        capture.daemon_down();
+    }
+    current
 }
 
 #[cfg(test)]

@@ -59,7 +59,6 @@
 //! first lost event.
 
 use std::io;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -71,11 +70,13 @@ use super::budget::Budget;
 use super::caps::{DstHost, ProcessPath, Protocol, RuleName};
 pub use super::capture_stats::CaptureStats;
 use super::capture_stats::{add, Counters};
+use super::control_lock::WriterLock;
 use super::gaps::{Losses, StandingLabels};
 use super::guard::{DecisionGuard, DecisionOutcome};
 use super::ledger::{LedgerLimits, LossCounter};
-use super::lifecycle::Generation;
+use super::lifecycle::{AcceptanceSeq, Generation};
 use super::measure::estimate_bytes;
+use super::pending::{PendingGuards, PendingKey};
 use super::pinned_queue::PinnedQueue;
 use super::pins::{PinId, PinRegistry};
 use super::record::{Action, AnsweredBy, EventRecord};
@@ -83,7 +84,7 @@ use super::rule_identity::{identify, RuleClass, RuleIdentity};
 use super::settings::{Settings, DEFAULT_RETENTION_DAYS};
 use super::snapshots::snapshot_for;
 use super::writer::{Engine, Item, QUEUE_MAX_BYTES, QUEUE_MAX_COUNT};
-use super::{load_state, locate, open_store, Consent, Mode, State};
+use super::Consent;
 
 /// Events whose first is no more than this many ms before them coalesce.
 const COALESCE_WINDOW_MS: i64 = 1000;
@@ -257,8 +258,11 @@ pub(super) struct Shared {
     // In-memory only. A control operation must change eligibility and/or
     // advance the generation under this gate before clearing queued work.
     control: Mutex<Option<Arc<Consent>>>,
-    generation: Generation,
+    generation: Arc<Generation>,
+    acceptance: Arc<AcceptanceSeq>,
     registry: Arc<PinRegistry>,
+    /// Prompts accepted and not yet settled (#420).
+    pending: PendingGuards,
     queue: PinnedQueue,
     admission: Mutex<Admission>,
     losses: Mutex<Losses>,
@@ -283,11 +287,19 @@ pub(super) struct Shared {
 }
 
 impl Shared {
-    fn new(registry: Arc<PinRegistry>, config: CaptureConfig, consent: Option<Consent>) -> Self {
+    fn new(
+        registry: Arc<PinRegistry>,
+        config: CaptureConfig,
+        consent: Option<Consent>,
+        generation: Arc<Generation>,
+        acceptance: Arc<AcceptanceSeq>,
+    ) -> Self {
         Self {
             control: Mutex::new(consent.map(Arc::new)),
-            generation: Generation::new(0),
+            generation,
+            acceptance,
             registry,
+            pending: PendingGuards::default(),
             queue: PinnedQueue::new(config.queue_max_bytes, config.queue_max_count),
             admission: Mutex::new(Admission::new(config.admission)),
             losses: Mutex::new(Losses::new()),
@@ -323,6 +335,21 @@ impl Shared {
                 .get()
                 .is_some_and(|deadline| Instant::now() >= *deadline)
         }));
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_add_for_test(&self, pin: PinId, arrival_ms: i64) -> PendingKey {
+        self.pending.add(pin, arrival_ms)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_len_for_test(&self) -> usize {
+        self.pending.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn generation_for_test(&self) -> Arc<Generation> {
+        self.generation.clone()
     }
 
     #[cfg(test)]
@@ -375,6 +402,9 @@ impl Shared {
 
     /// Admit, pin and queue one record.
     fn enqueue(&self, mapped: Mapped, now_ms: i64, arrival_pin: Option<PinId>) {
+        if arrival_pin.is_none() {
+            self.number_acceptance();
+        }
         let n = u64::from(mapped.record.repeat_count);
         let counters = &self.counters;
         let bytes = match self.admit(&mapped.record, now_ms) {
@@ -422,21 +452,33 @@ impl Shared {
         }
     }
 
+    /// Gives one accepted item its number, under the lock a control
+    /// operation takes to read the boundary, so the two agree.
+    pub(super) fn number_acceptance(&self) {
+        let _control = self.control.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self.acceptance.assign();
+    }
+
     pub(super) fn settle(
         &self,
         record: EventRecord,
         consent: &Consent,
         generation: u64,
-        pin: PinId,
+        key: PendingKey,
         outcome: DecisionOutcome<'_>,
     ) {
         let now = self.registry.now();
         let mapped = outcome.map(record, now);
         let control = self.control.lock().unwrap_or_else(|e| e.into_inner());
         if control.as_deref() != Some(consent) || self.generation.current() != generation {
-            let _ = self.registry.release(&pin);
+            // The pin stays pending: the end of this capture, or the control
+            // operation that invalidated it, turns it into a gap (#420).
             return;
         }
+        // A gap that took the pin already covers this prompt.
+        let Some(pin) = self.pending.take(key) else {
+            return;
+        };
         add(&self.counters.seen, 1);
         if mapped.record.rule_name.is_some() && mapped.identity.is_none() {
             add(&self.counters.unidentified_rules, 1);
@@ -482,6 +524,9 @@ impl Shared {
 pub struct Capture {
     pub(super) shared: Arc<Shared>,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// The single-writer lock of a capture that [`start`] made; released
+    /// only after the writer has been joined (fields drop after `Drop`).
+    _lock: Option<Arc<WriterLock>>,
 }
 
 impl Capture {
@@ -491,6 +536,25 @@ impl Capture {
         engine: Engine,
         registry: Arc<PinRegistry>,
         config: CaptureConfig,
+    ) -> io::Result<Self> {
+        Self::spawn_shared(
+            engine,
+            registry,
+            config,
+            Arc::new(Generation::random()),
+            Arc::new(AcceptanceSeq::default()),
+        )
+    }
+
+    /// [`spawn`](Self::spawn) on the bridge-wide generation and acceptance
+    /// sequence, which outlive this capture (PR 10: a clear or a re-enable
+    /// respawns the capture, never the counters).
+    pub fn spawn_shared(
+        engine: Engine,
+        registry: Arc<PinRegistry>,
+        config: CaptureConfig,
+        generation: Arc<Generation>,
+        acceptance: Arc<AcceptanceSeq>,
     ) -> io::Result<Self> {
         let mut engine = engine;
         engine.set_retention_days(config.retention_days);
@@ -506,7 +570,13 @@ impl Capture {
                 false
             }
         };
-        let shared = Arc::new(Shared::new(registry, config, engine.consent.clone()));
+        let shared = Arc::new(Shared::new(
+            registry,
+            config,
+            engine.consent.clone(),
+            generation,
+            acceptance,
+        ));
         let rx = shared
             .queue
             .take_receiver()
@@ -522,6 +592,7 @@ impl Capture {
         Ok(Self {
             shared,
             writer: Mutex::new(Some(handle)),
+            _lock: None,
         })
     }
 
@@ -534,6 +605,7 @@ impl Capture {
             .unwrap_or_else(|e| e.into_inner());
         let consent = Arc::clone(control.as_ref()?);
         let generation = self.shared.generation.current();
+        let _ = self.shared.acceptance.assign();
         let (pin, arrival) = match self.shared.registry.accept_timed() {
             Ok(accepted) => accepted,
             Err(_) => {
@@ -542,6 +614,7 @@ impl Capture {
                 return None;
             }
         };
+        let key = self.shared.pending.add(pin, arrival);
         drop(control);
         let mut record = EventRecord::new(arrival, Action::PendingUnanswered, AnsweredBy::Unknown);
         map_connection(&mut record, connection);
@@ -550,7 +623,7 @@ impl Capture {
             record,
             consent,
             generation,
-            pin,
+            key,
         ))
     }
 
@@ -613,7 +686,14 @@ impl Capture {
         config: CaptureConfig,
     ) -> Self {
         Self {
-            shared: Arc::new(Shared::new(registry, config, None)),
+            _lock: None,
+            shared: Arc::new(Shared::new(
+                registry,
+                config,
+                None,
+                Arc::new(Generation::random()),
+                Arc::new(AcceptanceSeq::default()),
+            )),
             writer: Mutex::new(None),
         }
     }
@@ -674,44 +754,10 @@ impl Drop for Capture {
     }
 }
 
-/// The bridge's one entry point. Reads the history state (which creates
-/// nothing) and returns a running capture **only if history is enabled**;
-/// off, unavailable, or a state directory the mode refuses gives `None`: no
-/// thread, no directory, no queue.
-pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
-    let location = locate(mode, state_dir).ok()?;
-    let State::Enabled(settings) = load_state(&location) else {
-        return None;
-    };
-    let budget = Budget::new(u64::from(settings.budget_mib) * 1024 * 1024).ok()?;
-    let store = match open_store(&location) {
-        Ok(store) => store,
-        Err(reason) => {
-            tracing::warn!(%reason, "history is enabled but could not be opened");
-            return None;
-        }
-    };
-    let engine = match Engine::new(store, &location, budget) {
-        Ok(engine) => engine,
-        Err(e) => {
-            tracing::warn!(error = %e, "history is enabled but its writer could not start");
-            return None;
-        }
-    };
-    let capture = Capture::spawn(
-        engine,
-        Arc::new(PinRegistry::new()),
-        CaptureConfig::for_settings(&budget, &settings),
-    );
-    match capture {
-        Ok(capture) => Some(Arc::new(capture)),
-        Err(e) => {
-            tracing::warn!(error = %e, "history writer thread could not start");
-            None
-        }
-    }
-}
+pub use self::control_ops::start;
 
+#[path = "capture_control.rs"]
+mod control_ops;
 #[path = "capture_writer.rs"]
 mod writer_loop;
 

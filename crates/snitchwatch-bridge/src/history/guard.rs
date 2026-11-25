@@ -5,7 +5,7 @@ use std::sync::Arc;
 use snitchwatch_proto::protocol::Rule;
 
 use super::capture::{map_rule, Mapped, Shared};
-use super::pins::PinId;
+use super::pending::PendingKey;
 use super::record::{Action, AnsweredBy, EventRecord, PromptOutcome};
 use super::Consent;
 
@@ -65,7 +65,7 @@ pub struct DecisionGuard {
     shared: Arc<Shared>,
     consent: Arc<Consent>,
     generation: u64,
-    pending: Option<(EventRecord, PinId)>,
+    pending: Option<(EventRecord, PendingKey)>,
 }
 
 impl DecisionGuard {
@@ -74,13 +74,13 @@ impl DecisionGuard {
         record: EventRecord,
         consent: Arc<Consent>,
         generation: u64,
-        pin: PinId,
+        key: PendingKey,
     ) -> Self {
         Self {
             shared,
             consent,
             generation,
-            pending: Some((record, pin)),
+            pending: Some((record, key)),
         }
     }
 
@@ -89,9 +89,9 @@ impl DecisionGuard {
     }
 
     fn finish(&mut self, outcome: DecisionOutcome<'_>) {
-        if let Some((record, pin)) = self.pending.take() {
+        if let Some((record, key)) = self.pending.take() {
             self.shared
-                .settle(record, &self.consent, self.generation, pin, outcome);
+                .settle(record, &self.consent, self.generation, key, outcome);
         }
     }
 }

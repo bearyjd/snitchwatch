@@ -937,7 +937,7 @@ fn accepting_before_a_generation_or_consent_change_never_writes_a_snapshot() {
     let first = rig.capture.begin_decision(&connection).unwrap();
     rig.capture.shared.generation.advance_for_test().unwrap();
     first.settle(outcome());
-    assert!(rig.registry.is_empty());
+    assert_eq!(rig.registry.len(), 1); // #420: held for its gap, not released
     assert_eq!(rig.capture.stats().seen, 0);
 
     let second = rig.capture.begin_decision(&connection).unwrap();

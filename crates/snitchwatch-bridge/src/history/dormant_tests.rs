@@ -182,6 +182,22 @@ const OWNERS: &[&str] = &[
     "retention_crash_tests.rs",
     "retention_writer_tests.rs",
     "retention_support.rs",
+    "control_epoch_tests.rs",
+    "control_outage_tests.rs",
+    "control_recheck_tests.rs",
+    "control_refusal_tests.rs",
+    "control_prompts_tests.rs",
+    "control_support.rs",
+    "pending.rs",
+    "control.rs",
+    "control_tests.rs",
+    "capture_control.rs",
+    "control_reader_tests.rs",
+    "control_two_bridge_tests.rs",
+    "control_owner_tests.rs",
+    "control_incomplete_tests.rs",
+    "control_leftover_tests.rs",
+    "control_lazy_tests.rs",
     "dormant_tests.rs",
 ];
 
@@ -313,7 +329,7 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 44] = [
+const DURABLE_OWNERS: [&str; 60] = [
     "timeline.rs",
     "timeline_tests.rs",
     "gap_counts.rs",
@@ -357,12 +373,30 @@ const DURABLE_OWNERS: [&str; 44] = [
     "retention_crash_tests.rs",
     "retention_writer_tests.rs",
     "retention_support.rs",
+    "control_epoch_tests.rs",
+    "control_outage_tests.rs",
+    "control_recheck_tests.rs",
+    "control_refusal_tests.rs",
+    "control_prompts_tests.rs",
+    "control_support.rs",
+    "control.rs",
+    "control_tests.rs",
+    "capture_control.rs",
+    "control_crash_tests.rs",
+    "control_reader_tests.rs",
+    "control_two_bridge_tests.rs",
+    "control_owner_tests.rs",
+    "control_incomplete_tests.rs",
+    "control_leftover_tests.rs",
+    "control_lazy_tests.rs",
     "dormant_tests.rs",
 ];
 
 /// PR 5: capture and admission. Whole identifiers that name them, a
 /// violation anywhere outside `history/`.
-const CAPTURE_TYPES: [&str; 4] = [
+const CAPTURE_TYPES: [&str; 6] = [
+    "CaptureSlot",
+    "ControlGate",
     "CaptureStats",
     "CaptureConfig",
     "queues_allocated",
@@ -412,6 +446,29 @@ const CAPTURE_OWNERS: &[&str] = &[
     "gaps.rs",
     "gaps_tests.rs",
     "gaps_repair_tests.rs",
+    "control_epoch_tests.rs",
+    "control_outage_tests.rs",
+    "control_recheck_tests.rs",
+    "control_refusal_tests.rs",
+    "control_prompts_tests.rs",
+    "control_support.rs",
+    "control_files_tests.rs",
+    "control_lock_tests.rs",
+    "control_clear.rs",
+    "control_clear_tests.rs",
+    "control.rs",
+    "control_tests.rs",
+    "control_preview.rs",
+    "control_crash_tests.rs",
+    "control_wiring_tests.rs",
+    "control_e2e_tests.rs",
+    "capture_control.rs",
+    "control_reader_tests.rs",
+    "control_two_bridge_tests.rs",
+    "control_owner_tests.rs",
+    "control_incomplete_tests.rs",
+    "control_leftover_tests.rs",
+    "control_lazy_tests.rs",
     "dormant_tests.rs",
     "mod.rs",
 ];
@@ -420,24 +477,33 @@ const CAPTURE_OWNERS: &[&str] = &[
 /// edges), and the only paths each may name:
 /// `UiService` holds the capture and uses it for pings and prompt outcomes.
 /// The bridge binary asks `start` for one.
-const HOOK_FILES: [(&str, &[&str]); 3] = [
+const HOOK_FILES: [(&str, &[&str]); 4] = [
     (
         "snitchwatch-bridge/src/daemon_watchdog.rs",
-        &["history::capture::Capture"],
+        &["history::capture::Capture", "history::control::CaptureSlot"],
     ),
     (
         "snitchwatch-bridge/src/grpc_server.rs",
         &[
             "history::capture::Capture",
+            "history::control::CaptureSlot",
             "history::guard::DecisionOutcome",
             "history::record::AnsweredBy",
         ],
+    ),
+    // The running bridge owns the gate, and with it the writer lock, for as
+    // long as it runs.
+    (
+        "snitchwatch-bridge-cli/src/running.rs",
+        &["history::control::ControlGate"],
     ),
     (
         "snitchwatch-bridge-cli/src/lib.rs",
         &[
             "history::capture::Capture",
             "history::capture::start",
+            "history::control::ControlGate",
+            "history::control::Limits",
             "history::Mode",
         ],
     ),

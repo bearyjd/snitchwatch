@@ -232,14 +232,36 @@ impl Shared {
             tracing::error!("history never started its session; the previous one stays open");
             return;
         }
-        let kind = if self.disabling.load(Ordering::Acquire) {
+        let disabling = self.disabling.load(Ordering::Acquire);
+        let kind = if disabling {
             SessionEnd::Disabled
         } else {
             SessionEnd::Clean
         };
+        self.gap_pending_guards(disabling);
         if let Err(e) = pulse.close(engine, &self.registry, limits, &self.losses, kind) {
             tracing::error!(error = %e, "history shutdown could not record its gaps");
         }
+    }
+
+    /// Every prompt still pending becomes one tally (so one gap row, from
+    /// the earliest arrival, counting the prompts) and its pin is released
+    /// when that row commits, with the session end (#420, W1).
+    pub(super) fn gap_pending_guards(&self, disabling: bool) {
+        let pending = self.pending.drain();
+        if pending.is_empty() {
+            return;
+        }
+        self.with_losses(|losses, registry| {
+            let tally = if disabling {
+                &mut losses.disabled
+            } else {
+                &mut losses.write_failed
+            };
+            for (pin, _arrival) in pending {
+                tally.record_pinned(registry, 1, pin, None);
+            }
+        });
     }
 
     /// The batch could not be written: count it, give its admission bytes

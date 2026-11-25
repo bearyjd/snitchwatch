@@ -71,6 +71,11 @@ pub struct RunningBridge {
     /// choices, saved once more at shutdown.
     pub(crate) curated_handle: tokio::task::JoinHandle<()>,
     pub(crate) curated: CuratedDefaults,
+    /// Connection history's control gate. It owns the writer lock, so it
+    /// must live exactly as long as the bridge: the capture slots handed to
+    /// the gRPC service and the watchdog do not carry the lock.
+    #[allow(dead_code)]
+    pub(crate) history_gate: Option<snitchwatch_bridge::history::control::ControlGate>,
 }
 
 impl RunningBridge {
