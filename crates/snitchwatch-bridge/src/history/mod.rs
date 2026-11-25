@@ -39,6 +39,7 @@ pub mod schema;
 pub mod session;
 pub mod settings;
 pub mod snapshots;
+pub mod timeline;
 pub mod writer;
 
 use std::path::{Path, PathBuf};

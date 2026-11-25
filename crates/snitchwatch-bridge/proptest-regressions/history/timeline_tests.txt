@@ -1,0 +1,13 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 659dc5db6ba31fb3ab52a517dec1698f04f228e96aca1e29939436b69be5071d # shrinks to (sessions, gaps) = ([Session { start_ms: 0, end_ms: Some(1), end: Some(Clean) }], []), lo = 0, len = 1, t_off = 0
+cc 8ee0df87f935d363fdde1f82cc8935619d9fdf2dc9cd89bce9ab41a48776c54e # shrinks to (sessions, gaps) = ([Session { start_ms: 0, end_ms: Some(1), end: Some(Clean) }], []), lo = 0, len = 0
+cc b45491553ff98a7ba75805a6cc0a7cbab585c15833657ac0588ec5955ba65e58 # shrinks to (sessions, gaps) = ([Session { start_ms: 0, end_ms: Some(24), end: Some(Clean) }, Session { start_ms: 50, end_ms: Some(51), end: Some(Clean) }], [Gap { start_ms: 24, end_ms: 50, start_exact: true, cause: BridgeDown, count: 1 }]), lo = 50, len = 1
+cc 9238fdd60a2586989f824fdcee8442cd05b075db7f722a3d2a24fd6feb956fee # shrinks to (sessions, gaps) = ([Session { start_ms: 0, end_ms: Some(1), end: Some(Clean) }], [Gap { start_ms: 53, end_ms: 109, start_exact: true, cause: BridgeDown, count: 1 }]), lo = 109, len = 1, t_off = 0
+cc 0e315124e0e707df78d109e6d605e7a9726d22afbc2f92111c1b3b3e1f125dea # shrinks to (sessions, gaps) = ([Session { start_ms: 0, end_ms: Some(1), end: Some(Clean) }], [Gap { start_ms: 63, end_ms: 63, start_exact: true, cause: BridgeDown, count: 1 }]), lo = 63, len = 1
+cc 64794981c80f3807f7d54399dd328a9c1d7944ad57a70081c2e31efacbe46925 # shrinks to (sessions, gaps) = ([Session { start_ms: 0, end_ms: Some(15), end: Some(Clean) }, Session { start_ms: 43, end_ms: Some(56), end: Some(Clean) }, Session { start_ms: 65, end_ms: Some(78), end: Some(Clean) }, Session { start_ms: 87, end_ms: Some(88), end: Some(Clean) }], [Gap { start_ms: 15, end_ms: 43, start_exact: true, cause: BridgeDown, count: 1 }, Gap { start_ms: 56, end_ms: 65, start_exact: true, cause: BridgeDown, count: 1 }, Gap { start_ms: 78, end_ms: 87, start_exact: true, cause: BridgeDown, count: 1 }]), lo = 78, len = 8, t_off = 99
+cc 5ea59a9bdf295d4188ff3ed3be2952ad502449be4a2337a6c1ced620b45a954c # shrinks to (sessions, gaps) = ([Session { start_ms: 0, end_ms: Some(1), end: Some(Clean) }, Session { start_ms: 27, end_ms: Some(38), end: Some(Clean) }], [Gap { start_ms: 1, end_ms: 27, start_exact: true, cause: BridgeDown, count: 1 }]), lo = 27, len = 11, t_off = 0
