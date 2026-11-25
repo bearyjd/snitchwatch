@@ -146,6 +146,16 @@ fn offending(src: &str) -> Vec<String> {
 /// Files allowed to mention the primitives: their own modules and tests, and
 /// the durable half (PR 3b), which holds and releases pins.
 const OWNERS: &[&str] = &[
+    "reader.rs",
+    "reader_registry.rs",
+    "reader_registry_tests.rs",
+    "reader_fixture.rs",
+    "reader_tests.rs",
+    "reader_paging_tests.rs",
+    "reader_limits_tests.rs",
+    "reader_coverage_tests.rs",
+    "reader_quiesce_tests.rs",
+    "reader_writer_tests.rs",
     "capture.rs",
     "capture_writer.rs",
     "capture_tests.rs",
@@ -305,7 +315,21 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 25] = [
+const DURABLE_OWNERS: [&str; 38] = [
+    "timeline.rs",
+    "timeline_tests.rs",
+    "gap_counts.rs",
+    "gap_counts_tests.rs",
+    "reader.rs",
+    "reader_page.rs",
+    "reader_sql.rs",
+    "reader_fixture.rs",
+    "reader_tests.rs",
+    "reader_paging_tests.rs",
+    "reader_limits_tests.rs",
+    "reader_coverage_tests.rs",
+    "reader_writer_tests.rs",
+
     "capture.rs",
     "capture_writer.rs",
     "capture_tests.rs",
@@ -364,6 +388,7 @@ const CAPTURE_MODULES: &[&str] = &[
 ];
 /// The files that implement and test capture and admission.
 const CAPTURE_OWNERS: &[&str] = &[
+    "reader_writer_tests.rs",
     "ping.rs",
     "capture.rs",
     "capture_writer.rs",

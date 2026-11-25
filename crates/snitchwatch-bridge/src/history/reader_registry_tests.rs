@@ -21,7 +21,7 @@ fn two_queries_run_and_the_third_is_refused_at_once() {
     let a = registry.try_acquire().unwrap();
     let b = registry.try_acquire().unwrap();
     // Never queued: this returns here and now, with nobody to release a slot.
-    assert_eq!(registry.try_acquire().err(), Some(Refusal::Busy));
+    assert_eq!(registry.try_acquire().err(), Some(NotAdmitted::Busy));
     assert_eq!(registry.in_use(), 2);
     drop(a);
     let c = registry.try_acquire().unwrap();
@@ -69,7 +69,7 @@ fn closing_refuses_new_readers_with_its_own_reason_until_reopened() {
     assert!(registry.is_closed());
     assert_eq!(
         registry.try_acquire().err(),
-        Some(Refusal::ControlOperation),
+        Some(NotAdmitted::ControlOperation),
         "not Busy: the client must not retry-spin during a clear"
     );
     registry.reopen();

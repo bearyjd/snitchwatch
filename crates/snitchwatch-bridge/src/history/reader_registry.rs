@@ -37,7 +37,7 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Why a query was not admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum Refusal {
+pub enum NotAdmitted {
     /// Every slot is taken: try again soon.
     #[error("busy")]
     Busy,
@@ -146,12 +146,12 @@ impl ReaderRegistry {
     }
 
     /// A slot now, or a refusal now. Never waits.
-    pub fn try_acquire(&self) -> Result<ReaderTicket, Refusal> {
+    pub fn try_acquire(&self) -> Result<ReaderTicket, NotAdmitted> {
         let mut state = locked(&self.0.state);
         if state.closed {
-            return Err(Refusal::ControlOperation);
+            return Err(NotAdmitted::ControlOperation);
         }
-        let permit = self.0.gate.try_acquire().map_err(|_| Refusal::Busy)?;
+        let permit = self.0.gate.try_acquire().map_err(|_| NotAdmitted::Busy)?;
         let id = state.next;
         state.next += 1;
         let token = CancelToken::default();
@@ -164,7 +164,7 @@ impl ReaderRegistry {
         })
     }
 
-    /// New queries are refused with [`Refusal::ControlOperation`] until
+    /// New queries are refused with [`NotAdmitted::ControlOperation`] until
     /// [`Self::reopen`]. Running ones are not touched.
     pub fn close(&self) {
         locked(&self.0.state).closed = true;
@@ -226,8 +226,8 @@ pub struct ConnectionReads {
 impl ConnectionReads {
     /// Cancels this connection's previous query, then admits a new one. The
     /// previous query keeps its slot until its worker exits, so the new one
-    /// can be [`Refusal::Busy`]: it is refused, never queued.
-    pub fn begin(&self) -> Result<ReaderTicket, Refusal> {
+    /// can be [`NotAdmitted::Busy`]: it is refused, never queued.
+    pub fn begin(&self) -> Result<ReaderTicket, NotAdmitted> {
         let mut current = locked(&self.current);
         if let Some(previous) = current.take() {
             previous.cancel();

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::reader::*;
 use super::reader_fixture::Fx;
-use super::reader_registry::{ReaderRegistry, Refusal};
+use super::reader_registry::{ReaderRegistry, NotAdmitted};
 
 const LONG: Duration = Duration::from_secs(20);
 
@@ -71,7 +71,7 @@ fn a_reader_mid_query_when_a_clear_unlinks_the_file_delivers_nothing_after() {
     });
     assert_eq!(
         registry.try_acquire().err(),
-        Some(Refusal::ControlOperation)
+        Some(NotAdmitted::ControlOperation)
     );
     registry.reopen();
     // After the unlink the reader says there is no history: never an empty page.
