@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use super::control::{ControlGate, Limits, Refused};
 use super::control_clear_tests::{feed_canary, wait_rows};
 use super::control_files::{Step, StoreDir};
-use super::control_support::{conn, consent, count};
+use super::control_support::{conn, consent, count, start_after_drop};
 use super::control_tests::{gate_rig, wait_for, GateRig};
 use super::guard::DecisionOutcome;
 use super::test_support::{state_dir, tempdir};
@@ -78,7 +78,7 @@ fn restart(rig: GateRig, edit: impl FnOnce(&Location)) -> GateRig {
     } = rig;
     drop(gate);
     edit(&location);
-    let gate = ControlGate::start(Mode::User, Some(&state), Limits::default());
+    let gate = start_after_drop(&state, Limits::default());
     GateRig {
         root,
         state,

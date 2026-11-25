@@ -5,11 +5,11 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-use super::control::{ControlGate, Limits, Refused};
+use super::control::{Limits, Refused};
 use super::control_clear_tests::{feed_canary, wait_rows};
 use super::control_files::Step;
+use super::control_support::start_after_drop;
 use super::control_tests::{gate_rig, settings_json, GateRig};
-use super::Mode;
 
 fn chmod(rig: &GateRig, mode: u32) {
     fs::set_permissions(rig.location.dir(), fs::Permissions::from_mode(mode)).unwrap();
@@ -55,7 +55,7 @@ fn a_delete_that_fails_after_the_store_is_gone_keeps_recording_off() {
         // The next start finishes the removal and records nothing.
         let (state, dir) = (rig.state.clone(), rig.location.dir().to_owned());
         drop(rig.gate);
-        let next = ControlGate::start(Mode::User, Some(&state), Limits::default());
+        let next = start_after_drop(&state, Limits::default());
         assert!(
             next.slot().get().is_none(),
             "{step:?}: still off after restart"

@@ -5,7 +5,7 @@
 use std::fs;
 
 use super::control::{ControlGate, Limits, Refused};
-use super::control_support::count;
+use super::control_support::{count, start_after_drop};
 use super::control_tests::gate_rig;
 use super::Mode;
 
@@ -36,7 +36,7 @@ fn a_second_bridge_records_nothing_and_never_finishes_the_first_ones_removal() {
     // Once the first bridge is gone, the next one finishes the job.
     drop(second);
     drop(rig.gate);
-    let third = ControlGate::start(Mode::User, Some(&rig.state), Limits::default());
+    let third = start_after_drop(&rig.state, Limits::default());
     assert!(!tombstone.exists());
     assert!(third.slot().get().is_some());
 }
@@ -57,6 +57,6 @@ fn the_writer_lock_lasts_as_long_as_a_writer_does_not_just_the_gate() {
     assert!(matches!(second.preview(), Err(Refused::Unavailable(_))));
     drop(second);
     drop(capture);
-    let third = ControlGate::start(Mode::User, Some(&state), Limits::default());
+    let third = start_after_drop(&state, Limits::default());
     assert!(third.slot().get().is_some(), "free once the writer is gone");
 }

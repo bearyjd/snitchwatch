@@ -34,7 +34,18 @@ fn a_second_holder_is_refused_until_the_first_lets_go() {
     let second = open(&dir).lock_writer();
     assert!(matches!(second, Err(LockError::InUse)), "{second:?}");
     drop(first);
-    open(&dir).lock_writer().unwrap();
+    // A concurrent spawn in this process holds a copy of the descriptor
+    // until its child execs: wait for the lock to come free, not a sleep.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match open(&dir).lock_writer() {
+            Ok(_) => break,
+            Err(LockError::InUse) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5))
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -129,5 +140,9 @@ fn a_second_bridge_on_the_same_state_records_nothing_and_leaves_the_first_alone(
     assert_eq!(count(&location, "SELECT watermark_ms FROM meta"), watermark);
     drop(first);
     // The lock went with the capture: a later start records again.
-    assert!(start(Mode::User, Some(&state)).is_some());
+    // (a concurrent spawn in this process may hold a copy of the descriptor
+    // until its child execs: wait for the lock, not a sleep)
+    super::control_tests::wait_for("the lock to come free", || {
+        start(Mode::User, Some(&state)).is_some()
+    });
 }

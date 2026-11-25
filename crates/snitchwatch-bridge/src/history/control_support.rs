@@ -127,3 +127,29 @@ pub(crate) fn count(location: &Location, sql: &str) -> i64 {
     .unwrap();
     db.query_row(sql, [], |r| r.get(0)).unwrap()
 }
+
+/// Starts a gate after the previous holder of the writer lock was dropped.
+/// Dropping joins the writer and closes the descriptor at once, but a
+/// concurrent `Command::spawn` in this test process holds a copy of every
+/// open descriptor (and so of the `flock`) until its child execs; a real
+/// restart has no such copy. Waits, on the observable "the lock is free
+/// again", instead of failing on that window.
+pub(crate) fn start_after_drop(
+    state: &std::path::Path,
+    limits: super::control::Limits,
+) -> super::control::ControlGate {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let gate = super::control::ControlGate::start(Mode::User, Some(state), limits);
+        let in_use = gate
+            .0
+            .blocked
+            .as_deref()
+            .is_some_and(|r| r.contains("in use by another bridge"));
+        if !in_use || std::time::Instant::now() >= deadline {
+            return gate;
+        }
+        drop(gate);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}

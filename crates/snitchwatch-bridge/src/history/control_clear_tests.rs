@@ -5,10 +5,9 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::time::Duration;
 
-use super::control::{ControlGate, Limits, Refused};
-use super::control_support::{conn, count, event};
+use super::control::{Limits, Refused};
+use super::control_support::{conn, count, event, start_after_drop};
 use super::control_tests::{feed, gate_rig, settings_json, wait_for, GateRig};
-use super::Mode;
 
 const CANARY: &str = "canary-9d41.example";
 
@@ -192,7 +191,7 @@ fn delete_removes_the_store_and_its_settings_and_nothing_else() {
     assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
     // Off for good: a restart records nothing and creates nothing.
     drop(rig.gate);
-    let again = ControlGate::start(Mode::User, Some(&rig.state), Limits::default());
+    let again = start_after_drop(&rig.state, Limits::default());
     assert!(again.slot().get().is_none());
     assert!(!dir.join("history.db").exists());
 }
@@ -232,7 +231,7 @@ fn a_linked_history_directory_makes_history_unavailable_and_touches_nothing() {
     let real = rig.state.join("real-history");
     fs::rename(rig.location.dir(), &real).unwrap();
     symlink(&real, rig.location.dir()).unwrap();
-    let gate = ControlGate::start(Mode::User, Some(&rig.state), Limits::default());
+    let gate = start_after_drop(&rig.state, Limits::default());
     assert!(gate.slot().get().is_none());
     assert!(matches!(gate.preview(), Err(Refused::Unavailable(_))));
     assert!(real.join("history.db").exists());

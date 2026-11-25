@@ -8,12 +8,12 @@ use std::time::Duration;
 use rusqlite::types::Value;
 use rusqlite::Connection as Db;
 
-use super::control::{ControlGate, Limits, Refused};
+use super::control::{Limits, Refused};
 use super::control_clear::EVENT_COLUMNS;
 use super::control_clear_tests::{feed_canary, rows, wait_rows};
 use super::control_preview::{scan_events, Token};
+use super::control_support::start_after_drop;
 use super::control_tests::{feed, gate_rig, settings_json, GateRig};
-use super::Mode;
 
 fn db(rig: &GateRig) -> Db {
     let db = Db::open(rig.location.db_path()).unwrap();
@@ -177,7 +177,7 @@ fn a_hot_journal_left_while_history_is_off_does_not_block_removal_for_good() {
     drop(gate);
     // What a kill during a commit left behind, found by the next start.
     fs::write(location.dir().join("history.db-journal"), [7u8; 1024]).unwrap();
-    let gate = ControlGate::start(Mode::User, Some(&state), Limits::default());
+    let gate = start_after_drop(&state, Limits::default());
     let rig = GateRig {
         root,
         state,
