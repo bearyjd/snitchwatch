@@ -3,7 +3,7 @@
 Parent plan: `2026-10-28-connection-history-implementation.md` (PR 10 section, lines 314-349; PR 11 and PR 12 for what the gate must serve).
 Spec: `docs/superpowers/specs/2026-10-27-connection-history-design.md` H02 (538-640: C1, C2, the six enforcement steps, the preview token), G1 (406-416), W1 (317), D2 (140-162: disable keeps), D3, S5 (268), D8 (509-536), owner decisions 10, 12, 14 (772-831).
 Branch: `feat/history-pr10-control-gate`, from `origin/main` (5d09a994, PR 9 merged). Bridge only, dormant (history is off by default). No wire change (that is PR 11).
-Status: DRAFT. Planning only; nothing here is built. Waiting for the owner on "Open decisions" below.
+Status: APPROVED 2026-11-25. The owner accepted all 11 recommendations in "Decisions" below, including #2 (keep items accepted after the boundary; this changes the owner's earlier decision 12) and #5 (silent discard of a pending prompt's gap on clear and delete; this departs from the spec's literal text). Scope of this PR is 10a only (decision 9): barrier, preview, disable, clear, delete. Range delete and retention change are 10b. #434 was fixed separately in #438.
 Issues folded in: #420 (prompts settling after stop), #418 (single-writer lock), #434 (`wait_again` bound to its registry). Not folded in, but the gate must be correct while they stay open: #421-#425, #428-#430, #432, #435-#437 (see "Interactions").
 
 ## Goal
@@ -213,7 +213,11 @@ The step order (quiesce, advance, files) and the rule that no pin is released by
 
 `CARGO_TARGET_DIR=/home/user/.sw-pr10-target TMPDIR=/home/user/.sw-pr10-tmp just check`, `just test-bridge`, then `just test`. `cargo fmt --all`; no function over 50 lines, no file over 800. `trail check` before the commit. No push, PR or merge without instruction. Tell the tower: no wire change in this PR; the bridge binary changes (dormant).
 
-## Open decisions (not guessed; owner to decide)
+## Decisions (owner accepted every recommended option on 2026-11-25)
+
+Summary: (1) respawn the capture behind a swappable `CaptureSlot`; (2) C2's acceptance boundary: keep items accepted after the boundary and carry them into the new file (changes the owner's earlier decision 12); (3) seed the generation with a random per-process epoch; (4) clear keeps `settings.json` and consent, delete removes the store and settings and revokes consent; (5) a pending prompt's gap is discarded silently on clear and delete, and the one `disabled` gap is kept only for disable (departs from the spec's literal text); (6) PR 10 leaves today's `Off` answer for reading kept history while disabled, PR 11 decides; (7) take the single-writer lock for #418 in PR 10 as `flock` on a separate `history.lock`; (8) wait bounds: readers 3 s plus one 3 s extension, writer 2 s drain, fail closed; (9) split into 10a (this PR) and 10b (range delete, retention change); (10) the gate enforces the token and C2, PR 11 owns authorisation and PR 12 the consent wording; (11) a server-side table of at most 4 live preview tokens, not a signed token.
+
+## Decision text (as proposed)
 
 1. **How the capture is restarted: respawn or toggle in place.** (a) Respawn a new `Capture` behind a swappable `CaptureSlot` (the writer thread, queue, engine, pin registry and admission state are rebuilt; the old ones are dropped after the join). (b) Make `Capture` restartable in place (a re-openable queue, a re-spawnable writer thread, `Shared` kept). (c) Stop only for clear and keep the same `Capture` for disable by gating ingestion with the consent flag (no thread restart on disable). **Recommend (a)** with the slot in `grpc_server.rs`/`daemon_watchdog.rs`. Why: the queue's receiver is taken once and the engine moves into the thread, so (b) rewrites the writer lifecycle that three PRs of review hardened; (c) would need the writer to hold a store open while disabled and cannot honour clear's unlink. The cost of (a) is the holder and one more edit across `grpc_server.rs` and the watchdog.
 
