@@ -244,6 +244,10 @@ mod budget_tests;
 #[cfg(test)]
 mod caps_tests;
 #[cfg(test)]
+mod control_epoch_tests;
+#[cfg(test)]
+pub(crate) mod control_support;
+#[cfg(test)]
 mod crash_tests;
 #[cfg(test)]
 mod dormant_tests;

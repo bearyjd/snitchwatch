@@ -35,6 +35,18 @@ impl Generation {
         Self(AtomicU64::new(start))
     }
 
+    /// A generation whose high 32 bits are `epoch`: a cursor tagged by
+    /// another process (another epoch) never equals ours, and the low 32
+    /// bits leave room for four billion control operations.
+    pub fn from_epoch(epoch: u32) -> Self {
+        Self::new(u64::from(epoch) << 32)
+    }
+
+    /// This process's generation: a random non-zero epoch, nothing persisted.
+    pub fn random() -> Self {
+        Self::from_epoch(rand::Rng::gen_range(&mut rand::thread_rng(), 1..=u32::MAX))
+    }
+
     pub fn current(&self) -> u64 {
         self.0.load(Ordering::SeqCst)
     }

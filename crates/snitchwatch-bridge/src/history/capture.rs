@@ -74,7 +74,7 @@ use super::capture_stats::{add, Counters};
 use super::gaps::{Losses, StandingLabels};
 use super::guard::{DecisionGuard, DecisionOutcome};
 use super::ledger::{LedgerLimits, LossCounter};
-use super::lifecycle::Generation;
+use super::lifecycle::{AcceptanceSeq, Generation};
 use super::measure::estimate_bytes;
 use super::pinned_queue::PinnedQueue;
 use super::pins::{PinId, PinRegistry};
@@ -257,7 +257,8 @@ pub(super) struct Shared {
     // In-memory only. A control operation must change eligibility and/or
     // advance the generation under this gate before clearing queued work.
     control: Mutex<Option<Arc<Consent>>>,
-    generation: Generation,
+    generation: Arc<Generation>,
+    acceptance: Arc<AcceptanceSeq>,
     registry: Arc<PinRegistry>,
     queue: PinnedQueue,
     admission: Mutex<Admission>,
@@ -283,10 +284,17 @@ pub(super) struct Shared {
 }
 
 impl Shared {
-    fn new(registry: Arc<PinRegistry>, config: CaptureConfig, consent: Option<Consent>) -> Self {
+    fn new(
+        registry: Arc<PinRegistry>,
+        config: CaptureConfig,
+        consent: Option<Consent>,
+        generation: Arc<Generation>,
+        acceptance: Arc<AcceptanceSeq>,
+    ) -> Self {
         Self {
             control: Mutex::new(consent.map(Arc::new)),
-            generation: Generation::new(0),
+            generation,
+            acceptance,
             registry,
             queue: PinnedQueue::new(config.queue_max_bytes, config.queue_max_count),
             admission: Mutex::new(Admission::new(config.admission)),
@@ -323,6 +331,11 @@ impl Shared {
                 .get()
                 .is_some_and(|deadline| Instant::now() >= *deadline)
         }));
+    }
+
+    #[cfg(test)]
+    pub(super) fn generation_for_test(&self) -> Arc<Generation> {
+        self.generation.clone()
     }
 
     #[cfg(test)]
@@ -375,6 +388,9 @@ impl Shared {
 
     /// Admit, pin and queue one record.
     fn enqueue(&self, mapped: Mapped, now_ms: i64, arrival_pin: Option<PinId>) {
+        if arrival_pin.is_none() {
+            self.number_acceptance();
+        }
         let n = u64::from(mapped.record.repeat_count);
         let counters = &self.counters;
         let bytes = match self.admit(&mapped.record, now_ms) {
@@ -420,6 +436,13 @@ impl Shared {
             self.refund(&item.event, bytes);
             add(&counters.dropped_queue, n);
         }
+    }
+
+    /// Gives one accepted item its number, under the lock a control
+    /// operation takes to read the boundary, so the two agree.
+    pub(super) fn number_acceptance(&self) {
+        let _control = self.control.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self.acceptance.assign();
     }
 
     pub(super) fn settle(
@@ -492,6 +515,25 @@ impl Capture {
         registry: Arc<PinRegistry>,
         config: CaptureConfig,
     ) -> io::Result<Self> {
+        Self::spawn_shared(
+            engine,
+            registry,
+            config,
+            Arc::new(Generation::random()),
+            Arc::new(AcceptanceSeq::default()),
+        )
+    }
+
+    /// [`spawn`](Self::spawn) on the bridge-wide generation and acceptance
+    /// sequence, which outlive this capture (PR 10: a clear or a re-enable
+    /// respawns the capture, never the counters).
+    pub fn spawn_shared(
+        engine: Engine,
+        registry: Arc<PinRegistry>,
+        config: CaptureConfig,
+        generation: Arc<Generation>,
+        acceptance: Arc<AcceptanceSeq>,
+    ) -> io::Result<Self> {
         let mut engine = engine;
         engine.set_retention_days(config.retention_days);
         let limits = LedgerLimits::from_budget(engine.budget());
@@ -506,7 +548,13 @@ impl Capture {
                 false
             }
         };
-        let shared = Arc::new(Shared::new(registry, config, engine.consent.clone()));
+        let shared = Arc::new(Shared::new(
+            registry,
+            config,
+            engine.consent.clone(),
+            generation,
+            acceptance,
+        ));
         let rx = shared
             .queue
             .take_receiver()
@@ -534,6 +582,7 @@ impl Capture {
             .unwrap_or_else(|e| e.into_inner());
         let consent = Arc::clone(control.as_ref()?);
         let generation = self.shared.generation.current();
+        let _ = self.shared.acceptance.assign();
         let (pin, arrival) = match self.shared.registry.accept_timed() {
             Ok(accepted) => accepted,
             Err(_) => {
@@ -613,7 +662,13 @@ impl Capture {
         config: CaptureConfig,
     ) -> Self {
         Self {
-            shared: Arc::new(Shared::new(registry, config, None)),
+            shared: Arc::new(Shared::new(
+                registry,
+                config,
+                None,
+                Arc::new(Generation::random()),
+                Arc::new(AcceptanceSeq::default()),
+            )),
             writer: Mutex::new(None),
         }
     }

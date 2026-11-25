@@ -182,6 +182,8 @@ const OWNERS: &[&str] = &[
     "retention_crash_tests.rs",
     "retention_writer_tests.rs",
     "retention_support.rs",
+    "control_epoch_tests.rs",
+    "control_support.rs",
     "dormant_tests.rs",
 ];
 
@@ -313,7 +315,7 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 44] = [
+const DURABLE_OWNERS: [&str; 46] = [
     "timeline.rs",
     "timeline_tests.rs",
     "gap_counts.rs",
@@ -357,6 +359,8 @@ const DURABLE_OWNERS: [&str; 44] = [
     "retention_crash_tests.rs",
     "retention_writer_tests.rs",
     "retention_support.rs",
+    "control_epoch_tests.rs",
+    "control_support.rs",
     "dormant_tests.rs",
 ];
 
@@ -412,6 +416,8 @@ const CAPTURE_OWNERS: &[&str] = &[
     "gaps.rs",
     "gaps_tests.rs",
     "gaps_repair_tests.rs",
+    "control_epoch_tests.rs",
+    "control_support.rs",
     "dormant_tests.rs",
     "mod.rs",
 ];

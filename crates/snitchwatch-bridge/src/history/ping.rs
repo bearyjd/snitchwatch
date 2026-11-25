@@ -61,6 +61,7 @@ impl Capture {
     /// anything awaits, and [`PingTicket::finish`] once they are queued.
     pub fn begin_ping(&self, loss: UpstreamLoss, events: u64) -> PingTicket {
         let mut begun = None;
+        self.shared.number_acceptance();
         self.shared
             .with_losses(|l, registry| begun = Some(l.begin_ping(registry, loss, events)));
         PingTicket {
