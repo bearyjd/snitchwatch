@@ -195,46 +195,89 @@ pub(super) struct Chunk {
     pub stop: Option<Stop>,
 }
 
-/// Up to `n` events older than `after` (newest first), as one statement.
-/// The seek is a row-value comparison over `(ts_ms, id)`: keyset, never
-/// `OFFSET`, and index-ordered on `events_ts`.
+/// The page statements. A keyset seek on `(ts_ms, id)` is two statements,
+/// because SQLite cannot use `(ts_ms, id) < (?, ?)` as an index range over
+/// `events_ts` (its implicit rowid): it would walk every row tied at the
+/// cursor's instant on every page. Each of the two is a pure index range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Seek {
+    /// The newest events.
+    Head,
+    /// Older events at the cursor's own instant (`id` below the cursor's).
+    Ties,
+    /// Events at earlier instants.
+    Older,
+}
+
+pub(super) fn events_sql(seek: Seek) -> String {
+    let (filter, limit) = match seek {
+        Seek::Head => ("", "?1"),
+        Seek::Ties => ("WHERE ts_ms = ?1 AND id < ?2", "?3"),
+        Seek::Older => ("WHERE ts_ms < ?1", "?2"),
+    };
+    format!(
+        "SELECT {EVENT_COLUMNS} FROM history_events {filter} \
+         ORDER BY ts_ms DESC, id DESC LIMIT {limit}"
+    )
+}
+
+/// One statement's rows into `chunk`.
+fn run_events(
+    conn: &Connection,
+    ctl: &Control,
+    seek: Seek,
+    after: (i64, i64),
+    n: usize,
+    chunk: &mut Chunk,
+) -> Result<(), rusqlite::Error> {
+    let limit = i64::try_from(n).unwrap_or(i64::MAX);
+    let mut stmt = conn.prepare(&events_sql(seek))?;
+    ctl.begin_statement();
+    let mut rows = match seek {
+        Seek::Head => stmt.query(rusqlite::params![limit])?,
+        Seek::Ties => stmt.query(rusqlite::params![after.0, after.1, limit])?,
+        Seek::Older => stmt.query(rusqlite::params![after.0, limit])?,
+    };
+    while let Some(row) = rows.next()? {
+        chunk.rows.push(event_from_row(row)?);
+    }
+    Ok(())
+}
+
+/// Up to `n` events older than `after` (newest first): the ties at its
+/// instant, then earlier instants, each its own statement and so its own
+/// short lock. Rows read before an interruption are kept.
 pub(super) fn events_chunk(
     conn: &Connection,
     ctl: &Control,
     after: Option<(i64, i64)>,
     n: usize,
 ) -> Chunk {
-    let sql = match after {
-        Some(_) => format!(
-            "SELECT {EVENT_COLUMNS} FROM history_events WHERE (ts_ms, id) < (?1, ?2) \
-             ORDER BY ts_ms DESC, id DESC LIMIT ?3"
-        ),
-        None => format!(
-            "SELECT {EVENT_COLUMNS} FROM history_events \
-             ORDER BY ts_ms DESC, id DESC LIMIT ?1"
-        ),
-    };
     let mut chunk = Chunk {
         rows: Vec::new(),
         stop: None,
     };
-    let limit = i64::try_from(n).unwrap_or(i64::MAX);
-    let (ts, id) = after.unwrap_or((0, 0));
-    let run = (|| -> Result<(), rusqlite::Error> {
-        let mut stmt = conn.prepare(&sql)?;
-        ctl.begin_statement();
-        let mut rows = if after.is_some() {
-            stmt.query(rusqlite::params![ts, id, limit])?
-        } else {
-            stmt.query(rusqlite::params![limit])?
-        };
-        while let Some(row) = rows.next()? {
-            chunk.rows.push(event_from_row(row)?);
+    let steps: &[Seek] = if after.is_some() {
+        &[Seek::Ties, Seek::Older]
+    } else {
+        &[Seek::Head]
+    };
+    for seek in steps {
+        let want = n - chunk.rows.len();
+        if want == 0 || ctl.cancelled() {
+            break;
         }
-        Ok(())
-    })();
-    if let Err(e) = run {
-        chunk.stop = Some(ctl.stop_for(&e));
+        if let Err(e) = run_events(conn, ctl, *seek, after.unwrap_or((0, 0)), want, &mut chunk) {
+            chunk.stop = Some(ctl.stop_for(&e));
+            break;
+        }
+        if !conn.is_autocommit() {
+            chunk.stop = Some(Stop::Fail {
+                reason: "a read transaction was left open".into(),
+                retry: false,
+            });
+            break;
+        }
     }
     chunk
 }
