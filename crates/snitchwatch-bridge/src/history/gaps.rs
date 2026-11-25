@@ -53,6 +53,8 @@ pub(super) struct Losses {
     pub(super) queue: LossCounter,
     pub(super) admission: LossCounter,
     pub(super) write_failed: LossCounter,
+    /// Prompts pending when history was switched off (PR 10).
+    pub(super) disabled: LossCounter,
     pub(super) upstream: LossCounter,
     /// Upstream losses from the last ping to the outage's start; the outage
     /// itself is the daemon gap's, and the rest is `upstream`'s.
@@ -100,15 +102,17 @@ enum Slot {
     Queue,
     Admission,
     WriteFailed,
+    Disabled,
     UpstreamPre,
     Upstream,
     Disconnect,
 }
 
-const EVERY_SLOT: [Slot; 6] = [
+const EVERY_SLOT: [Slot; 7] = [
     Slot::Queue,
     Slot::Admission,
     Slot::WriteFailed,
+    Slot::Disabled,
     Slot::UpstreamPre,
     Slot::Upstream,
     Slot::Disconnect,
@@ -120,6 +124,7 @@ impl Losses {
             queue: LossCounter::new(GapCause::QueueOverflow),
             admission: LossCounter::new(GapCause::AdmissionDrop),
             write_failed: LossCounter::new(GapCause::WriteFailed),
+            disabled: LossCounter::new(GapCause::Disabled),
             upstream: LossCounter::bounded(GapCause::UpstreamLoss),
             upstream_pre: LossCounter::bounded(GapCause::UpstreamLoss),
             pre_outage_end: None,
@@ -158,6 +163,7 @@ impl Losses {
             Slot::Queue => &mut self.queue,
             Slot::Admission => &mut self.admission,
             Slot::WriteFailed => &mut self.write_failed,
+            Slot::Disabled => &mut self.disabled,
             Slot::UpstreamPre => &mut self.upstream_pre,
             Slot::Upstream => &mut self.upstream,
             Slot::Disconnect => &mut self.disconnect,

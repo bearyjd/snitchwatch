@@ -76,6 +76,7 @@ use super::guard::{DecisionGuard, DecisionOutcome};
 use super::ledger::{LedgerLimits, LossCounter};
 use super::lifecycle::{AcceptanceSeq, Generation};
 use super::measure::estimate_bytes;
+use super::pending::{PendingGuards, PendingKey};
 use super::pinned_queue::PinnedQueue;
 use super::pins::{PinId, PinRegistry};
 use super::record::{Action, AnsweredBy, EventRecord};
@@ -260,6 +261,8 @@ pub(super) struct Shared {
     generation: Arc<Generation>,
     acceptance: Arc<AcceptanceSeq>,
     registry: Arc<PinRegistry>,
+    /// Prompts accepted and not yet settled (#420).
+    pending: PendingGuards,
     queue: PinnedQueue,
     admission: Mutex<Admission>,
     losses: Mutex<Losses>,
@@ -296,6 +299,7 @@ impl Shared {
             generation,
             acceptance,
             registry,
+            pending: PendingGuards::default(),
             queue: PinnedQueue::new(config.queue_max_bytes, config.queue_max_count),
             admission: Mutex::new(Admission::new(config.admission)),
             losses: Mutex::new(Losses::new()),
@@ -331,6 +335,16 @@ impl Shared {
                 .get()
                 .is_some_and(|deadline| Instant::now() >= *deadline)
         }));
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_add_for_test(&self, pin: PinId, arrival_ms: i64) -> PendingKey {
+        self.pending.add(pin, arrival_ms)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_len_for_test(&self) -> usize {
+        self.pending.len()
     }
 
     #[cfg(test)]
@@ -450,16 +464,21 @@ impl Shared {
         record: EventRecord,
         consent: &Consent,
         generation: u64,
-        pin: PinId,
+        key: PendingKey,
         outcome: DecisionOutcome<'_>,
     ) {
         let now = self.registry.now();
         let mapped = outcome.map(record, now);
         let control = self.control.lock().unwrap_or_else(|e| e.into_inner());
         if control.as_deref() != Some(consent) || self.generation.current() != generation {
-            let _ = self.registry.release(&pin);
+            // The pin stays pending: the end of this capture, or the control
+            // operation that invalidated it, turns it into a gap (#420).
             return;
         }
+        // A gap that took the pin already covers this prompt.
+        let Some(pin) = self.pending.take(key) else {
+            return;
+        };
         add(&self.counters.seen, 1);
         if mapped.record.rule_name.is_some() && mapped.identity.is_none() {
             add(&self.counters.unidentified_rules, 1);
@@ -591,6 +610,7 @@ impl Capture {
                 return None;
             }
         };
+        let key = self.shared.pending.add(pin, arrival);
         drop(control);
         let mut record = EventRecord::new(arrival, Action::PendingUnanswered, AnsweredBy::Unknown);
         map_connection(&mut record, connection);
@@ -599,7 +619,7 @@ impl Capture {
             record,
             consent,
             generation,
-            pin,
+            key,
         ))
     }
 

@@ -28,6 +28,7 @@ pub mod ledger;
 pub mod lifecycle;
 mod measure;
 pub mod open;
+mod pending;
 pub mod ping;
 mod pinned_queue;
 pub mod pins;
@@ -245,6 +246,8 @@ mod budget_tests;
 mod caps_tests;
 #[cfg(test)]
 mod control_epoch_tests;
+#[cfg(test)]
+mod control_prompts_tests;
 #[cfg(test)]
 pub(crate) mod control_support;
 #[cfg(test)]
