@@ -142,8 +142,10 @@ fn a_crashed_writers_hot_journal_is_unavailable_retry_and_left_untouched() {
         std::fs::read(&journal).unwrap(),
     );
 
+    let copy = super::locate(super::Mode::User, Some(root.path())).unwrap();
+    std::fs::copy(fx.rig.location.settings_path(), copy.settings_path()).unwrap();
     let ctx = Context {
-        db_path: &db,
+        location: &copy,
         ..fx.ctx()
     };
     let outcome = read_page(

@@ -64,12 +64,12 @@ fn store() -> Store {
 }
 
 fn ctx<'a>(
-    db: &'a std::path::Path,
+    location: &'a Location,
     generation: &'a Generation,
     cancel: &'a CancelToken,
 ) -> Context<'a> {
     Context {
-        db_path: db,
+        location,
         generation,
         cancel,
         now_ms: 1_000_000,
@@ -82,7 +82,7 @@ fn ctx<'a>(
 /// Two threads reading pages until `done`, counting delivered pages.
 fn spawn_readers<'s>(
     scope: &'s std::thread::Scope<'s, '_>,
-    db: &'s std::path::Path,
+    location: &'s Location,
     generation: &'s Generation,
     cancel: &'s CancelToken,
     done: &'s AtomicBool,
@@ -90,7 +90,7 @@ fn spawn_readers<'s>(
 ) {
     for _ in 0..2 {
         scope.spawn(move || {
-            let ctx = ctx(db, generation, cancel);
+            let ctx = ctx(location, generation, cancel);
             while !done.load(Ordering::SeqCst) {
                 let outcome = read_page(
                     &Request {
@@ -174,7 +174,7 @@ fn the_real_writer_commits_every_batch_while_two_readers_read_flat_out() {
     let (generation, cancel) = (Generation::default(), CancelToken::default());
     let (done, reads) = (AtomicBool::new(false), AtomicUsize::new(0));
     let stats = std::thread::scope(|scope| {
-        spawn_readers(scope, &db, &generation, &cancel, &done, &reads);
+        spawn_readers(scope, &s.location, &generation, &cancel, &done, &reads);
         wait_for_reads(&reads, 4);
         for batch in 0..30 {
             wait_for_reads(&reads, 2);
@@ -209,7 +209,7 @@ fn commits_succeed_while_two_readers_read_flat_out() {
     let (generation, cancel) = (Generation::default(), CancelToken::default());
     let (done, reads) = (AtomicBool::new(false), AtomicUsize::new(0));
     let failures = std::thread::scope(|scope| {
-        spawn_readers(scope, &db, &generation, &cancel, &done, &reads);
+        spawn_readers(scope, &s.location, &generation, &cancel, &done, &reads);
         let writer = open_owner_only(&db).unwrap();
         writer.busy_timeout(Duration::from_millis(250)).unwrap();
         writer.pragma_update(None, "synchronous", "OFF").unwrap();
@@ -242,7 +242,7 @@ fn no_reader_lock_outlasts_the_writers_busy_timeout() {
     let (generation, cancel) = (Generation::default(), CancelToken::default());
     let (done, reads) = (AtomicBool::new(false), AtomicUsize::new(0));
     let longest = std::thread::scope(|scope| {
-        spawn_readers(scope, &db, &generation, &cancel, &done, &reads);
+        spawn_readers(scope, &s.location, &generation, &cancel, &done, &reads);
         let probe = open_owner_only(&db).unwrap();
         probe.busy_timeout(Duration::ZERO).unwrap();
         let (mut longest, mut since) = (Duration::ZERO, None::<Instant>);
@@ -282,7 +282,7 @@ fn quiesce_then_unlink(bump: bool) {
         let worker = scope.spawn(|| {
             // The worker owns the ticket, as the real caller's does.
             let _ticket = ticket;
-            let ctx = ctx(&db, &generation, &token);
+            let ctx = ctx(&s.location, &generation, &token);
             let mut delivered_after_stop = 0;
             loop {
                 started.fetch_add(1, Ordering::SeqCst);
@@ -327,7 +327,7 @@ fn quiesce_then_unlink(bump: bool) {
             cursor: None,
             limit: 10,
         },
-        &ctx(&db, &generation, &cancel),
+        &ctx(&s.location, &generation, &cancel),
     );
     assert!(
         matches!(after, Outcome::Unavailable(ref u) if u.reason == "no history"),

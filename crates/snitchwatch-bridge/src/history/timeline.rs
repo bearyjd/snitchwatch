@@ -73,6 +73,7 @@ fn cut_points(
     sessions: &[Session],
     gaps: &[Gap],
     floor_ms: Option<i64>,
+    dropped: &[(i64, i64)],
 ) -> Vec<i64> {
     let mut points = vec![window.lo_ms, window.hi_ms];
     let edges = sessions
@@ -80,6 +81,7 @@ fn cut_points(
         .flat_map(|s| [Some(s.start_ms), s.end_ms])
         .chain(gaps.iter().flat_map(|g| [Some(g.start_ms), Some(g.end_ms)]))
         .flatten()
+        .chain(dropped.iter().flat_map(|d| [d.0, d.1]))
         .chain(floor_ms);
     points.extend(edges.filter(|p| *p > window.lo_ms && *p < window.hi_ms));
     points.sort_unstable();
@@ -92,6 +94,7 @@ fn classify(
     sessions: &[Session],
     gaps: &[Gap],
     floor_ms: Option<i64>,
+    dropped: &[(i64, i64)],
 ) -> Segment {
     let session = sessions.iter().any(|s| session_covers(s, a, b));
     let covering: Vec<usize> = gaps
@@ -102,6 +105,10 @@ fn classify(
         .collect();
     let kind = if !covering.is_empty() {
         Kind::Gap
+    } else if dropped.iter().any(|d| d.0 <= a && d.1 >= b) {
+        // A row the page could not carry covers this: say nothing explains
+        // it here, never "recorded".
+        Kind::Unexplained
     } else if session {
         Kind::Recorded
     } else if floor_ms.is_some_and(|floor| b <= floor) {
@@ -130,7 +137,22 @@ pub fn coverage(
     gaps: &[Gap],
     floor_ms: Option<i64>,
 ) -> Vec<Segment> {
-    let points = cut_points(window, sessions, gaps, floor_ms);
+    coverage_masked(window, sessions, gaps, floor_ms, &[])
+}
+
+/// [`coverage`] for a page that could not carry every row: `dropped` are the
+/// spans of the rows it left out (see [`coalesce`]). Where one covers a
+/// stretch that no carried gap covers, the stretch is [`Kind::Unexplained`]
+/// (a point span is a segment of its own), so a page never labels time it
+/// dropped a row for as recorded.
+pub fn coverage_masked(
+    window: Window,
+    sessions: &[Session],
+    gaps: &[Gap],
+    floor_ms: Option<i64>,
+    dropped: &[(i64, i64)],
+) -> Vec<Segment> {
+    let points = cut_points(window, sessions, gaps, floor_ms, dropped);
     let mut out: Vec<Segment> = Vec::new();
     let mut push = |segment: Segment| match out.last_mut() {
         Some(last) if same_state(last, &segment) && last.end_ms == segment.start_ms => {
@@ -138,20 +160,42 @@ pub fn coverage(
         }
         _ => out.push(segment),
     };
+    let state = |span| classify(span, sessions, gaps, floor_ms, dropped);
     if let [only] = points[..] {
-        push(classify((only, only), sessions, gaps, floor_ms));
+        push(state((only, only)));
     } else {
         for (i, point) in points.iter().copied().enumerate() {
             if i > 0 {
-                push(classify((points[i - 1], point), sessions, gaps, floor_ms));
+                push(state((points[i - 1], point)));
             }
             // A zero-length gap is a point of its own, wherever it falls.
-            if gaps
+            let point_gap = gaps
                 .iter()
-                .any(|g| g.start_ms == point && g.end_ms == point)
-            {
-                push(classify((point, point), sessions, gaps, floor_ms));
+                .any(|g| g.start_ms == point && g.end_ms == point);
+            if point_gap || dropped.contains(&(point, point)) {
+                push(state((point, point)));
             }
+        }
+    }
+    out
+}
+
+/// `spans` merged where they overlap, in order, and at most `max` of them:
+/// past that they collapse into one span from the first start to the last
+/// end (more time is called unexplained, never less).
+pub fn coalesce(spans: impl IntoIterator<Item = (i64, i64)>, max: usize) -> Vec<(i64, i64)> {
+    let mut sorted: Vec<(i64, i64)> = spans.into_iter().collect();
+    sorted.sort_unstable();
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    for (start, end) in sorted {
+        match out.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => out.push((start, end)),
+        }
+    }
+    if out.len() > max {
+        if let (Some(first), Some(last)) = (out.first(), out.iter().map(|s| s.1).max()) {
+            return vec![(first.0, last)];
         }
     }
     out

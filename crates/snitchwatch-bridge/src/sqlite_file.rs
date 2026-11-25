@@ -102,8 +102,8 @@ pub fn open_owner_only(path: &Path) -> Result<Connection, OpenError> {
 
 /// Open an existing store file for reading only: the checks of
 /// [`open_owner_only`] (no unsafe sidecar, a regular file of ours with one
-/// link, `O_NOFOLLOW`; also `O_NONBLOCK`, since a FIFO opened for reading
-/// would otherwise wait for a writer), but nothing is created and nothing is
+/// link, checked with `lstat` so a FIFO is refused unopened, and `NOFOLLOW`),
+/// but nothing is created and nothing is
 /// changed: no `set_permissions`, no `CREATE`, `SQLITE_OPEN_READ_ONLY` and
 /// `query_only`, no `ATTACH`. A missing file is `OpenError::Io(NotFound)`.
 ///
@@ -111,17 +111,17 @@ pub fn open_owner_only(path: &Path) -> Result<Connection, OpenError> {
 /// a writer's commit, because in rollback-journal mode a reader's lock delays
 /// that commit.
 pub fn open_owner_only_readonly(path: &Path) -> Result<Connection, OpenError> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::fs::MetadataExt;
     refuse_unsafe_sidecars(path)?;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)?;
-    let meta = file.metadata()?;
+    // `lstat`, never an open-and-close of the file: closing any descriptor of
+    // an inode releases this process's POSIX record locks on it, which would
+    // free a lock the bridge's own writer holds. SQLite's `NOFOLLOW` open
+    // below refuses a symlink; the second `lstat` refuses a swap in between.
+    let before = std::fs::symlink_metadata(path)?;
     let facts = FileFacts {
-        regular: meta.is_file(),
-        uid: meta.uid(),
-        links: meta.nlink(),
+        regular: before.file_type().is_file(),
+        uid: before.uid(),
+        links: before.nlink(),
     };
     if let Some(why) = file_problem(&facts, effective_uid()) {
         return Err(OpenError::Refused(format!(
@@ -129,13 +129,19 @@ pub fn open_owner_only_readonly(path: &Path) -> Result<Connection, OpenError> {
             path.display()
         )));
     }
-    drop(file);
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
+    let after = std::fs::symlink_metadata(path)?;
+    if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+        return Err(OpenError::Refused(format!(
+            "{} was replaced while it was opened",
+            path.display()
+        )));
+    }
     conn.busy_timeout(std::time::Duration::ZERO)?;
     conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, 0)?;
@@ -218,9 +224,12 @@ fn refuse_unsafe_sidecars(path: &Path) -> Result<(), OpenError> {
 /// an index SQLite makes itself). Its `rootpage` differs from file to file.
 type SchemaRow = (String, String, String, Option<String>);
 
-fn schema_rows(conn: &Connection) -> rusqlite::Result<Vec<SchemaRow>> {
-    let mut statement = conn.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master")?;
-    let rows = statement.query_map([], |row| {
+/// At most `max` rows: the catalog of a file that is not ours can be any size.
+fn schema_rows(conn: &Connection, max: usize) -> rusqlite::Result<Vec<SchemaRow>> {
+    let mut statement =
+        conn.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master LIMIT ?1")?;
+    let max = i64::try_from(max).unwrap_or(i64::MAX);
+    let rows = statement.query_map([max], |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     })?;
     rows.collect()
@@ -249,8 +258,10 @@ fn schema_rows(conn: &Connection) -> rusqlite::Result<Vec<SchemaRow>> {
 pub fn require_known_schema(conn: &Connection, schema: &str) -> Result<(), OpenError> {
     let reference = Connection::open_in_memory()?;
     reference.execute_batch(schema)?;
-    let known = schema_rows(&reference)?;
-    for row in schema_rows(conn)? {
+    let known = schema_rows(&reference, usize::MAX)?;
+    // Every row must be a known one and none repeats, so one row more than
+    // `known` has holds an unknown one: a huge catalog is never read whole.
+    for row in schema_rows(conn, known.len() + 1)? {
         if known.contains(&row) {
             continue;
         }
@@ -589,7 +600,7 @@ mod tests {
             .unwrap();
             drop(conn);
             let conn = Connection::open(&path).unwrap();
-            let rows = schema_rows(&conn).unwrap();
+            let rows = schema_rows(&conn, usize::MAX).unwrap();
             let planted = (
                 "table".to_owned(),
                 "profiles".to_owned(),

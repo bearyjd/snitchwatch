@@ -54,11 +54,10 @@ fn outage(missing: u64) -> DurableRig {
 }
 
 fn read_durable(rig: &DurableRig, live: Option<i64>, now_ms: i64) -> Page {
-    let path = rig.location.db_path();
     let generation = Generation::default();
     let cancel = CancelToken::default();
     let ctx = Context {
-        db_path: &path,
+        location: &rig.location,
         generation: &generation,
         cancel: &cancel,
         now_ms,
@@ -366,8 +365,9 @@ fn an_eviction_between_the_events_and_the_ledger_shows_as_a_marker_not_a_hole() 
     fx.session(1);
     fx.events(1..=300);
     // Fields borrowed one by one, so the rig stays free for the eviction.
+    let location = fx.rig.location.clone();
     let ctx = Context {
-        db_path: &fx.db,
+        location: &location,
         generation: &fx.generation,
         cancel: &fx.cancel,
         now_ms: fx.now_ms,

@@ -13,7 +13,6 @@
 //! schema or a control operation each give [`Outcome::Unavailable`], never a
 //! page with `events: []`.
 
-use std::path::Path;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -24,12 +23,13 @@ use super::lifecycle::Generation;
 use super::reader_open::{from_stop, open_validated};
 use super::reader_page::{assemble, Loaded};
 use super::reader_registry::CancelToken;
-use super::reader_size::{event_bytes, HEADER_BYTES};
+use super::reader_size::{event_bytes, HEADER_BYTES, MIN_PAGE_BYTES};
 use super::reader_sql::{
     events_chunk, floor, gaps_overlapping, ledger_start, sessions_overlapping, watermark, Control,
     Stop,
 };
 use super::timeline::Segment;
+use super::{load_state, Location, State};
 
 /// The safety bounds (D8). Constants, not settings (Decision 6): a struct
 /// whose `Default` is production, so a test can shrink a budget without a
@@ -88,7 +88,9 @@ pub struct Request {
 
 /// What the reader needs from its caller.
 pub struct Context<'a> {
-    pub db_path: &'a Path,
+    /// Where history lives; the reader asks it the same question
+    /// [`super::open_store`] does (is history on?) before it opens the file.
+    pub location: &'a Location,
     pub generation: &'a Generation,
     pub cancel: &'a CancelToken,
     pub now_ms: i64,
@@ -236,6 +238,24 @@ pub struct Unavail {
     pub reason: String,
     /// Worth retrying soon (a writer's commit, a journal to recover).
     pub retry: bool,
+    /// Which refusal, for a caller that must tell them apart without
+    /// reading the reason.
+    pub kind: UnavailKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnavailKind {
+    /// Missing, busy, damaged or refused file.
+    Other,
+    /// History is off: nothing was opened.
+    Off,
+    /// The request costs more than one query may spend, even at one event:
+    /// retrying the same request cannot help.
+    TooExpensive,
+    /// One event is larger than the page byte limit.
+    OversizedEvent,
+    /// The limits cannot hold even an empty page.
+    LimitsTooSmall,
 }
 
 #[derive(Debug)]
@@ -278,6 +298,53 @@ fn unavailable(u: Unavail) -> Outcome {
     Outcome::Unavailable(u)
 }
 
+/// Neither a control operation nor a cancel has landed since `generation`.
+fn still_current(ctx: &Context<'_>, generation: u64, control: &Control) -> Result<(), Outcome> {
+    if ctx.generation.current() != generation {
+        return Err(Outcome::Superseded);
+    }
+    if control.cancelled() {
+        return Err(Outcome::Cancelled);
+    }
+    Ok(())
+}
+
+/// One ledger statement, unless the query's time is already spent: a short
+/// statement could finish below the progress handler's first tick.
+fn before_statement(control: &Control) -> Result<(), Stop> {
+    if control.deadline_passed() {
+        Err(Stop::Deadline)
+    } else {
+        Ok(())
+    }
+}
+
+fn refusal(kind: UnavailKind, reason: String) -> Outcome {
+    Outcome::Unavailable(Unavail {
+        reason,
+        retry: false,
+        kind,
+    })
+}
+
+/// A time or scan cut that read no event at all. A page with nothing and an
+/// older page to come would hand the client the same cursor again, and the
+/// same retry would repeat the same expensive scan: say so instead. (A busy
+/// cut is a writer's doing, not the request's: it stays a retryable page.)
+fn too_expensive() -> Outcome {
+    refusal(
+        UnavailKind::TooExpensive,
+        "history read is too expensive for one request: ask for a smaller page".into(),
+    )
+}
+
+pub(super) fn oversized() -> Outcome {
+    refusal(
+        UnavailKind::OversizedEvent,
+        "one history event is larger than the page byte limit".into(),
+    )
+}
+
 fn stopped(stop: Stop) -> Outcome {
     match stop {
         Stop::Cancelled => Outcome::Cancelled,
@@ -297,16 +364,29 @@ impl<'a> Read<'a> {
         if ctx.cancel.is_cancelled() {
             return Err(Outcome::Cancelled);
         }
+        if ctx.limits.page_bytes < MIN_PAGE_BYTES {
+            return Err(refusal(
+                UnavailKind::LimitsTooSmall,
+                format!("the page byte limit is under {MIN_PAGE_BYTES}, less than a page"),
+            ));
+        }
+        // The answer `open_store` gives, before any file is touched.
+        match load_state(ctx.location) {
+            State::Enabled(_) => {}
+            State::Off => return Err(refusal(UnavailKind::Off, "history is off".into())),
+            State::Unavailable(why) => return Err(refusal(UnavailKind::Other, why.0)),
+        }
         let control = Control::new(ctx.cancel, &ctx.limits);
         // A cancel that lands while the file is being checked is a cancel, not
         // an unavailable store (a cancel is sticky).
-        let conn = open_validated(ctx.db_path, &control, ctx.limits.busy_wait).map_err(|u| {
-            if ctx.cancel.is_cancelled() {
-                Outcome::Cancelled
-            } else {
-                unavailable(u)
-            }
-        })?;
+        let conn = open_validated(&ctx.location.db_path(), &control, ctx.limits.busy_wait)
+            .map_err(|u| {
+                if ctx.cancel.is_cancelled() {
+                    Outcome::Cancelled
+                } else {
+                    unavailable(u)
+                }
+            })?;
         ctx.cancel.attach(conn.get_interrupt_handle());
         let hi_ms = request.cursor.map_or(ctx.now_ms, |c| c.ts_ms);
         Ok(Self {
@@ -320,19 +400,16 @@ impl<'a> Read<'a> {
     }
 
     fn check(&self) -> Result<(), Outcome> {
-        if self.ctx.generation.current() != self.generation {
-            return Err(Outcome::Superseded);
-        }
-        if self.control.cancelled() {
-            return Err(Outcome::Cancelled);
-        }
-        Ok(())
+        still_current(self.ctx, self.generation, &self.control)
     }
 
     /// Up to a page of events, newest first, as short statements.
     pub fn load_events(&mut self) -> Result<(), Outcome> {
         self.check()?;
-        let limit = self.request.limit.clamp(1, self.ctx.limits.events_per_page);
+        let limit = self
+            .request
+            .limit
+            .clamp(1, self.ctx.limits.events_per_page.max(1));
         let mut run = Collect {
             limit,
             after: self.request.cursor.map(|c| (c.ts_ms, c.id)),
@@ -348,7 +425,10 @@ impl<'a> Read<'a> {
     }
 
     /// Ends the page early, with an older page to follow.
-    fn cut(&mut self, why: Partial) -> Result<bool, Outcome> {
+    fn cut(&mut self, why: Partial, run: &Collect) -> Result<bool, Outcome> {
+        if run.rows.is_empty() && why != Partial::Busy {
+            return Err(too_expensive());
+        }
         self.loaded.partial = Some(why);
         self.loaded.more = true;
         Ok(false)
@@ -358,56 +438,68 @@ impl<'a> Read<'a> {
     fn step(&mut self, run: &mut Collect) -> Result<bool, Outcome> {
         let limits = &self.ctx.limits;
         if run.statements > 0 && self.control.deadline_passed() {
-            return self.cut(Partial::Time);
+            return self.cut(Partial::Time, run);
         }
         if run.scanned >= limits.scan_rows_max {
-            return self.cut(Partial::Scan);
+            return self.cut(Partial::Scan, run);
         }
         self.check()?;
-        let want = (run.limit + 1 - run.rows.len())
-            .min(limits.scan_window)
+        let want = run
+            .limit
+            .saturating_add(1)
+            .saturating_sub(run.rows.len())
+            .min(limits.scan_window.max(1))
             .min(limits.scan_rows_max - run.scanned);
         let chunk = events_chunk(&self.conn, &self.control, run.after, want);
         run.statements += 1;
         run.scanned += chunk.rows.len();
         let exhausted = chunk.rows.len() < want && chunk.stop.is_none();
-        if !self.take_rows(run, chunk.rows) {
-            return self.cut(Partial::Bytes);
+        if !self.take_rows(run, chunk.rows)? {
+            return self.cut(Partial::Bytes, run);
         }
         match chunk.stop {
-            Some(stop) => self.on_stop(stop),
+            Some(stop) => self.on_stop(stop, run),
             None => Ok(!exhausted && run.rows.len() <= run.limit),
         }
     }
 
-    /// Keeps the rows that fit the byte bound. `false`: one did not.
-    fn take_rows(&self, run: &mut Collect, rows: Vec<EventView>) -> bool {
-        let room = self.ctx.limits.page_bytes - HEADER_BYTES;
+    /// Keeps the rows that fit the byte bound. `Ok(false)`: one did not. An
+    /// event that alone does not fit is refused: no page may exceed the bound.
+    fn take_rows(&self, run: &mut Collect, rows: Vec<EventView>) -> Result<bool, Outcome> {
+        let room = self.ctx.limits.page_bytes.saturating_sub(HEADER_BYTES);
         for row in rows {
-            run.bytes += event_bytes(&row);
-            if run.bytes > room && !run.rows.is_empty() {
-                return false;
+            let size = event_bytes(&row);
+            if run.rows.is_empty() && size > room {
+                return Err(oversized());
+            }
+            run.bytes = run.bytes.saturating_add(size);
+            if run.bytes > room {
+                return Ok(false);
             }
             run.after = Some((row.ts_ms, row.id));
             run.rows.push(row);
         }
-        true
+        Ok(true)
     }
 
-    fn on_stop(&mut self, stop: Stop) -> Result<bool, Outcome> {
+    fn on_stop(&mut self, stop: Stop, run: &Collect) -> Result<bool, Outcome> {
         match stop {
             Stop::Cancelled => Err(Outcome::Cancelled),
-            Stop::Statement | Stop::Deadline => self.cut(Partial::Time),
-            Stop::Busy => self.cut(Partial::Busy),
+            Stop::Statement | Stop::Deadline => self.cut(Partial::Time, run),
+            Stop::Busy => self.cut(Partial::Busy, run),
             fail @ Stop::Fail { .. } => Err(stopped(fail)),
         }
     }
 
     /// The gap and session rows that explain the page's window, read after
     /// the events so an eviction in between shows as a marker, not a hole.
+    ///
+    /// If the query's time runs out here, the events already collected are
+    /// kept with their cursor and the ledger is marked unknown (the page's
+    /// window is then `Unexplained`, never `Recorded`); with no events there
+    /// is nothing to keep and the read is unavailable.
     pub fn load_ledger(&mut self) -> Result<(), Outcome> {
         self.check()?;
-        let (conn, ctl) = (&self.conn, &self.control);
         let loaded = &mut self.loaded;
         if let Some(newest) = loaded.events.first() {
             loaded.hi_ms = self
@@ -417,24 +509,86 @@ impl<'a> Read<'a> {
         } else if self.request.cursor.is_none() {
             loaded.hi_ms = self.ctx.now_ms;
         }
-        loaded.floor_ms = floor(conn, ctl).map_err(stopped)?;
-        loaded.ledger_start_ms = ledger_start(conn, ctl).map_err(stopped)?;
-        let lo = loaded.widest_lo();
-        loaded.gaps = gaps_overlapping(conn, ctl, lo, loaded.hi_ms).map_err(stopped)?;
-        loaded.sessions = sessions_overlapping(conn, ctl, lo, loaded.hi_ms).map_err(stopped)?;
-        loaded.watermark_ms = watermark(conn, ctl).map_err(stopped)?;
+        match read_ledger(&self.conn, &self.control, loaded) {
+            Ok(()) => {}
+            Err(Stop::Statement | Stop::Deadline) if !loaded.events.is_empty() => {
+                loaded.ledger_unknown = true;
+                loaded.partial = Some(Partial::Time);
+                loaded.more = true;
+            }
+            Err(stop) => return Err(stopped(stop)),
+        }
         self.check()
     }
 
     /// The page, unless a control operation ran meanwhile (G1: nothing is
     /// delivered from an older generation).
     pub fn finish(self) -> Outcome {
-        if let Err(outcome) = self.check() {
-            return outcome;
+        match self.build() {
+            Ok(built) => built.deliver(),
+            Err(outcome) => outcome,
         }
-        let page = assemble(self.loaded, self.generation, &self.request, self.ctx);
-        Outcome::Page(Box::new(page))
     }
+
+    /// Assembles the page: the timeline, the summary, the fit to the bounds.
+    /// A separate stage from [`Built::deliver`] so a test can move the world
+    /// between the two.
+    pub fn build(self) -> Result<Built<'a>, Outcome> {
+        self.check()?;
+        let Self {
+            request,
+            ctx,
+            generation,
+            control,
+            loaded,
+            ..
+        } = self;
+        let page = assemble(loaded, generation, &request, ctx, &control).map_err(unavailable)?;
+        Ok(Built {
+            page: Box::new(page),
+            ctx,
+            generation,
+            control,
+        })
+    }
+}
+
+/// An assembled page that has not been delivered yet.
+pub struct Built<'a> {
+    page: Box<Page>,
+    ctx: &'a Context<'a>,
+    generation: u64,
+    control: Control,
+}
+
+impl Built<'_> {
+    /// Delivers the page unless a control operation or a cancel landed while
+    /// it was assembled (G1): assembly is not instant.
+    pub fn deliver(self) -> Outcome {
+        match still_current(self.ctx, self.generation, &self.control) {
+            Ok(()) => Outcome::Page(self.page),
+            Err(outcome) => outcome,
+        }
+    }
+}
+
+fn read_ledger(
+    conn: &rusqlite::Connection,
+    ctl: &Control,
+    loaded: &mut Loaded,
+) -> Result<(), Stop> {
+    before_statement(ctl)?;
+    loaded.floor_ms = floor(conn, ctl)?;
+    before_statement(ctl)?;
+    loaded.ledger_start_ms = ledger_start(conn, ctl)?;
+    let lo = loaded.widest_lo();
+    before_statement(ctl)?;
+    loaded.gaps = gaps_overlapping(conn, ctl, lo, loaded.hi_ms)?;
+    before_statement(ctl)?;
+    loaded.sessions = sessions_overlapping(conn, ctl, lo, loaded.hi_ms)?;
+    before_statement(ctl)?;
+    loaded.watermark_ms = watermark(conn, ctl)?;
+    Ok(())
 }
 
 pub fn read_page(request: &Request, ctx: &Context<'_>) -> Outcome {

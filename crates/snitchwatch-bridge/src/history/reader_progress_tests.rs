@@ -93,16 +93,13 @@ fn a_commit_that_outlasts_the_busy_wait_is_unavailable_retry() {
     );
 }
 
-/// Many prompts and pings that never match each other inside one window: the
-/// `possible_duplicate` lookup of every returned row scans the lot.
-fn slow_statement_store(fx: &Fx, prompts: u32, pings: u32) {
+/// Prompts 16 ms apart, so each has about 250 events within two seconds: under the duplicate lookup's cap, so it runs in full for every
+/// returned row, and a page of them is one long statement.
+fn slow_statement_store(fx: &Fx, prompts: u32) {
     let sql = format!(
         "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {prompts}) \
          INSERT INTO events (ts_ms, decided_ts_ms, prompt_outcome, process_path, action, answered_by) \
-         SELECT 1000, 1000, 'replied', '/a', 'allow', 'gui' FROM c; \
-         WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {pings}) \
-         INSERT INTO events (ts_ms, process_path, action, answered_by) \
-         SELECT 1000, '/b', 'allow', 'rule' FROM c;"
+         SELECT x * 16, x * 16, 'replied', '/a', 'allow', 'gui' FROM c;"
     );
     fx.conn().execute_batch(&sql).unwrap();
 }
@@ -110,17 +107,20 @@ fn slow_statement_store(fx: &Fx, prompts: u32, pings: u32) {
 #[test]
 fn a_cancel_stops_a_slow_statement_in_the_reader_itself() {
     let mut fx = Fx::new();
-    slow_statement_store(&fx, 60_000, 300);
+    slow_statement_store(&fx, 60_000);
     // Neither the statement budget nor the deadline may be what ends it.
     fx.limits.statement_budget = std::time::Duration::from_secs(600);
     fx.limits.query_deadline = std::time::Duration::from_secs(600);
+    fx.limits.events_per_page = 60_000;
+    fx.limits.scan_window = 60_000;
+    fx.limits.scan_rows_max = 60_000;
     let started = std::time::Instant::now();
     let outcome = std::thread::scope(|scope| {
         scope.spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(150));
             fx.cancel.cancel();
         });
-        fx.read(None, 200)
+        fx.read(None, 60_000)
     });
     assert!(matches!(outcome, Outcome::Cancelled), "{outcome:?}");
     assert!(

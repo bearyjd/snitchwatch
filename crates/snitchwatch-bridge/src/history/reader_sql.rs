@@ -24,6 +24,9 @@ const TICK_OPS: i32 = 1000;
 /// More rows than the ledger's own ceiling (L1): never a reason to read on.
 pub(super) const LEDGER_ROWS_MAX: usize = 4096;
 
+/// Candidates the duplicate lookup may examine for one event.
+pub(super) const DUPLICATE_PROBE_CAP: usize = 256;
+
 const WHY_NONE: u8 = 0;
 const WHY_CANCELLED: u8 = 1;
 const WHY_STATEMENT: u8 = 2;
@@ -79,7 +82,15 @@ pub(super) struct Control {
     why: Arc<AtomicU8>,
     budget: Duration,
     deadline: Duration,
+    /// What the progress handler enforces now: the page's, or a validation's.
+    live_budget_ns: Arc<AtomicU64>,
+    live_deadline_ns: Arc<AtomicU64>,
 }
+
+/// The least a statement of the schema check may run, whatever the page
+/// budget: the check is a fixed handful of statements over a bounded catalog,
+/// and a budget a test shrinks to nothing is meant for the page statements.
+const VALIDATION_FLOOR: Duration = Duration::from_millis(100);
 
 fn ns(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
@@ -94,6 +105,8 @@ impl Control {
             why: Arc::new(AtomicU8::new(WHY_NONE)),
             budget: limits.statement_budget,
             deadline: limits.query_deadline,
+            live_budget_ns: Arc::new(AtomicU64::new(ns(limits.statement_budget))),
+            live_deadline_ns: Arc::new(AtomicU64::new(ns(limits.query_deadline))),
         }
     }
 
@@ -104,16 +117,21 @@ impl Control {
         let base = self.base;
         let start = Arc::clone(&self.statement_start_ns);
         let why = Arc::clone(&self.why);
-        let (budget, deadline) = (ns(self.budget), ns(self.deadline));
+        let (budget, deadline) = (
+            Arc::clone(&self.live_budget_ns),
+            Arc::clone(&self.live_deadline_ns),
+        );
         conn.progress_handler(
             TICK_OPS,
             Some(move || {
                 let now = ns(base.elapsed());
                 let reason = if token.is_cancelled() {
                     WHY_CANCELLED
-                } else if now.saturating_sub(start.load(Ordering::Relaxed)) > budget {
+                } else if now.saturating_sub(start.load(Ordering::Relaxed))
+                    > budget.load(Ordering::Relaxed)
+                {
                     WHY_STATEMENT
-                } else if now > deadline {
+                } else if now > deadline.load(Ordering::Relaxed) {
                     WHY_DEADLINE
                 } else {
                     return false;
@@ -122,6 +140,22 @@ impl Control {
                 true
             }),
         )
+    }
+
+    /// The schema check's terms: its own statement budget, and no query
+    /// deadline (the deadline is for the page).
+    pub(super) fn validating(&self) {
+        let floor = self.budget.max(VALIDATION_FLOOR);
+        self.live_budget_ns.store(ns(floor), Ordering::Relaxed);
+        self.live_deadline_ns.store(u64::MAX, Ordering::Relaxed);
+    }
+
+    /// Back to the page's terms.
+    pub(super) fn paging(&self) {
+        self.live_budget_ns
+            .store(ns(self.budget), Ordering::Relaxed);
+        self.live_deadline_ns
+            .store(ns(self.deadline), Ordering::Relaxed);
     }
 
     pub(super) fn begin_statement(&self) {
@@ -190,7 +224,31 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<EventView> {
 
 const EVENT_COLUMNS: &str = "id, ts_ms, decided_ts_ms, process_path, dst_host, dst_ip, \
     dst_port, protocol, action, answered_by, rule_name, lower(hex(rule_hash)), rule_class, \
-    repeat_count, src_port, src_ip, prompt_outcome, possible_duplicate";
+    repeat_count, src_port, src_ip, prompt_outcome";
+
+/// `possible_duplicate`, with the view's lookup bounded. The view examines
+/// every event within two seconds of a prompt (or every prompt within two
+/// seconds of a ping): tens of thousands in a burst, per returned row. First
+/// count those candidates with an unfiltered index range capped at
+/// [`DUPLICATE_PROBE_CAP`] + 1 entries (cost bounded whatever the burst); past
+/// the cap the lookup is not run and the flag is **true**: it says "possible",
+/// and a pair cannot be ruled out without the scan. Within the cap it is the
+/// view's own answer.
+fn possible_duplicate_sql() -> String {
+    let cap = DUPLICATE_PROBE_CAP;
+    format!(
+        "CASE WHEN CASE WHEN h.prompt_outcome IS NOT NULL \
+             THEN (SELECT count(*) FROM (SELECT 1 FROM events x \
+                   WHERE x.ts_ms BETWEEN h.decided_ts_ms - 2000 AND h.decided_ts_ms + 2000 \
+                   LIMIT {limit})) \
+             ELSE (SELECT count(*) FROM (SELECT 1 FROM events x \
+                   WHERE x.prompt_outcome IS NOT NULL \
+                   AND x.decided_ts_ms BETWEEN h.ts_ms - 2000 AND h.ts_ms + 2000 \
+                   LIMIT {limit})) END > {cap} \
+         THEN 1 ELSE h.possible_duplicate END",
+        limit = cap + 1
+    )
+}
 
 /// One statement's rows and why it ended early, if it did.
 pub(super) struct Chunk {
@@ -219,8 +277,9 @@ pub(super) fn events_sql(seek: Seek) -> String {
         Seek::Older => ("WHERE ts_ms < ?1", "?2"),
     };
     format!(
-        "SELECT {EVENT_COLUMNS} FROM history_events {filter} \
-         ORDER BY ts_ms DESC, id DESC LIMIT {limit}"
+        "SELECT {EVENT_COLUMNS}, {flag} FROM history_events h {filter} \
+         ORDER BY ts_ms DESC, id DESC LIMIT {limit}",
+        flag = possible_duplicate_sql()
     )
 }
 

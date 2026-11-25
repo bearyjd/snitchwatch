@@ -11,11 +11,12 @@ use super::gap_counts::{pair_flags, summarize};
 use super::ledger::{Gap, GapCause};
 use super::reader::{
     Context, Cursor, End, EventView, GapView, Label, Limits, Page, Partial, Request, SessionView,
-    Standing,
+    Standing, Unavail, UnavailKind,
 };
 use super::reader_size::{event_bytes, gap_bytes, segment_bytes, session_bytes, HEADER_BYTES};
+use super::reader_sql::Control;
 use super::session::Session;
-use super::timeline::{coverage, gap_overlaps_events, Segment, Window};
+use super::timeline::{coalesce, coverage_masked, gap_overlaps_events, Segment, Window};
 
 /// What the two read stages produced.
 pub(super) struct Loaded {
@@ -30,16 +31,32 @@ pub(super) struct Loaded {
     pub sessions: Vec<Session>,
     pub watermark_ms: Option<i64>,
     pub hi_ms: i64,
+    /// The query ran out of time before the ledger was read: its rows are
+    /// unknown, and the window is said to be unexplained.
+    pub ledger_unknown: bool,
+}
+
+/// Most spans of dropped rows a page's coverage is cut at (see
+/// [`coalesce`]): what bounds the segments a trimmed page carries.
+const OMITTED_SPANS_MAX: usize = 16;
+
+/// The ledger rows that overlap one candidate window, before any is carried.
+#[derive(Clone)]
+struct Rows {
+    lo_ms: i64,
+    gaps: Vec<Gap>,
+    sessions: Vec<Session>,
 }
 
 struct Candidate {
     lo_ms: i64,
     gaps: Vec<Gap>,
-    sessions: Vec<Session>,
     gap_views: Vec<GapView>,
     session_views: Vec<SessionView>,
     segments: Vec<Segment>,
     bytes: usize,
+    /// More rows overlap the window than a page may carry. Then nothing
+    /// else is built: the window is too big to describe.
     over_rows: bool,
 }
 
@@ -82,6 +99,7 @@ impl Loaded {
             sessions: Vec::new(),
             watermark_ms: None,
             hi_ms,
+            ledger_unknown: false,
         }
     }
 
@@ -107,33 +125,85 @@ impl Loaded {
         }
     }
 
-    fn candidate(&self, n: usize, ctx: &Context<'_>) -> Candidate {
+    /// The rows overlapping the window of `n` kept events.
+    fn rows(&self, n: usize, ctx: &Context<'_>) -> Rows {
         let (lo, hi) = (self.lo_for(n), self.hi_ms);
-        let gaps: Vec<Gap> = self
+        if self.ledger_unknown {
+            return Rows {
+                lo_ms: lo,
+                gaps: Vec::new(),
+                sessions: Vec::new(),
+            };
+        }
+        let gaps = self
             .gaps
             .iter()
             .filter(|g| overlaps(g.start_ms, g.end_ms, lo, hi))
             .copied()
             .collect();
-        let live = ctx.live_session_start_ms;
-        let sessions: Vec<Session> = effective(&self.sessions, live, self.watermark_ms)
+        let sessions = effective(&self.sessions, ctx.live_session_start_ms, self.watermark_ms)
             .into_iter()
             .filter(|s| overlaps(s.start_ms, s.end_ms.unwrap_or(i64::MAX), lo, hi))
             .collect();
-        let segments = coverage(window(lo, hi), &sessions, &gaps, self.floor_ms);
+        Rows {
+            lo_ms: lo,
+            gaps,
+            sessions,
+        }
+    }
+
+    /// The page for `n` events as it would be carried whole. The row caps are
+    /// checked before any segment or gap view is built: a ledger that cannot
+    /// fit costs a count, not a tiling.
+    fn candidate(&self, n: usize, ctx: &Context<'_>) -> Candidate {
+        let rows = self.rows(n, ctx);
+        let over_rows = rows.gaps.len() > ctx.limits.gap_rows_per_page
+            || rows.sessions.len() > ctx.limits.session_rows_per_page;
+        if over_rows {
+            return Candidate {
+                lo_ms: rows.lo_ms,
+                gaps: rows.gaps,
+                gap_views: Vec::new(),
+                session_views: Vec::new(),
+                segments: Vec::new(),
+                bytes: usize::MAX,
+                over_rows,
+            };
+        }
+        let (kg, ks) = (rows.gaps.len(), rows.sessions.len());
+        self.carrying(n, rows, (kg, ks), ctx)
+    }
+
+    /// The page for `n` events carrying the newest `keep` (gaps, sessions)
+    /// of `rows`; what the rest covered is reported as unexplained.
+    fn carrying(&self, n: usize, rows: Rows, keep: (usize, usize), ctx: &Context<'_>) -> Candidate {
+        let Rows {
+            lo_ms: lo,
+            mut gaps,
+            mut sessions,
+        } = rows;
+        let hi = self.hi_ms;
+        let left_gaps = gaps.split_off(keep.0.min(gaps.len()));
+        let left_sessions = sessions.split_off(keep.1.min(sessions.len()));
+        let dropped = coalesce(
+            left_gaps.iter().map(|g| (g.start_ms, g.end_ms)).chain(
+                left_sessions
+                    .iter()
+                    .map(|s| (s.start_ms, s.end_ms.unwrap_or(hi))),
+            ),
+            OMITTED_SPANS_MAX,
+        );
+        let segments = coverage_masked(window(lo, hi), &sessions, &gaps, self.floor_ms, &dropped);
         let event_ts: Vec<i64> = self.events[..n].iter().map(|e| e.ts_ms).collect();
         let mut c = Candidate {
             lo_ms: lo,
-            gap_views: Vec::new(),
-            session_views: session_views(&sessions, live),
-            over_rows: gaps.len() > ctx.limits.gap_rows_per_page
-                || sessions.len() > ctx.limits.session_rows_per_page,
+            gap_views: gap_views(&gaps, lo, hi, &event_ts),
+            session_views: session_views(&sessions, ctx.live_session_start_ms),
+            over_rows: false,
             bytes: 0,
             gaps,
-            sessions,
             segments,
         };
-        c.gap_views = gap_views(&c.gaps, lo, hi, &event_ts);
         c.bytes = c.bytes_with(&self.events[..n]);
         c
     }
@@ -154,7 +224,8 @@ fn fits(c: &Candidate, limits: &Limits) -> bool {
 }
 
 /// The most events whose window fits; `None` if even zero events do not.
-fn largest_fit(loaded: &Loaded, ctx: &Context<'_>) -> Option<usize> {
+/// Out of time, the best fit found so far stands.
+fn largest_fit(loaded: &Loaded, ctx: &Context<'_>, ctl: &Control) -> Option<usize> {
     let n = loaded.events.len();
     if fits(&loaded.candidate(n, ctx), &ctx.limits) {
         return Some(n);
@@ -164,7 +235,7 @@ fn largest_fit(loaded: &Loaded, ctx: &Context<'_>) -> Option<usize> {
     }
     // Fewer events, a smaller window, fewer rows and bytes: monotone.
     let (mut ok, mut bad) = (0, n);
-    while bad - ok > 1 {
+    while bad - ok > 1 && !ctl.deadline_passed() {
         let mid = ok + (bad - ok) / 2;
         if fits(&loaded.candidate(mid, ctx), &ctx.limits) {
             ok = mid;
@@ -173,6 +244,37 @@ fn largest_fit(loaded: &Loaded, ctx: &Context<'_>) -> Option<usize> {
         }
     }
     Some(ok)
+}
+
+/// The pathological case: `n` events whose window holds more ledger than a
+/// page may carry. Keep the newest rows that fit the row and byte bounds,
+/// halving until they do; what the rest covered shows as unexplained. If
+/// not even the events and a bare tiling fit, the page cannot be made.
+fn trimmed(loaded: &Loaded, n: usize, ctx: &Context<'_>) -> Result<Candidate, Unavail> {
+    let rows = loaded.rows(n, ctx);
+    let limits = &ctx.limits;
+    let mut keep = (
+        rows.gaps.len().min(limits.gap_rows_per_page),
+        rows.sessions.len().min(limits.session_rows_per_page),
+    );
+    loop {
+        let c = loaded.carrying(n, rows.clone(), keep, ctx);
+        if c.bytes <= limits.page_bytes {
+            return Ok(c);
+        }
+        if keep == (0, 0) {
+            return Err(unavailable_oversized());
+        }
+        keep = (keep.0 / 2, keep.1 / 2);
+    }
+}
+
+fn unavailable_oversized() -> Unavail {
+    Unavail {
+        reason: "one history event is larger than the page byte limit".into(),
+        retry: false,
+        kind: UnavailKind::OversizedEvent,
+    }
 }
 
 fn label(on: bool, available: bool) -> Label {
@@ -242,21 +344,21 @@ pub(super) fn assemble(
     generation: u64,
     request: &Request,
     ctx: &Context<'_>,
-) -> Page {
+    ctl: &Control,
+) -> Result<Page, Unavail> {
     let full = loaded.events.len();
-    let (n, forced) = match largest_fit(&loaded, ctx) {
-        // Progress: a page that kept no event would give the client the same
+    let (n, forced) = match largest_fit(&loaded, ctx, ctl) {
+        // Progress: a page that kept no event would hand the client the same
         // cursor again. Keep the newest one and trim the ledger instead.
         Some(0) | None if full > 0 => (1, Some(Partial::Gaps)),
         Some(n) => (n, None),
-        // Even an empty window carries more ledger rows than a page may:
-        // keep the newest, and say so. Never silent.
+        // Even an empty window is over the row caps: trim it, and say so.
         None => (0, Some(Partial::Gaps)),
     };
-    let mut c = loaded.candidate(n, ctx);
-    if forced.is_some() {
-        truncate_ledger(&mut c, &loaded, ctx, &loaded.events[..n]);
-    }
+    let c = match forced {
+        Some(_) => trimmed(&loaded, n, ctx)?,
+        None => loaded.candidate(n, ctx),
+    };
     let shrunk = n < full;
     let over_rows_at_full = shrunk && loaded.candidate(full, ctx).over_rows;
     loaded.events.truncate(n);
@@ -266,7 +368,7 @@ pub(super) fn assemble(
         .or(loaded.partial);
     let more = loaded.more || shrunk;
     let end = end_state(more, &c.gaps);
-    Page {
+    Ok(Page {
         generation,
         at_head: request.cursor.is_none(),
         next_cursor: more
@@ -284,7 +386,7 @@ pub(super) fn assemble(
         partial,
         end,
         bytes: c.bytes,
-    }
+    })
 }
 
 fn end_state(more: bool, gaps: &[Gap]) -> End {
@@ -294,21 +396,4 @@ fn end_state(more: bool, gaps: &[Gap]) -> End {
         (false, true) => End::RetentionFloor,
         (false, false) => End::OldestRecorded,
     }
-}
-
-/// The pathological case: keep the newest rows a page may carry and tile
-/// what they cover (anything they leave unexplained shows as such).
-fn truncate_ledger(c: &mut Candidate, loaded: &Loaded, ctx: &Context<'_>, kept: &[EventView]) {
-    c.gaps.truncate(ctx.limits.gap_rows_per_page);
-    c.sessions.truncate(ctx.limits.session_rows_per_page);
-    c.segments = coverage(
-        window(c.lo_ms, loaded.hi_ms),
-        &c.sessions,
-        &c.gaps,
-        loaded.floor_ms,
-    );
-    let kept_ts: Vec<i64> = kept.iter().map(|e| e.ts_ms).collect();
-    c.gap_views = gap_views(&c.gaps, c.lo_ms, loaded.hi_ms, &kept_ts);
-    c.session_views = session_views(&c.sessions, ctx.live_session_start_ms);
-    c.bytes = c.bytes_with(kept);
 }

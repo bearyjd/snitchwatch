@@ -40,7 +40,7 @@ impl Fx {
 
     pub fn ctx(&self) -> Context<'_> {
         Context {
-            db_path: &self.db,
+            location: &self.rig.location,
             generation: &self.generation,
             cancel: &self.cancel,
             now_ms: self.now_ms,

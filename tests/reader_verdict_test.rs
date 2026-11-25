@@ -33,7 +33,7 @@ async fn next_frame(ws: &mut WebSocketStream<UnixStream>) -> Value {
 }
 
 /// A history store with 20,000 events, enabled the supported way.
-fn history_db(dir: &std::path::Path) -> std::path::PathBuf {
+fn history_db(dir: &std::path::Path) -> snitchwatch_bridge::history::Location {
     let state = dir.canonicalize().unwrap().join("state");
     std::fs::create_dir(&state).unwrap();
     let location = locate(Mode::User, Some(&state)).unwrap();
@@ -54,7 +54,7 @@ fn history_db(dir: &std::path::Path) -> std::path::PathBuf {
              SELECT x, 'allow', 'rule', '/usr/bin/old' FROM c;",
         )
         .unwrap();
-    location.db_path()
+    location
 }
 
 #[tokio::test]
@@ -99,7 +99,7 @@ async fn an_ask_is_answered_at_once_while_two_readers_read_flat_out() {
             std::thread::spawn(move || {
                 let (generation, cancel) = (Generation::default(), CancelToken::default());
                 let ctx = Context {
-                    db_path: &db,
+                    location: &db,
                     generation: &generation,
                     cancel: &cancel,
                     now_ms: 1_000_000,

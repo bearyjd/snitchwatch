@@ -9,6 +9,8 @@ use super::timeline::Segment;
 
 /// The page header: generation, window, standing labels, summary, cursor.
 pub(super) const HEADER_BYTES: usize = 4096;
+/// The smallest page limit a reader accepts: the header and room for rows.
+pub(super) const MIN_PAGE_BYTES: usize = 2 * HEADER_BYTES;
 const INT: usize = 20;
 const BOOL: usize = 5;
 const NULL: usize = 4;

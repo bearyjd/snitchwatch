@@ -167,19 +167,33 @@ fn more_gap_rows_at_one_instant_than_a_page_holds_is_said_not_hidden() {
 }
 
 #[test]
-fn a_zero_query_deadline_returns_a_partial_page_that_resumes_cleanly() {
+fn a_zero_query_deadline_returns_partial_pages_that_resume_and_never_claim_a_ledger() {
     let mut fx = Fx::new();
     fx.events(1..=100);
     fx.limits.query_deadline = Duration::ZERO;
     fx.limits.scan_window = 10;
-    let pages = fx.all_pages(200);
-    // Ten pages cut at the deadline, then the empty page that finds the end.
-    assert_eq!(pages.len(), 11);
-    assert!(pages[..10].iter().all(|p| p.partial == Some(Partial::Time)));
-    assert!(pages[..10].iter().all(|p| p.events.len() == 10));
-    assert!(pages[10].events.is_empty());
-    assert_eq!(pages[10].end, End::OldestRecorded);
+    let mut pages = Vec::new();
+    let mut cursor = None;
+    for _ in 0..10 {
+        let page = fx.page(cursor, 200);
+        cursor = page.next_cursor;
+        pages.push(page);
+    }
+    // Each page is cut at the deadline with its events and cursor: the ledger
+    // statements come after it, so the window is unexplained, not recorded.
+    assert!(pages.iter().all(|p| p.partial == Some(Partial::Time)));
+    assert!(pages.iter().all(|p| p.events.len() == 10));
+    assert!(pages
+        .iter()
+        .flat_map(|p| &p.coverage)
+        .all(|s| s.kind != super::timeline::Kind::Recorded));
     assert_pages_complete(&pages, 100);
+    // With nothing collected there is nothing to keep: unavailable, to retry.
+    let outcome = fx.read(cursor, 200);
+    assert!(
+        matches!(outcome, Outcome::Unavailable(ref u) if u.retry),
+        "{outcome:?}"
+    );
 }
 
 #[test]
