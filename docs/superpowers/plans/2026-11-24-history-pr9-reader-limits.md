@@ -141,6 +141,6 @@ Each item below keeps its option text; the option marked recommended is the deci
 ## Repair pass 4 notes
 
 - **Hidden outages.** `lost_at_least` pools every upstream-loss row that overlaps or abuts an `uncertain`, `write-failed` or `evicted` row, or that the page window clips (the outage row between its halves may be gone), and counts the pool once as `ceil(rows / 2)`: an outage's rows sum to `n`, or to 2 for `n = 1`, so rows summing to `r` come from a loss of at least `ceil(r / 2)`. An outage row that left no trace at all cannot be told from a plain loss; that case is not covered.
-- **Duplicate flag.** The probe cap is one value (256) for every page and client; a page is bounded by its rows times 257 index entries and by the statement budget and query deadline (time cut, with the rows read so far).
+- **Duplicate flag.** The probe cap is one value (99, `scan_rows_max / (events_per_page + 1)`) for every page and client; a page is bounded by its rows times 100 index entries (20 000 for 200 rows) and by the statement budget and query deadline (time cut, with the rows read so far).
 - **Zero-event cuts.** A scan cut, or a time cut of a page larger than one row, is `TooExpensive` (`retry: false`, ask for a smaller page). A busy cut, or a time cut at `limit == 1`, is `retry: true`.
 - **Not fixed (E1).** SQLite's own memory for a 100 MiB `substr` is outside the reader's bounds.

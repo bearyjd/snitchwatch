@@ -177,7 +177,7 @@ fn two_hundred_pings_over_257_prompts_stay_within_the_page_bound() {
     // progress.
     let limits = Limits::default();
     assert!(
-        limits.events_per_page * (DUPLICATE_PROBE_CAP + 1) <= 52_000,
+        limits.events_per_page * (DUPLICATE_PROBE_CAP + 1) <= limits.scan_rows_max,
         "candidates a page may examine"
     );
     let started = std::time::Instant::now();
@@ -185,7 +185,7 @@ fn two_hundred_pings_over_257_prompts_stay_within_the_page_bound() {
     assert!(started.elapsed() < limits.query_deadline);
     assert!(!page.events.is_empty(), "progress");
     let steps = head_steps(&fx, 200, DUPLICATE_PROBE_CAP);
-    assert!(steps < 1_000_000, "{steps} virtual machine steps");
+    assert!(steps < 400_000, "{steps} virtual machine steps");
 }
 
 #[test]

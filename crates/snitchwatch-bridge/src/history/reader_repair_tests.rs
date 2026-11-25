@@ -185,10 +185,12 @@ fn the_flag_is_exact_up_to_the_cap_and_undetermined_past_it() {
 
 #[test]
 fn a_rows_duplicate_flag_does_not_depend_on_the_page_size() {
-    // 150 prompts within two seconds of every ping: past the cap a page of 200
-    // would once have shared out (99), under the fixed one (256) it is exact.
-    let fx = Fx::new();
-    dense_store(&fx, 150, 200);
+    // 30 prompts within two seconds of every ping, well under the cap. A cap
+    // shared out over the page (here 600 / 201 = 2 at 200 rows) would flag it
+    // at 200 rows but not at 1.
+    let mut fx = Fx::new();
+    dense_store(&fx, 30, 200);
+    fx.limits.scan_rows_max = 600;
     let flags: Vec<bool> = [1, 50, 200]
         .iter()
         .map(|&limit| fx.page(None, limit).events[0].possible_duplicate)
