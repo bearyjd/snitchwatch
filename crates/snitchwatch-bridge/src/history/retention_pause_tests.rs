@@ -162,13 +162,18 @@ struct Live {
 
 /// A capture over a store already `over` pages past high-water.
 fn live(over: u64, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
-    live_rounds(over, EVICTION_ROUNDS, tweak)
+    live_over(rig(), over, tweak)
 }
 
-/// [`live`] with the writer's chunk limit per attempt lowered to `rounds`.
+/// [`live`] over a small store with the writer's chunk limit per attempt
+/// lowered to `rounds`.
 fn live_rounds(over: u64, rounds: u32, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
     let mut rig = rig_with(SMALL_STORE);
     rig.engine.set_eviction_rounds_for_test(rounds);
+    live_over(rig, over, tweak)
+}
+
+fn live_over(rig: Rig, over: u64, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
     fill_to(&rig, over);
     let Rig {
         _root,
