@@ -21,6 +21,7 @@ mod capture_stats;
 mod correlation;
 pub mod durable;
 mod expiry_budget;
+pub mod gap_counts;
 pub mod gaps;
 pub mod guard;
 pub mod ledger;
@@ -30,6 +31,46 @@ pub mod open;
 pub mod ping;
 mod pinned_queue;
 pub mod pins;
+pub mod reader;
+#[cfg(test)]
+mod reader_ceiling_tests;
+#[cfg(test)]
+mod reader_coverage_tests;
+#[cfg(test)]
+mod reader_cut_tests;
+#[cfg(test)]
+mod reader_fit_tests;
+#[cfg(test)]
+mod reader_fixture;
+#[cfg(test)]
+mod reader_limits_tests;
+#[cfg(test)]
+mod reader_loss_tests;
+mod reader_open;
+#[cfg(test)]
+mod reader_open_tests;
+mod reader_page;
+#[cfg(test)]
+mod reader_paging_tests;
+#[cfg(test)]
+mod reader_progress_tests;
+pub mod reader_registry;
+#[cfg(test)]
+mod reader_registry_guard_tests;
+#[cfg(test)]
+mod reader_repair_tests;
+#[cfg(test)]
+mod reader_settings_tests;
+mod reader_size;
+#[cfg(test)]
+mod reader_slot_cap_tests;
+mod reader_sql;
+#[cfg(test)]
+mod reader_stage_tests;
+#[cfg(test)]
+mod reader_structure_tests;
+#[cfg(test)]
+mod reader_tests;
 pub mod record;
 mod retention;
 mod retention_room;
@@ -38,6 +79,7 @@ pub mod schema;
 pub mod session;
 pub mod settings;
 pub mod snapshots;
+pub mod timeline;
 pub mod writer;
 
 use std::path::{Path, PathBuf};
@@ -132,6 +174,19 @@ pub fn load_state(location: &Location) -> State {
 }
 
 pub(crate) fn load_state_as(location: &Location, euid: u32) -> State {
+    state_of(location, euid, settings::load)
+}
+
+/// [`load_state`] for a reader: the same answer, and nothing on disk changes.
+pub(crate) fn load_state_read_only(location: &Location) -> State {
+    state_of(location, open::effective_uid(), settings::load_read_only)
+}
+
+fn state_of(
+    location: &Location,
+    euid: u32,
+    load: fn(&Location) -> Result<Option<settings::Settings>, Unavailable>,
+) -> State {
     match open::dir_exists(location.dir()) {
         Ok(false) => return State::Off,
         Ok(true) => {}
@@ -140,7 +195,7 @@ pub(crate) fn load_state_as(location: &Location, euid: u32) -> State {
     if let Err(reason) = open::check_dir(location.dir(), euid) {
         return State::Unavailable(reason);
     }
-    match settings::load(location) {
+    match load(location) {
         Ok(Some(settings)) if settings.enabled => State::Enabled(settings),
         Ok(_) => State::Off,
         Err(reason) => State::Unavailable(reason),

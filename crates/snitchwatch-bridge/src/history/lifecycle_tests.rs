@@ -6,16 +6,16 @@ use std::sync::Arc;
 fn generation_advances_monotonically() {
     let g = Generation::default();
     assert_eq!(g.current(), 0);
-    assert_eq!(g.advance(), Ok(1));
-    assert_eq!(g.advance(), Ok(2));
+    assert_eq!(g.advance_for_test(), Ok(1));
+    assert_eq!(g.advance_for_test(), Ok(2));
     assert_eq!(g.current(), 2);
 }
 
 #[test]
 fn generation_does_not_wrap() {
     let g = Generation::new(u64::MAX - 1);
-    assert_eq!(g.advance(), Ok(u64::MAX));
-    assert_eq!(g.advance(), Err(Exhausted));
+    assert_eq!(g.advance_for_test(), Ok(u64::MAX));
+    assert_eq!(g.advance_for_test(), Err(Exhausted));
     assert_eq!(g.current(), u64::MAX, "stays put, never wraps to 0");
 }
 
@@ -48,7 +48,7 @@ fn counters_are_unique_across_threads() {
             let (s, g) = (Arc::clone(&s), Arc::clone(&g));
             std::thread::spawn(move || {
                 (0..1000)
-                    .map(|_| (s.assign().unwrap(), g.advance().unwrap()))
+                    .map(|_| (s.assign().unwrap(), g.advance_for_test().unwrap()))
                     .collect::<Vec<_>>()
             })
         })

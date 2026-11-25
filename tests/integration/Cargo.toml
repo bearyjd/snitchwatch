@@ -37,6 +37,18 @@ name = "forever_persists"
 path = "../forever_persists_test.rs"
 
 [[test]]
+name = "history_reader_stress"
+path = "../history_reader_stress_test.rs"
+
+[[test]]
+name = "history_reader_memory"
+path = "../history_reader_memory_test.rs"
+
+[[test]]
+name = "reader_verdict"
+path = "../reader_verdict_test.rs"
+
+[[test]]
 name = "analysis_export"
 path = "../analysis_export_test.rs"
 

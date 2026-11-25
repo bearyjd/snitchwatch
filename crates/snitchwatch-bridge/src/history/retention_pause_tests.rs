@@ -186,7 +186,10 @@ fn live(over: u64, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
 }
 
 fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // A heavy eviction pass takes about 6 s on a debug build and longer under a
+    // loaded test run, so the deadline is generous: it bounds a hung test, it
+    // does not measure speed.
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !done() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(5));

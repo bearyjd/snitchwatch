@@ -100,6 +100,57 @@ pub fn open_owner_only(path: &Path) -> Result<Connection, OpenError> {
     Ok(conn)
 }
 
+/// Open an existing store file for reading only: the checks of
+/// [`open_owner_only`] (no unsafe sidecar, a regular file of ours with one
+/// link, checked with `lstat` so a FIFO is refused unopened, and `NOFOLLOW`),
+/// but nothing is created and nothing is
+/// changed: no `set_permissions`, no `CREATE`, `SQLITE_OPEN_READ_ONLY` and
+/// `query_only`, no `ATTACH`. A missing file is `OpenError::Io(NotFound)`.
+///
+/// There is no busy timeout: the caller decides how long a read may wait for
+/// a writer's commit, because in rollback-journal mode a reader's lock delays
+/// that commit.
+pub fn open_owner_only_readonly(path: &Path) -> Result<Connection, OpenError> {
+    use std::os::unix::fs::MetadataExt;
+    refuse_unsafe_sidecars(path)?;
+    // `lstat`, never an open-and-close of the file: closing any descriptor of
+    // an inode releases this process's POSIX record locks on it, which would
+    // free a lock the bridge's own writer holds. SQLite's `NOFOLLOW` open
+    // below refuses a symlink; the second `lstat` refuses a swap in between.
+    let before = std::fs::symlink_metadata(path)?;
+    let facts = FileFacts {
+        regular: before.file_type().is_file(),
+        uid: before.uid(),
+        links: before.nlink(),
+    };
+    if let Some(why) = file_problem(&facts, effective_uid()) {
+        return Err(OpenError::Refused(format!(
+            "{} {why}, so it was left as it is",
+            path.display()
+        )));
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let after = std::fs::symlink_metadata(path)?;
+    if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+        return Err(OpenError::Refused(format!(
+            "{} was replaced while it was opened",
+            path.display()
+        )));
+    }
+    conn.busy_timeout(std::time::Duration::ZERO)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, 0)?;
+    conn.execute_batch(
+        "PRAGMA trusted_schema = OFF; PRAGMA cell_size_check = ON; PRAGMA query_only = ON;",
+    )?;
+    Ok(conn)
+}
+
 /// What matters about an existing store file or SQLite sidecar file.
 pub(crate) struct FileFacts {
     pub regular: bool,
@@ -130,6 +181,17 @@ fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// [`file_problem`] for a sidecar, which SQLite creates and deletes as it
+/// works: a journal caught mid-unlink still stats, with no name left, and
+/// SQLite can no longer open it, so it is not a problem.
+fn sidecar_problem(facts: &FileFacts, euid: u32) -> Option<&'static str> {
+    if facts.links == 0 {
+        None
+    } else {
+        file_problem(facts, euid)
+    }
+}
+
 fn refuse_unsafe_sidecars(path: &Path) -> Result<(), OpenError> {
     use std::os::unix::fs::MetadataExt;
     let euid = effective_uid();
@@ -148,7 +210,7 @@ fn refuse_unsafe_sidecars(path: &Path) -> Result<(), OpenError> {
             uid: meta.uid(),
             links: meta.nlink(),
         };
-        if let Some(why) = file_problem(&facts, euid) {
+        if let Some(why) = sidecar_problem(&facts, euid) {
             return Err(OpenError::Refused(format!(
                 "{} {why}; SQLite would use it, so remove it and restart",
                 sidecar.display()
@@ -162,9 +224,12 @@ fn refuse_unsafe_sidecars(path: &Path) -> Result<(), OpenError> {
 /// an index SQLite makes itself). Its `rootpage` differs from file to file.
 type SchemaRow = (String, String, String, Option<String>);
 
-fn schema_rows(conn: &Connection) -> rusqlite::Result<Vec<SchemaRow>> {
-    let mut statement = conn.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master")?;
-    let rows = statement.query_map([], |row| {
+/// At most `max` rows: the catalog of a file that is not ours can be any size.
+fn schema_rows(conn: &Connection, max: usize) -> rusqlite::Result<Vec<SchemaRow>> {
+    let mut statement =
+        conn.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master LIMIT ?1")?;
+    let max = i64::try_from(max).unwrap_or(i64::MAX);
+    let rows = statement.query_map([max], |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     })?;
     rows.collect()
@@ -193,8 +258,10 @@ fn schema_rows(conn: &Connection) -> rusqlite::Result<Vec<SchemaRow>> {
 pub fn require_known_schema(conn: &Connection, schema: &str) -> Result<(), OpenError> {
     let reference = Connection::open_in_memory()?;
     reference.execute_batch(schema)?;
-    let known = schema_rows(&reference)?;
-    for row in schema_rows(conn)? {
+    let known = schema_rows(&reference, usize::MAX)?;
+    // Every row must be a known one and none repeats, so one row more than
+    // `known` has holds an unknown one: a huge catalog is never read whole.
+    for row in schema_rows(conn, known.len() + 1)? {
         if known.contains(&row) {
             continue;
         }
@@ -214,6 +281,20 @@ pub fn require_known_schema(conn: &Connection, schema: &str) -> Result<(), OpenE
     }
     Ok(())
 }
+
+/// How many `sqlite_master` rows running `schema` on an empty database
+/// makes: what a complete store has. [`require_known_schema`] accepts fewer
+/// (a crash between two `CREATE`s); a reader that must not repair needs the
+/// exact number.
+pub fn schema_object_count(schema: &str) -> Result<i64, OpenError> {
+    let reference = Connection::open_in_memory()?;
+    reference.execute_batch(schema)?;
+    Ok(reference.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?)
+}
+
+#[cfg(test)]
+#[path = "sqlite_file_readonly_tests.rs"]
+mod readonly_tests;
 
 #[cfg(test)]
 mod tests {
@@ -348,6 +429,24 @@ mod tests {
             std::fs::write(sidecar(&db, suffix), b"").unwrap();
             open_owner_only(&db).unwrap_or_else(|e| panic!("{suffix}: {e}"));
         }
+    }
+
+    #[test]
+    fn a_sidecar_caught_mid_unlink_is_no_problem_but_a_second_link_is() {
+        let gone = FileFacts {
+            regular: true,
+            uid: 1000,
+            links: 0,
+        };
+        assert_eq!(sidecar_problem(&gone, 1000), None);
+        let linked = FileFacts { links: 2, ..gone };
+        assert!(sidecar_problem(&linked, 1000).is_some_and(|why| why.contains("hard link")));
+        let theirs = FileFacts {
+            uid: 1001,
+            links: 1,
+            ..gone
+        };
+        assert!(sidecar_problem(&theirs, 1000).is_some());
     }
 
     #[test]
@@ -501,7 +600,7 @@ mod tests {
             .unwrap();
             drop(conn);
             let conn = Connection::open(&path).unwrap();
-            let rows = schema_rows(&conn).unwrap();
+            let rows = schema_rows(&conn, usize::MAX).unwrap();
             let planted = (
                 "table".to_owned(),
                 "profiles".to_owned(),

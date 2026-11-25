@@ -8,6 +8,7 @@
 //!
 //! Counters never wrap: at `u64::MAX` they return [`Exhausted`] and stay put.
 
+use super::reader_registry::ControlGuard;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -38,8 +39,15 @@ impl Generation {
         self.0.load(Ordering::SeqCst)
     }
 
-    /// Increments and returns the new generation.
-    pub fn advance(&self) -> Result<u64, Exhausted> {
+    /// Increments and returns the new generation. Only a quiesced registry
+    /// may do this, so the guard that proves it is required.
+    pub(super) fn advance(&self, _guard: &ControlGuard) -> Result<u64, Exhausted> {
+        bump(&self.0)
+    }
+
+    /// `advance` for tests that have no registry to quiesce.
+    #[cfg(test)]
+    pub(super) fn advance_for_test(&self) -> Result<u64, Exhausted> {
         bump(&self.0)
     }
 }
