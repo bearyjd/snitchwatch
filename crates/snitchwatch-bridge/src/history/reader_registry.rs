@@ -30,7 +30,9 @@ pub const RESPONSE_SLOTS: usize = 2;
 pub const SEND_DEADLINE: Duration = Duration::from_secs(5);
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Why a query was not admitted.

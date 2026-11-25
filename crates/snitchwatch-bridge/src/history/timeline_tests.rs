@@ -164,7 +164,10 @@ fn what_lies_below_the_retention_floor_is_not_blank() {
     let segments = coverage(w, &[session(50, None)], &[], Some(50));
     assert_eq!(
         spans(&segments),
-        vec![(0, 50, Kind::BeforeFloor, false), (50, 100, Kind::Recorded, true)]
+        vec![
+            (0, 50, Kind::BeforeFloor, false),
+            (50, 100, Kind::Recorded, true)
+        ]
     );
     // A marker below the floor explains its stretch better than "before".
     let gaps = [gap(0, 20, GapCause::Evicted)];

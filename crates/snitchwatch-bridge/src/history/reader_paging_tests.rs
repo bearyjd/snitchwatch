@@ -13,7 +13,10 @@ use super::retention_support::evict_before;
 use super::session::SessionEnd;
 
 fn ids(pages: &[Page]) -> Vec<i64> {
-    pages.iter().flat_map(|p| p.events.iter().map(|e| e.id)).collect()
+    pages
+        .iter()
+        .flat_map(|p| p.events.iter().map(|e| e.id))
+        .collect()
 }
 
 fn assert_no_duplicates(ids: &[i64]) {
@@ -34,7 +37,9 @@ fn all_ids(fx: &Fx) -> BTreeSet<i64> {
 fn plan(conn: &rusqlite::Connection, sql: &str, params: &[i64]) -> Vec<String> {
     let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(params), |r| r.get::<_, String>(3))
+        .query_map(rusqlite::params_from_iter(params), |r| {
+            r.get::<_, String>(3)
+        })
         .unwrap()
         .map(Result::unwrap)
         .collect();
@@ -62,14 +67,20 @@ fn every_page_statement_uses_the_time_index_with_no_sort_and_no_table_scan() {
     }
     // The tie statement is a range on the index itself, not a filter over it.
     let ties = plan(fx.conn(), &events_sql(Seek::Ties), &[5, 5, 200]).join(" | ");
-    assert!(ties.contains("ts_ms=?") && ties.contains("rowid<?"), "{ties}");
+    assert!(
+        ties.contains("ts_ms=?") && ties.contains("rowid<?"),
+        "{ties}"
+    );
 }
 
 fn steps(conn: &rusqlite::Connection, cursor: Option<(i64, i64)>) -> i32 {
     let mut total = 0;
     let mut got = 0;
     let statements: Vec<(Seek, Vec<i64>)> = match cursor {
-        Some((ts, id)) => vec![(Seek::Ties, vec![ts, id, 200]), (Seek::Older, vec![ts, 200])],
+        Some((ts, id)) => vec![
+            (Seek::Ties, vec![ts, id, 200]),
+            (Seek::Older, vec![ts, 200]),
+        ],
         None => vec![(Seek::Head, vec![200])],
     };
     for (seek, params) in statements {
@@ -110,7 +121,7 @@ fn fifty_thousand_ties_cost_the_same_at_every_depth() {
 #[test]
 fn ties_at_one_instant_page_by_id_without_duplicates_or_skips() {
     let fx = Fx::new();
-    fx.events(std::iter::repeat(7).take(1234));
+    fx.events(std::iter::repeat_n(7, 1234));
     let pages = fx.all_pages(200);
     assert_eq!(pages.len(), 7);
     let got = ids(&pages);
@@ -144,8 +155,15 @@ fn rows_inserted_while_paging_neither_repeat_nor_hide_existing_ones() {
         .collect();
     assert_no_duplicates(&seen);
     let ts: Vec<i64> = rest_events.iter().map(|e| e.ts_ms).collect();
-    assert!(!ts.contains(&900), "ahead of the cursor: a re-read of the head shows it");
-    assert_eq!(ts.iter().filter(|t| **t == 5).count(), 2, "the original ts-5 row and the late one, once each");
+    assert!(
+        !ts.contains(&900),
+        "ahead of the cursor: a re-read of the head shows it"
+    );
+    assert_eq!(
+        ts.iter().filter(|t| **t == 5).count(),
+        2,
+        "the original ts-5 row and the late one, once each"
+    );
     let existing: BTreeSet<i64> = (1..=300).collect();
     let seen_set: BTreeSet<i64> = seen.iter().copied().collect();
     assert!(existing.is_subset(&seen_set), "no existing row was skipped");
@@ -159,7 +177,9 @@ fn a_reused_newest_rowid_does_not_duplicate_or_hide_anything() {
     let cursor = first.next_cursor.unwrap();
     // The newest row's id is free again after it is deleted: a new row takes
     // it, now behind the cursor.
-    fx.conn().execute("DELETE FROM events WHERE id = 300", []).unwrap();
+    fx.conn()
+        .execute("DELETE FROM events WHERE id = 300", [])
+        .unwrap();
     fx.events([150]);
     let reused: i64 = fx
         .conn()
@@ -197,7 +217,10 @@ fn paging_into_evicted_data_resumes_and_ends_at_the_retention_floor() {
     assert!(last.gaps.iter().any(|g| g.cause == "evicted"));
     assert_no_duplicates(&ids(&pages));
     // The evicted stretch is covered by a marker, never blank.
-    assert!(last.coverage.iter().all(|s| s.kind != super::timeline::Kind::Unexplained));
+    assert!(last
+        .coverage
+        .iter()
+        .all(|s| s.kind != super::timeline::Kind::Unexplained));
 }
 
 #[test]
@@ -214,7 +237,10 @@ fn a_cursor_whose_row_was_evicted_still_resumes_at_the_next_older_row() {
     assert!(rest.events.is_empty(), "nothing older survives");
     assert_eq!(rest.end, End::RetentionFloor);
     assert!(rest.next_cursor.is_none());
-    assert!(rest.gaps.iter().any(|g| g.cause == "evicted"), "and it says so");
+    assert!(
+        rest.gaps.iter().any(|g| g.cause == "evicted"),
+        "and it says so"
+    );
 }
 
 /// Retention removes in chunks: runs them until nothing older than `cutoff`
@@ -223,7 +249,11 @@ fn evict_all_before(fx: &mut Fx, cutoff: i64) {
     loop {
         let older: i64 = fx
             .conn()
-            .query_row("SELECT count(*) FROM events WHERE ts_ms < ?1", [cutoff], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM events WHERE ts_ms < ?1",
+                [cutoff],
+                |r| r.get(0),
+            )
             .unwrap();
         if older == 0 {
             return;
@@ -255,11 +285,21 @@ fn consecutive_pages_share_a_boundary_and_each_tiles_its_window() {
         let c = &page.coverage;
         assert_eq!(c.first().unwrap().start_ms, page.window_lo_ms);
         assert_eq!(c.last().unwrap().end_ms, page.window_hi_ms);
-        assert!(c.windows(2).all(|w| w[0].end_ms == w[1].start_ms), "a hole inside a page");
-        assert!(c.iter().all(|s| s.kind != super::timeline::Kind::Unexplained), "{c:?}");
+        assert!(
+            c.windows(2).all(|w| w[0].end_ms == w[1].start_ms),
+            "a hole inside a page"
+        );
+        assert!(
+            c.iter()
+                .all(|s| s.kind != super::timeline::Kind::Unexplained),
+            "{c:?}"
+        );
     }
     for pair in pages.windows(2) {
-        assert_eq!(pair[0].window_lo_ms, pair[1].window_hi_ms, "a hole between pages");
+        assert_eq!(
+            pair[0].window_lo_ms, pair[1].window_hi_ms,
+            "a hole between pages"
+        );
     }
     assert_eq!(pages[0].window_hi_ms, 2_000, "the head runs to now");
     assert_no_duplicates(&ids(&pages));
@@ -267,7 +307,9 @@ fn consecutive_pages_share_a_boundary_and_each_tiles_its_window() {
     // Every gap row is on some page that overlaps it.
     for stored in [(1_450, 1_500), (1_700, 1_720), (1_800, 1_805)] {
         assert!(
-            pages.iter().any(|p| p.gaps.iter().any(|g| (g.start_ms, g.end_ms) == stored)),
+            pages
+                .iter()
+                .any(|p| p.gaps.iter().any(|g| (g.start_ms, g.end_ms) == stored)),
             "gap {stored:?} never shown"
         );
     }
@@ -296,7 +338,9 @@ fn eviction_between_pages_leaves_no_hole_between_windows() {
     }
     for page in &pages {
         assert!(
-            page.coverage.iter().all(|s| s.kind != super::timeline::Kind::Unexplained),
+            page.coverage
+                .iter()
+                .all(|s| s.kind != super::timeline::Kind::Unexplained),
             "{:?}",
             page.coverage
         );

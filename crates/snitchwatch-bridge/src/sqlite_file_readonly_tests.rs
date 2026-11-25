@@ -151,7 +151,8 @@ fn every_write_is_refused_and_the_file_is_byte_identical() {
     }
     // Not a write on a rollback-journal database: a no-op, and the file
     // comparison below proves it changed nothing.
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
     let sum: i64 = conn
         .query_row("SELECT sum(x) FROM t", [], |r| r.get(0))
         .unwrap();
@@ -189,7 +190,5 @@ fn the_connection_is_defensive_and_does_not_wait_on_a_lock() {
         .query_row("PRAGMA cell_size_check", [], |r| r.get(0))
         .unwrap();
     assert_eq!(cell, 1);
-    assert!(conn
-        .db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)
-        .unwrap());
+    assert!(conn.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE).unwrap());
 }

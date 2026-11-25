@@ -80,13 +80,19 @@ fn a_schema_with_something_extra_is_refused() {
         .execute_batch("CREATE VIEW sneaky AS SELECT * FROM events;")
         .unwrap();
     let u = unavailable(fx.read(None, 10));
-    assert!(u.reason.contains("schema") || u.reason.contains("sneaky"), "{}", u.reason);
+    assert!(
+        u.reason.contains("schema") || u.reason.contains("sneaky"),
+        "{}",
+        u.reason
+    );
 }
 
 #[test]
 fn a_schema_with_something_missing_is_refused() {
     let fx = Fx::new();
-    fx.conn().execute_batch("DROP VIEW history_events;").unwrap();
+    fx.conn()
+        .execute_batch("DROP VIEW history_events;")
+        .unwrap();
     let u = unavailable(fx.read(None, 10));
     assert!(u.reason.contains("schema"), "{}", u.reason);
 }
@@ -127,14 +133,37 @@ fn a_crashed_writers_hot_journal_is_unavailable_retry_and_left_untouched() {
     let journal = dir.join("history.db-journal");
     std::fs::copy(fx.db.with_extension("db-journal"), &journal).unwrap();
     w.execute_batch("ROLLBACK;").unwrap();
-    assert!(std::fs::metadata(&journal).unwrap().len() > 0, "a journal to be hot");
-    let (db_before, journal_before) = (std::fs::read(&db).unwrap(), std::fs::read(&journal).unwrap());
+    assert!(
+        std::fs::metadata(&journal).unwrap().len() > 0,
+        "a journal to be hot"
+    );
+    let (db_before, journal_before) = (
+        std::fs::read(&db).unwrap(),
+        std::fs::read(&journal).unwrap(),
+    );
 
-    let ctx = Context { db_path: &db, ..fx.ctx() };
-    let outcome = read_page(&Request { cursor: None, limit: 10 }, &ctx);
+    let ctx = Context {
+        db_path: &db,
+        ..fx.ctx()
+    };
+    let outcome = read_page(
+        &Request {
+            cursor: None,
+            limit: 10,
+        },
+        &ctx,
+    );
     let u = unavailable(outcome);
-    assert!(u.retry, "a journal to recover: retry, not empty: {}", u.reason);
-    assert_eq!(std::fs::read(&journal).unwrap(), journal_before, "journal untouched");
+    assert!(
+        u.retry,
+        "a journal to recover: retry, not empty: {}",
+        u.reason
+    );
+    assert_eq!(
+        std::fs::read(&journal).unwrap(),
+        journal_before,
+        "journal untouched"
+    );
     assert_eq!(std::fs::read(&db).unwrap(), db_before, "database untouched");
 }
 
@@ -144,7 +173,10 @@ fn a_cursor_from_before_a_generation_bump_is_refused() {
     fx.events(1..=300);
     let cursor = fx.page(None, 100).next_cursor.unwrap();
     fx.generation.advance().unwrap();
-    assert!(matches!(fx.read(Some(cursor), 100), Outcome::StaleGeneration));
+    assert!(matches!(
+        fx.read(Some(cursor), 100),
+        Outcome::StaleGeneration
+    ));
     // Starting again from the head works under the new generation.
     let page = fx.page(None, 100);
     assert_eq!(page.generation, fx.generation.current());
@@ -155,7 +187,10 @@ fn a_page_that_finishes_after_the_generation_moved_is_dropped() {
     let fx = Fx::new();
     fx.events(1..=300);
     let ctx = fx.ctx();
-    let request = Request { cursor: None, limit: 100 };
+    let request = Request {
+        cursor: None,
+        limit: 100,
+    };
     let mut read = Read::open(&request, &ctx).unwrap_or_else(|o| panic!("{o:?}"));
     read.load_events().unwrap_or_else(|o| panic!("{o:?}"));
     read.load_ledger().unwrap_or_else(|o| panic!("{o:?}"));
@@ -168,7 +203,10 @@ fn a_clear_between_the_events_and_the_ledger_delivers_nothing() {
     let fx = Fx::new();
     fx.events(1..=300);
     let ctx = fx.ctx();
-    let request = Request { cursor: None, limit: 100 };
+    let request = Request {
+        cursor: None,
+        limit: 100,
+    };
     let mut read = Read::open(&request, &ctx).unwrap_or_else(|o| panic!("{o:?}"));
     read.load_events().unwrap_or_else(|o| panic!("{o:?}"));
     fx.generation.advance().unwrap();
@@ -189,7 +227,10 @@ fn a_cancel_between_stages_stops_the_read() {
     let fx = Fx::new();
     fx.events(1..=300);
     let ctx = fx.ctx();
-    let request = Request { cursor: None, limit: 100 };
+    let request = Request {
+        cursor: None,
+        limit: 100,
+    };
     let mut read = Read::open(&request, &ctx).unwrap_or_else(|o| panic!("{o:?}"));
     fx.cancel.cancel();
     assert!(matches!(read.load_events(), Err(Outcome::Cancelled)));

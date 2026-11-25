@@ -26,7 +26,8 @@ use super::reader_page::{assemble, Loaded};
 use super::reader_registry::CancelToken;
 use super::reader_size::{event_bytes, HEADER_BYTES};
 use super::reader_sql::{
-    events_chunk, floor, gaps_overlapping, ledger_start, sessions_overlapping, watermark, Control, Stop,
+    events_chunk, floor, gaps_overlapping, ledger_start, sessions_overlapping, watermark, Control,
+    Stop,
 };
 use super::timeline::Segment;
 
@@ -295,7 +296,15 @@ impl<'a> Read<'a> {
             return Err(Outcome::Cancelled);
         }
         let control = Control::new(ctx.cancel, &ctx.limits);
-        let conn = open_validated(ctx.db_path, &control).map_err(unavailable)?;
+        // A cancel that lands while the file is being checked is a cancel, not
+        // an unavailable store (a cancel is sticky).
+        let conn = open_validated(ctx.db_path, &control).map_err(|u| {
+            if ctx.cancel.is_cancelled() {
+                Outcome::Cancelled
+            } else {
+                unavailable(u)
+            }
+        })?;
         ctx.cancel.attach(conn.get_interrupt_handle());
         let hi_ms = request.cursor.map_or(ctx.now_ms, |c| c.ts_ms);
         Ok(Self {
@@ -399,7 +408,10 @@ impl<'a> Read<'a> {
         let (conn, ctl) = (&self.conn, &self.control);
         let loaded = &mut self.loaded;
         if let Some(newest) = loaded.events.first() {
-            loaded.hi_ms = self.request.cursor.map_or(self.ctx.now_ms.max(newest.ts_ms), |c| c.ts_ms);
+            loaded.hi_ms = self
+                .request
+                .cursor
+                .map_or(self.ctx.now_ms.max(newest.ts_ms), |c| c.ts_ms);
         } else if self.request.cursor.is_none() {
             loaded.hi_ms = self.ctx.now_ms;
         }

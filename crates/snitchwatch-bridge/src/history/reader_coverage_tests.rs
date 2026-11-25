@@ -4,6 +4,7 @@
 
 use std::sync::Mutex;
 
+use super::caps::ProcessPath;
 use super::durable::tests::{rig as durable_rig, Rig as DurableRig};
 use super::gaps::{flush_due, Losses, StandingLabels};
 use super::ledger::GapCause;
@@ -12,7 +13,6 @@ use super::reader::*;
 use super::reader_fixture::Fx;
 use super::reader_registry::CancelToken;
 use super::record::{insert_event, Action, AnsweredBy, EventRecord};
-use super::caps::ProcessPath;
 use super::retention_support::evict_process;
 use super::timeline::Kind;
 use crate::cache::rule_hits::UpstreamLoss;
@@ -30,7 +30,9 @@ fn ping(missing: u64, since: Option<i64>, at: i64) -> UpstreamLoss {
 /// at 4000, and the first ping after it reporting `missing` lost upstream.
 fn outage(missing: u64) -> DurableRig {
     let mut rig = durable_rig(1000);
-    rig.engine.begin_session(&rig.registry, &rig.limits).unwrap();
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
     let losses = Mutex::new(Losses::new());
     {
         let mut l = losses.lock().unwrap();
@@ -64,7 +66,13 @@ fn read_durable(rig: &DurableRig, live: Option<i64>, now_ms: i64) -> Page {
         standing: None,
         limits: Limits::default(),
     };
-    match read_page(&Request { cursor: None, limit: 200 }, &ctx) {
+    match read_page(
+        &Request {
+            cursor: None,
+            limit: 200,
+        },
+        &ctx,
+    ) {
         Outcome::Page(page) => *page,
         other => panic!("{other:?}"),
     }
@@ -94,9 +102,20 @@ fn after_an_outage_the_page_covers_last_ping_to_down_edge_outage_and_up_to_ping(
 fn a_single_lost_event_across_an_outage_is_at_least_one_not_two() {
     let rig = outage(1);
     let page = read_durable(&rig, Some(1000), 6000);
-    let upstream: Vec<&GapView> = page.gaps.iter().filter(|g| g.cause == "upstream-loss").collect();
-    assert_eq!(upstream.iter().map(|g| g.count_min).sum::<u64>(), 2, "the rows say 1 + 1");
-    assert!(upstream.iter().all(|g| g.part_of_pair), "shown as a pair, not a sum");
+    let upstream: Vec<&GapView> = page
+        .gaps
+        .iter()
+        .filter(|g| g.cause == "upstream-loss")
+        .collect();
+    assert_eq!(
+        upstream.iter().map(|g| g.count_min).sum::<u64>(),
+        2,
+        "the rows say 1 + 1"
+    );
+    assert!(
+        upstream.iter().all(|g| g.part_of_pair),
+        "shown as a pair, not a sum"
+    );
     assert_eq!(page.summary.lost_at_least, 1, "never above the truth");
 }
 
@@ -113,7 +132,10 @@ fn a_pair_broken_apart_says_it_may_overcount() {
     let rig = outage(3);
     rig.engine
         .connection()
-        .execute("DELETE FROM gaps WHERE cause = 'upstream-loss' AND start_ms >= 4000", [])
+        .execute(
+            "DELETE FROM gaps WHERE cause = 'upstream-loss' AND start_ms >= 4000",
+            [],
+        )
         .unwrap();
     let page = read_durable(&rig, Some(1000), 6000);
     assert_eq!(page.summary.may_overcount_by_pairs, 1);
@@ -124,7 +146,9 @@ fn a_pair_broken_apart_says_it_may_overcount() {
 fn a_session_that_crashed_open_does_not_claim_the_time_after_its_watermark() {
     let rig = durable_rig(1000);
     let mut rig = rig;
-    rig.engine.begin_session(&rig.registry, &rig.limits).unwrap();
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
     rig.set(3000);
     // The process is killed here: the session row has no end, the watermark
     // is wherever the last commit left it, and nothing is running now.
@@ -138,20 +162,32 @@ fn a_session_that_crashed_open_does_not_claim_the_time_after_its_watermark() {
     assert!(page.sessions.iter().all(|s| !s.running));
     // Another session being live does not make this open one run to the head.
     let other = read_durable(&rig, Some(9_999), 9000);
-    assert!(other.coverage.iter().any(|s| s.kind == Kind::Unexplained), "{:?}", other.coverage);
+    assert!(
+        other.coverage.iter().any(|s| s.kind == Kind::Unexplained),
+        "{:?}",
+        other.coverage
+    );
     // The same open session as the live one runs to the head.
     let live = read_durable(&rig, Some(1000), 9000);
-    assert!(live.coverage.iter().all(|s| s.kind == Kind::Recorded), "{:?}", live.coverage);
+    assert!(
+        live.coverage.iter().all(|s| s.kind == Kind::Recorded),
+        "{:?}",
+        live.coverage
+    );
     assert!(live.sessions[0].running);
 }
 
 #[test]
 fn after_the_restart_a_crashed_session_is_covered_by_an_uncertain_gap() {
     let mut rig = durable_rig(1000);
-    rig.engine.begin_session(&rig.registry, &rig.limits).unwrap();
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
     rig.set(3000);
     // Killed; the next start records the crash and opens a session.
-    rig.engine.begin_session(&rig.registry, &rig.limits).unwrap();
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
     rig.set(5000);
     let page = read_durable(&rig, Some(3000), 5000);
     assert_tiled_and_explained(&page);
@@ -175,7 +211,10 @@ fn standing_labels_describe_the_current_session_and_say_so() {
     assert_eq!(s.nolog, Label::Yes);
     assert_eq!(s.stock_default_unobservable, Label::Yes);
     assert_eq!(s.no_gui_prompts, Label::No);
-    assert_eq!(s.earlier_sessions, "unknown", "not false: they are not persisted");
+    assert_eq!(
+        s.earlier_sessions, "unknown",
+        "not false: they are not persisted"
+    );
 }
 
 #[test]
@@ -202,18 +241,37 @@ fn a_process_marker_over_other_processes_events_is_never_shown_as_empty() {
     fx.now_ms = 1_000;
     fx.session(1);
     for ts in 1..=400 {
-        event_of(&fx, ts, if ts % 2 == 0 { "/usr/bin/a" } else { "/usr/bin/b" });
+        event_of(
+            &fx,
+            ts,
+            if ts % 2 == 0 {
+                "/usr/bin/a"
+            } else {
+                "/usr/bin/b"
+            },
+        );
     }
     while super::retention_support::count_of(&fx.rig, "/usr/bin/a") > 0 {
         evict_process(&mut fx.rig, "/usr/bin/a").unwrap();
     }
     let page = fx.page(None, 200);
-    let marker = page.gaps.iter().find(|g| g.cause == "evicted").expect("the marker");
+    let marker = page
+        .gaps
+        .iter()
+        .find(|g| g.cause == "evicted")
+        .expect("the marker");
     assert!(marker.overlaps_events, "b's events survive inside a's span");
     assert!(marker.count_is_lower_bound);
     assert!(page.coverage.iter().all(|s| s.kind != Kind::Unexplained));
-    let evicted_seg = page.coverage.iter().find(|s| s.kind == Kind::Gap && !s.gaps.is_empty()).unwrap();
-    assert!(evicted_seg.session, "a session ran there: events may be missing, not 'nothing'");
+    let evicted_seg = page
+        .coverage
+        .iter()
+        .find(|s| s.kind == Kind::Gap && !s.gaps.is_empty())
+        .unwrap();
+    assert!(
+        evicted_seg.session,
+        "a session ran there: events may be missing, not 'nothing'"
+    );
 }
 
 #[test]
@@ -249,7 +307,9 @@ fn what_lies_below_the_floor_and_outside_the_ledger_is_named_not_blank() {
     fx.conn().execute("DELETE FROM gaps", []).unwrap();
     let page = fx.page(None, 200);
     assert!(
-        page.coverage.iter().any(|s| s.kind == Kind::BeforeFloor && s.start_ms == 200 && s.end_ms == 600),
+        page.coverage
+            .iter()
+            .any(|s| s.kind == Kind::BeforeFloor && s.start_ms == 200 && s.end_ms == 600),
         "{:?}",
         page.coverage
     );
@@ -263,7 +323,10 @@ fn gap_counts_are_always_lower_bounds_and_uncertain_counts_restarts() {
     fx.gap(30, 40, GapCause::QueueOverflow, 7);
     let page = fx.page(None, 10);
     assert!(page.gaps.iter().all(|g| g.count_is_lower_bound));
-    assert_eq!(page.summary.lost_at_least, 7, "restarts are not lost events");
+    assert_eq!(
+        page.summary.lost_at_least, 7,
+        "restarts are not lost events"
+    );
 }
 
 #[test]
@@ -277,13 +340,21 @@ fn a_gap_wider_than_the_window_is_clipped_for_display_only() {
     let page = fx.page(None, 100);
     let g = page.gaps.iter().find(|g| g.cause == "clock-jump").unwrap();
     assert!(g.clipped, "it runs past the window");
-    assert_eq!((g.start_ms, g.end_ms, g.count_min), (0, 5_000, 2), "its own bounds, never shrunk");
+    assert_eq!(
+        (g.start_ms, g.end_ms, g.count_min),
+        (0, 5_000, 2),
+        "its own bounds, never shrunk"
+    );
     let tiny = page.coverage.iter().find(|s| !s.gaps.is_empty()).unwrap();
     assert!(tiny.start_ms >= page.window_lo_ms);
     // A gap inside the window is not clipped.
     fx.gap(150, 160, GapCause::UpstreamLoss, 1);
     let page = fx.page(None, 200);
-    let inside = page.gaps.iter().find(|g| g.cause == "upstream-loss").unwrap();
+    let inside = page
+        .gaps
+        .iter()
+        .find(|g| g.cause == "upstream-loss")
+        .unwrap();
     assert!(!inside.clipped);
 }
 
@@ -304,7 +375,10 @@ fn an_eviction_between_the_events_and_the_ledger_shows_as_a_marker_not_a_hole() 
         standing: fx.standing,
         limits: fx.limits,
     };
-    let request = Request { cursor: None, limit: 200 };
+    let request = Request {
+        cursor: None,
+        limit: 200,
+    };
     let mut read = Read::open(&request, &ctx).unwrap_or_else(|o| panic!("{o:?}"));
     read.load_events().unwrap_or_else(|o| panic!("{o:?}"));
     // Retention removes the oldest rows after this reader took its events.
@@ -313,7 +387,9 @@ fn an_eviction_between_the_events_and_the_ledger_shows_as_a_marker_not_a_hole() 
             .rig
             .engine
             .connection()
-            .query_row("SELECT count(*) FROM events WHERE ts_ms < 150", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM events WHERE ts_ms < 150", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         if older == 0 {
             break;
@@ -321,7 +397,13 @@ fn an_eviction_between_the_events_and_the_ledger_shows_as_a_marker_not_a_hole() 
         super::retention_support::evict_before(&mut fx.rig, 150).unwrap();
     }
     read.load_ledger().unwrap_or_else(|o| panic!("{o:?}"));
-    let Outcome::Page(page) = read.finish() else { panic!("a page") };
-    assert!(page.coverage.iter().all(|s| s.kind != Kind::Unexplained), "{:?}", page.coverage);
+    let Outcome::Page(page) = read.finish() else {
+        panic!("a page")
+    };
+    assert!(
+        page.coverage.iter().all(|s| s.kind != Kind::Unexplained),
+        "{:?}",
+        page.coverage
+    );
     assert!(page.gaps.iter().any(|g| g.cause == "evicted"));
 }

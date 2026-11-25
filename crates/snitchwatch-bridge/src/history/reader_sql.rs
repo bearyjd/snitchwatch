@@ -40,7 +40,10 @@ pub(super) enum Stop {
     /// A writer's commit held the file past the short busy wait.
     Busy,
     /// Anything else: the file is not readable.
-    Fail { reason: String, retry: bool },
+    Fail {
+        reason: String,
+        retry: bool,
+    },
 }
 
 pub(super) fn classify_error(e: &rusqlite::Error) -> Stop {

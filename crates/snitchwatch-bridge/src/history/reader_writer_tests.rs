@@ -65,7 +65,14 @@ fn the_real_writer_commits_every_batch_while_two_readers_read_flat_out() {
     let root = tempdir();
     let state = state_dir(&root);
     let location = locate(Mode::User, Some(&state)).unwrap();
-    enable(&location, Consent { text_id: "t".into(), accepted_ms: 1 }).unwrap();
+    enable(
+        &location,
+        Consent {
+            text_id: "t".into(),
+            accepted_ms: 1,
+        },
+    )
+    .unwrap();
     let engine = engine_at(&location);
     engine
         .connection()
@@ -95,7 +102,13 @@ fn the_real_writer_commits_every_batch_while_two_readers_read_flat_out() {
                     limits: Limits::default(),
                 };
                 while !done.load(Ordering::SeqCst) {
-                    let _ = read_page(&Request { cursor: None, limit: 200 }, &ctx);
+                    let _ = read_page(
+                        &Request {
+                            cursor: None,
+                            limit: 200,
+                        },
+                        &ctx,
+                    );
                     reads.fetch_add(1, Ordering::SeqCst);
                 }
             });
@@ -126,7 +139,11 @@ fn the_real_writer_commits_every_batch_while_two_readers_read_flat_out() {
     assert_eq!(stats.dropped_queue, 0, "{stats:?}");
     let conn = rusqlite::Connection::open(&db).unwrap();
     let failed: i64 = conn
-        .query_row("SELECT count(*) FROM gaps WHERE cause IN ('write-failed', 'queue-overflow')", [], |r| r.get(0))
+        .query_row(
+            "SELECT count(*) FROM gaps WHERE cause IN ('write-failed', 'queue-overflow')",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(failed, 0, "a read made the writer lose a batch");
 }

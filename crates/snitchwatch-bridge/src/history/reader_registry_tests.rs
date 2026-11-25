@@ -94,7 +94,10 @@ fn the_quiesce_order_stops_an_in_flight_reader_before_wait_idle_returns() {
     registry.close();
     registry.cancel_all();
     assert!(registry.wait_idle(LONG), "the worker stopped");
-    assert!(worker.join().unwrap(), "it stopped because it was cancelled");
+    assert!(
+        worker.join().unwrap(),
+        "it stopped because it was cancelled"
+    );
 }
 
 #[test]
@@ -240,7 +243,11 @@ fn reclaiming_a_slot_drops_its_page_not_just_a_counter() {
     assert!(stuck.reclaimed());
     assert!(stuck.take().is_none());
     assert!(stuck.fill(Counted(Arc::clone(&dropped))).is_err());
-    assert_eq!(dropped.load(Ordering::SeqCst), 2, "the refused page came back and dropped");
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        2,
+        "the refused page came back and dropped"
+    );
     drop((stuck, fresh));
 }
 

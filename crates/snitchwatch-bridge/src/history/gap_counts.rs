@@ -59,7 +59,9 @@ fn find_pairs(gaps: &[Gap]) -> Pairs {
             (0..gaps.len()).find(|&i| i != d && upstream(i) && !used[i] && pick(i))
         };
         let before = free(&used, &|i| gaps[i].end_ms == down.start_ms);
-        let after = free(&used, &|i| gaps[i].start_ms == down.end_ms && Some(i) != before);
+        let after = free(&used, &|i| {
+            gaps[i].start_ms == down.end_ms && Some(i) != before
+        });
         match (before, after) {
             (Some(b), Some(a)) => {
                 used[b] = true;

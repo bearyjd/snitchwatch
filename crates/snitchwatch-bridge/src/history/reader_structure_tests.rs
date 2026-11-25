@@ -56,7 +56,10 @@ fn the_reader_names_no_writer_type_and_no_statement_that_changes_data() {
 fn nothing_in_the_read_path_is_compiled_only_for_tests() {
     for (name, source) in SOURCES {
         let code = production(source);
-        assert!(!code.contains("cfg(test)") && !code.contains("for_test"), "{name}");
+        assert!(
+            !code.contains("cfg(test)") && !code.contains("for_test"),
+            "{name}"
+        );
         assert!(!code.contains("thread::sleep"), "{name} sleeps");
     }
 }

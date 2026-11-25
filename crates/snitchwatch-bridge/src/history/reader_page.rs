@@ -10,8 +10,8 @@
 use super::gap_counts::{pair_flags, summarize};
 use super::ledger::{Gap, GapCause};
 use super::reader::{
-    Context, Cursor, End, EventView, GapView, Limits, Page, Partial, Request, SessionView,
-    Standing, Label,
+    Context, Cursor, End, EventView, GapView, Label, Limits, Page, Partial, Request, SessionView,
+    Standing,
 };
 use super::reader_size::{event_bytes, gap_bytes, segment_bytes, session_bytes, HEADER_BYTES};
 use super::session::Session;
@@ -64,7 +64,10 @@ fn effective(sessions: &[Session], live: Option<i64>, watermark: Option<i64>) ->
 }
 
 fn window(lo: i64, hi: i64) -> Window {
-    Window::new(lo, hi).unwrap_or(Window { lo_ms: hi, hi_ms: hi })
+    Window::new(lo, hi).unwrap_or(Window {
+        lo_ms: hi,
+        hi_ms: hi,
+    })
 }
 
 impl Loaded {
@@ -289,7 +292,12 @@ fn end_state(more: bool, gaps: &[Gap]) -> End {
 fn truncate_ledger(c: &mut Candidate, loaded: &Loaded, ctx: &Context<'_>) {
     c.gaps.truncate(ctx.limits.gap_rows_per_page);
     c.sessions.truncate(ctx.limits.session_rows_per_page);
-    c.segments = coverage(window(c.lo_ms, loaded.hi_ms), &c.sessions, &c.gaps, loaded.floor_ms);
+    c.segments = coverage(
+        window(c.lo_ms, loaded.hi_ms),
+        &c.sessions,
+        &c.gaps,
+        loaded.floor_ms,
+    );
     c.gap_views = gap_views(&c.gaps, c.lo_ms, loaded.hi_ms, &[]);
     c.session_views = session_views(&c.sessions, ctx.live_session_start_ms);
 }

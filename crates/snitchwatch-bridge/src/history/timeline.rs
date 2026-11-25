@@ -146,7 +146,10 @@ pub fn coverage(
                 push(classify((points[i - 1], point), sessions, gaps, floor_ms));
             }
             // A zero-length gap is a point of its own, wherever it falls.
-            if gaps.iter().any(|g| g.start_ms == point && g.end_ms == point) {
+            if gaps
+                .iter()
+                .any(|g| g.start_ms == point && g.end_ms == point)
+            {
                 push(classify((point, point), sessions, gaps, floor_ms));
             }
         }

@@ -35,7 +35,10 @@ fn worst_case_events(fx: &Fx, n: i64) {
 }
 
 fn all_event_ids(pages: &[Page]) -> Vec<i64> {
-    pages.iter().flat_map(|p| p.events.iter().map(|e| e.id)).collect()
+    pages
+        .iter()
+        .flat_map(|p| p.events.iter().map(|e| e.id))
+        .collect()
 }
 
 fn assert_pages_complete(pages: &[Page], expected: i64) {
@@ -67,7 +70,12 @@ fn worst_case_rows_make_a_page_under_the_byte_bound_with_a_cursor() {
     for page in &pages {
         assert!(page.bytes <= 256 * KIB, "{}", page.bytes);
         let json = serde_json::to_vec(page).unwrap();
-        assert!(json.len() <= page.bytes, "real {} > bound {}", json.len(), page.bytes);
+        assert!(
+            json.len() <= page.bytes,
+            "real {} > bound {}",
+            json.len(),
+            page.bytes
+        );
         for e in &page.events {
             let real = serde_json::to_string(e).unwrap().len();
             assert!(real <= event_bytes(e), "row {real} > {}", event_bytes(e));
@@ -97,7 +105,11 @@ fn gap_heavy_windows_shrink_the_window_and_drop_no_gap() {
     fx.now_ms = 1_300;
     fx.session(1_000);
     fx.events(1_000..1_200);
-    let causes = [GapCause::UpstreamLoss, GapCause::QueueOverflow, GapCause::AdmissionDrop];
+    let causes = [
+        GapCause::UpstreamLoss,
+        GapCause::QueueOverflow,
+        GapCause::AdmissionDrop,
+    ];
     for i in 0..150i64 {
         fx.gap(1_000 + i, 1_000 + i, causes[(i % 3) as usize], 1);
     }
@@ -111,16 +123,26 @@ fn gap_heavy_windows_shrink_the_window_and_drop_no_gap() {
     let mut seen: BTreeSet<i64> = BTreeSet::new();
     for page in &pages {
         assert!(page.gaps.len() <= 100);
-        assert!(page.coverage.iter().all(|s| s.kind != super::timeline::Kind::Unexplained || s.start_ms > 1_200));
+        assert!(page
+            .coverage
+            .iter()
+            .all(|s| s.kind != super::timeline::Kind::Unexplained || s.start_ms > 1_200));
         seen.extend(page.gaps.iter().map(|g| g.start_ms));
     }
-    assert_eq!(seen, (1_000..1_150).collect::<BTreeSet<_>>(), "every gap row shown");
+    assert_eq!(
+        seen,
+        (1_000..1_150).collect::<BTreeSet<_>>(),
+        "every gap row shown"
+    );
     let keys: Vec<(i64, i64)> = pages
         .iter()
         .filter_map(|p| p.next_cursor)
         .map(|c| (c.ts_ms, c.id))
         .collect();
-    assert!(keys.windows(2).all(|w| w[0] > w[1]), "strictly forward: {keys:?}");
+    assert!(
+        keys.windows(2).all(|w| w[0] > w[1]),
+        "strictly forward: {keys:?}"
+    );
 }
 
 #[test]
@@ -130,7 +152,11 @@ fn more_gap_rows_at_one_instant_than_a_page_holds_is_said_not_hidden() {
     fx.now_ms = 1_100;
     fx.session(1_000);
     fx.events([1_050]);
-    let causes = [GapCause::UpstreamLoss, GapCause::QueueOverflow, GapCause::AdmissionDrop];
+    let causes = [
+        GapCause::UpstreamLoss,
+        GapCause::QueueOverflow,
+        GapCause::AdmissionDrop,
+    ];
     for i in 0..150usize {
         fx.gap(1_050, 1_050, causes[i % 3], 1);
     }
@@ -165,7 +191,10 @@ fn a_statement_over_its_budget_is_cut_but_keeps_its_rows_and_resumes() {
     let mut cursor = None;
     loop {
         let page = fx.page(cursor, 200);
-        assert!(!page.events.is_empty(), "a cut statement still made progress");
+        assert!(
+            !page.events.is_empty(),
+            "a cut statement still made progress"
+        );
         cursor = page.next_cursor;
         pages.push(page);
         assert!(pages.len() < 400);
@@ -173,7 +202,10 @@ fn a_statement_over_its_budget_is_cut_but_keeps_its_rows_and_resumes() {
             break;
         }
     }
-    assert!(pages.iter().any(|p| p.partial == Some(Partial::Time)), "the budget cut something");
+    assert!(
+        pages.iter().any(|p| p.partial == Some(Partial::Time)),
+        "the budget cut something"
+    );
     assert_pages_complete(&pages, 300);
 }
 
@@ -194,16 +226,23 @@ fn no_read_lock_is_held_between_statements() {
     let fx = Fx::new();
     fx.events(1..=300);
     let ctx = fx.ctx();
-    let request = Request { cursor: None, limit: 100 };
+    let request = Request {
+        cursor: None,
+        limit: 100,
+    };
     let mut read = Read::open(&request, &ctx).unwrap_or_else(|o| panic!("{o:?}"));
     read.load_events().unwrap_or_else(|o| panic!("{o:?}"));
     // The reader's connection is open and idle: a writer commits at once,
     // with no busy wait at all.
     let writer = rusqlite::Connection::open(&fx.db).unwrap();
     writer.busy_timeout(Duration::ZERO).unwrap();
-    writer.execute_batch("BEGIN EXCLUSIVE; COMMIT;").expect("no lock held between stages");
+    writer
+        .execute_batch("BEGIN EXCLUSIVE; COMMIT;")
+        .expect("no lock held between stages");
     read.load_ledger().unwrap_or_else(|o| panic!("{o:?}"));
-    writer.execute_batch("BEGIN EXCLUSIVE; COMMIT;").expect("none after the ledger either");
+    writer
+        .execute_batch("BEGIN EXCLUSIVE; COMMIT;")
+        .expect("none after the ledger either");
     assert!(matches!(read.finish(), Outcome::Page(_)));
 }
 
@@ -234,7 +273,13 @@ fn writers_commit_through_two_readers_reading_flat_out() {
                     limits,
                 };
                 while !done.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = read_page(&Request { cursor: None, limit: 200 }, &ctx);
+                    let _ = read_page(
+                        &Request {
+                            cursor: None,
+                            limit: 200,
+                        },
+                        &ctx,
+                    );
                     reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
             });
@@ -291,7 +336,11 @@ fn the_byte_total_counts_gaps_sessions_and_segments_as_well_as_events() {
     }
     let page = fx.page(None, 200);
     assert!(!page.gaps.is_empty() && !page.sessions.is_empty() && !page.coverage.is_empty());
-    assert_eq!(page.bytes, accounted(&page), "every part of the page is counted");
+    assert_eq!(
+        page.bytes,
+        accounted(&page),
+        "every part of the page is counted"
+    );
 }
 
 #[test]
@@ -303,14 +352,22 @@ fn overlapping_gaps_beside_worst_case_events_still_fit_the_bound() {
     worst_case_events(&fx, 150);
     // Many overlapping gap rows (rotating causes, so they do not merge):
     // every segment lists the gaps that cover it.
-    let causes = [GapCause::UpstreamLoss, GapCause::QueueOverflow, GapCause::AdmissionDrop];
+    let causes = [
+        GapCause::UpstreamLoss,
+        GapCause::QueueOverflow,
+        GapCause::AdmissionDrop,
+    ];
     // A smaller page, so the ledger's bytes are what tips it over.
     fx.limits.page_bytes = 245 * KIB;
     for i in 0..94usize {
         fx.gap(i as i64, 40_000, causes[i % 3], 1);
     }
     let pages = fx.all_pages(200);
-    assert!(pages[0].events.len() < 8, "the ledger's bytes cost events: {}", pages[0].events.len());
+    assert!(
+        pages[0].events.len() < 8,
+        "the ledger's bytes cost events: {}",
+        pages[0].events.len()
+    );
     for page in pages {
         assert!(page.bytes <= 245 * KIB, "{}", page.bytes);
         assert_eq!(page.bytes, accounted(&page));
@@ -348,7 +405,13 @@ fn no_reader_lock_outlasts_the_writers_busy_timeout() {
                     limits,
                 };
                 while !done.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = read_page(&Request { cursor: None, limit: 200 }, &ctx);
+                    let _ = read_page(
+                        &Request {
+                            cursor: None,
+                            limit: 200,
+                        },
+                        &ctx,
+                    );
                     reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
             });
