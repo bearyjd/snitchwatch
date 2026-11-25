@@ -41,6 +41,10 @@ name = "history_reader_stress"
 path = "../history_reader_stress_test.rs"
 
 [[test]]
+name = "history_reader_memory"
+path = "../history_reader_memory_test.rs"
+
+[[test]]
 name = "reader_verdict"
 path = "../reader_verdict_test.rs"
 

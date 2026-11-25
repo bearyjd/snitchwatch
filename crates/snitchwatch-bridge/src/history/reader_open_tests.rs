@@ -73,3 +73,50 @@ fn a_really_unknown_schema_is_still_refused_for_good() {
     assert!(!err.retry, "{}", err.reason);
     assert!(err.reason.contains("refused"), "{}", err.reason);
 }
+
+/// A catalog far bigger than the history schema: reading it takes real work,
+/// done under the read lock.
+fn huge_catalog(fx: &Fx, tables: u32) {
+    let extra: String = (0..tables)
+        .map(|i| format!("CREATE TABLE x{i} (a, b, c);"))
+        .collect();
+    fx.conn()
+        .execute_batch("PRAGMA max_page_count = 1000000")
+        .unwrap();
+    fx.conn()
+        .execute_batch(&format!("BEGIN; {extra} COMMIT;"))
+        .unwrap();
+}
+
+#[test]
+fn a_cancel_during_the_schema_check_interrupts_it_instead_of_waiting_it_out() {
+    let fx = Fx::new();
+    huge_catalog(&fx, 4_000);
+    let ctx = fx.ctx();
+    let control = Control::new(ctx.cancel, &ctx.limits);
+    let err = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(2));
+            ctx.cancel.cancel();
+        });
+        open_validated(&fx.db, &control, Duration::ZERO).unwrap_err()
+    });
+    // Interrupted at a tick; not carried through to a verdict on the catalog.
+    assert_eq!(err.reason, "history read was interrupted", "{}", err.reason);
+}
+
+#[test]
+fn a_huge_unexpected_catalog_is_refused_for_good_not_retried() {
+    let fx = Fx::new();
+    huge_catalog(&fx, 2_500);
+    let ctx = fx.ctx();
+    let control = Control::new(ctx.cancel, &ctx.limits);
+    let err = open_validated(&fx.db, &control, Duration::ZERO).unwrap_err();
+    assert!(!err.retry, "retrying cannot make it the history database");
+    // Either verdict (too big to check in budget, or plainly not ours) is final.
+    assert!(
+        err.reason.contains("never has") || err.reason.contains("too large"),
+        "{}",
+        err.reason
+    );
+}

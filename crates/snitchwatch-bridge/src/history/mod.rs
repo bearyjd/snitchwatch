@@ -35,6 +35,8 @@ pub mod reader;
 #[cfg(test)]
 mod reader_coverage_tests;
 #[cfg(test)]
+mod reader_fit_tests;
+#[cfg(test)]
 mod reader_fixture;
 #[cfg(test)]
 mod reader_limits_tests;
@@ -49,8 +51,12 @@ mod reader_progress_tests;
 pub mod reader_registry;
 #[cfg(test)]
 mod reader_registry_guard_tests;
+#[cfg(test)]
+mod reader_repair_tests;
 mod reader_size;
 mod reader_sql;
+#[cfg(test)]
+mod reader_stage_tests;
 #[cfg(test)]
 mod reader_structure_tests;
 #[cfg(test)]

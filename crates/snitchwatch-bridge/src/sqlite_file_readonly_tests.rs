@@ -192,3 +192,83 @@ fn the_connection_is_defensive_and_does_not_wait_on_a_lock() {
     assert_eq!(cell, 1);
     assert!(conn.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE).unwrap());
 }
+
+/// Whether a fresh open file description would conflict with a write lock
+/// anywhere in the file, i.e. whether someone in this process holds a lock.
+/// OFD locks conflict with the process's classic POSIX locks (SQLite's).
+///
+/// `file` stays open for the whole test: closing any descriptor of the inode
+/// would itself drop the locks being looked for.
+fn write_lock_is_held(file: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+    // SAFETY: an all-zero `flock` is valid; `fcntl` gets a valid descriptor
+    // and a pointer to it.
+    let mut probe: libc::flock = unsafe { std::mem::zeroed() };
+    probe.l_type = libc::F_WRLCK as _;
+    probe.l_whence = libc::SEEK_SET as _;
+    // SAFETY: as above.
+    let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_GETLK, &mut probe) };
+    assert_eq!(rc, 0);
+    probe.l_type != libc::F_UNLCK as libc::c_short
+}
+
+#[test]
+fn opening_for_reading_does_not_release_a_writers_locks() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("history.db");
+    make_db(&db);
+    let witness = std::fs::File::open(&db).unwrap();
+    let writer = Connection::open(&db).unwrap();
+    writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    assert!(write_lock_is_held(&witness), "the writer's lock is visible");
+    // Closing any descriptor of the inode would drop the process's locks.
+    drop(open_owner_only_readonly(&db));
+    assert!(
+        write_lock_is_held(&witness),
+        "the read-only open released the writer's lock"
+    );
+    writer.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn the_readonly_opener_opens_no_descriptor_of_its_own_on_the_database() {
+    let source = include_str!("sqlite_file.rs");
+    let start = source.find("pub fn open_owner_only_readonly").unwrap();
+    let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
+    for raw in ["OpenOptions", "File::open", ".open(", "drop(file)"] {
+        assert!(!body.contains(raw), "the opener names {raw}");
+    }
+}
+
+#[test]
+fn a_huge_unexpected_catalog_is_not_read_whole() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let schema = "CREATE TABLE t (x INTEGER);";
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(schema).unwrap();
+    let extra: String = (0..5_000)
+        .map(|i| format!("CREATE TABLE x{i} (a);"))
+        .collect();
+    conn.execute_batch(&extra).unwrap();
+    // The schema is parsed on first use: warm it, then count VM steps.
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .unwrap();
+    let steps = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&steps);
+    conn.progress_handler(
+        1,
+        Some(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+            false
+        }),
+    )
+    .unwrap();
+    let refused = require_known_schema(&conn, schema).unwrap_err();
+    assert!(matches!(refused, OpenError::Refused(_)), "{refused}");
+    let steps = steps.load(Ordering::Relaxed);
+    // Reading all 5,000 rows is tens of thousands of steps.
+    assert!(steps < 2_000, "{steps} VM steps for a refusal");
+}
