@@ -18,6 +18,7 @@ pub mod budget;
 pub mod caps;
 pub mod capture;
 mod capture_stats;
+pub mod control;
 mod control_files;
 mod control_lock;
 mod correlation;
@@ -256,6 +257,8 @@ mod control_lock_tests;
 mod control_prompts_tests;
 #[cfg(test)]
 pub(crate) mod control_support;
+#[cfg(test)]
+mod control_tests;
 #[cfg(test)]
 mod crash_tests;
 #[cfg(test)]

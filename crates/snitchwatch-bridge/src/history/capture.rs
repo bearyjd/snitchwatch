@@ -808,6 +808,8 @@ pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
     }
 }
 
+#[path = "capture_control.rs"]
+mod control_ops;
 #[path = "capture_writer.rs"]
 mod writer_loop;
 
