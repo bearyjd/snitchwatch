@@ -54,6 +54,8 @@ mod reader_registry_guard_tests;
 #[cfg(test)]
 mod reader_repair_tests;
 #[cfg(test)]
+mod reader_settings_tests;
+#[cfg(test)]
 mod reader_slot_cap_tests;
 mod reader_size;
 mod reader_sql;
@@ -166,6 +168,19 @@ pub fn load_state(location: &Location) -> State {
 }
 
 pub(crate) fn load_state_as(location: &Location, euid: u32) -> State {
+    state_of(location, euid, settings::load)
+}
+
+/// [`load_state`] for a reader: the same answer, and nothing on disk changes.
+pub(crate) fn load_state_read_only(location: &Location) -> State {
+    state_of(location, open::effective_uid(), settings::load_read_only)
+}
+
+fn state_of(
+    location: &Location,
+    euid: u32,
+    load: fn(&Location) -> Result<Option<settings::Settings>, Unavailable>,
+) -> State {
     match open::dir_exists(location.dir()) {
         Ok(false) => return State::Off,
         Ok(true) => {}
@@ -174,7 +189,7 @@ pub(crate) fn load_state_as(location: &Location, euid: u32) -> State {
     if let Err(reason) = open::check_dir(location.dir(), euid) {
         return State::Unavailable(reason);
     }
-    match settings::load(location) {
+    match load(location) {
         Ok(Some(settings)) if settings.enabled => State::Enabled(settings),
         Ok(_) => State::Off,
         Err(reason) => State::Unavailable(reason),

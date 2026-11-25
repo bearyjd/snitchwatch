@@ -142,8 +142,8 @@ pub(crate) fn encode(settings: &Settings) -> Result<Vec<u8>, Unavailable> {
 /// just before can see it with **zero** links: it was replaced, not hard
 /// linked. That is retried (the new file is already in place); a file that
 /// keeps vanishing is refused.
-fn read_checked(path: &std::path::Path) -> Result<Option<Vec<u8>>, Unavailable> {
-    read_checked_with(path, crate::state_file::REPLACED_RETRIES, &mut || {})
+fn read_checked(path: &std::path::Path, repair: bool) -> Result<Option<Vec<u8>>, Unavailable> {
+    read_checked_in(path, repair, crate::state_file::REPLACED_RETRIES, &mut || {})
 }
 
 /// [`read_checked`] with the retry cap and a hook that runs after each open
@@ -153,8 +153,17 @@ pub(crate) fn read_checked_with(
     tries: u32,
     after_open: &mut dyn FnMut(),
 ) -> Result<Option<Vec<u8>>, Unavailable> {
+    read_checked_in(path, true, tries, after_open)
+}
+
+fn read_checked_in(
+    path: &std::path::Path,
+    repair: bool,
+    tries: u32,
+    after_open: &mut dyn FnMut(),
+) -> Result<Option<Vec<u8>>, Unavailable> {
     for _ in 0..tries {
-        if let Some(read) = read_checked_once(path, after_open)? {
+        if let Some(read) = read_checked_once(path, repair, after_open)? {
             return Ok(read);
         }
     }
@@ -164,6 +173,7 @@ pub(crate) fn read_checked_with(
 /// One attempt; `Ok(None)` when the file was replaced under us (retry).
 fn read_checked_once(
     path: &std::path::Path,
+    repair: bool,
     after_open: &mut dyn FnMut(),
 ) -> Result<Option<Option<Vec<u8>>>, Unavailable> {
     use std::io::Read;
@@ -195,7 +205,7 @@ fn read_checked_once(
     if meta.len() > SETTINGS_MAX_BYTES {
         return Err(bad("too large"));
     }
-    if meta.mode() & 0o7777 != 0o600 {
+    if repair && meta.mode() & 0o7777 != 0o600 {
         file.set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(bad)?;
     }
@@ -211,7 +221,17 @@ fn read_checked_once(
 
 /// `None` when there is no settings file (never enabled).
 pub(crate) fn load(location: &Location) -> Result<Option<Settings>, Unavailable> {
-    let Some(bytes) = read_checked(&location.settings_path())? else {
+    load_in(location, true)
+}
+
+/// [`load`] that changes nothing on disk: no mode repair. For a reader, which
+/// must never write (a `0400` file stays `0400`).
+pub(crate) fn load_read_only(location: &Location) -> Result<Option<Settings>, Unavailable> {
+    load_in(location, false)
+}
+
+fn load_in(location: &Location, repair: bool) -> Result<Option<Settings>, Unavailable> {
+    let Some(bytes) = read_checked(&location.settings_path(), repair)? else {
         return Ok(None);
     };
     let file: File = serde_json::from_slice(&bytes).map_err(bad)?;

@@ -29,7 +29,7 @@ use super::reader_sql::{
     Stop,
 };
 use super::timeline::Segment;
-use super::{load_state, Location, State};
+use super::{load_state_read_only, Location, State};
 
 /// The safety bounds (D8). Constants, not settings (Decision 6): a struct
 /// whose `Default` is production, so a test can shrink a budget without a
@@ -371,7 +371,7 @@ impl<'a> Read<'a> {
             ));
         }
         // The answer `open_store` gives, before any file is touched.
-        match load_state(ctx.location) {
+        match load_state_read_only(ctx.location) {
             State::Enabled(_) => {}
             State::Off => return Err(refusal(UnavailKind::Off, "history is off".into())),
             State::Unavailable(why) => return Err(refusal(UnavailKind::Other, why.0)),
