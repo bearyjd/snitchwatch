@@ -21,6 +21,7 @@ mod capture_stats;
 mod correlation;
 pub mod durable;
 mod expiry_budget;
+pub mod gap_counts;
 pub mod gaps;
 pub mod guard;
 pub mod ledger;
