@@ -128,8 +128,14 @@ const SEAM_AFTER_A_TEST_MODULE: &str = "fn a() {}\n\
 fn a_test_only_seam_after_a_test_module_is_still_production_code() {
     let code = production(SEAM_AFTER_A_TEST_MODULE);
     assert!(code.contains("cfg(test)"), "the seam must be seen");
-    assert!(code.contains("fn writes"), "the code after it must be scanned");
-    assert!(!code.contains("fn t()"), "the test module itself is dropped");
+    assert!(
+        code.contains("fn writes"),
+        "the code after it must be scanned"
+    );
+    assert!(
+        !code.contains("fn t()"),
+        "the test module itself is dropped"
+    );
 }
 
 #[test]

@@ -91,7 +91,9 @@ fn waiting_again_is_bound_to_the_registry_that_timed_out() {
     let outcome = not_idle.wait_again(Duration::from_millis(20));
     assert!(outcome.is_err(), "the stuck registry's worker still runs");
     assert_eq!(stuck_registry.in_use(), 1, "the worker still owns its slot");
-    let Err(not_idle) = outcome else { unreachable!() };
+    let Err(not_idle) = outcome else {
+        unreachable!()
+    };
     drop(ticket);
     assert!(not_idle.wait_again(LONG).is_ok());
 }
