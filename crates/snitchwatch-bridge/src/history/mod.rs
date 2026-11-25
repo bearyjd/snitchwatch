@@ -53,6 +53,8 @@ pub mod reader_registry;
 mod reader_registry_guard_tests;
 #[cfg(test)]
 mod reader_repair_tests;
+#[cfg(test)]
+mod reader_slot_cap_tests;
 mod reader_size;
 mod reader_sql;
 #[cfg(test)]

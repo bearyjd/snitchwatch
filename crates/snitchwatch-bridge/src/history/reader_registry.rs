@@ -321,6 +321,9 @@ struct SlotFlag<P> {
     reclaimed: AtomicBool,
     taken: Instant,
     payload: Mutex<Option<P>>,
+    /// The page was taken: the slot is spent and cannot be filled again, so
+    /// one slot never holds more than one live page.
+    spent: AtomicBool,
     /// The slot handle, plus one while a taken page is still alive: the
     /// slot's place is held until both are gone.
     owners: AtomicUsize,
@@ -370,7 +373,7 @@ impl<P> ResponseSlot<P> {
     /// the slot was already reclaimed.
     pub fn fill(&self, page: P) -> Result<(), P> {
         let mut payload = locked(&self.flag.payload);
-        if self.reclaimed() {
+        if self.reclaimed() || self.flag.spent.load(Ordering::SeqCst) {
             return Err(page);
         }
         *payload = Some(page);
@@ -388,6 +391,7 @@ impl<P> ResponseSlot<P> {
             release(&self.flag, &self.slots);
             return None;
         };
+        self.flag.spent.store(true, Ordering::SeqCst);
         Some(InFlight {
             page: Some(page),
             flag: Arc::clone(&self.flag),
@@ -486,6 +490,7 @@ impl<P> ResponseSlots<P> {
             reclaimed: AtomicBool::new(false),
             taken: Instant::now(),
             payload: Mutex::new(None),
+            spent: AtomicBool::new(false),
             owners: AtomicUsize::new(1),
         });
         held.push(Arc::clone(&flag));
