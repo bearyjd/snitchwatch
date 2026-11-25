@@ -23,8 +23,13 @@ use tokio_tungstenite::WebSocketStream;
 async fn next_frame(ws: &mut WebSocketStream<UnixStream>) -> Value {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(Ok(Message::Text(text))) = ws.next().await {
-                return serde_json::from_str(&text).unwrap();
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).unwrap(),
+                Some(Ok(_)) => {}
+                // A closed or failed stream never produces the frame: fail
+                // now instead of spinning until the timeout is polled.
+                Some(Err(e)) => panic!("the stream failed: {e}"),
+                None => panic!("the stream closed before the frame"),
             }
         }
     })
@@ -121,9 +126,19 @@ async fn an_ask_is_answered_at_once_while_two_readers_read_flat_out() {
             })
         })
         .collect();
-    // Readers are demonstrably mid-flight before the Ask goes in.
+    // Readers are demonstrably mid-flight before the Ask goes in. A reader
+    // that panicked ends its thread: report that, never wait for it.
+    let give_up = Instant::now() + Duration::from_secs(20);
     while reads.load(Ordering::SeqCst) < 4 {
-        tokio::task::yield_now().await;
+        assert!(
+            readers.iter().all(|r| !r.is_finished()),
+            "a reader stopped before producing four pages"
+        );
+        assert!(
+            Instant::now() < give_up,
+            "the readers never read four pages"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
     let conn = Connection {

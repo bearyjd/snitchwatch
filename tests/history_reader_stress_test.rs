@@ -267,9 +267,11 @@ fn no_reader_lock_outlasts_the_writers_busy_timeout() {
 }
 
 /// The control gate's order (PR 10, with a stub caller) against a real read:
-/// advance the generation, close, cancel, wait idle, then unlink. The reader
-/// stops before the unlink and delivers nothing after the stop. `bump` leaves
-/// the generation alone, so the stop is the cancel's doing alone.
+/// close admission, cancel, wait idle, **then** advance the generation, then
+/// unlink and recreate. The reader stops before the unlink and delivers
+/// nothing after the stop; a cursor it handed out earlier is refused by the
+/// replacement. `bump` leaves the generation alone, so the stop is the
+/// cancel's doing alone.
 fn quiesce_then_unlink(bump: bool) {
     let s = store();
     let db = s.location.db_path();
@@ -278,12 +280,13 @@ fn quiesce_then_unlink(bump: bool) {
     let token = ticket.cancel_token();
     let generation = Generation::default();
     let started = AtomicUsize::new(0);
-    std::thread::scope(|scope| {
+    let cursor = std::thread::scope(|scope| {
         let worker = scope.spawn(|| {
             // The worker owns the ticket, as the real caller's does.
             let _ticket = ticket;
             let ctx = ctx(&s.location, &generation, &token);
             let mut delivered_after_stop = 0;
+            let mut last_cursor = None;
             loop {
                 started.fetch_add(1, Ordering::SeqCst);
                 match read_page(
@@ -294,45 +297,56 @@ fn quiesce_then_unlink(bump: bool) {
                     &ctx,
                 ) {
                     Outcome::Page(_) if token.is_cancelled() => delivered_after_stop += 1,
-                    Outcome::Page(_) => {}
-                    Outcome::Cancelled => return delivered_after_stop,
-                    Outcome::Superseded if bump => return delivered_after_stop,
+                    Outcome::Page(page) => last_cursor = page.next_cursor,
+                    Outcome::Cancelled => return (delivered_after_stop, last_cursor),
                     other => panic!("{other:?}"),
                 }
             }
         });
         wait_for_reads(&started, 3);
-        if bump {
-            generation.advance().unwrap();
-        }
         let guard = registry.quiesce(Duration::from_secs(20));
         assert!(guard.is_ok(), "the reader stopped before the unlink");
-        // Held across the unlink, as the control gate holds it.
+        // Held across the unlink, as the control gate holds it; the
+        // generation moves only while admission is closed and idle.
         let guard = guard.ok();
+        if bump {
+            guard.as_ref().unwrap().advance(&generation).unwrap();
+        }
         std::fs::remove_file(&db).unwrap();
-        assert_eq!(
-            worker.join().unwrap(),
-            0,
-            "a page was delivered after the stop"
-        );
+        let (after_stop, cursor) = worker.join().unwrap();
+        assert_eq!(after_stop, 0, "a page was delivered after the stop");
         assert_eq!(
             registry.try_acquire().err(),
             Some(NotAdmitted::ControlOperation)
         );
         drop(guard);
+        cursor
     });
-    let (generation, cancel) = (Generation::default(), CancelToken::default());
+    let (fresh, cancel) = (Generation::default(), CancelToken::default());
     let after = read_page(
         &Request {
             cursor: None,
             limit: 10,
         },
-        &ctx(&s.location, &generation, &cancel),
+        &ctx(&s.location, &fresh, &cancel),
     );
     assert!(
         matches!(after, Outcome::Unavailable(ref u) if u.reason == "no history"),
         "{after:?}"
     );
+    // A cursor from the old database is refused by its replacement.
+    let _replacement = open_store(&s.location).unwrap();
+    let cursor = cursor.expect("a page was delivered before the stop");
+    let stale = read_page(
+        &Request {
+            cursor: Some(cursor),
+            limit: 10,
+        },
+        &ctx(&s.location, &generation, &cancel),
+    );
+    if bump {
+        assert!(matches!(stale, Outcome::StaleGeneration), "{stale:?}");
+    }
 }
 
 #[test]
