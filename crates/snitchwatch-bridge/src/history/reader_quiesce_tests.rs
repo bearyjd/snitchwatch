@@ -11,6 +11,7 @@ const LONG: Duration = Duration::from_secs(20);
 
 #[test]
 fn a_reader_mid_query_when_a_clear_unlinks_the_file_delivers_nothing_after() {
+    let _heavy = super::reader_fixture::heavy();
     let fx = Fx::new();
     fx.events(1..=5_000);
     let registry = ReaderRegistry::new();

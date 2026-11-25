@@ -62,6 +62,7 @@ fn config() -> CaptureConfig {
 
 #[test]
 fn the_real_writer_commits_every_batch_while_two_readers_read_flat_out() {
+    let _heavy = super::reader_fixture::heavy();
     let root = tempdir();
     let state = state_dir(&root);
     let location = locate(Mode::User, Some(&state)).unwrap();

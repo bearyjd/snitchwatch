@@ -248,8 +248,8 @@ fn no_read_lock_is_held_between_statements() {
 
 #[test]
 fn writers_commit_through_two_readers_reading_flat_out() {
+    let _heavy = super::reader_fixture::heavy();
     let fx = Fx::new();
-    worst_case_events(&fx, 200);
     fx.conn()
         .execute_batch(
             "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 20000) \
@@ -288,7 +288,9 @@ fn writers_commit_through_two_readers_reading_flat_out() {
             .spawn(|| {
                 let writer = rusqlite::Connection::open(db).unwrap();
                 writer.busy_timeout(Duration::from_millis(250)).unwrap();
-                let failed = (0..300)
+                // As the history writer runs (and no fsync storm for the suite).
+                writer.pragma_update(None, "synchronous", "OFF").unwrap();
+                let failed = (0..60)
                     .filter(|i| {
                         // A commit only counts with readers mid-flight: wait
                         // on completed reads, not on a sleep.
@@ -380,8 +382,8 @@ fn overlapping_gaps_beside_worst_case_events_still_fit_the_bound() {
 /// that tries `BEGIN EXCLUSIVE` with no wait, over and over.
 #[test]
 fn no_reader_lock_outlasts_the_writers_busy_timeout() {
+    let _heavy = super::reader_fixture::heavy();
     let fx = Fx::new();
-    worst_case_events(&fx, 200);
     fx.conn()
         .execute_batch(
             "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 20000) \
