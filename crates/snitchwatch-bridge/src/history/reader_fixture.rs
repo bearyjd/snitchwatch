@@ -12,16 +12,6 @@ use super::session::{start_session, SessionEnd};
 
 pub(super) const NOW_MS: i64 = 1_000_000_000;
 
-static HEAVY: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Held by the tests that run threads flat out, so they do not stack their
-/// load on each other (or starve the suite's sleep-based timing tests).
-pub(super) fn heavy() -> std::sync::MutexGuard<'static, ()> {
-    HEAVY
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 pub(super) struct Fx {
     pub rig: Rig,
     pub db: std::path::PathBuf,

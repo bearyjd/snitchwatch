@@ -154,8 +154,6 @@ const OWNERS: &[&str] = &[
     "reader_paging_tests.rs",
     "reader_limits_tests.rs",
     "reader_coverage_tests.rs",
-    "reader_quiesce_tests.rs",
-    "reader_writer_tests.rs",
     "capture.rs",
     "capture_writer.rs",
     "capture_tests.rs",
@@ -315,7 +313,7 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 38] = [
+const DURABLE_OWNERS: [&str; 37] = [
     "timeline.rs",
     "timeline_tests.rs",
     "gap_counts.rs",
@@ -328,7 +326,6 @@ const DURABLE_OWNERS: [&str; 38] = [
     "reader_paging_tests.rs",
     "reader_limits_tests.rs",
     "reader_coverage_tests.rs",
-    "reader_writer_tests.rs",
     "capture.rs",
     "capture_writer.rs",
     "capture_tests.rs",
@@ -387,7 +384,6 @@ const CAPTURE_MODULES: &[&str] = &[
 ];
 /// The files that implement and test capture and admission.
 const CAPTURE_OWNERS: &[&str] = &[
-    "reader_writer_tests.rs",
     "ping.rs",
     "capture.rs",
     "capture_writer.rs",

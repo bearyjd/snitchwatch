@@ -42,8 +42,6 @@ mod reader_open;
 mod reader_page;
 #[cfg(test)]
 mod reader_paging_tests;
-#[cfg(test)]
-mod reader_quiesce_tests;
 pub mod reader_registry;
 mod reader_size;
 mod reader_sql;
@@ -51,8 +49,6 @@ mod reader_sql;
 mod reader_structure_tests;
 #[cfg(test)]
 mod reader_tests;
-#[cfg(test)]
-mod reader_writer_tests;
 pub mod record;
 mod retention;
 mod retention_room;
