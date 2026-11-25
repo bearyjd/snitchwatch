@@ -254,6 +254,8 @@ mod control_clear_tests;
 #[cfg(test)]
 mod control_crash_tests;
 #[cfg(test)]
+mod control_e2e_tests;
+#[cfg(test)]
 mod control_epoch_tests;
 #[cfg(test)]
 mod control_files_tests;

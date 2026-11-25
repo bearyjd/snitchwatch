@@ -439,6 +439,7 @@ const CAPTURE_OWNERS: &[&str] = &[
     "control_preview.rs",
     "control_crash_tests.rs",
     "control_wiring_tests.rs",
+    "control_e2e_tests.rs",
     "capture_control.rs",
     "dormant_tests.rs",
     "mod.rs",

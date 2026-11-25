@@ -4,10 +4,16 @@
 
 use std::sync::Arc;
 
+use super::super::budget::Budget;
+use super::super::control_files::StoreDir;
 use super::super::lifecycle::{Exhausted, Generation};
+use super::super::pins::PinRegistry;
 use super::super::reader_registry::ControlGuard;
+use super::super::writer::Engine;
 use super::super::Consent;
-use super::{Capture, CaptureStats};
+use super::super::{load_state, locate, open_store, Mode, State};
+use super::{Capture, CaptureConfig, CaptureStats};
+use std::path::Path;
 
 impl Capture {
     /// Step 2 of the barrier, brief and in memory: advance the generation
@@ -51,10 +57,67 @@ impl Capture {
     }
 }
 
+/// The bridge's one entry point. Reads the history state (which creates
+/// nothing) and returns a running capture **only if history is enabled**;
+/// off, unavailable, or a state directory the mode refuses gives `None`: no
+/// thread, no directory, no queue.
+pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
+    let location = locate(mode, state_dir).ok()?;
+    super::super::control_files::recover(&location);
+    let State::Enabled(settings) = load_state(&location) else {
+        return None;
+    };
+    let budget = Budget::new(u64::from(settings.budget_mib) * 1024 * 1024).ok()?;
+    let lock = match StoreDir::open(location.dir(), super::super::open::effective_uid())
+        .map_err(Into::into)
+        .and_then(|dir| dir.lock_writer())
+    {
+        Ok(lock) => lock,
+        Err(reason) => {
+            tracing::warn!(%reason, "history is enabled but another bridge holds it");
+            return None;
+        }
+    };
+    let store = match open_store(&location) {
+        Ok(store) => store,
+        Err(reason) => {
+            tracing::warn!(%reason, "history is enabled but could not be opened");
+            return None;
+        }
+    };
+    let engine = match Engine::new(store, &location, budget) {
+        Ok(engine) => engine,
+        Err(e) => {
+            tracing::warn!(error = %e, "history is enabled but its writer could not start");
+            return None;
+        }
+    };
+    let capture = Capture::spawn(
+        engine,
+        Arc::new(PinRegistry::new()),
+        CaptureConfig::for_settings(&budget, &settings),
+    );
+    match capture {
+        Ok(mut capture) => {
+            capture._lock = Some(lock);
+            Some(Arc::new(capture))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "history writer thread could not start");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 impl Capture {
     /// Stops the writer without touching consent or the generation.
     pub(in crate::history) fn quiesce_writer_for_test(&self) {
         self.stop();
+    }
+
+    /// Pins this capture's registry holds.
+    pub(in crate::history) fn pins_for_test(&self) -> usize {
+        self.shared.registry.len()
     }
 }

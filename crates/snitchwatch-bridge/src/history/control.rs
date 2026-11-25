@@ -107,7 +107,7 @@ pub(super) struct Inner {
     /// Serialises operations; never held by anything else.
     op: Mutex<()>,
     /// Held for as long as history lives here, also while it is disabled.
-    _writer_lock: Mutex<Option<WriterLock>>,
+    writer_lock: Mutex<Option<WriterLock>>,
     /// Why history is unavailable (another bridge holds it), if it is.
     pub(super) blocked: Option<String>,
     pub(super) tokens: super::control_preview::Tokens,
@@ -159,7 +159,7 @@ impl ControlGate {
             acceptance: Arc::new(AcceptanceSeq::default()),
             limits,
             op: Mutex::new(()),
-            _writer_lock: Mutex::new(lock),
+            writer_lock: Mutex::new(lock),
             blocked,
             tokens: Default::default(),
         };
@@ -245,6 +245,37 @@ impl ControlGate {
                 Err(Refused::ReaderBusy)
             }
         }
+    }
+
+    /// The user's enable action through the gate: writes the settings with
+    /// the consent record (creating the history directory), takes the
+    /// writer lock if it is not held yet, and starts recording on the
+    /// bridge-wide counters.
+    pub fn enable(&self, consent: super::Consent) -> Result<(), Refused> {
+        let _op = self.begin()?;
+        let location = self.location()?.clone();
+        super::enable(&location, consent).map_err(|e| Refused::Settings(e.to_string()))?;
+        self.holdwriter_lock(&location)?;
+        if self.0.slot.get().is_none() {
+            self.resume();
+        }
+        match self.0.slot.get() {
+            Some(_) => Ok(()),
+            None => Err(Refused::Unavailable("history could not start".into())),
+        }
+    }
+
+    fn holdwriter_lock(&self, location: &Location) -> Result<(), Refused> {
+        let mut held = self.0.writer_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_none() {
+            let dir = StoreDir::open(location.dir(), super::open::effective_uid())
+                .map_err(|e| Refused::Unavailable(e.to_string()))?;
+            *held = Some(
+                dir.lock_writer()
+                    .map_err(|e| Refused::Unavailable(e.to_string()))?,
+            );
+        }
+        Ok(())
     }
 
     /// Stops recording and keeps history (owner decision 10): prompts still

@@ -59,7 +59,6 @@
 //! first lost event.
 
 use std::io;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -71,7 +70,6 @@ use super::budget::Budget;
 use super::caps::{DstHost, ProcessPath, Protocol, RuleName};
 pub use super::capture_stats::CaptureStats;
 use super::capture_stats::{add, Counters};
-use super::control_files::StoreDir;
 use super::control_lock::WriterLock;
 use super::gaps::{Losses, StandingLabels};
 use super::guard::{DecisionGuard, DecisionOutcome};
@@ -86,7 +84,7 @@ use super::rule_identity::{identify, RuleClass, RuleIdentity};
 use super::settings::{Settings, DEFAULT_RETENTION_DAYS};
 use super::snapshots::snapshot_for;
 use super::writer::{Engine, Item, QUEUE_MAX_BYTES, QUEUE_MAX_COUNT};
-use super::{load_state, locate, open_store, Consent, Mode, State};
+use super::Consent;
 
 /// Events whose first is no more than this many ms before them coalesce.
 const COALESCE_WINDOW_MS: i64 = 1000;
@@ -756,57 +754,7 @@ impl Drop for Capture {
     }
 }
 
-/// The bridge's one entry point. Reads the history state (which creates
-/// nothing) and returns a running capture **only if history is enabled**;
-/// off, unavailable, or a state directory the mode refuses gives `None`: no
-/// thread, no directory, no queue.
-pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
-    let location = locate(mode, state_dir).ok()?;
-    super::control_files::recover(&location);
-    let State::Enabled(settings) = load_state(&location) else {
-        return None;
-    };
-    let budget = Budget::new(u64::from(settings.budget_mib) * 1024 * 1024).ok()?;
-    let lock = match StoreDir::open(location.dir(), super::open::effective_uid())
-        .map_err(Into::into)
-        .and_then(|dir| dir.lock_writer())
-    {
-        Ok(lock) => lock,
-        Err(reason) => {
-            tracing::warn!(%reason, "history is enabled but another bridge holds it");
-            return None;
-        }
-    };
-    let store = match open_store(&location) {
-        Ok(store) => store,
-        Err(reason) => {
-            tracing::warn!(%reason, "history is enabled but could not be opened");
-            return None;
-        }
-    };
-    let engine = match Engine::new(store, &location, budget) {
-        Ok(engine) => engine,
-        Err(e) => {
-            tracing::warn!(error = %e, "history is enabled but its writer could not start");
-            return None;
-        }
-    };
-    let capture = Capture::spawn(
-        engine,
-        Arc::new(PinRegistry::new()),
-        CaptureConfig::for_settings(&budget, &settings),
-    );
-    match capture {
-        Ok(mut capture) => {
-            capture._lock = Some(lock);
-            Some(Arc::new(capture))
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "history writer thread could not start");
-            None
-        }
-    }
-}
+pub use self::control_ops::start;
 
 #[path = "capture_control.rs"]
 mod control_ops;
