@@ -63,6 +63,16 @@ impl ControlGate {
         self.destructive(token, Kind::Clear, observe)
     }
 
+    /// [`delete`](Self::delete) reporting each file step.
+    #[cfg(test)]
+    pub(super) fn delete_observed(
+        &self,
+        token: TokenId,
+        observe: &dyn Fn(Step),
+    ) -> Result<(), Refused> {
+        self.destructive(token, Kind::Delete, observe)
+    }
+
     /// Removes the store and its settings; history is off afterwards.
     pub fn delete(&self, token: TokenId) -> Result<(), Refused> {
         self.destructive(token, Kind::Delete, &|_| {})

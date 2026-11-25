@@ -104,6 +104,15 @@ fn a_disable_blocked_in_the_writer_join_holds_nothing_hostage() {
     assert_eq!(rig.gate.disable(), Err(Refused::InProgress));
     // `Shared::control` is not held across the join: a prompt is refused at
     // once instead of waiting for the writer.
+    // Wait until the writer's stop is under way (the queue refuses events),
+    // so the join is what the prompt would have to wait behind.
+    let probe = event("/usr/bin/curl", "probe.example", 99);
+    wait_for("the queue to close", || {
+        let at = Instant::now();
+        capture.observe(&[&probe]);
+        assert!(at.elapsed() < Duration::from_millis(500), "observe waited");
+        capture.stats().dropped_queue > 0
+    });
     let started = Instant::now();
     assert!(capture
         .begin_decision(&super::control_support::conn("/a", "h"))
