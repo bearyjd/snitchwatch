@@ -39,6 +39,8 @@ mod reader_sql;
 #[cfg(test)]
 mod reader_fixture;
 #[cfg(test)]
+mod reader_limits_tests;
+#[cfg(test)]
 mod reader_paging_tests;
 #[cfg(test)]
 mod reader_tests;

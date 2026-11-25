@@ -52,9 +52,11 @@ pub(super) fn open_validated(path: &Path, ctl: &Control) -> Result<Connection, U
             .map_err(|e| no_retry(e.to_string()))?;
     }
     let mut conn = open_owner_only_readonly(path).map_err(open_error)?;
+    // The schema check reads a handful of rows; the budget applies to the
+    // page statements that follow.
+    check_schema(&conn, ctl)?;
     ctl.install(&mut conn)
         .map_err(|e| from_stop(super::reader_sql::classify_error(&e)))?;
-    check_schema(&conn, ctl)?;
     Ok(conn)
 }
 

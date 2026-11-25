@@ -318,10 +318,12 @@ impl<'a> Read<'a> {
         loop {
             if statements > 0 && self.control.deadline_passed() {
                 self.loaded.partial = Some(Partial::Time);
+                self.loaded.more = true;
                 break;
             }
             if scanned >= limits.scan_rows_max {
                 self.loaded.partial = Some(Partial::Scan);
+                self.loaded.more = true;
                 break;
             }
             self.check()?;
