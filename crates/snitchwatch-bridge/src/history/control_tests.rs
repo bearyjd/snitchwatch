@@ -118,6 +118,7 @@ fn a_reader_that_will_not_stop_fails_the_disable_closed() {
     let limits = Limits {
         quiesce: Duration::from_millis(100),
         extension: Duration::from_millis(100),
+        ..Limits::default()
     };
     let rig = gate_rig(limits);
     let stuck = rig.gate.readers().try_acquire().unwrap();

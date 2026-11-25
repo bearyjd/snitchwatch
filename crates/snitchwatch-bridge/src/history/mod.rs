@@ -19,8 +19,10 @@ pub mod caps;
 pub mod capture;
 mod capture_stats;
 pub mod control;
+mod control_clear;
 mod control_files;
 mod control_lock;
+pub mod control_preview;
 mod correlation;
 pub mod durable;
 mod expiry_budget;
@@ -248,11 +250,17 @@ mod budget_tests;
 #[cfg(test)]
 mod caps_tests;
 #[cfg(test)]
+mod control_clear_tests;
+#[cfg(test)]
+mod control_crash_tests;
+#[cfg(test)]
 mod control_epoch_tests;
 #[cfg(test)]
 mod control_files_tests;
 #[cfg(test)]
 mod control_lock_tests;
+#[cfg(test)]
+mod control_preview_tests;
 #[cfg(test)]
 mod control_prompts_tests;
 #[cfg(test)]

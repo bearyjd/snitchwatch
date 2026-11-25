@@ -50,3 +50,11 @@ impl Capture {
         self.shared.stats()
     }
 }
+
+#[cfg(test)]
+impl Capture {
+    /// Stops the writer without touching consent or the generation.
+    pub(in crate::history) fn quiesce_writer_for_test(&self) {
+        self.stop();
+    }
+}

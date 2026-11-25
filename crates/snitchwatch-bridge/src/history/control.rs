@@ -40,6 +40,17 @@ pub enum Refused {
     Unavailable(String),
     #[error("settings could not be saved: {0}")]
     Settings(String),
+    /// The token is unknown, expired, or from an older generation.
+    #[error("the preview is no longer valid; preview again")]
+    StaleToken,
+    /// What the preview counted is not what is stored now.
+    #[error("history changed since the preview; preview again")]
+    Changed,
+    #[error("files: {0}")]
+    Files(String),
+    /// A reader slot or the scan itself was not available; try again.
+    #[error("busy")]
+    Busy,
 }
 
 /// How long a control operation waits for readers: one wait and one
@@ -48,6 +59,8 @@ pub enum Refused {
 pub struct Limits {
     pub quiesce: Duration,
     pub extension: Duration,
+    /// How long a preview token stays valid.
+    pub token_ttl: Duration,
 }
 
 impl Default for Limits {
@@ -55,6 +68,7 @@ impl Default for Limits {
         Self {
             quiesce: Duration::from_secs(3),
             extension: Duration::from_secs(3),
+            token_ttl: Duration::from_secs(60),
         }
     }
 }
@@ -87,6 +101,7 @@ pub(super) struct Inner {
     writer_lock: Mutex<Option<WriterLock>>,
     /// Why history is unavailable (another bridge holds it), if it is.
     pub(super) blocked: Option<String>,
+    pub(super) tokens: super::control_preview::Tokens,
 }
 
 #[derive(Clone)]
@@ -137,6 +152,7 @@ impl ControlGate {
             op: Mutex::new(()),
             writer_lock: Mutex::new(lock),
             blocked,
+            tokens: Default::default(),
         };
         let gate = Self(Arc::new(inner));
         gate.resume();
@@ -260,7 +276,7 @@ impl ControlGate {
 }
 
 /// `enabled = false`, everything else kept.
-fn save_disabled(location: &Location) -> Result<(), Refused> {
+pub(super) fn save_disabled(location: &Location) -> Result<(), Refused> {
     let current = settings::load(location)
         .map_err(|e| Refused::Settings(e.to_string()))?
         .unwrap_or_default();
