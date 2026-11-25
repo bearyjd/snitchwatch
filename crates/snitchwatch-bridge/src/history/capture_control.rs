@@ -63,7 +63,7 @@ impl Capture {
 pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
     let location = locate(mode, state_dir).ok()?;
     // The lock first: only its holder may finish another run's removal.
-    let lock = match super::super::control::lock_and_recover(&location) {
+    let lock = match super::super::control::lock_and_recover(&location, false) {
         Ok(lock) => lock,
         Err(reason) => {
             tracing::warn!(%reason, "history is held by another bridge");

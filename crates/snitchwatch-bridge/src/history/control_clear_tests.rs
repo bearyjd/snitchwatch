@@ -210,13 +210,13 @@ fn delete_refuses_a_linked_store_and_leaves_everything_as_it_was() {
     fs::write(&victim, "keep").unwrap();
     fs::rename(dir.join("history.db"), &real).unwrap();
     symlink(&victim, dir.join("history.db")).unwrap();
-    // The link is refused, and recording cannot restart on it either: the
-    // refusal says both.
+    // The link is refused before anything is closed: recording goes on.
     let result = rig.gate.delete(preview.token);
     assert!(
-        matches!(&result, Err(Refused::RollbackFailed { refused, .. }) if refused.starts_with("files:")),
+        matches!(&result, Err(Refused::Files(reason)) if reason.contains("not a plain file")),
         "{result:?}"
     );
+    assert!(rig.gate.slot().get().is_some(), "recording untouched");
     assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
     assert!(real.exists());
     assert!(dir.join("settings.json").exists(), "settings untouched");

@@ -42,6 +42,16 @@ struct Carry {
     rules: Vec<(Vec<u8>, String, i64)>,
 }
 
+/// A delete that failed past the rename: the rows are still on disk if the
+/// tombstone was not unlinked, otherwise only the settings are left.
+fn incomplete(tombstone_removed: bool, refused: &Refused) -> Refused {
+    if tombstone_removed {
+        Refused::Incomplete(format!("settings could not be removed: {refused}"))
+    } else {
+        Refused::DataLeft(refused.to_string())
+    }
+}
+
 fn files(e: FilesError) -> Refused {
     Refused::Files(e.to_string())
 }
@@ -89,11 +99,16 @@ impl ControlGate {
             .ok_or(Refused::StaleToken)?;
         let guard = self.quiesce()?;
         self.check_owner()?;
+        // What an earlier removal left (a tombstone that could not be
+        // unlinked) is finished first, so a retry completes it.
+        StoreDir::open(location.dir(), super::open::effective_uid())
+            .and_then(|dir| dir.finish_leftover())
+            .map_err(files)?;
         let capture = self.0.slot.get();
-        // Delete turns recording off first; nothing here is closed yet, so a
-        // refusal changes nothing.
+        // Delete turns recording off first, and revokes consent in the same
+        // write; nothing here is closed yet, so a refusal changes nothing.
         let changed = match kind {
-            Kind::Delete => persist_off(&location, true)?,
+            Kind::Delete => persist_off(&location, true, true)?,
             Kind::Clear => None,
         };
         if let Err(refused) = self.close(&guard, capture.as_ref()) {
@@ -104,27 +119,50 @@ impl ControlGate {
         if let Some(c) = &capture {
             c.quiesce_writer(false);
         }
+        let outcome = self.remove_and_finish(
+            &location,
+            &token,
+            kind,
+            (changed, capture.is_some()),
+            observe,
+        );
+        drop(guard);
+        outcome
+    }
+
+    /// With the writer stopped: the file work, then what the outcome means.
+    fn remove_and_finish(
+        &self,
+        location: &Location,
+        token: &Token,
+        kind: Kind,
+        (changed, was_recording): (Option<Settings>, bool),
+        observe: &dyn Fn(Step),
+    ) -> Result<(), Refused> {
         // Once the store is out of place the user's request cannot be undone.
-        let renamed = std::cell::Cell::new(false);
+        let reached = std::cell::Cell::new((false, false));
         let watch = |step: Step| {
-            renamed.set(renamed.get() || step == Step::Renamed);
+            let (renamed, unlinked) = reached.get();
+            reached.set((
+                renamed || step == Step::Renamed,
+                unlinked || step == Step::TombstoneRemoved,
+            ));
             observe(step);
         };
         let done = self
-            .remove_files(&location, &token, kind, &watch)
-            .and_then(|carry| self.finish(&location, (kind, capture.is_some()), carry, &watch));
-        let outcome = match done {
-            Err(refused) if kind == Kind::Delete && renamed.get() => {
-                // Delete means off: settings were saved off before anything
-                // closed, so keep them, respawn nothing and say what failed.
+            .remove_files(location, token, kind, &watch)
+            .and_then(|carry| self.finish(location, (kind, was_recording), carry, &watch));
+        match done {
+            Err(refused) if kind == Kind::Delete && reached.get().0 => {
+                // Delete means off: settings were saved off (consent revoked)
+                // before anything closed, so keep them, respawn nothing and
+                // say what failed.
                 tracing::error!(%refused, "a delete failed after the store was removed");
-                Err(Refused::Incomplete(refused.to_string()))
+                Err(incomplete(reached.get().1, &refused))
             }
-            Err(refused) => Err(self.undo(&location, changed, capture.is_some(), refused)),
+            Err(refused) => Err(self.undo(location, changed, was_recording, refused)),
             ok => ok,
-        };
-        drop(guard);
-        outcome
+        }
     }
 
     /// A refusal after the writer stopped: restart recording and say so if

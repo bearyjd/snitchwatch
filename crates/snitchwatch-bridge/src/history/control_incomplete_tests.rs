@@ -34,10 +34,11 @@ fn a_delete_that_fails_after_the_store_is_gone_keeps_recording_off() {
     // Between the rename and the unlink, and after the unlink (settings).
     for step in [Step::Renamed, Step::TombstoneRemoved] {
         let (rig, result) = failed_delete_at(step);
-        assert!(
-            matches!(result, Err(Refused::Incomplete(_))),
-            "{step:?}: {result:?}"
-        );
+        let past = match step {
+            Step::Renamed => matches!(result, Err(Refused::DataLeft(_))),
+            _ => matches!(result, Err(Refused::Incomplete(_))),
+        };
+        assert!(past, "{step:?}: {result:?}");
         assert!(
             rig.gate.slot().get().is_none(),
             "{step:?}: no capture respawned"

@@ -61,7 +61,8 @@ fn a_refused_delete_does_not_strand_a_prompt_that_was_pending() {
     chmod(&rig, 0o500);
     let result = rig.gate.delete(token);
     chmod(&rig, 0o700);
-    assert!(matches!(result, Err(Refused::Settings(_))), "{result:?}");
+    // The directory is refused before anything is closed or written.
+    assert!(matches!(result, Err(Refused::Files(_))), "{result:?}");
     guard.settle(DecisionOutcome::GuiLost);
     wait_rows(&rig, 2);
     wait_for("its pin to be released", || capture.pins_for_test() == 0);
@@ -164,8 +165,12 @@ fn a_delete_failing_past_the_rename_is_incomplete_and_not_rolled_back() {
             }
         });
         chmod(&rig, 0o700);
+        let past = match step {
+            Step::Renamed => matches!(result, Err(Refused::DataLeft(_))),
+            _ => matches!(result, Err(Refused::Incomplete(_))),
+        };
         assert!(
-            matches!(result, Err(Refused::Incomplete(_))),
+            past,
             "{step:?}: a delete past the rename is not rolled back: {result:?}"
         );
     }

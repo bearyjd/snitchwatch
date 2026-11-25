@@ -140,6 +140,17 @@ impl StoreDir {
         Ok(())
     }
 
+    /// Whether the store, its settings or a tombstone is here: there is
+    /// history to own.
+    pub(super) fn has_history(&self) -> Result<bool, FilesError> {
+        for name in [DB_FILE, SETTINGS_FILE, TOMBSTONE] {
+            if self.plain(name)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// A rollback journal is beside the store: a commit was cut off, and
     /// only a writable open of the store rolls it back.
     pub(super) fn journal_present(&self) -> Result<bool, FilesError> {

@@ -262,6 +262,10 @@ mod control_files_tests;
 #[cfg(test)]
 mod control_incomplete_tests;
 #[cfg(test)]
+mod control_lazy_tests;
+#[cfg(test)]
+mod control_leftover_tests;
+#[cfg(test)]
 mod control_lock_tests;
 #[cfg(test)]
 mod control_outage_tests;

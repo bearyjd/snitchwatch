@@ -299,7 +299,7 @@ fn a_kill_at_every_step_of_a_delete_leaves_the_store_whole_or_gone_and_history_o
             !saved.enabled,
             "{step}: off was saved before anything moved"
         );
-        assert!(saved.consent.is_some(), "{step}: consent goes last");
+        assert!(saved.consent.is_none(), "{step}: delete revokes consent");
         let gate = ControlGate::start(Mode::User, Some(&state), Limits::default());
         assert!(gate.slot().get().is_none(), "{step}: never records again");
         assert!(!dir.join("history.db.deleting").exists(), "{step}");

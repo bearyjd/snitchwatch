@@ -68,6 +68,11 @@ pub enum Refused {
     /// settings could not be removed".
     #[error("history was removed but the delete did not finish: {0}; recording stays off")]
     Incomplete(String),
+    /// A delete passed the rename but the tombstone could not be unlinked:
+    /// every recorded row is still on disk, recording stays off, and
+    /// retrying the delete finishes the job.
+    #[error("deleted history is still on disk; retry delete: {0}; recording stays off")]
+    DataLeft(String),
 }
 
 /// How long a control operation waits for readers: one wait and one
@@ -171,15 +176,22 @@ impl Inner {
 
 /// Takes the writer lock if the history directory exists (it is never
 /// created here), and only **then** finishes what a crashed removal left:
-/// another bridge's half-done clear is not ours to finish.
-pub(super) fn lock_and_recover(location: &Location) -> Result<Option<Arc<WriterLock>>, String> {
+/// another bridge's half-done clear is not ours to finish. With
+/// `needs_history` a directory that holds no store, settings or tombstone
+/// yet (an enabling bridge has just made it) is not taken either.
+pub(super) fn lock_and_recover(
+    location: &Location,
+    needs_history: bool,
+) -> Result<Option<Arc<WriterLock>>, String> {
     if !matches!(super::open::dir_exists(location.dir()), Ok(true)) {
         return Ok(None);
     }
-    let held = StoreDir::open(location.dir(), super::open::effective_uid())
-        .map_err(|e| e.to_string())?
-        .lock_writer()
-        .map_err(|e| e.to_string())?;
+    let dir =
+        StoreDir::open(location.dir(), super::open::effective_uid()).map_err(|e| e.to_string())?;
+    if needs_history && !dir.has_history().map_err(|e| e.to_string())? {
+        return Ok(None);
+    }
+    let held = dir.lock_writer().map_err(|e| e.to_string())?;
     control_files::recover(location);
     Ok(Some(Arc::new(held)))
 }
@@ -193,7 +205,7 @@ impl ControlGate {
         let mut blocked = None;
         let mut lock = None;
         if let Ok(location) = &location {
-            match lock_and_recover(location) {
+            match lock_and_recover(location, false) {
                 Ok(held) => lock = held,
                 Err(reason) => blocked = Some(reason),
             }
@@ -293,7 +305,7 @@ impl ControlGate {
         // bridge that owns the store.
         super::open::ensure_dir(location.dir(), super::open::effective_uid())
             .map_err(|e| Refused::Unavailable(e.to_string()))?;
-        self.hold_writer_lock(&location)?;
+        self.hold_writer_lock(&location, false)?;
         super::enable(&location, consent).map_err(|e| Refused::Settings(e.to_string()))?;
         if self.0.slot.get().is_none() {
             self.resume();
@@ -308,18 +320,30 @@ impl ControlGate {
     /// finishes what a crashed removal left, once, as the lock is first
     /// taken. No directory means history was never enabled here: nothing to
     /// hold, so nothing may be changed.
-    fn hold_writer_lock(&self, location: &Location) -> Result<(), Refused> {
-        let mut held = self.0.writer_lock.lock().unwrap_or_else(|e| e.into_inner());
-        if held.is_none() {
-            match lock_and_recover(location) {
-                Ok(Some(lock)) => *held = Some(lock),
-                Ok(None) => {
-                    return Err(Refused::Unavailable(
-                        "history has never been enabled; nothing to change".into(),
-                    ))
+    /// A bridge that takes the lock here, lazily, also starts recording if
+    /// history is enabled: nobody else would. Only an operation that owns
+    /// existing history takes it (`needs_history`), never one that finds an
+    /// empty directory.
+    fn hold_writer_lock(&self, location: &Location, needs_history: bool) -> Result<(), Refused> {
+        let took = {
+            let mut held = self.0.writer_lock.lock().unwrap_or_else(|e| e.into_inner());
+            if held.is_some() {
+                false
+            } else {
+                match lock_and_recover(location, needs_history) {
+                    Ok(Some(lock)) => *held = Some(lock),
+                    Ok(None) => {
+                        return Err(Refused::Unavailable(
+                            "history has never been enabled; nothing to change".into(),
+                        ))
+                    }
+                    Err(reason) => return Err(Refused::Unavailable(reason)),
                 }
-                Err(reason) => return Err(Refused::Unavailable(reason)),
+                true
             }
+        };
+        if took && self.0.slot.get().is_none() {
+            self.resume();
         }
         Ok(())
     }
@@ -328,7 +352,7 @@ impl ControlGate {
     /// that holds the writer lock may preview, clear, delete or disable.
     pub(super) fn owned_location(&self) -> Result<Location, Refused> {
         let location = self.location()?.clone();
-        self.hold_writer_lock(&location)?;
+        self.hold_writer_lock(&location, true)?;
         Ok(location)
     }
 
@@ -371,7 +395,7 @@ impl ControlGate {
         let guard = self.quiesce()?;
         self.check_owner()?;
         let capture = self.0.slot.get();
-        let prior = persist_off(&location, capture.is_none())?;
+        let prior = persist_off(&location, capture.is_none(), false)?;
         if let Err(refused) = self.close(&guard, capture.as_ref()) {
             restore_settings(&location, prior);
             return Err(refused);
@@ -390,9 +414,11 @@ impl ControlGate {
 /// nothing to turn off. With `tolerate_unreadable`, settings that cannot be
 /// read are left as they are instead of refusing: there is nothing to
 /// preserve, and what the user wants (off, or gone) does not depend on them.
+/// With `revoke_consent` (a delete) the consent record goes in the same write.
 pub(super) fn persist_off(
     location: &Location,
     tolerate_unreadable: bool,
+    revoke_consent: bool,
 ) -> Result<Option<Settings>, Refused> {
     let prior = match settings::load(location) {
         Ok(Some(prior)) => prior,
@@ -405,6 +431,11 @@ pub(super) fn persist_off(
     };
     let off = Settings {
         enabled: false,
+        consent: if revoke_consent {
+            None
+        } else {
+            prior.consent.clone()
+        },
         ..prior.clone()
     };
     settings::save(location, &off).map_err(|e| Refused::Settings(e.to_string()))?;

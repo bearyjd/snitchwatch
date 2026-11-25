@@ -33,6 +33,9 @@ pub struct Preview {
     pub to_ms: Option<i64>,
     /// An estimate: the size of the store file.
     pub approx_bytes: u64,
+    /// A tombstone of a removal that did not finish is still on disk: its
+    /// rows are counted above and a clear or delete removes it.
+    pub leftover: bool,
     pub token: TokenId,
 }
 
@@ -177,6 +180,20 @@ fn add_window(conn: &Connection, scan: &mut Scan, low: i64, high: i64) -> Result
     Ok(())
 }
 
+/// The file a preview counts, and whether a tombstone is on disk. With no
+/// store but a tombstone, its rows are what is still to remove, so they are
+/// counted: an empty history is never reported over data that is still there.
+fn scan_target(location: &super::Location) -> (std::path::PathBuf, bool) {
+    let tombstone = location.dir().join(super::control_files::TOMBSTONE);
+    let leftover = tombstone.symlink_metadata().is_ok();
+    let db = location.db_path();
+    if leftover && db.symlink_metadata().is_err() {
+        (tombstone, true)
+    } else {
+        (db, leftover)
+    }
+}
+
 impl ControlGate {
     /// Counts what a clear would remove. Takes a reader slot while it scans,
     /// so a control operation sees it (and cancels it); writes nothing,
@@ -188,7 +205,7 @@ impl ControlGate {
             NotAdmitted::ControlOperation => Refused::InProgress,
         })?;
         let generation = self.0.generation.current();
-        let path = location.db_path();
+        let (path, leftover) = scan_target(location);
         let approx_bytes = std::fs::metadata(&path).map_or(0, |m| m.len());
         let scan = match crate::sqlite_file::open_owner_only_readonly(&path) {
             Ok(mut conn) => {
@@ -230,6 +247,7 @@ impl ControlGate {
             from_ms: scan.from_ms,
             to_ms: scan.to_ms,
             approx_bytes,
+            leftover,
             token,
         })
     }
