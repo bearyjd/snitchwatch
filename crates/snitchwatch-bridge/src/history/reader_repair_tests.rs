@@ -160,11 +160,13 @@ fn a_time_cut_with_no_event_at_a_page_larger_than_one_says_ask_for_less() {
 }
 
 #[test]
-fn a_time_cut_with_no_event_at_a_page_of_one_is_retryable() {
-    // Nothing smaller exists to ask for.
+fn a_time_cut_with_no_event_at_a_page_of_one_says_still_too_slow_and_does_not_retry() {
+    // Nothing smaller exists to ask for, and the request is stateless, so no
+    // counter can bound a client that retries: the answer must say stop.
     let u = unavailable(first_outcome_under_a_cut(1));
-    assert_ne!(u.kind, UnavailKind::TooExpensive, "{}", u.reason);
-    assert!(u.retry, "{}", u.reason);
+    assert_eq!(u.kind, UnavailKind::TooExpensive, "{}", u.reason);
+    assert!(!u.retry, "{}", u.reason);
+    assert!(u.reason.contains("smallest page"), "{}", u.reason);
 }
 
 fn pings_with_prompts(fx: &Fx, prompts: usize) {
@@ -199,9 +201,15 @@ fn a_rows_duplicate_flag_does_not_depend_on_the_page_size() {
     let mut fx = Fx::new();
     dense_store(&fx, 30, 200);
     fx.limits.scan_rows_max = 600;
-    let flags: Vec<bool> = [1, 50, 200]
-        .iter()
-        .map(|&limit| fx.page(None, limit).events[0].possible_duplicate)
-        .collect();
-    assert_eq!(flags, vec![false, false, false], "one answer per row");
+    let widest = fx.page(None, 200).events;
+    assert_eq!(widest.len(), 200);
+    for limit in [1, 50, 200] {
+        let events = fx.page(None, limit).events;
+        assert_eq!(events.len(), limit);
+        assert!(
+            events.iter().all(|e| !e.possible_duplicate),
+            "every row of a page of {limit}"
+        );
+        assert_eq!(events[..], widest[..limit], "the same view at {limit}");
+    }
 }

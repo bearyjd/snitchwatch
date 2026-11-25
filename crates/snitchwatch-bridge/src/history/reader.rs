@@ -252,8 +252,12 @@ pub enum UnavailKind {
     Other,
     /// History is off: nothing was opened.
     Off,
-    /// The request costs more than one query may spend, even at one event:
-    /// retrying the same request cannot help.
+    /// The request costs more than one query may spend: retrying the same
+    /// request cannot help. At a page of one event the reason says "smallest
+    /// page": the first row alone outran the statement budget (a cold cache
+    /// can do that). The request is stateless, so no counter can bound a
+    /// retry loop; the answer is `retry: false` and the caller tries again
+    /// on its own schedule, with a back-off.
     TooExpensive,
     /// One event is larger than the page byte limit.
     OversizedEvent,
@@ -338,8 +342,8 @@ fn refusal(kind: UnavailKind, reason: String) -> Outcome {
     })
 }
 
-/// A cut by a writer's commit, or by time of a one-row page, that read no
-/// event: the same request can succeed a moment later.
+/// A cut by a writer's commit that read no event: the same request can
+/// succeed a moment later.
 fn try_again(why: Partial) -> Outcome {
     let cause = match why {
         Partial::Busy => "a writer is committing",
@@ -358,6 +362,15 @@ fn too_expensive() -> Outcome {
     refusal(
         UnavailKind::TooExpensive,
         "history read is too expensive for one request: ask for a smaller page".into(),
+    )
+}
+
+/// A time cut of a one-row page that read no event: the smallest request is
+/// still too slow right now.
+fn too_slow_at_one() -> Outcome {
+    refusal(
+        UnavailKind::TooExpensive,
+        "history read is still too slow at the smallest page: try again later".into(),
     )
 }
 
@@ -452,12 +465,15 @@ impl<'a> Read<'a> {
     /// again): a scan-cap cut, or a time cut of a page larger than one row,
     /// says the request is too big (the same request is cut the same way, so
     /// `retry: true` would loop for ever); a writer's commit says to ask
-    /// again, and so does a time cut of a one-row page (nothing is smaller).
+    /// again. A time cut of a one-row page is "too slow at the smallest page":
+    /// nothing is smaller to ask for, and with no state between requests a
+    /// `retry: true` could repeat for as long as the slowness lasts.
     fn cut(&mut self, why: Partial, run: &Collect) -> Result<bool, Outcome> {
         if run.rows.is_empty() {
             return Err(match why {
                 Partial::Scan => too_expensive(),
                 Partial::Time if run.limit > 1 => too_expensive(),
+                Partial::Time => too_slow_at_one(),
                 _ => try_again(why),
             });
         }
