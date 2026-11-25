@@ -292,7 +292,7 @@ const WIRING_HISTORY_ONLY: [&str; 1] = ["Writer"];
 /// The 3b names with no other use in the workspace: types and functions of
 /// `ledger`, `session` and `durable`. Whole identifiers, anywhere in code.
 /// `durable_names_cover_every_pub_item` keeps this and the next list complete.
-const DURABLE_TYPES: [&str; 18] = [
+const DURABLE_TYPES: [&str; 19] = [
     "LossCounter",
     "LedgerLimits",
     "LedgerOverflow",
@@ -310,6 +310,7 @@ const DURABLE_TYPES: [&str; 18] = [
     "commit_gap",
     "flush_counter",
     "flush_counter_at",
+    "flush_counters_at",
     "begin_session",
 ];
 /// The other 3b names: the modules and common words (`session`, `Gap`,

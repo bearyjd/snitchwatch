@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::super::durable::tests::{engine_at, rig, Rig};
+use super::super::gap_counts::summarize;
 use super::super::ledger::{read_gaps, Gap, GapCause};
 use super::super::pins::PinRegistry;
 use super::super::session::{read_watermark, SessionEnd};
@@ -122,8 +123,9 @@ fn a_failed_post_outage_tally_keeps_the_watermark_before_the_lost_stretch() {
     rig.set(4500);
     locked(&losses).upstream_loss(&rig.registry, ping(3, Some(1000), 4500));
     rig.set(5000);
-    // pre-outage row, then the post-outage row (fails), then the daemon row.
-    rig.engine.fault_before_commit_for_test(fail_nth(1));
+    // The pre-outage row, the post-outage row and the daemon row are one
+    // commit (#432), and it fails.
+    rig.engine.fault_before_commit_for_test(fail_nth(0));
     let mut clock = ClockWatch::new();
     let failed = beat(
         &mut rig.engine,
@@ -616,4 +618,79 @@ fn the_next_ping_leaves_a_ping_in_flights_only_pin() {
     assert_covered(&after, 1000, 3500, "a crash before A queued its events");
     locked(&losses).finish_ping(&rig.registry, a);
     assert_eq!(rig.registry.len(), 1, "then only B's guard remains");
+}
+
+// ---- #432 / #419: the outage's rows commit together ------------------------
+
+/// An outage across which exactly one event was lost: the first ping after
+/// the daemon came back reports `missing = 1`, which becomes a pre-outage
+/// row, a post-outage row (count 1 each, #419) and the daemon row.
+fn one_event_lost_across_an_outage(rig: &Rig, losses: &Mutex<Losses>) {
+    {
+        let mut l = locked(losses);
+        let first = l.begin_ping(&rig.registry, ping(0, None, 1000), 0);
+        l.finish_ping(&rig.registry, first);
+    }
+    rig.set(2000);
+    locked(losses).daemon_down(&rig.registry);
+    rig.set(4000);
+    locked(losses).daemon_up(4000);
+    rig.set(4500);
+    locked(losses).upstream_loss(&rig.registry, ping(1, Some(1000), 4500));
+    rig.set(5000);
+}
+
+/// A reader on its own connection, run before every commit: the largest
+/// `lost_at_least` any read between the writer's commits could have shown.
+fn worst_read_between_commits(rig: &mut Rig) -> Arc<AtomicUsize> {
+    let worst = Arc::new(AtomicUsize::new(0));
+    let (seen, db) = (worst.clone(), rig.location.db_path());
+    rig.engine.fault_before_commit_for_test(Box::new(move || {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let read = summarize(&read_gaps(&conn).unwrap()).lost_at_least;
+        seen.fetch_max(usize::try_from(read).unwrap(), Ordering::SeqCst);
+        None
+    }));
+    worst
+}
+
+#[test]
+fn one_lost_event_across_an_outage_never_reads_as_two_between_commits() {
+    let mut rig = rig(1000);
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
+    let losses = losses();
+    one_event_lost_across_an_outage(&rig, &losses);
+    let worst = worst_read_between_commits(&mut rig);
+    flush_due(&mut rig.engine, &rig.registry, &rig.limits, &losses, false).unwrap();
+    assert_eq!(rows(&rig).len(), 3, "{:?}", rows(&rig));
+    assert_eq!(summarize(&rows(&rig)).lost_at_least, 1, "n = 1 reads 1");
+    assert!(
+        worst.load(Ordering::SeqCst) <= 1,
+        "a read between two commits overstated the loss"
+    );
+}
+
+#[test]
+fn a_failed_outage_commit_writes_none_of_its_rows_and_releases_no_pin() {
+    let mut rig = rig(1000);
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
+    let losses = losses();
+    one_event_lost_across_an_outage(&rig, &losses);
+    let pins = rig.registry.len();
+    rig.engine.fault_before_commit_for_test(fail_nth(0));
+    let failed = flush_due(&mut rig.engine, &rig.registry, &rig.limits, &losses, false);
+    assert!(failed.is_err());
+    assert!(rows(&rig).is_empty(), "all three or none: {:?}", rows(&rig));
+    assert_eq!(rig.registry.len(), pins, "no pin released");
+    assert_watermark_held(&rig, "after the failed group");
+    // Every tally came back: the retry writes the whole outage at once.
+    flush_due(&mut rig.engine, &rig.registry, &rig.limits, &losses, false).unwrap();
+    let all = rows(&rig);
+    assert_eq!(all.len(), 3, "{all:?}");
+    assert_eq!(summarize(&all).lost_at_least, 1);
+    assert!(rig.registry.len() < pins, "the pins were released");
 }

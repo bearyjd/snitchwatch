@@ -136,6 +136,37 @@ impl Engine {
         Ok(true)
     }
 
+    /// [`flush_counter_at`](Self::flush_counter_at) for several counters, each
+    /// with its own end: every gap row and every pin release is one
+    /// transaction, so a reader sees all of them or none. A counter with
+    /// nothing pending is skipped; the counters are cleared only once the
+    /// transaction committed. `false` when there was nothing to flush.
+    pub fn flush_counters_at(
+        &mut self,
+        parts: &mut [(&mut LossCounter, i64)],
+        registry: &PinRegistry,
+        limits: &LedgerLimits,
+    ) -> Result<bool, DurableError> {
+        let pending: Vec<(Gap, &PinId)> = parts
+            .iter()
+            .filter_map(|(counter, end_ms)| counter.pending_gap(*end_ms))
+            .collect();
+        if pending.is_empty() {
+            return Ok(false);
+        }
+        let pins: Vec<&PinId> = pending.iter().map(|(_, pin)| *pin).collect();
+        self.durable_txn(registry, &pins, TxnKind::Ledger, |conn, _| {
+            for (gap, _) in &pending {
+                record_gap(conn, gap, limits)?;
+            }
+            Ok(pending.len() as u64)
+        })?;
+        for (counter, _) in parts.iter_mut() {
+            counter.clear();
+        }
+        Ok(true)
+    }
+
     /// A commit with no rows: advances the watermark as far as the pins allow.
     pub fn heartbeat(&mut self, registry: &PinRegistry) -> Result<TxnReport, DurableError> {
         self.durable_txn(registry, &[], TxnKind::Ledger, |_, _| Ok(0))

@@ -513,10 +513,50 @@ fn flush_taken(
     let result = engine.flush_counter_at(&mut taken, registry, limits, end_ms);
     let mut guard = locked(losses);
     guard.disconnect_flushing = false;
+    settle_taken(&mut guard, registry, slot, taken);
+    result.map(|_| ())
+}
+
+/// After a flush, under the lock: a tally that was not written goes back to
+/// its slot, and a daemon gap that was is no longer open or ended.
+fn settle_taken(guard: &mut Losses, registry: &PinRegistry, slot: Slot, taken: LossCounter) {
     if taken.is_pending() {
         guard.slot(slot).absorb(registry, taken);
     } else if matches!(slot, Slot::Disconnect) && !guard.disconnect.is_pending() {
         guard.disconnect_end = None;
+    }
+}
+
+/// The tallies of one outage, committed together (#432): its pre-outage and
+/// post-outage upstream-loss rows and the daemon row. Written one by one, a
+/// read between the commits could see two unpaired count-1 upstream rows for
+/// one lost event.
+const OUTAGE_GROUP: [Slot; 3] = [Slot::UpstreamPre, Slot::Upstream, Slot::Disconnect];
+
+/// A tally taken out of its slot with the end its gap would be written at.
+type TakenSlot = (Slot, LossCounter, i64);
+
+/// Writes `group` in one transaction (see
+/// [`Engine::flush_counters_at`]); when that failed, every tally goes back
+/// (with anything counted meanwhile) as [`flush_taken`] does for one.
+fn flush_group(
+    engine: &mut Engine,
+    registry: &PinRegistry,
+    limits: &LedgerLimits,
+    losses: &Mutex<Losses>,
+    mut group: Vec<TakenSlot>,
+) -> Result<(), DurableError> {
+    let result = {
+        let mut parts: Vec<(&mut LossCounter, i64)> = group
+            .iter_mut()
+            .map(|(_, taken, end_ms)| (taken, *end_ms))
+            .collect();
+        engine.flush_counters_at(&mut parts, registry, limits)
+    };
+    let mut guard = locked(losses);
+    guard.disconnect_flushing = false;
+    for (slot, taken, _) in group {
+        settle_taken(&mut guard, registry, slot, taken);
     }
     result.map(|_| ())
 }
@@ -525,7 +565,9 @@ fn flush_taken(
 /// daemon-disconnected gap alone; `closing` (shutdown, disable) flushes it
 /// too. The first error is returned, after every counter was tried. Each
 /// tally's end and the tally itself are read under one lock, so an outage
-/// that begins meanwhile is a tally of its own.
+/// that begins meanwhile is a tally of its own. The outage's three tallies
+/// are taken under one lock and written in one transaction; the daemon's is
+/// among them only once its end is known.
 pub(super) fn flush_due(
     engine: &mut Engine,
     registry: &PinRegistry,
@@ -535,10 +577,26 @@ pub(super) fn flush_due(
 ) -> Result<(), DurableError> {
     let mut first = Ok(());
     for slot in EVERY_SLOT {
+        if matches!(slot, Slot::UpstreamPre | Slot::Upstream | Slot::Disconnect) {
+            continue;
+        }
         let due = take_due(&mut locked(losses), registry, slot, closing);
         let Some((taken, end_ms)) = due else { continue };
         let done = flush_taken(engine, registry, limits, losses, (slot, taken), end_ms);
         first = first.and(done);
+    }
+    let group: Vec<TakenSlot> = {
+        let mut guard = locked(losses);
+        OUTAGE_GROUP
+            .into_iter()
+            .filter_map(|slot| {
+                let (taken, end_ms) = take_due(&mut guard, registry, slot, closing)?;
+                Some((slot, taken, end_ms))
+            })
+            .collect()
+    };
+    if !group.is_empty() {
+        first = first.and(flush_group(engine, registry, limits, losses, group));
     }
     first
 }
