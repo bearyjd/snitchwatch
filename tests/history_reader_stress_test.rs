@@ -15,6 +15,7 @@ use snitchwatch_bridge::history::reader::{read_page, Context, Limits, Outcome, R
 use snitchwatch_bridge::history::reader_registry::{CancelToken, NotAdmitted, ReaderRegistry};
 use snitchwatch_bridge::history::writer::Engine;
 use snitchwatch_bridge::history::{enable, locate, open_store, Consent, Location, Mode};
+use snitchwatch_bridge::sqlite_file::open_owner_only;
 use snitchwatch_proto::protocol::{Connection, Event, Operator, Rule};
 
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
@@ -178,7 +179,7 @@ fn the_real_writer_commits_every_batch_while_two_readers_read_flat_out() {
     });
     assert_eq!(stats.written, 600, "{stats:?}");
     assert_eq!((stats.lost_write, stats.dropped_queue), (0, 0), "{stats:?}");
-    let conn = rusqlite::Connection::open(&db).unwrap();
+    let conn = open_owner_only(&db).unwrap();
     let failed: i64 = conn
         .query_row(
             "SELECT count(*) FROM gaps WHERE cause IN ('write-failed', 'queue-overflow')",
@@ -200,7 +201,7 @@ fn commits_succeed_while_two_readers_read_flat_out() {
     let (done, reads) = (AtomicBool::new(false), AtomicUsize::new(0));
     let failures = std::thread::scope(|scope| {
         spawn_readers(scope, &db, &generation, &cancel, &done, &reads);
-        let writer = rusqlite::Connection::open(&db).unwrap();
+        let writer = open_owner_only(&db).unwrap();
         writer.busy_timeout(Duration::from_millis(250)).unwrap();
         writer.pragma_update(None, "synchronous", "OFF").unwrap();
         let failed = (0..60)
@@ -233,7 +234,7 @@ fn no_reader_lock_outlasts_the_writers_busy_timeout() {
     let (done, reads) = (AtomicBool::new(false), AtomicUsize::new(0));
     let longest = std::thread::scope(|scope| {
         spawn_readers(scope, &db, &generation, &cancel, &done, &reads);
-        let probe = rusqlite::Connection::open(&db).unwrap();
+        let probe = open_owner_only(&db).unwrap();
         probe.busy_timeout(Duration::ZERO).unwrap();
         let (mut longest, mut since) = (Duration::ZERO, None::<Instant>);
         while reads.load(Ordering::SeqCst) < 40 {
