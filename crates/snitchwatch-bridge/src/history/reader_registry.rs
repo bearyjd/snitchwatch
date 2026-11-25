@@ -161,7 +161,7 @@ impl ControlGuard {
     /// return a cursor tagged as the new generation, which the replacement
     /// would accept.
     pub fn advance(&self, generation: &Generation) -> Result<u64, Exhausted> {
-        generation.advance()
+        generation.advance(self)
     }
 }
 

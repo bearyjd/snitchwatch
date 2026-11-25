@@ -40,7 +40,7 @@ fn a_generation_change_while_the_page_is_assembled_delivers_nothing() {
     let built = staged(&fx, &ctx, 10)
         .build()
         .unwrap_or_else(|o| panic!("{o:?}"));
-    fx.generation.advance().unwrap();
+    fx.generation.advance_for_test().unwrap();
     assert!(matches!(built.deliver(), Outcome::Superseded));
 }
 

@@ -147,7 +147,12 @@ fn damaged_rows(ls: &[Layout], dm: &Damage) -> (Vec<Gap>, u64) {
     let (mut pre, mut post, mut down) = (Vec::new(), Vec::new(), Vec::new());
     for (l, hide) in ls.iter().zip(&dm.hide) {
         pre.push(row(l.p, l.d, GapCause::UpstreamLoss, 1));
-        post.push(row(l.u, l.q, GapCause::UpstreamLoss, l.n.saturating_sub(1).max(1)));
+        post.push(row(
+            l.u,
+            l.q,
+            GapCause::UpstreamLoss,
+            l.n.saturating_sub(1).max(1),
+        ));
         if *hide {
             kept.push(row(l.d, l.u, GapCause::Uncertain, 1));
         } else {

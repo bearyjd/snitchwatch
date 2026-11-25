@@ -935,7 +935,7 @@ fn accepting_before_a_generation_or_consent_change_never_writes_a_snapshot() {
         answered_by: AnsweredBy::Gui,
     };
     let first = rig.capture.begin_decision(&connection).unwrap();
-    rig.capture.shared.generation.advance().unwrap();
+    rig.capture.shared.generation.advance_for_test().unwrap();
     first.settle(outcome());
     assert!(rig.registry.is_empty());
     assert_eq!(rig.capture.stats().seen, 0);

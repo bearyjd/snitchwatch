@@ -174,7 +174,7 @@ fn a_cursor_from_before_a_generation_bump_is_refused() {
     let fx = Fx::new();
     fx.events(1..=300);
     let cursor = fx.page(None, 100).next_cursor.unwrap();
-    fx.generation.advance().unwrap();
+    fx.generation.advance_for_test().unwrap();
     assert!(matches!(
         fx.read(Some(cursor), 100),
         Outcome::StaleGeneration
@@ -196,7 +196,7 @@ fn a_page_that_finishes_after_the_generation_moved_is_dropped() {
     let mut read = Read::open(&request, &ctx).unwrap_or_else(|o| panic!("{o:?}"));
     read.load_events().unwrap_or_else(|o| panic!("{o:?}"));
     read.load_ledger().unwrap_or_else(|o| panic!("{o:?}"));
-    fx.generation.advance().unwrap();
+    fx.generation.advance_for_test().unwrap();
     assert!(matches!(read.finish(), Outcome::Superseded));
 }
 
@@ -211,7 +211,7 @@ fn a_clear_between_the_events_and_the_ledger_delivers_nothing() {
     };
     let mut read = Read::open(&request, &ctx).unwrap_or_else(|o| panic!("{o:?}"));
     read.load_events().unwrap_or_else(|o| panic!("{o:?}"));
-    fx.generation.advance().unwrap();
+    fx.generation.advance_for_test().unwrap();
     // The next stage notices at once; nothing is built from the old world.
     assert!(matches!(read.load_ledger(), Err(Outcome::Superseded)));
 }
