@@ -151,7 +151,8 @@ fn a_tombstone_that_cannot_be_scanned_beside_a_store_gets_no_token() {
     .unwrap();
     let result = rig.gate.preview();
     assert!(
-        matches!(result, Err(Refused::Unavailable(_))),
+        matches!(&result, Err(Refused::Unavailable(r))
+            if r.contains("leftover") && r.contains("restart")),
         "its rows would go uncounted and unchecked: {result:?}"
     );
 }
@@ -188,4 +189,24 @@ fn a_retry_that_cannot_unlink_the_tombstone_still_says_the_data_is_on_disk() {
         panic!("{result:?}");
     };
     assert!(rig.location.dir().join(TOMBSTONE).exists());
+}
+
+#[test]
+fn recovery_still_rolls_back_a_hot_journal_when_the_tombstone_has_a_second_link() {
+    let rig = gate_rig(Limits::default());
+    feed_canary(&rig, 1);
+    wait_rows(&rig, 1);
+    rig.gate.disable().unwrap();
+    let GateRig { location, gate, .. } = rig;
+    drop(gate);
+    let dir = location.dir();
+    fs::write(dir.join(TOMBSTONE), b"old").unwrap();
+    fs::hard_link(dir.join(TOMBSTONE), dir.join("other-name")).unwrap();
+    fs::write(dir.join("history.db-journal"), [7u8; 1024]).unwrap();
+    super::control_files::recover(&location);
+    assert!(!dir.join(TOMBSTONE).exists(), "the leftover was finished");
+    assert!(
+        !dir.join("history.db-journal").exists(),
+        "the journal was rolled back, not skipped"
+    );
 }

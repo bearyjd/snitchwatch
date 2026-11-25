@@ -288,6 +288,11 @@ impl ControlGate {
             Err(Refused::Busy | Refused::Unavailable(_)) if !store_present => {
                 Ok((empty_scan(), Leftover::Unchecked))
             }
+            Err(Refused::Busy | Refused::Unavailable(_)) => Err(Refused::Unavailable(
+                "the leftover of an old store could not be checked; restart the bridge \
+                 to finish removing it"
+                    .into(),
+            )),
             Err(other) => Err(other),
         }
     }

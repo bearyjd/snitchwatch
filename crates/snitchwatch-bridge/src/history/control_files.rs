@@ -306,7 +306,14 @@ pub(super) fn recover(location: &super::Location) {
         _ => return,
     }
     let result = StoreDir::open(location.dir(), open::effective_uid()).and_then(|dir| {
-        dir.finish_leftover()?;
+        match dir.finish_leftover() {
+            Ok(()) => {}
+            // The tombstone is gone; the journal check must still run.
+            Err(FilesError::Linked(name)) => {
+                tracing::warn!(name, "another link keeps deleted history");
+            }
+            Err(e) => return Err(e),
+        }
         dir.journal_present()
     });
     match result {
