@@ -755,6 +755,7 @@ impl Drop for Capture {
 /// thread, no directory, no queue.
 pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
     let location = locate(mode, state_dir).ok()?;
+    super::control_files::recover(&location);
     let State::Enabled(settings) = load_state(&location) else {
         return None;
     };

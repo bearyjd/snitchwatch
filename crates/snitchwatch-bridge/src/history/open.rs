@@ -67,7 +67,7 @@ pub(crate) fn dir_exists(dir: &Path) -> Result<bool, Unavailable> {
 }
 
 /// Open `dir` `O_NOFOLLOW | O_DIRECTORY` and check what that one handle says.
-fn open_checked(dir: &Path, euid: u32) -> Result<fs::File, Unavailable> {
+pub(super) fn open_checked(dir: &Path, euid: u32) -> Result<fs::File, Unavailable> {
     let handle = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
