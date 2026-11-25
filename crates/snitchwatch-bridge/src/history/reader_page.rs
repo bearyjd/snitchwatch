@@ -134,12 +134,18 @@ impl Loaded {
             segments,
         };
         c.gap_views = gap_views(&c.gaps, lo, hi, &event_ts);
-        c.bytes = HEADER_BYTES
-            + self.events[..n].iter().map(event_bytes).sum::<usize>()
-            + c.gap_views.iter().map(gap_bytes).sum::<usize>()
-            + c.session_views.iter().map(session_bytes).sum::<usize>()
-            + c.segments.iter().map(segment_bytes).sum::<usize>();
+        c.bytes = c.bytes_with(&self.events[..n]);
         c
+    }
+}
+
+impl Candidate {
+    fn bytes_with(&self, events: &[EventView]) -> usize {
+        HEADER_BYTES
+            + events.iter().map(event_bytes).sum::<usize>()
+            + self.gap_views.iter().map(gap_bytes).sum::<usize>()
+            + self.session_views.iter().map(session_bytes).sum::<usize>()
+            + self.segments.iter().map(segment_bytes).sum::<usize>()
     }
 }
 
@@ -239,6 +245,9 @@ pub(super) fn assemble(
 ) -> Page {
     let full = loaded.events.len();
     let (n, forced) = match largest_fit(&loaded, ctx) {
+        // Progress: a page that kept no event would give the client the same
+        // cursor again. Keep the newest one and trim the ledger instead.
+        Some(0) | None if full > 0 => (1, Some(Partial::Gaps)),
         Some(n) => (n, None),
         // Even an empty window carries more ledger rows than a page may:
         // keep the newest, and say so. Never silent.
@@ -246,7 +255,7 @@ pub(super) fn assemble(
     };
     let mut c = loaded.candidate(n, ctx);
     if forced.is_some() {
-        truncate_ledger(&mut c, &loaded, ctx);
+        truncate_ledger(&mut c, &loaded, ctx, &loaded.events[..n]);
     }
     let shrunk = n < full;
     let over_rows_at_full = shrunk && loaded.candidate(full, ctx).over_rows;
@@ -289,7 +298,7 @@ fn end_state(more: bool, gaps: &[Gap]) -> End {
 
 /// The pathological case: keep the newest rows a page may carry and tile
 /// what they cover (anything they leave unexplained shows as such).
-fn truncate_ledger(c: &mut Candidate, loaded: &Loaded, ctx: &Context<'_>) {
+fn truncate_ledger(c: &mut Candidate, loaded: &Loaded, ctx: &Context<'_>, kept: &[EventView]) {
     c.gaps.truncate(ctx.limits.gap_rows_per_page);
     c.sessions.truncate(ctx.limits.session_rows_per_page);
     c.segments = coverage(
@@ -298,6 +307,8 @@ fn truncate_ledger(c: &mut Candidate, loaded: &Loaded, ctx: &Context<'_>) {
         &c.gaps,
         loaded.floor_ms,
     );
-    c.gap_views = gap_views(&c.gaps, c.lo_ms, loaded.hi_ms, &[]);
+    let kept_ts: Vec<i64> = kept.iter().map(|e| e.ts_ms).collect();
+    c.gap_views = gap_views(&c.gaps, c.lo_ms, loaded.hi_ms, &kept_ts);
     c.session_views = session_views(&c.sessions, ctx.live_session_start_ms);
+    c.bytes = c.bytes_with(kept);
 }

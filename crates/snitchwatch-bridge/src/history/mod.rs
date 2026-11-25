@@ -42,7 +42,11 @@ mod reader_open;
 mod reader_page;
 #[cfg(test)]
 mod reader_paging_tests;
+#[cfg(test)]
+mod reader_progress_tests;
 pub mod reader_registry;
+#[cfg(test)]
+mod reader_registry_guard_tests;
 mod reader_size;
 mod reader_sql;
 #[cfg(test)]

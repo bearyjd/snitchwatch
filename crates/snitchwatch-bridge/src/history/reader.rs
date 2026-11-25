@@ -213,6 +213,8 @@ pub struct Page {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SummaryView {
+    /// A lower bound for this page's window only: rows the window clips
+    /// appear on every page they overlap, so do not add pages together.
     pub lost_at_least: u64,
     pub gap_rows: usize,
     pub may_overcount_by_pairs: usize,
@@ -298,7 +300,7 @@ impl<'a> Read<'a> {
         let control = Control::new(ctx.cancel, &ctx.limits);
         // A cancel that lands while the file is being checked is a cancel, not
         // an unavailable store (a cancel is sticky).
-        let conn = open_validated(ctx.db_path, &control).map_err(|u| {
+        let conn = open_validated(ctx.db_path, &control, ctx.limits.busy_wait).map_err(|u| {
             if ctx.cancel.is_cancelled() {
                 Outcome::Cancelled
             } else {

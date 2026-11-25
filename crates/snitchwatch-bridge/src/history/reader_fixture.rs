@@ -4,7 +4,7 @@
 use super::caps::ProcessPath;
 use super::ledger::{record_gap, Gap, GapCause, LedgerLimits};
 use super::lifecycle::Generation;
-use super::reader::{read_page, Context, Cursor, Limits, Outcome, Page, Request};
+use super::reader::{read_page, Context, Cursor, End, Limits, Outcome, Page, Request};
 use super::reader_registry::CancelToken;
 use super::record::{insert_event, Action, AnsweredBy, EventRecord};
 use super::retention_support::{rig, Rig};
@@ -100,6 +100,13 @@ impl Fx {
         let mut cursor = None;
         loop {
             let page = self.page(cursor, limit);
+            if page.end == End::More {
+                assert!(
+                    page.next_cursor.is_some() && page.next_cursor != cursor,
+                    "End::More without progress: cursor {cursor:?} -> {:?}",
+                    page.next_cursor
+                );
+            }
             cursor = page.next_cursor;
             let done = page.next_cursor.is_none();
             pages.push(page);

@@ -79,7 +79,7 @@ fn ctx<'a>(
     }
 }
 
-/// Two threads reading pages until `done`, counting completed reads.
+/// Two threads reading pages until `done`, counting delivered pages.
 fn spawn_readers<'s>(
     scope: &'s std::thread::Scope<'s, '_>,
     db: &'s std::path::Path,
@@ -92,14 +92,23 @@ fn spawn_readers<'s>(
         scope.spawn(move || {
             let ctx = ctx(db, generation, cancel);
             while !done.load(Ordering::SeqCst) {
-                let _ = read_page(
+                let outcome = read_page(
                     &Request {
                         cursor: None,
                         limit: 200,
                     },
                     &ctx,
                 );
-                reads.fetch_add(1, Ordering::SeqCst);
+                match outcome {
+                    // Only a delivered page is a read: a reader that cannot
+                    // open or read must fail these tests, not satisfy them.
+                    Outcome::Page(_) => {
+                        reads.fetch_add(1, Ordering::SeqCst);
+                    }
+                    // The probe's exclusive lock may land on a reader.
+                    Outcome::Unavailable(ref u) if u.retry => {}
+                    other => panic!("a reader got {other:?}"),
+                }
             }
         });
     }
@@ -294,26 +303,22 @@ fn quiesce_then_unlink(bump: bool) {
         if bump {
             generation.advance().unwrap();
         }
-        registry.close();
-        registry.cancel_all();
-        let idle = registry.wait_idle(Duration::from_secs(20));
-        if !idle {
-            // Let the worker go, so the failure is reported instead of hanging.
-            token.cancel();
-        }
-        assert!(idle, "the reader stopped before the unlink");
+        let guard = registry.quiesce(Duration::from_secs(20));
+        assert!(guard.is_ok(), "the reader stopped before the unlink");
+        // Held across the unlink, as the control gate holds it.
+        let guard = guard.ok();
         std::fs::remove_file(&db).unwrap();
         assert_eq!(
             worker.join().unwrap(),
             0,
             "a page was delivered after the stop"
         );
+        assert_eq!(
+            registry.try_acquire().err(),
+            Some(NotAdmitted::ControlOperation)
+        );
+        drop(guard);
     });
-    assert_eq!(
-        registry.try_acquire().err(),
-        Some(NotAdmitted::ControlOperation)
-    );
-    registry.reopen();
     let (generation, cancel) = (Generation::default(), CancelToken::default());
     let after = read_page(
         &Request {

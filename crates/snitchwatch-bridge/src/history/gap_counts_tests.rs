@@ -73,6 +73,29 @@ fn a_pair_broken_apart_by_a_merge_says_it_may_overcount() {
 }
 
 #[test]
+fn a_surviving_half_of_a_broken_pair_never_counts_more_than_it_can_prove() {
+    // The other half was merged away or fell outside the window: the row's
+    // count may include a loss that happened on the missing side.
+    for gaps in [
+        vec![
+            row(100, 200, GapCause::UpstreamLoss, 5),
+            row(200, 300, GapCause::DaemonDisconnected, 1),
+        ],
+        vec![
+            row(200, 300, GapCause::DaemonDisconnected, 1),
+            row(300, 400, GapCause::UpstreamLoss, 5),
+        ],
+    ] {
+        assert_eq!(summarize(&gaps).lost_at_least, 4);
+    }
+    let one = vec![
+        row(100, 200, GapCause::UpstreamLoss, 1),
+        row(200, 300, GapCause::DaemonDisconnected, 1),
+    ];
+    assert_eq!(summarize(&one).lost_at_least, 1, "never below one");
+}
+
+#[test]
 fn one_upstream_row_is_never_the_half_of_two_pairs() {
     let gaps = vec![
         row(100, 200, GapCause::UpstreamLoss, 2),
@@ -84,7 +107,11 @@ fn one_upstream_row_is_never_the_half_of_two_pairs() {
     // Chain: the middle row sits between two outages. It is used once.
     let flags = pair_flags(&gaps);
     assert_eq!(flags, vec![true, false, true, false, false]);
-    assert_eq!(summarize(&gaps).lost_at_least, 3 + 2);
+    assert_eq!(
+        summarize(&gaps).lost_at_least,
+        3 + 1,
+        "the unpaired half counts n-1"
+    );
     assert_eq!(summarize(&gaps).may_overcount_by_pairs, 1);
 }
 

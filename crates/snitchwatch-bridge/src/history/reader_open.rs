@@ -1,6 +1,7 @@
 //! Opening the history database for reading, and refusing what is not it.
 
 use std::path::Path;
+use std::time::Duration;
 
 use rusqlite::Connection;
 
@@ -48,12 +49,19 @@ fn open_error(e: OpenError) -> Unavail {
 /// directory is the bridge's own 0700 one and whose schema is exactly
 /// version 4's: the same object names and `CREATE` text a store creates, and
 /// all of them (the check alone accepts a subset).
-pub(super) fn open_validated(path: &Path, ctl: &Control) -> Result<Connection, Unavail> {
+pub(super) fn open_validated(
+    path: &Path,
+    ctl: &Control,
+    busy_wait: Duration,
+) -> Result<Connection, Unavail> {
     if let Some(dir) = path.parent() {
         super::open::check_dir(dir, super::open::effective_uid())
             .map_err(|e| no_retry(e.to_string()))?;
     }
     let mut conn = open_owner_only_readonly(path).map_err(open_error)?;
+    // A writer's commit window is short: wait it out, briefly, per statement.
+    conn.busy_timeout(busy_wait)
+        .map_err(|e| from_stop(super::reader_sql::classify_error(&e)))?;
     // The schema check reads a handful of rows; the budget applies to the
     // page statements that follow.
     check_schema(&conn, ctl)?;

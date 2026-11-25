@@ -35,13 +35,13 @@ fn a_cancelled_query_keeps_its_slot_until_its_worker_has_exited() {
     let ticket = registry.try_acquire().unwrap();
     let token = ticket.cancel_token();
     let (release, worker) = hold(ticket);
-    registry.cancel_all();
+    let stuck = registry.quiesce(Duration::from_millis(30));
     assert!(token.is_cancelled());
     assert_eq!(registry.in_use(), 1, "cancelled, not yet stopped");
-    assert!(
-        !registry.wait_idle(Duration::from_millis(30)),
-        "idle only when the worker has returned"
-    );
+    let Err(stuck) = stuck else {
+        panic!("idle only when the worker has returned")
+    };
+    stuck.give_up();
     release.send(()).unwrap();
     worker.join().unwrap();
     assert!(registry.wait_idle(LONG));
@@ -65,14 +65,14 @@ fn the_slot_returns_when_the_worker_panics() {
 #[test]
 fn closing_refuses_new_readers_with_its_own_reason_until_reopened() {
     let registry = ReaderRegistry::new();
-    registry.close();
+    let guard = registry.quiesce(LONG).ok().unwrap();
     assert!(registry.is_closed());
     assert_eq!(
         registry.try_acquire().err(),
         Some(NotAdmitted::ControlOperation),
         "not Busy: the client must not retry-spin during a clear"
     );
-    registry.reopen();
+    drop(guard);
     assert!(!registry.is_closed());
     registry.try_acquire().unwrap();
 }
@@ -91,9 +91,8 @@ fn the_quiesce_order_stops_an_in_flight_reader_before_wait_idle_returns() {
         }
         token.is_cancelled()
     });
-    registry.close();
-    registry.cancel_all();
-    assert!(registry.wait_idle(LONG), "the worker stopped");
+    let guard = registry.quiesce(LONG);
+    assert!(guard.is_ok(), "the worker stopped");
     assert!(
         worker.join().unwrap(),
         "it stopped because it was cancelled"
@@ -146,7 +145,7 @@ fn cancelling_interrupts_a_running_statement() {
         )
     });
     started_rx.recv().unwrap();
-    registry.cancel_all();
+    assert!(registry.quiesce(LONG).is_ok());
     let result = worker.join().unwrap();
     assert!(result.is_err(), "interrupted, not completed");
     assert!(registry.wait_idle(LONG));

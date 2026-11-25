@@ -7,15 +7,18 @@
 //!   a cancelled query keeps its slot until it has really stopped.
 //! * [`CancelToken`] is a flag plus the SQLite interrupt handle of the
 //!   worker's connection, so a cancel stops a running statement.
-//! * The control gate (PR 10) quiesces readers with [`ReaderRegistry::close`],
-//!   [`ReaderRegistry::cancel_all`], [`ReaderRegistry::wait_idle`] and, once
-//!   it is done, [`ReaderRegistry::reopen`]. A control operation never waits
-//!   behind a queued reader, because there is no queue.
+//! * The control gate (PR 10) quiesces readers with
+//!   [`ReaderRegistry::quiesce`]: close, cancel and wait for idle as one step
+//!   under the state lock. Its [`ControlGuard`] reopens on drop, and only
+//!   once every overlapping guard is gone; a quiesce that timed out stays
+//!   closed (fail closed) until the caller decides ([`NotIdle`]). A control
+//!   operation never waits behind a queued reader, because there is no queue.
 //! * [`ResponseSlots`] bound the memory of pages waiting for a slow
-//!   consumer: [`RESPONSE_SLOTS`] of them, each reclaimed after
-//!   [`SEND_DEADLINE`] so one stuck client cannot starve the rest.
+//!   consumer: [`RESPONSE_SLOTS`] of them. A page that was never sent is
+//!   dropped at [`SEND_DEADLINE`]; a page that is being sent keeps its slot
+//!   until it is dropped, so memory never exceeds the slot count.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -79,7 +82,8 @@ impl CancelToken {
 }
 
 struct State {
-    closed: bool,
+    /// Control operations that hold the registry closed (they may overlap).
+    closers: usize,
     next: u64,
     live: Vec<(u64, CancelToken)>,
 }
@@ -118,6 +122,66 @@ impl Drop for ReaderTicket {
     }
 }
 
+/// One control operation's hold on the registry's closed state.
+struct Closer {
+    inner: Arc<Inner>,
+    /// Reopen (drop this closer's count) on drop; false after a quiesce that
+    /// timed out, so a forgotten error cannot reopen the registry.
+    release: bool,
+}
+
+impl Closer {
+    fn armed(mut self) -> Self {
+        self.release = true;
+        self
+    }
+}
+
+impl Drop for Closer {
+    fn drop(&mut self) {
+        if self.release {
+            let mut state = locked(&self.inner.state);
+            state.closers = state.closers.saturating_sub(1);
+        }
+    }
+}
+
+/// A completed quiesce: no reader is running and none is admitted. Dropping
+/// it reopens the registry once no other control operation holds it closed.
+#[must_use = "the registry reopens when the guard is dropped"]
+pub struct ControlGuard {
+    _closer: Closer,
+}
+
+/// A quiesce whose workers did not stop in time. The registry stays closed:
+/// dropping this leaves it so. Wait again, or give up and reopen once the
+/// control operation has been refused with nothing changed.
+#[must_use = "dropping this leaves the registry closed"]
+pub struct NotIdle(Closer);
+
+impl NotIdle {
+    /// Waits again; on success the guard reopens on drop as usual.
+    pub fn wait_again(
+        self,
+        registry: &ReaderRegistry,
+        within: Duration,
+    ) -> Result<ControlGuard, Self> {
+        if registry.wait_idle(within) {
+            Ok(ControlGuard {
+                _closer: self.0.armed(),
+            })
+        } else {
+            Err(self)
+        }
+    }
+
+    /// Reopens, for a control operation that failed closed without touching
+    /// the store.
+    pub fn give_up(self) {
+        drop(self.0.armed());
+    }
+}
+
 /// The bridge-wide reader admission. Cheap to clone; clones share state.
 #[derive(Clone)]
 pub struct ReaderRegistry(Arc<Inner>);
@@ -137,7 +201,7 @@ impl ReaderRegistry {
         Self(Arc::new(Inner {
             gate: ReaderGate::new(limit),
             state: Mutex::new(State {
-                closed: false,
+                closers: 0,
                 next: 0,
                 live: Vec::new(),
             }),
@@ -148,7 +212,7 @@ impl ReaderRegistry {
     /// A slot now, or a refusal now. Never waits.
     pub fn try_acquire(&self) -> Result<ReaderTicket, NotAdmitted> {
         let mut state = locked(&self.0.state);
-        if state.closed {
+        if state.closers > 0 {
             return Err(NotAdmitted::ControlOperation);
         }
         let permit = self.0.gate.try_acquire().map_err(|_| NotAdmitted::Busy)?;
@@ -164,35 +228,42 @@ impl ReaderRegistry {
         })
     }
 
-    /// New queries are refused with [`NotAdmitted::ControlOperation`] until
-    /// [`Self::reopen`]. Running ones are not touched.
-    pub fn close(&self) {
-        locked(&self.0.state).closed = true;
-    }
-
-    pub fn reopen(&self) {
-        locked(&self.0.state).closed = false;
-    }
-
-    pub fn is_closed(&self) -> bool {
-        locked(&self.0.state).closed
-    }
-
-    /// Cancels every running query (flag and interrupt).
-    pub fn cancel_all(&self) {
-        let tokens: Vec<CancelToken> = locked(&self.0.state)
-            .live
-            .iter()
-            .map(|(_, token)| token.clone())
-            .collect();
+    /// Closes the registry, cancels every running query and waits for their
+    /// workers to return, as one step: no query is admitted between the
+    /// close and the cancel, and overlapping calls count as nested closers.
+    /// New queries get [`NotAdmitted::ControlOperation`] until the returned
+    /// guard (and every other) is dropped. If a worker has not returned
+    /// within `within`, the registry **stays closed** and [`NotIdle`] says
+    /// so: the caller must fail closed, not unlink.
+    pub fn quiesce(&self, within: Duration) -> Result<ControlGuard, NotIdle> {
+        let tokens: Vec<CancelToken> = {
+            let mut state = locked(&self.0.state);
+            state.closers += 1;
+            state.live.iter().map(|(_, token)| token.clone()).collect()
+        };
         for token in tokens {
             token.cancel();
         }
+        let closer = Closer {
+            inner: Arc::clone(&self.0),
+            release: false,
+        };
+        if self.wait_idle(within) {
+            Ok(ControlGuard {
+                _closer: closer.armed(),
+            })
+        } else {
+            Err(NotIdle(closer))
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        locked(&self.0.state).closers > 0
     }
 
     /// True once every worker has returned its ticket; false if `within`
-    /// passes first (the caller must then fail closed, not unlink).
-    pub fn wait_idle(&self, within: Duration) -> bool {
+    /// passes first.
+    fn wait_idle(&self, within: Duration) -> bool {
         let state = locked(&self.0.state);
         let (state, _) = self
             .0
@@ -250,6 +321,9 @@ struct SlotFlag<P> {
     reclaimed: AtomicBool,
     taken: Instant,
     payload: Mutex<Option<P>>,
+    /// The slot handle, plus one while a taken page is still alive: the
+    /// slot's place is held until both are gone.
+    owners: AtomicUsize,
 }
 
 struct SlotsInner<P> {
@@ -275,10 +349,13 @@ impl Default for ResponseSlots<super::reader::Page> {
     }
 }
 
-/// A page's place. Released on drop. Past the send deadline the slot is
-/// taken back **lazily, by the next [`ResponseSlots::acquire`]** (there is no
-/// timer): its page is dropped, [`Self::take`] returns `None` and
-/// [`Self::reclaimed`] says so. The sender must then close its connection.
+/// A page's place. Released on drop. Past the send deadline a page that was
+/// **not yet taken** is dropped, by [`ResponseSlots::sweep`] or the next
+/// [`ResponseSlots::acquire`] (there is no timer): [`Self::take`] then
+/// returns `None` and [`Self::reclaimed`] says so. A page that was taken is
+/// the sender's memory and keeps counting against the slots until it is
+/// dropped; [`Self::overdue`] tells the sender to give up and close its
+/// connection.
 pub struct ResponseSlot<P> {
     flag: Arc<SlotFlag<P>>,
     slots: Arc<SlotsInner<P>>,
@@ -300,15 +377,61 @@ impl<P> ResponseSlot<P> {
         Ok(())
     }
 
-    /// The page, to send; `None` if it was reclaimed or never filled.
-    pub fn take(&self) -> Option<P> {
-        locked(&self.flag.payload).take()
+    /// The page, to send; `None` if it was reclaimed or never filled. The
+    /// slot's place stays held until the returned page is dropped.
+    pub fn take(&self) -> Option<InFlight<P>> {
+        let mut payload = locked(&self.flag.payload);
+        // Counted before the page leaves, under the lock a sweep also takes.
+        self.flag.owners.fetch_add(1, Ordering::SeqCst);
+        let Some(page) = payload.take() else {
+            drop(payload);
+            release(&self.flag, &self.slots);
+            return None;
+        };
+        Some(InFlight {
+            page: Some(page),
+            flag: Arc::clone(&self.flag),
+            slots: Arc::clone(&self.slots),
+        })
+    }
+
+    /// The send deadline has passed: stop sending and close the connection.
+    pub fn overdue(&self) -> bool {
+        self.flag.taken.elapsed() >= self.slots.deadline
+    }
+}
+
+fn release<P>(flag: &Arc<SlotFlag<P>>, slots: &SlotsInner<P>) {
+    if flag.owners.fetch_sub(1, Ordering::SeqCst) == 1 {
+        locked(&slots.held).retain(|f| !Arc::ptr_eq(f, flag));
     }
 }
 
 impl<P> Drop for ResponseSlot<P> {
     fn drop(&mut self) {
-        locked(&self.slots.held).retain(|f| !Arc::ptr_eq(f, &self.flag));
+        release(&self.flag, &self.slots);
+    }
+}
+
+/// A page that left its slot to be sent. Dropping it frees the page, then
+/// the slot's place.
+pub struct InFlight<P> {
+    page: Option<P>,
+    flag: Arc<SlotFlag<P>>,
+    slots: Arc<SlotsInner<P>>,
+}
+
+impl<P> std::ops::Deref for InFlight<P> {
+    type Target = P;
+    fn deref(&self) -> &P {
+        self.page.as_ref().expect("held until drop")
+    }
+}
+
+impl<P> Drop for InFlight<P> {
+    fn drop(&mut self) {
+        drop(self.page.take());
+        release(&self.flag, &self.slots);
     }
 }
 
@@ -327,19 +450,35 @@ impl<P> ResponseSlots<P> {
         }))
     }
 
-    /// A slot, taking back (and dropping the page of) any that outlived the
-    /// send deadline; `None` when all are in use and none is overdue.
-    pub fn acquire(&self) -> Option<ResponseSlot<P>> {
+    /// Takes back the slots whose page outlived the send deadline unsent,
+    /// dropping those pages. A page already taken for sending is not
+    /// touched: its memory is still live, so its place is still counted.
+    pub fn sweep(&self) {
         let mut held = locked(&self.0.held);
+        self.reclaim(&mut held);
+    }
+
+    fn reclaim(&self, held: &mut Vec<Arc<SlotFlag<P>>>) {
         held.retain(|flag| {
             let overdue = flag.taken.elapsed() >= self.0.deadline;
-            if overdue {
-                let mut payload = locked(&flag.payload);
-                flag.reclaimed.store(true, Ordering::SeqCst);
-                drop(payload.take());
+            if !overdue {
+                return true;
             }
-            !overdue
+            let mut payload = locked(&flag.payload);
+            if flag.owners.load(Ordering::SeqCst) > 1 {
+                return true;
+            }
+            flag.reclaimed.store(true, Ordering::SeqCst);
+            drop(payload.take());
+            false
         });
+    }
+
+    /// A slot, after a [`Self::sweep`]; `None` when all are in use and none
+    /// could be taken back.
+    pub fn acquire(&self) -> Option<ResponseSlot<P>> {
+        let mut held = locked(&self.0.held);
+        self.reclaim(&mut held);
         if held.len() >= self.0.limit {
             return None;
         }
@@ -347,6 +486,7 @@ impl<P> ResponseSlots<P> {
             reclaimed: AtomicBool::new(false),
             taken: Instant::now(),
             payload: Mutex::new(None),
+            owners: AtomicUsize::new(1),
         });
         held.push(Arc::clone(&flag));
         Some(ResponseSlot {

@@ -18,11 +18,16 @@ use super::ledger::{Gap, GapCause};
 /// What a range of gap rows adds up to, never as one exact number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Summary {
-    /// Items lost, at least. Every part of it is a lower bound.
+    /// Items lost, at least, among the rows given. Every part of it is a
+    /// lower bound. A row that a page window clips is counted in full on
+    /// every page it overlaps, so these totals describe one window and must
+    /// not be added across pages.
     pub lost_at_least: u64,
     pub gap_rows: usize,
-    /// Outage rows that touch an upstream-loss row on one side only (the
-    /// other half was merged away): their total can err high by one each.
+    /// Upstream-loss rows that touch an outage on one side only (the other
+    /// half was merged away or lies outside the window). Each is counted one
+    /// lower than its row says, so the total stays a lower bound; this says
+    /// how many rows were treated so.
     pub may_overcount_by_pairs: usize,
 }
 
@@ -38,17 +43,17 @@ fn counts_items(cause: GapCause) -> bool {
 }
 
 /// `(before, outage, after)` row indexes of every bracketing pair, and the
-/// outage rows that only have one side.
+/// upstream-loss rows that touch an outage on one side only.
 struct Pairs {
     pairs: Vec<(usize, usize, usize)>,
-    broken: usize,
+    broken: Vec<usize>,
 }
 
 fn find_pairs(gaps: &[Gap]) -> Pairs {
     let mut used = vec![false; gaps.len()];
     let mut found = Pairs {
         pairs: Vec::new(),
-        broken: 0,
+        broken: Vec::new(),
     };
     let upstream = |i: usize| gaps[i].cause == GapCause::UpstreamLoss;
     for (d, down) in gaps.iter().enumerate() {
@@ -69,7 +74,11 @@ fn find_pairs(gaps: &[Gap]) -> Pairs {
                 found.pairs.push((b, d, a));
             }
             (None, None) => {}
-            _ => found.broken += 1,
+            (one, other) => {
+                let lone = one.or(other).unwrap_or_default();
+                used[lone] = true;
+                found.broken.push(lone);
+            }
         }
     }
     found
@@ -91,17 +100,21 @@ pub fn summarize(gaps: &[Gap]) -> Summary {
     let flags = pair_flags(gaps);
     let singles = gaps
         .iter()
-        .zip(&flags)
-        .filter(|(g, paired)| !**paired && counts_items(g.cause))
-        .fold(0u64, |sum, (g, _)| sum.saturating_add(g.count));
+        .enumerate()
+        .filter(|(i, g)| !flags[*i] && !found.broken.contains(i) && counts_items(g.cause))
+        .fold(0u64, |sum, (_, g)| sum.saturating_add(g.count));
+    // A lone half may hold a loss that belongs to the missing half: one less.
+    let lone = found.broken.iter().fold(0u64, |sum, &i| {
+        sum.saturating_add(gaps[i].count.saturating_sub(1).max(1))
+    });
     let paired = found.pairs.iter().fold(0u64, |sum, (b, _, a)| {
         let both = gaps[*b].count.saturating_add(gaps[*a].count);
         sum.saturating_add(both.saturating_sub(1).max(1))
     });
     Summary {
-        lost_at_least: singles.saturating_add(paired),
+        lost_at_least: singles.saturating_add(paired).saturating_add(lone),
         gap_rows: gaps.len(),
-        may_overcount_by_pairs: found.broken,
+        may_overcount_by_pairs: found.broken.len(),
     }
 }
 
