@@ -175,6 +175,31 @@ fn what_lies_below_the_retention_floor_is_not_blank() {
 }
 
 #[test]
+fn the_floor_splits_a_stretch_that_straddles_it() {
+    let w = win(0, 100);
+    let segments = coverage(w, &[session(60, None)], &[], Some(30));
+    assert_tiles(w, &segments);
+    assert_eq!(
+        spans(&segments),
+        vec![
+            (0, 30, Kind::BeforeFloor, false),
+            (30, 60, Kind::Unexplained, false),
+            (60, 100, Kind::Recorded, true),
+        ]
+    );
+}
+
+#[test]
+fn a_clock_stepped_back_leaves_inverted_rows_that_never_break_the_tiling() {
+    let w = win(0, 100);
+    let sessions = [session(80, Some(20)), session(0, Some(50))];
+    let segments = coverage(w, &sessions, &[], None);
+    assert_tiles(w, &segments);
+    assert!(segments.iter().any(|s| s.kind == Kind::Recorded));
+    assert!(segments.iter().any(|s| s.kind == Kind::Unexplained));
+}
+
+#[test]
 fn a_gap_overlaps_events_when_one_lies_within_its_bounds() {
     let g = gap(10, 20, GapCause::Evicted);
     assert!(gap_overlaps_events(&g, &[5, 15, 30]));
@@ -182,6 +207,23 @@ fn a_gap_overlaps_events_when_one_lies_within_its_bounds() {
     assert!(gap_overlaps_events(&g, &[20]));
     assert!(!gap_overlaps_events(&g, &[9, 21]));
     assert!(!gap_overlaps_events(&g, &[]));
+}
+
+proptest! {
+    /// Whatever the ledger holds (inverted sessions from a stepped-back
+    /// clock, gaps anywhere, any floor), the window is tiled.
+    #[test]
+    fn any_ledger_at_all_still_tiles(
+        sessions in proptest::collection::vec((0i64..200, proptest::option::of(0i64..200)), 0..6),
+        gaps in proptest::collection::vec(arbitrary_gap(), 0..6),
+        floor in proptest::option::of(0i64..200),
+        lo in 0i64..150,
+        len in 0i64..150,
+    ) {
+        let sessions: Vec<Session> = sessions.into_iter().map(|(s, e)| session(s, e)).collect();
+        let w = win(lo, lo + len);
+        assert_tiles(w, &coverage(w, &sessions, &gaps, floor));
+    }
 }
 
 fn arbitrary_gap() -> impl Strategy<Value = Gap> {

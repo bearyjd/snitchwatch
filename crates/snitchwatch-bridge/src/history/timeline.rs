@@ -64,15 +64,21 @@ fn gap_covers(gap: &Gap, a: i64, b: i64) -> bool {
     gap.start_ms <= a && gap.end_ms >= b
 }
 
-/// Every point where something starts or ends inside the window, plus its
-/// two ends, sorted and distinct.
-fn cut_points(window: Window, sessions: &[Session], gaps: &[Gap]) -> Vec<i64> {
+/// Every point where something starts or ends inside the window (the floor
+/// included), plus its two ends, sorted and distinct.
+fn cut_points(
+    window: Window,
+    sessions: &[Session],
+    gaps: &[Gap],
+    floor_ms: Option<i64>,
+) -> Vec<i64> {
     let mut points = vec![window.lo_ms, window.hi_ms];
     let edges = sessions
         .iter()
         .flat_map(|s| [Some(s.start_ms), s.end_ms])
         .chain(gaps.iter().flat_map(|g| [Some(g.start_ms), Some(g.end_ms)]))
-        .flatten();
+        .flatten()
+        .chain(floor_ms);
     points.extend(edges.filter(|p| *p > window.lo_ms && *p < window.hi_ms));
     points.sort_unstable();
     points.dedup();
@@ -122,7 +128,7 @@ pub fn coverage(
     gaps: &[Gap],
     floor_ms: Option<i64>,
 ) -> Vec<Segment> {
-    let points = cut_points(window, sessions, gaps);
+    let points = cut_points(window, sessions, gaps, floor_ms);
     let mut out: Vec<Segment> = Vec::new();
     let mut push = |segment: Segment| match out.last_mut() {
         Some(last) if same_state(last, &segment) && last.end_ms == segment.start_ms => {
