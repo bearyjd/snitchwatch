@@ -262,11 +262,17 @@ mod control_files_tests;
 #[cfg(test)]
 mod control_lock_tests;
 #[cfg(test)]
+mod control_outage_tests;
+#[cfg(test)]
 mod control_preview_tests;
 #[cfg(test)]
 mod control_prompts_tests;
 #[cfg(test)]
 mod control_reader_tests;
+#[cfg(test)]
+mod control_recheck_tests;
+#[cfg(test)]
+mod control_refusal_tests;
 #[cfg(test)]
 pub(crate) mod control_support;
 #[cfg(test)]

@@ -183,6 +183,9 @@ const OWNERS: &[&str] = &[
     "retention_writer_tests.rs",
     "retention_support.rs",
     "control_epoch_tests.rs",
+    "control_outage_tests.rs",
+    "control_recheck_tests.rs",
+    "control_refusal_tests.rs",
     "control_prompts_tests.rs",
     "control_support.rs",
     "pending.rs",
@@ -322,7 +325,7 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 52] = [
+const DURABLE_OWNERS: [&str; 56] = [
     "timeline.rs",
     "timeline_tests.rs",
     "gap_counts.rs",
@@ -367,11 +370,15 @@ const DURABLE_OWNERS: [&str; 52] = [
     "retention_writer_tests.rs",
     "retention_support.rs",
     "control_epoch_tests.rs",
+    "control_outage_tests.rs",
+    "control_recheck_tests.rs",
+    "control_refusal_tests.rs",
     "control_prompts_tests.rs",
     "control_support.rs",
     "control.rs",
     "control_tests.rs",
     "capture_control.rs",
+    "control_crash_tests.rs",
     "control_reader_tests.rs",
     "control_two_bridge_tests.rs",
     "dormant_tests.rs",
@@ -432,6 +439,9 @@ const CAPTURE_OWNERS: &[&str] = &[
     "gaps_tests.rs",
     "gaps_repair_tests.rs",
     "control_epoch_tests.rs",
+    "control_outage_tests.rs",
+    "control_recheck_tests.rs",
+    "control_refusal_tests.rs",
     "control_prompts_tests.rs",
     "control_support.rs",
     "control_files_tests.rs",
@@ -455,7 +465,7 @@ const CAPTURE_OWNERS: &[&str] = &[
 /// edges), and the only paths each may name:
 /// `UiService` holds the capture and uses it for pings and prompt outcomes.
 /// The bridge binary asks `start` for one.
-const HOOK_FILES: [(&str, &[&str]); 3] = [
+const HOOK_FILES: [(&str, &[&str]); 4] = [
     (
         "snitchwatch-bridge/src/daemon_watchdog.rs",
         &["history::capture::Capture", "history::control::CaptureSlot"],
@@ -468,6 +478,12 @@ const HOOK_FILES: [(&str, &[&str]); 3] = [
             "history::guard::DecisionOutcome",
             "history::record::AnsweredBy",
         ],
+    ),
+    // The running bridge owns the gate, and with it the writer lock, for as
+    // long as it runs.
+    (
+        "snitchwatch-bridge-cli/src/running.rs",
+        &["history::control::ControlGate"],
     ),
     (
         "snitchwatch-bridge-cli/src/lib.rs",

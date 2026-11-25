@@ -10,7 +10,10 @@ use std::process::Command;
 use super::control::{ControlGate, Limits};
 use super::control_files::Step;
 use super::control_support::{consent, count, event};
+use super::reader::{read_page, Context, Limits as ReadLimits, Outcome, Request};
+use super::reader_registry::CancelToken;
 use super::test_support::{state_dir, tempdir};
+use super::timeline::Kind;
 use super::{enable, locate, settings, Location, Mode};
 
 const KILL_AT: &str = "SW_CONTROL_CRASH_AT";
@@ -59,6 +62,12 @@ fn clear_child() {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     let token = gate.preview().unwrap().token;
+    // Accepted after the preview: a clear carries it into the new store.
+    let later = event("/usr/bin/curl", "carry.example", 99);
+    capture.observe(&[&later]);
+    while count(&location, "SELECT COUNT(*) FROM events") < 4 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let kill = |step: Step| {
         if format!("{step:?}") == at {
             // SAFETY: kill(2) on our own pid; no memory is touched.
@@ -119,38 +128,123 @@ fn crashed(step: &str, kind: &str) -> (tempfile::TempDir, std::path::PathBuf, Lo
     (root, state, location)
 }
 
+const TOMBSTONE: &str = "history.db.deleting";
+
+/// What the directory holds at the instant of the kill, before any restart.
+fn assert_at_the_kill(step: &str, dir: &Path, location: &Location) {
+    let live = dir.join("history.db");
+    match step {
+        "Begin" => {
+            assert_eq!(
+                dir_canaries(dir),
+                ["history.db"],
+                "{step}: positive control"
+            );
+            assert_eq!(count(location, "SELECT COUNT(*) FROM events"), 4, "{step}");
+        }
+        "Renamed" => {
+            assert!(!live.exists(), "{step}: nothing under the live name");
+            assert_eq!(dir_canaries(dir), [TOMBSTONE], "{step}: only the tombstone");
+        }
+        "TombstoneRemoved" => {
+            assert!(!live.exists(), "{step}: nothing under the live name");
+            assert_eq!(
+                dir_canaries(dir),
+                Vec::<String>::new(),
+                "{step}: it is gone"
+            );
+        }
+        "Created" => {
+            assert_eq!(dir_canaries(dir), Vec::<String>::new(), "{step}");
+            assert_eq!(count(location, "SELECT COUNT(*) FROM events"), 0, "{step}");
+        }
+        _ => {
+            assert_eq!(dir_canaries(dir), Vec::<String>::new(), "{step}");
+            let kept = "SELECT COUNT(*) FROM events WHERE dst_host = 'carry.example'";
+            assert_eq!(count(location, "SELECT COUNT(*) FROM events"), 1, "{step}");
+            assert_eq!(count(location, kept), 1, "{step}: the carried row");
+        }
+    }
+}
+
 #[test]
 fn a_kill_at_every_step_leaves_the_old_store_whole_or_an_empty_one() {
     for step in ["Begin", "Renamed", "TombstoneRemoved", "Created", "Carried"] {
         let (_root, state, location) = crashed_clear(step);
         let dir = location.dir().to_owned();
-        let live = dir.join("history.db");
-        match step {
-            "Begin" => assert!(live.exists(), "{step}: the old store is still whole"),
-            "Renamed" | "TombstoneRemoved" => {
-                assert!(!live.exists(), "{step}: nothing under the live name");
-            }
-            _ => {
-                assert!(live.exists(), "{step}: the new store exists");
-                assert_eq!(dir_canaries(&dir), Vec::<String>::new(), "{step}");
-                assert_eq!(count(&location, "SELECT COUNT(*) FROM events"), 0, "{step}");
-            }
-        }
+        assert_at_the_kill(step, &dir, &location);
         // Restart, history on: the old store whole, or a fresh empty one.
         let gate = ControlGate::start(Mode::User, Some(&state), Limits::default());
         assert!(gate.slot().get().is_some(), "{step}: recording again");
-        assert!(
-            count(&location, "SELECT COUNT(*) FROM sessions") >= 1,
+        let sessions = if step == "Begin" { 2 } else { 1 };
+        assert_eq!(
+            count(&location, "SELECT COUNT(*) FROM sessions"),
+            sessions,
             "{step}"
         );
         let events = count(&location, "SELECT COUNT(*) FROM events");
-        if step == "Begin" {
-            assert_eq!(events, 3, "{step}");
-        } else {
-            assert_eq!(events, 0, "{step}");
+        let expected = match step {
+            "Begin" => 4,
+            "Carried" => 1,
+            _ => 0,
+        };
+        assert_eq!(events, expected, "{step}");
+        if step != "Begin" {
             assert_eq!(dir_canaries(&dir), Vec::<String>::new(), "{step}");
         }
-        assert!(!dir.join("history.db.deleting").exists(), "{step}");
+        assert!(!dir.join(TOMBSTONE).exists(), "{step}");
+        assert_crash_not_recorded(&gate, &location, step);
+    }
+}
+
+/// The reader, after the restart, never calls the stretch between the kill
+/// and the new session recorded coverage.
+fn assert_crash_not_recorded(gate: &ControlGate, location: &Location, step: &str) {
+    let restart = count(location, "SELECT MAX(start_ms) FROM sessions");
+    let generation = gate.generation();
+    let cancel = CancelToken::default();
+    let ctx = Context {
+        location,
+        generation: &generation,
+        cancel: &cancel,
+        now_ms: restart + 1,
+        live_session_start_ms: None,
+        standing: None,
+        limits: ReadLimits::default(),
+    };
+    let Outcome::Page(page) = read_page(
+        &Request {
+            cursor: None,
+            limit: 10,
+        },
+        &ctx,
+    ) else {
+        panic!("{step}: no page");
+    };
+    // Whatever the page shows of the instants before the new session is not
+    // recorded coverage: the old session crashed, or its store is gone.
+    let near: Vec<_> = page
+        .coverage
+        .iter()
+        .filter(|s| s.start_ms < restart)
+        .collect();
+    for segment in &near {
+        assert!(
+            !matches!(segment.kind, Kind::Recorded) || segment.end_ms < restart - 1,
+            "{step}: {segment:?} claims recording across the crash"
+        );
+    }
+    let gap_before = near.iter().any(|s| matches!(s.kind, Kind::Gap));
+    match step {
+        // The old session is in the old store: its end is a crash gap.
+        "Begin" => assert!(gap_before, "{step}: the crash is a gap: {near:?}"),
+        // The carried event is older than the new store: shown, unexplained.
+        "Carried" => assert!(!near.is_empty(), "{step}: the carried row has a place"),
+        // The old store is gone: nothing of it is claimed.
+        _ => assert!(
+            near.is_empty(),
+            "{step}: nothing before the restart: {near:?}"
+        ),
     }
 }
 

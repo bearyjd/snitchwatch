@@ -21,8 +21,6 @@ use super::reader_registry::NotAdmitted;
 pub const MAX_TOKENS: usize = 4;
 /// Ids per statement window.
 const CHUNK: i64 = 20_000;
-/// A statement is cut after this long.
-const STATEMENT_BUDGET: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenId(pub u64);
@@ -108,11 +106,13 @@ fn sql(e: rusqlite::Error) -> ScanError {
 }
 
 /// Scans `events` with `id <= upto` (the current max when `None`), window by
-/// window. Each statement is cut at [`STATEMENT_BUDGET`] or on `cancelled`.
+/// window. Each statement is cut after `budget` (never, when `None`) or on
+/// `cancelled`.
 pub(super) fn scan_events(
     conn: &mut Connection,
     upto: Option<i64>,
     cancelled: Cancelled,
+    budget: Option<Duration>,
 ) -> Result<Scan, ScanError> {
     let window = Arc::new(Mutex::new(Instant::now()));
     let (flag, started) = (cancelled.clone(), window.clone());
@@ -122,7 +122,7 @@ pub(super) fn scan_events(
             flag()
                 || started
                     .lock()
-                    .map_or(true, |at| at.elapsed() > STATEMENT_BUDGET)
+                    .map_or(true, |at| budget.is_some_and(|b| at.elapsed() > b))
         }),
     )
     .map_err(sql)?;
@@ -196,12 +196,16 @@ impl ControlGate {
                 let cancel = ticket.cancel_token();
                 cancel.attach(conn.get_interrupt_handle());
                 let seen = cancel.clone();
-                scan_events(&mut conn, None, Arc::new(move || seen.is_cancelled())).map_err(
-                    |e| match e {
-                        ScanError::Cancelled => Refused::Busy,
-                        ScanError::Failed(reason) => Refused::Unavailable(reason),
-                    },
-                )?
+                scan_events(
+                    &mut conn,
+                    None,
+                    Arc::new(move || seen.is_cancelled()),
+                    Some(self.0.limits.statement),
+                )
+                .map_err(|e| match e {
+                    ScanError::Cancelled => Refused::Busy,
+                    ScanError::Failed(reason) => Refused::Unavailable(reason),
+                })?
             }
             Err(crate::sqlite_file::OpenError::Io(e))
                 if e.kind() == std::io::ErrorKind::NotFound =>

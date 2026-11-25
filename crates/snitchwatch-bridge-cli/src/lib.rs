@@ -290,7 +290,7 @@ where
     // Connection history is off unless the owner enabled it: `start` reads
     // the state (creating nothing) and gives `None` for off, so a bridge with
     // history off starts no writer, makes no directory and allocates no queue.
-    // The gate lives as long as this bridge: it holds the writer lock.
+    // The gate is stored in `RunningBridge`: it holds the writer lock.
     let gate = history_gate(&options);
     let recorder = gate.as_ref().map(|gate| gate.slot());
     let ui_service_inner = match recorder.clone() {
@@ -752,6 +752,7 @@ where
         rule_hits_ticker,
         curated_handle,
         curated,
+        history_gate: gate,
     })
 }
 

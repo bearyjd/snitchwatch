@@ -12,11 +12,11 @@ use super::Mode;
 
 const CANARY: &str = "canary-9d41.example";
 
-fn rows(rig: &GateRig) -> i64 {
+pub(super) fn rows(rig: &GateRig) -> i64 {
     count(&rig.location, "SELECT COUNT(*) FROM events")
 }
 
-fn feed_canary(rig: &GateRig, n: usize) {
+pub(super) fn feed_canary(rig: &GateRig, n: usize) {
     let capture = rig.gate.slot().get().expect("recording");
     let events: Vec<_> = (0..n)
         .map(|i| {
@@ -30,7 +30,7 @@ fn feed_canary(rig: &GateRig, n: usize) {
     capture.observe(&events.iter().collect::<Vec<_>>());
 }
 
-fn wait_rows(rig: &GateRig, n: i64) {
+pub(super) fn wait_rows(rig: &GateRig, n: i64) {
     wait_for("rows to be written", || rows(rig) == n);
 }
 
@@ -210,10 +210,13 @@ fn delete_refuses_a_linked_store_and_leaves_everything_as_it_was() {
     fs::write(&victim, "keep").unwrap();
     fs::rename(dir.join("history.db"), &real).unwrap();
     symlink(&victim, dir.join("history.db")).unwrap();
-    assert!(matches!(
-        rig.gate.delete(preview.token),
-        Err(Refused::Files(_))
-    ));
+    // The link is refused, and recording cannot restart on it either: the
+    // refusal says both.
+    let result = rig.gate.delete(preview.token);
+    assert!(
+        matches!(&result, Err(Refused::RollbackFailed { refused, .. }) if refused.starts_with("files:")),
+        "{result:?}"
+    );
     assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
     assert!(real.exists());
     assert!(dir.join("settings.json").exists(), "settings untouched");

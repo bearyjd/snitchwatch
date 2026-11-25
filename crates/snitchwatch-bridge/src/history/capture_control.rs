@@ -5,11 +5,11 @@
 use std::sync::Arc;
 
 use super::super::budget::Budget;
+use super::super::control_lock::WriterLock;
 use super::super::lifecycle::{Exhausted, Generation};
 use super::super::pins::PinRegistry;
 use super::super::reader_registry::ControlGuard;
 use super::super::writer::Engine;
-use super::super::Consent;
 use super::super::{load_state, locate, open_store, Mode, State};
 use super::{Capture, CaptureConfig, CaptureStats};
 use std::path::Path;
@@ -18,29 +18,29 @@ impl Capture {
     /// Step 2 of the barrier, brief and in memory: advance the generation
     /// (the registry is quiesced, so no reader can tag old data with the new
     /// number) and clear the consent, so no prompt or event is accepted from
-    /// now on. Returns the consent that was active, to put back if the
-    /// operation is refused after this point.
+    /// now on. Nothing after this can be refused: the writer stops next, so
+    /// a prompt pending here is covered by a gap or discarded with its store,
+    /// never left holding its pin for a capture that goes on.
     pub(in crate::history) fn close_admission(
         &self,
         guard: &ControlGuard,
         generation: &Generation,
-    ) -> Result<Option<Arc<Consent>>, Exhausted> {
+    ) -> Result<(), Exhausted> {
         let mut control = self
             .shared
             .control
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         guard.advance(generation)?;
-        Ok(control.take())
+        *control = None;
+        Ok(())
     }
 
-    /// Undoes [`close_admission`](Self::close_admission)'s consent change.
-    pub(in crate::history) fn restore_consent(&self, consent: Option<Arc<Consent>>) {
-        *self
-            .shared
-            .control
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = consent;
+    /// This capture shares the writer lock, so the lock outlives the gate
+    /// for as long as this writer can write.
+    pub(in crate::history) fn holding(mut self, lock: Option<Arc<WriterLock>>) -> Self {
+        self._lock = lock;
+        self
     }
 
     /// Closes the queue and joins the writer, which drains what is queued
@@ -94,10 +94,7 @@ pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
         CaptureConfig::for_settings(&budget, &settings),
     );
     match capture {
-        Ok(mut capture) => {
-            capture._lock = lock;
-            Some(Arc::new(capture))
-        }
+        Ok(capture) => Some(Arc::new(capture.holding(lock))),
         Err(e) => {
             tracing::warn!(error = %e, "history writer thread could not start");
             None

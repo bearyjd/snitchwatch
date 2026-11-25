@@ -526,7 +526,7 @@ pub struct Capture {
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// The single-writer lock of a capture that [`start`] made; released
     /// only after the writer has been joined (fields drop after `Drop`).
-    _lock: Option<WriterLock>,
+    _lock: Option<Arc<WriterLock>>,
 }
 
 impl Capture {

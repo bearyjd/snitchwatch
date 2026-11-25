@@ -563,7 +563,10 @@ retention change; nothing for disable (which keeps history by default). Enforcem
    A reader admitted between the bump and the close would read the old
    database and tag its cursor with the new generation, which the
    replacement would then accept. PR 9's design 7 repeats the old order; it
-   is superseded by this one.*
+   is superseded by this one. The mode change that can be refused (saving
+   `enabled = false`, for disable and delete) is made after step 2 and
+   before this bump: a refusal after the bump leaves every pending prompt
+   stale, its pin held, so a refusal must change nothing.*
 4. **Split the queue by scope; do not discard wholesale.**
    - *Queued events* outside the scope are kept. Moving them across the
      boundary does not rewrite anything about how they were accepted: the

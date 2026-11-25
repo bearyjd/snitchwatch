@@ -17,15 +17,15 @@ use std::sync::Arc;
 use rusqlite::types::Value;
 use rusqlite::Connection;
 
-use super::capture::Capture;
-use super::control::{save_disabled, spawn_capture, ControlGate, Refused};
+use super::control::{persist_off, restore_settings, spawn_capture, ControlGate, Refused};
 use super::control_files::{FilesError, Step, StoreDir};
-use super::control_preview::{scan_events, Checksum, Token, TokenId};
+use super::control_preview::{scan_events, Checksum, ScanError, Token, TokenId};
 use super::{open_store, settings, Location, Settings};
 
 /// The most events that a clear carries into the new store.
 const CARRY_MAX: i64 = 10_000;
-const EVENT_COLUMNS: &str = "ts_ms, decided_ts_ms, process_path, dst_host, dst_ip, dst_port, \
+pub(super) const EVENT_COLUMNS: &str =
+    "ts_ms, decided_ts_ms, process_path, dst_host, dst_ip, dst_port, \
     protocol, action, answered_by, rule_name, rule_hash, rule_class, repeat_count, src_port, \
     src_ip, prompt_outcome";
 
@@ -89,19 +89,15 @@ impl ControlGate {
             .ok_or(Refused::StaleToken)?;
         let guard = self.quiesce()?;
         let capture = self.0.slot.get();
-        let prior = settings::load(&location).ok().flatten();
-        let saved = match &capture {
-            Some(c) => c.close_admission(&guard, &self.0.generation),
-            None => guard.advance(&self.0.generation).map(|_| None),
-        }
-        .map_err(|_| Refused::Unavailable("generation counter exhausted".into()))?;
-        if kind == Kind::Delete {
-            if let Err(refused) = save_disabled(&location) {
-                if let Some(c) = &capture {
-                    c.restore_consent(saved);
-                }
-                return Err(refused);
-            }
+        // Delete turns recording off first; nothing here is closed yet, so a
+        // refusal changes nothing.
+        let changed = match kind {
+            Kind::Delete => persist_off(&location, true)?,
+            Kind::Clear => None,
+        };
+        if let Err(refused) = self.close(&guard, capture.as_ref()) {
+            restore_settings(&location, changed);
+            return Err(refused);
         }
         self.0.slot.set(None);
         if let Some(c) = &capture {
@@ -110,12 +106,31 @@ impl ControlGate {
         let done = self
             .remove_files(&location, &token, kind, observe)
             .and_then(|carry| self.finish(&location, (kind, capture.is_some()), carry, observe));
-        if let Err(refused) = &done {
-            tracing::warn!(%refused, "a control operation was refused; restarting recording");
-            self.rollback(&location, prior, capture.is_some());
-        }
+        let outcome = match done {
+            Err(refused) => Err(self.undo(&location, changed, capture.is_some(), refused)),
+            ok => ok,
+        };
         drop(guard);
-        done
+        outcome
+    }
+
+    /// A refusal after the writer stopped: restart recording and say so if
+    /// that failed too, instead of claiming that nothing changed.
+    fn undo(
+        &self,
+        location: &Location,
+        changed: Option<Settings>,
+        was_recording: bool,
+        refused: Refused,
+    ) -> Refused {
+        tracing::warn!(%refused, "a control operation was refused; restarting recording");
+        match self.rollback(location, changed, was_recording) {
+            Ok(()) => refused,
+            Err(reason) => Refused::RollbackFailed {
+                refused: refused.to_string(),
+                reason,
+            },
+        }
     }
 
     fn remove_files(
@@ -128,7 +143,7 @@ impl ControlGate {
         let dir = StoreDir::open(location.dir(), super::open::effective_uid()).map_err(files)?;
         dir.check_removable().map_err(files)?;
         let carry = match crate::sqlite_file::open_owner_only_readonly(&location.db_path()) {
-            Ok(mut conn) => recheck(&mut conn, token, kind == Kind::Clear)?,
+            Ok(mut conn) => recheck(&mut conn, token, kind == Kind::Clear, None)?,
             Err(crate::sqlite_file::OpenError::Io(e))
                 if e.kind() == std::io::ErrorKind::NotFound =>
             {
@@ -169,50 +184,78 @@ impl ControlGate {
         Ok(())
     }
 
-    /// A refusal after the writer stopped: put the settings back and record
-    /// again on whatever store is there (a missing one is created empty).
-    fn rollback(&self, location: &Location, prior: Option<Settings>, was_recording: bool) {
-        if let Some(prior) = prior {
-            if let Err(e) = settings::save(location, &prior) {
-                tracing::error!(error = %e, "history settings could not be put back");
-            }
+    /// Put the settings back and record again on whatever store is there (a
+    /// missing one is created empty).
+    fn rollback(
+        &self,
+        location: &Location,
+        changed: Option<Settings>,
+        was_recording: bool,
+    ) -> Result<(), String> {
+        if let Some(prior) = changed {
+            settings::save(location, &prior).map_err(|e| format!("settings: {e}"))?;
         }
         if !was_recording {
-            return;
+            return Ok(());
         }
-        let restarted: Result<Capture, String> = settings::load(location)
-            .map_err(|e| e.to_string())
-            .and_then(|s| s.ok_or_else(|| "settings are gone".to_owned()))
-            .and_then(|s| spawn_capture(location, &s, &self.0));
-        match restarted {
-            Ok(capture) => self.0.slot.set(Some(Arc::new(capture))),
-            Err(reason) => tracing::error!(%reason, "history could not restart recording"),
-        }
+        let settings = settings::load(location)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "settings are gone".to_owned())?;
+        let capture = spawn_capture(location, &settings, &self.0)?;
+        self.0.slot.set(Some(Arc::new(capture)));
+        Ok(())
     }
 }
 
 /// With the writer stopped: the previewed rows still add up to the token,
 /// and (for clear) what came after them, ready to carry.
-fn recheck(conn: &mut Connection, token: &Token, carry: bool) -> Result<Carry, Refused> {
-    let scan =
-        scan_events(conn, Some(token.max_id), Arc::new(|| false)).map_err(|_| Refused::Changed)?;
+fn recheck(
+    conn: &mut Connection,
+    token: &Token,
+    carry: bool,
+    scan_budget: Option<std::time::Duration>,
+) -> Result<Carry, Refused> {
+    let scan = scan_events(conn, Some(token.max_id), Arc::new(|| false), scan_budget).map_err(
+        |e| match e {
+            ScanError::Cancelled => Refused::Busy,
+            ScanError::Failed(reason) => Refused::Unavailable(reason),
+        },
+    )?;
     let same: Checksum = scan.checksum;
     if same != token.checksum {
         return Err(Refused::Changed);
     }
     if carry {
-        read_carry(conn, token.max_id).map_err(|_| Refused::Changed)
+        read_carry(conn, token.max_id)
     } else {
         Ok(Carry::default())
     }
 }
 
-fn read_carry(conn: &Connection, after: i64) -> rusqlite::Result<Carry> {
+fn read_carry(conn: &Connection, after: i64) -> Result<Carry, Refused> {
+    read_carry_rows(conn, after).map_err(|e| match e {
+        CarryError::TooMany => Refused::TooManyCarried,
+        CarryError::Sql(e) => Refused::Unavailable(e.to_string()),
+    })
+}
+
+enum CarryError {
+    TooMany,
+    Sql(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for CarryError {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::Sql(e)
+    }
+}
+
+fn read_carry_rows(conn: &Connection, after: i64) -> Result<Carry, CarryError> {
     let many: i64 = conn.query_row("SELECT COUNT(*) FROM events WHERE id > ?1", [after], |r| {
         r.get(0)
     })?;
     if many > CARRY_MAX {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
+        return Err(CarryError::TooMany);
     }
     let width = EVENT_COLUMNS.split(',').count();
     let mut stmt = conn.prepare(&format!(

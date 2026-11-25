@@ -4,10 +4,13 @@
 //! 1. close read admission and wait for the readers to stop
 //!    ([`ReaderRegistry::quiesce`], which fails closed: a reader that will
 //!    not stop means **nothing** changes);
-//! 2. in one short step under `Shared::control` (never held across anything
+//! 2. persist the new mode. This is the only step before the point of no
+//!    return that can be refused, so it comes first: a refusal then changes
+//!    nothing, and a prompt that was being answered is not stranded;
+//! 3. in one short step under `Shared::control` (never held across anything
 //!    slow): advance the generation, which only the quiesced registry's
-//!    guard can do, and stop accepting;
-//! 3. persist the new mode;
+//!    guard can do, and stop accepting. Nothing after this is refused for
+//!    the capture that was running;
 //! 4. stop the writer and wait for it;
 //! 5. file work (clear and delete, see `control_clear`).
 //!
@@ -51,6 +54,14 @@ pub enum Refused {
     /// A reader slot or the scan itself was not available; try again.
     #[error("busy")]
     Busy,
+    /// More events were accepted after the preview than a clear carries
+    /// into the new store.
+    #[error("too many events were recorded since the preview to keep; preview again")]
+    TooManyCarried,
+    /// The operation was refused after the writer had stopped, and putting
+    /// recording back failed too: history may now be off.
+    #[error("{refused}; recording could not be put back: {reason}")]
+    RollbackFailed { refused: String, reason: String },
 }
 
 /// How long a control operation waits for readers: one wait and one
@@ -61,6 +72,9 @@ pub struct Limits {
     pub extension: Duration,
     /// How long a preview token stays valid.
     pub token_ttl: Duration,
+    /// How long one statement of the advisory preview scan may run. The
+    /// authoritative recheck at confirm is not bounded by it.
+    pub statement: Duration,
 }
 
 impl Default for Limits {
@@ -69,6 +83,7 @@ impl Default for Limits {
             quiesce: Duration::from_secs(3),
             extension: Duration::from_secs(3),
             token_ttl: Duration::from_secs(60),
+            statement: Duration::from_millis(100),
         }
     }
 }
@@ -107,7 +122,7 @@ pub(super) struct Inner {
     /// Serialises operations; never held by anything else.
     op: Mutex<()>,
     /// Held for as long as history lives here, also while it is disabled.
-    writer_lock: Mutex<Option<WriterLock>>,
+    writer_lock: Mutex<Option<Arc<WriterLock>>>,
     /// Why history is unavailable (another bridge holds it), if it is.
     pub(super) blocked: Option<String>,
     pub(super) tokens: super::control_preview::Tokens,
@@ -133,13 +148,25 @@ pub(super) fn spawn_capture(
         inner.generation.clone(),
         inner.acceptance.clone(),
     )
+    .map(|capture| capture.holding(inner.shared_writer_lock()))
     .map_err(|e| e.to_string())
+}
+
+impl Inner {
+    /// The writer lock, shared with a capture so that it is held for as long
+    /// as the capture's writer can write, whatever happens to the gate.
+    fn shared_writer_lock(&self) -> Option<Arc<WriterLock>> {
+        self.writer_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 }
 
 /// Takes the writer lock if the history directory exists (it is never
 /// created here), and only **then** finishes what a crashed removal left:
 /// another bridge's half-done clear is not ours to finish.
-pub(super) fn lock_and_recover(location: &Location) -> Result<Option<WriterLock>, String> {
+pub(super) fn lock_and_recover(location: &Location) -> Result<Option<Arc<WriterLock>>, String> {
     if !matches!(super::open::dir_exists(location.dir()), Ok(true)) {
         return Ok(None);
     }
@@ -148,7 +175,7 @@ pub(super) fn lock_and_recover(location: &Location) -> Result<Option<WriterLock>
         .lock_writer()
         .map_err(|e| e.to_string())?;
     control_files::recover(location);
-    Ok(Some(held))
+    Ok(Some(Arc::new(held)))
 }
 
 impl ControlGate {
@@ -253,8 +280,15 @@ impl ControlGate {
     pub fn enable(&self, consent: super::Consent) -> Result<(), Refused> {
         let _op = self.begin()?;
         let location = self.location()?.clone();
-        super::enable(&location, consent).map_err(|e| Refused::Settings(e.to_string()))?;
+        consent
+            .validate()
+            .map_err(|e| Refused::Settings(e.to_string()))?;
+        // The directory and the lock first: consent is only written by the
+        // bridge that owns the store.
+        super::open::ensure_dir(location.dir(), super::open::effective_uid())
+            .map_err(|e| Refused::Unavailable(e.to_string()))?;
         self.holdwriter_lock(&location)?;
+        super::enable(&location, consent).map_err(|e| Refused::Settings(e.to_string()))?;
         if self.0.slot.get().is_none() {
             self.resume();
         }
@@ -269,41 +303,43 @@ impl ControlGate {
         if held.is_none() {
             let dir = StoreDir::open(location.dir(), super::open::effective_uid())
                 .map_err(|e| Refused::Unavailable(e.to_string()))?;
-            *held = Some(
+            *held = Some(Arc::new(
                 dir.lock_writer()
                     .map_err(|e| Refused::Unavailable(e.to_string()))?,
-            );
+            ));
         }
         Ok(())
+    }
+
+    /// Step 3: advance the generation and stop accepting, through the
+    /// capture if there is one.
+    pub(super) fn close(
+        &self,
+        guard: &ControlGuard,
+        capture: Option<&Arc<Capture>>,
+    ) -> Result<(), Refused> {
+        match capture {
+            Some(capture) => capture.close_admission(guard, &self.0.generation),
+            None => guard.advance(&self.0.generation).map(|_| ()),
+        }
+        .map_err(|_| Refused::Unavailable("generation counter exhausted".into()))
     }
 
     /// Stops recording and keeps history (owner decision 10): prompts still
     /// pending become one `disabled` gap, the queue is written, the session
     /// ends `disabled`, and `settings.json` keeps its consent with
-    /// `enabled = false`. The settings are saved before the writer stops, so
-    /// a crash between the two never restarts recording on a user who
-    /// disabled it.
+    /// `enabled = false`. The settings are saved before anything is closed,
+    /// so a refusal changes nothing, and before the writer stops, so a crash
+    /// between the two never restarts recording on a user who disabled it.
     pub fn disable(&self) -> Result<(), Refused> {
         let _op = self.begin()?;
         let location = self.location()?.clone();
         let guard = self.quiesce()?;
         let capture = self.0.slot.get();
-        let saved = match &capture {
-            Some(capture) => capture
-                .close_admission(&guard, &self.0.generation)
-                .map_err(|_| Refused::Unavailable("generation counter exhausted".into()))?,
-            None => {
-                guard
-                    .advance(&self.0.generation)
-                    .map_err(|_| Refused::Unavailable("generation counter exhausted".into()))?;
-                None
-            }
-        };
-        if let Err(reason) = save_disabled(&location) {
-            if let Some(capture) = &capture {
-                capture.restore_consent(saved);
-            }
-            return Err(reason);
+        let prior = persist_off(&location, capture.is_none())?;
+        if let Err(refused) = self.close(&guard, capture.as_ref()) {
+            restore_settings(&location, prior);
+            return Err(refused);
         }
         if let Some(capture) = capture {
             self.0.slot.set(None);
@@ -314,14 +350,37 @@ impl ControlGate {
     }
 }
 
-/// `enabled = false`, everything else kept.
-pub(super) fn save_disabled(location: &Location) -> Result<(), Refused> {
-    let current = settings::load(location)
-        .map_err(|e| Refused::Settings(e.to_string()))?
-        .unwrap_or_default();
-    let next = Settings {
-        enabled: false,
-        ..current
+/// Saves `enabled = false`, everything else kept, and returns the settings
+/// that were there (to put back). Creates nothing: no settings file means
+/// nothing to turn off. With `tolerate_unreadable`, settings that cannot be
+/// read are left as they are instead of refusing: there is nothing to
+/// preserve, and what the user wants (off, or gone) does not depend on them.
+pub(super) fn persist_off(
+    location: &Location,
+    tolerate_unreadable: bool,
+) -> Result<Option<Settings>, Refused> {
+    let prior = match settings::load(location) {
+        Ok(Some(prior)) => prior,
+        Ok(None) => return Ok(None),
+        Err(e) if tolerate_unreadable => {
+            tracing::warn!(error = %e, "history settings are unreadable; leaving them");
+            return Ok(None);
+        }
+        Err(e) => return Err(Refused::Settings(e.to_string())),
     };
-    settings::save(location, &next).map_err(|e| Refused::Settings(e.to_string()))
+    let off = Settings {
+        enabled: false,
+        ..prior.clone()
+    };
+    settings::save(location, &off).map_err(|e| Refused::Settings(e.to_string()))?;
+    Ok(Some(prior))
+}
+
+/// Puts back what [`persist_off`] replaced, when nothing else has changed.
+pub(super) fn restore_settings(location: &Location, prior: Option<Settings>) {
+    if let Some(prior) = prior {
+        if let Err(e) = settings::save(location, &prior) {
+            tracing::error!(error = %e, "history settings could not be put back");
+        }
+    }
 }

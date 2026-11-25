@@ -177,6 +177,15 @@ fn a_kill_at_every_step_leaves_the_old_store_whole_or_none() {
         } else {
             assert!(!live.exists(), "{step}: no store under the live name");
         }
+        let tombstone = dir.join(TOMBSTONE);
+        match step {
+            "Renamed" => assert_eq!(
+                fs::read_to_string(&tombstone).unwrap(),
+                format!("db {CANARY}"),
+                "{step}: the store is the tombstone, not yet unlinked"
+            ),
+            _ => assert!(!tombstone.exists(), "{step}: no tombstone"),
+        }
         // The next start, enabled or not, finishes the job.
         open(&dir).finish_leftover().unwrap();
         let expected = if step == "Begin" {

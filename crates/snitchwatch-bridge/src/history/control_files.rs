@@ -140,6 +140,12 @@ impl StoreDir {
         Ok(())
     }
 
+    /// A rollback journal is beside the store: a commit was cut off, and
+    /// only a writable open of the store rolls it back.
+    pub(super) fn journal_present(&self) -> Result<bool, FilesError> {
+        self.require_plain(SIDECARS[0])
+    }
+
     /// Opens (creating, 0600) the plain file `name` in this directory,
     /// refusing a link or anything that is not a regular file.
     pub(super) fn open_private(
@@ -247,9 +253,36 @@ pub(super) fn recover(location: &super::Location) {
         Ok(true) => {}
         _ => return,
     }
-    let result =
-        StoreDir::open(location.dir(), open::effective_uid()).and_then(|dir| dir.finish_leftover());
+    let result = StoreDir::open(location.dir(), open::effective_uid()).and_then(|dir| {
+        dir.finish_leftover()?;
+        dir.journal_present()
+    });
+    match result {
+        Ok(true) => roll_back_journal(location),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, "history could not finish removing an old store"),
+    }
+}
+
+/// A commit that was cut off while history was off leaves a hot journal that
+/// nothing else would ever open the store to roll back, and a read-only open
+/// (the preview, the reader) cannot. Under the writer lock, at start, open
+/// the store once for write and let SQLite finish or discard the commit. A
+/// store that is missing is left missing; whatever stays is refused by the
+/// removal's own check.
+fn roll_back_journal(location: &super::Location) {
+    if !location.db_path().exists() {
+        return;
+    }
+    let result = crate::sqlite_file::open_owner_only(&location.db_path())
+        .map_err(|e| e.to_string())
+        .and_then(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map_err(|e| e.to_string())
+        });
     if let Err(error) = result {
-        tracing::warn!(%error, "history could not finish removing an old store");
+        tracing::warn!(%error, "a leftover journal could not be rolled back");
     }
 }
