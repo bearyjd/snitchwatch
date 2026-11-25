@@ -375,7 +375,9 @@ const DURABLE_OWNERS: [&str; 50] = [
 
 /// PR 5: capture and admission. Whole identifiers that name them, a
 /// violation anywhere outside `history/`.
-const CAPTURE_TYPES: [&str; 4] = [
+const CAPTURE_TYPES: [&str; 6] = [
+    "CaptureSlot",
+    "ControlGate",
     "CaptureStats",
     "CaptureConfig",
     "queues_allocated",
@@ -434,6 +436,9 @@ const CAPTURE_OWNERS: &[&str] = &[
     "control_clear_tests.rs",
     "control.rs",
     "control_tests.rs",
+    "control_preview.rs",
+    "control_crash_tests.rs",
+    "control_wiring_tests.rs",
     "capture_control.rs",
     "dormant_tests.rs",
     "mod.rs",
@@ -446,12 +451,13 @@ const CAPTURE_OWNERS: &[&str] = &[
 const HOOK_FILES: [(&str, &[&str]); 3] = [
     (
         "snitchwatch-bridge/src/daemon_watchdog.rs",
-        &["history::capture::Capture"],
+        &["history::capture::Capture", "history::control::CaptureSlot"],
     ),
     (
         "snitchwatch-bridge/src/grpc_server.rs",
         &[
             "history::capture::Capture",
+            "history::control::CaptureSlot",
             "history::guard::DecisionOutcome",
             "history::record::AnsweredBy",
         ],
@@ -461,6 +467,8 @@ const HOOK_FILES: [(&str, &[&str]); 3] = [
         &[
             "history::capture::Capture",
             "history::capture::start",
+            "history::control::ControlGate",
+            "history::control::Limits",
             "history::Mode",
         ],
     ),

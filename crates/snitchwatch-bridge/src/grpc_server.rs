@@ -131,7 +131,7 @@ pub struct UiService {
     /// Connection history capture (`crate::history::capture`). `None`, the
     /// only value production code gives it while history is off, bypasses
     /// capture for both pings and prompts.
-    history_capture: Option<Arc<crate::history::capture::Capture>>,
+    history_capture: Option<crate::history::control::CaptureSlot>,
 }
 
 impl UiService {
@@ -175,8 +175,20 @@ impl UiService {
     /// Record the decided events of every `ping` in connection history.
     /// Called only with a capture [`crate::history::capture::start`] made,
     /// which exists only while history is enabled.
-    pub fn with_history_capture(mut self, capture: Arc<crate::history::capture::Capture>) -> Self {
-        self.history_capture = Some(capture);
+    /// The capture that exists now, if any. Asked on every use.
+    fn recorder(&self) -> Option<Arc<crate::history::capture::Capture>> {
+        self.history_capture.as_ref().and_then(|slot| slot.get())
+    }
+
+    pub fn with_history_capture(self, capture: Arc<crate::history::capture::Capture>) -> Self {
+        self.with_history_slot(capture.into())
+    }
+
+    /// [`with_history_capture`](Self::with_history_capture) for a capture
+    /// that a control operation may replace: every use asks the slot, so no
+    /// call keeps a capture that a clear or a disable has stopped.
+    pub fn with_history_slot(mut self, slot: crate::history::control::CaptureSlot) -> Self {
+        self.history_capture = Some(slot);
         self
     }
 
@@ -339,8 +351,8 @@ impl Ui for UiService {
             // Begun here, before anything awaits, and finished once the
             // events are queued: the previous ping's guard holds until then,
             // and a cancelled handler's ticket counts its events as lost.
-            let ping = self
-                .history_capture
+            let recorder = self.recorder();
+            let ping = recorder
                 .as_ref()
                 .map(|capture| capture.begin_ping(upstream_loss, stats.events.len() as u64));
             // Its own statement: neither this nor `record_hits` may run under
@@ -356,7 +368,7 @@ impl Ui for UiService {
                 let mut rows = Vec::new();
                 for event in &stats.events {
                     if let Some(row) = event_to_row(event, listed) {
-                        if self.history_capture.is_some() {
+                        if recorder.is_some() {
                             captured.push(event);
                         }
                         rows.push(row);
@@ -380,7 +392,7 @@ impl Ui for UiService {
             }
             // History, last: after the cache lock (and the rules lock above)
             // is dropped and the live rows are out. Bounded, never waits.
-            if let Some(capture) = &self.history_capture {
+            if let Some(capture) = &recorder {
                 if !captured.is_empty() {
                     capture.observe(&captured);
                 }
@@ -439,14 +451,13 @@ impl Ui for UiService {
         // (security review 2026-10-07, issue #47).
         let Some(mut admission) = self.client_presence.admit() else {
             // No row exists for this prompt: a standing label, not a gap.
-            if let Some(capture) = &self.history_capture {
+            if let Some(capture) = self.recorder() {
                 capture.note_no_gui_prompt();
             }
             return Err(Status::unavailable("no authenticated GUI session"));
         };
         let decision = self
-            .history_capture
-            .as_ref()
+            .recorder()
             .and_then(|capture| capture.begin_decision(&conn));
 
         let row = connection_to_row(&conn, ask_id);

@@ -54,6 +54,7 @@ impl ControlGate {
 
     /// [`clear`](Self::clear) reporting each file step, so a test can kill
     /// the process at exactly that point.
+    #[cfg(test)]
     pub(super) fn clear_observed(
         &self,
         token: TokenId,

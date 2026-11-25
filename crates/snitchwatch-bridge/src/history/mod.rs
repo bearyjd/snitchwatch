@@ -268,6 +268,8 @@ pub(crate) mod control_support;
 #[cfg(test)]
 mod control_tests;
 #[cfg(test)]
+mod control_wiring_tests;
+#[cfg(test)]
 mod crash_tests;
 #[cfg(test)]
 mod dormant_tests;

@@ -205,11 +205,10 @@ pub async fn run_system(listeners: activation::ActivatedListeners) -> Result<Run
     Ok(bridge)
 }
 
-/// The history capture for this bridge, if history is enabled in its state
-/// directory. Only a persistent state directory can hold history.
-fn history_capture(
-    options: &RunOptions,
-) -> Option<std::sync::Arc<snitchwatch_bridge::history::capture::Capture>> {
+/// This bridge's history control gate: it finishes what a crashed removal
+/// left, takes the writer lock when a history directory exists, and records
+/// if history is enabled. `None` without a persistent state directory.
+fn history_gate(options: &RunOptions) -> Option<snitchwatch_bridge::history::control::ControlGate> {
     let Storage::Persistent(dir) = &options.storage else {
         return None;
     };
@@ -220,7 +219,11 @@ fn history_capture(
     } else {
         snitchwatch_bridge::history::Mode::System
     };
-    snitchwatch_bridge::history::capture::start(mode, Some(dir))
+    Some(snitchwatch_bridge::history::control::ControlGate::start(
+        mode,
+        Some(dir),
+        snitchwatch_bridge::history::control::Limits::default(),
+    ))
 }
 
 async fn run_with_incoming<I, IO>(
@@ -287,9 +290,11 @@ where
     // Connection history is off unless the owner enabled it: `start` reads
     // the state (creating nothing) and gives `None` for off, so a bridge with
     // history off starts no writer, makes no directory and allocates no queue.
-    let recorder = history_capture(&options);
+    // The gate lives as long as this bridge: it holds the writer lock.
+    let gate = history_gate(&options);
+    let recorder = gate.as_ref().map(|gate| gate.slot());
     let ui_service_inner = match recorder.clone() {
-        Some(capture) => ui_service_inner.with_history_capture(capture),
+        Some(slot) => ui_service_inner.with_history_slot(slot),
         None => ui_service_inner,
     };
     // Taken before the gRPC server starts, so no rules snapshot is missed.

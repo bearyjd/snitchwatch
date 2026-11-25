@@ -45,7 +45,7 @@ pub async fn run(
         cache,
         diagnostics_ctx,
         broadcast_tx,
-        None,
+        None::<crate::history::control::CaptureSlot>,
     )
     .await;
 }
@@ -58,7 +58,7 @@ pub async fn run_with_history(
     cache: Arc<TokioMutex<ConnectionCache>>,
     diagnostics_ctx: Arc<crate::diagnostics::DiagnosticsCtx>,
     broadcast_tx: broadcast::Sender<crate::ws_messages::ServerMessage>,
-    recorder: Option<Arc<crate::history::capture::Capture>>,
+    recorder: Option<impl Into<crate::history::control::CaptureSlot>>,
 ) {
     run_with_history_timing(
         liveness,
@@ -80,9 +80,10 @@ pub(crate) async fn run_with_history_timing(
     cache: Arc<TokioMutex<ConnectionCache>>,
     diagnostics_ctx: Arc<crate::diagnostics::DiagnosticsCtx>,
     broadcast_tx: broadcast::Sender<crate::ws_messages::ServerMessage>,
-    recorder: Option<Arc<crate::history::capture::Capture>>,
+    recorder: Option<impl Into<crate::history::control::CaptureSlot>>,
     (tick, timeout): (Duration, Duration),
 ) {
+    let recorder: Option<crate::history::control::CaptureSlot> = recorder.map(Into::into);
     let mut interval = tokio::time::interval(tick);
     let mut was_down = false;
     // History's gap opens only for an outage seen to begin: a daemon that
@@ -97,7 +98,11 @@ pub(crate) async fn run_with_history_timing(
         // Connection history's `daemon-disconnected` gap: open at the down
         // edge, closed at recovery. In memory only; the writer commits it.
         seen_up |= !down_now && liveness.heard_from_daemon();
-        if let Some(recorder) = recorder.as_ref().filter(|_| down_now != was_down) {
+        let recorder = recorder
+            .as_ref()
+            .filter(|_| down_now != was_down)
+            .and_then(|slot| slot.get());
+        if let Some(recorder) = recorder {
             if !down_now {
                 recorder.daemon_up();
             } else if seen_up {

@@ -91,11 +91,6 @@ impl Tokens {
         (entry.issued.elapsed() <= ttl && entry.token.generation == generation)
             .then_some(entry.token)
     }
-
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).len()
-    }
 }
 
 /// Asked between statements and from the progress handler.
@@ -129,7 +124,8 @@ pub(super) fn scan_events(
                     .lock()
                     .map_or(true, |at| at.elapsed() > STATEMENT_BUDGET)
         }),
-    );
+    )
+    .map_err(sql)?;
     let max_id = match upto {
         Some(max) => max,
         None => conn
@@ -152,7 +148,8 @@ pub(super) fn scan_events(
         add_window(conn, &mut scan, low, high)?;
         low = high;
     }
-    conn.progress_handler(0, None::<fn() -> bool>);
+    conn.progress_handler(0, None::<fn() -> bool>)
+        .map_err(sql)?;
     Ok(scan)
 }
 

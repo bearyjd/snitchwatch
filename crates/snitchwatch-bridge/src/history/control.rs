@@ -78,6 +78,15 @@ impl Default for Limits {
 #[derive(Clone, Default)]
 pub struct CaptureSlot(Arc<RwLock<Option<Arc<Capture>>>>);
 
+impl From<Arc<Capture>> for CaptureSlot {
+    /// A slot that never changes.
+    fn from(capture: Arc<Capture>) -> Self {
+        let slot = Self::default();
+        slot.set(Some(capture));
+        slot
+    }
+}
+
 impl CaptureSlot {
     pub fn get(&self) -> Option<Arc<Capture>> {
         self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
@@ -98,7 +107,7 @@ pub(super) struct Inner {
     /// Serialises operations; never held by anything else.
     op: Mutex<()>,
     /// Held for as long as history lives here, also while it is disabled.
-    writer_lock: Mutex<Option<WriterLock>>,
+    _writer_lock: Mutex<Option<WriterLock>>,
     /// Why history is unavailable (another bridge holds it), if it is.
     pub(super) blocked: Option<String>,
     pub(super) tokens: super::control_preview::Tokens,
@@ -150,7 +159,7 @@ impl ControlGate {
             acceptance: Arc::new(AcceptanceSeq::default()),
             limits,
             op: Mutex::new(()),
-            writer_lock: Mutex::new(lock),
+            _writer_lock: Mutex::new(lock),
             blocked,
             tokens: Default::default(),
         };
