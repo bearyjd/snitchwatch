@@ -1,0 +1,238 @@
+# History PR 10: the control gate (clear, preview, disable, delete)
+
+Parent plan: `2026-10-28-connection-history-implementation.md` (PR 10 section, lines 314-349; PR 11 and PR 12 for what the gate must serve).
+Spec: `docs/superpowers/specs/2026-10-27-connection-history-design.md` H02 (538-640: C1, C2, the six enforcement steps, the preview token), G1 (406-416), W1 (317), D2 (140-162: disable keeps), D3, S5 (268), D8 (509-536), owner decisions 10, 12, 14 (772-831).
+Branch: `feat/history-pr10-control-gate`, from `origin/main` (5d09a994, PR 9 merged). Bridge only, dormant (history is off by default). No wire change (that is PR 11).
+Status: DRAFT. Planning only; nothing here is built. Waiting for the owner on "Open decisions" below.
+Issues folded in: #420 (prompts settling after stop), #418 (single-writer lock), #434 (`wait_again` bound to its registry). Not folded in, but the gate must be correct while they stay open: #421-#425, #428-#430, #432, #435-#437 (see "Interactions").
+
+## Goal
+
+One object, the control gate, through which every destructive or mode-changing operation on history passes: **preview, disable, clear (delete everything) and delete (remove the store)**, plus the hook points for range delete and retention change (Open decision 9). After an operation is acknowledged, nothing inside its scope is readable or writable (C1); a rejected operation leaves queue, guards, pins, watermark, files and settings exactly as they were; and a crash at any step leaves either the old store intact or no/empty store, never a half-deleted one. It also turns the dormant generation counter, acceptance sequence and reader quiesce (PR 3, PR 9) into a working barrier, which they are not yet: nothing in production advances a generation or assigns an acceptance number today.
+
+## What exists (explore pass, 2026-11-24, on 5d09a994)
+
+Findings that **change the design** (read these first):
+
+1. **The barrier order is fixed by code, and it differs from the spec.** `Generation::advance` (`lifecycle.rs:44`) takes `&ControlGuard`; `ControlGuard::advance` (`reader_registry.rs:163`) is the only caller outside tests; a `ControlGuard` only comes from `ReaderRegistry::quiesce` (`:250`: close, cancel, wait idle as one step). The doc comment (`:155-162`) gives the reason: a reader admitted between the bump and the close would read the old database and tag its cursor with the new generation. Spec H02 puts "increment the generation" (step 2) before "close read admission" (step 3), and PR 9 Design 7 repeats it. **The code wins; this PR records a spec erratum** (see Spec edits).
+2. **There is no writer quiesce and no way to close the writer's connection.** `Capture::spawn` (`capture.rs:490`) moves the `Engine` (and its SQLite connection) into the `history-writer` thread (`:511-516`). The only way to close it is `Capture::stop` (`:594`: sets `control = None`, closes the queue, joins), reached through `shutdown`/`disable`, both of which take `self` (`:583,589`). The queue's receiver is taken once (`pinned_queue.rs:82`) and a closed queue cannot reopen. So a clear that must unlink the file needs a **new writer and a new queue afterwards**: a respawned `Capture` (or an in-place restart; Open decision 1).
+3. **Callers hold `Arc<Capture>` for the life of the process.** `grpc_server.rs:134` (`history_capture: Option<Arc<Capture>>`), `:178` (`with_history_capture`), uses at `:343`, `:383`, `:442-448`; `daemon_watchdog.rs:61,83` (`recorder`); built once in `snitchwatch-bridge-cli/src/lib.rs:210-223,290`. Runtime disable, re-enable or clear needs a **swappable holder** outside `history/`; PR 10 adds it and edits those files.
+4. **`Generation` is per `Capture`, not per bridge.** `Shared::new` does `Generation::new(0)` (`capture.rs:292`); the reader's `Context.generation` is a `&Generation` (`reader.rs:94`) that nothing yet shares with it. After a respawn the counter restarts at 0, so a cursor from before a clear or a disable/re-enable would be **accepted** (`reader.rs:384` compares equal numbers). One bridge-wide `Arc<Generation>` must be injected into every `Capture` and the reader. Across a bridge restart the counter also restarts (Open decision 3).
+5. **`AcceptanceSeq` exists (`lifecycle.rs:62-82`) but is not used by any production path** (grep: only `lifecycle.rs` and tests). The preview boundary means nothing until every acceptance path assigns a number: `begin_decision` (`capture.rs:529`), `enqueue` (`:377`), the loss tallies (`lose`, `:359`), `begin_ping` (`gaps.rs:203`).
+6. **#420 is the exact "pin released by discard alone" the spec forbids.** `Shared::settle` (`capture.rs:425-445`): on a consent or generation mismatch it does `let _ = self.registry.release(&pin); return;` (`:436-439`). No row, no gap, and `Shared` keeps no set of pending guards (a `DecisionGuard` owns `(EventRecord, PinId)` alone, `guard.rs:64-71`), so the gate cannot write per-guard gaps today. Dropping a guard also takes this path (`guard.rs:101`, `Cancelled`).
+
+Other facts the design leans on:
+
+7. `Shared.control: Mutex<Option<Arc<Consent>>>` (`capture.rs:259`) is the acceptance gate; `begin_decision` (`:529-556`) and `settle` both take it; so holding it across slow work would stall the AskRule path (a verdict-latency regression). `settle` compares consent **by value** (`:436`), so a disable then re-enable with the same consent text produces an equal `Consent`: only the generation distinguishes the old guards.
+8. `Capture::disable` ends the session as `disabled` (`capture.rs:583`, `capture_writer.rs:230-238`) so the next start writes a `disabled` gap (`session.rs:126-160`). `finish` is skipped, leaving the previous session open, if the session never began (`capture_writer.rs:228-231`).
+9. Settings live **beside** the db, not in it (`settings.rs:1-8`), saved by atomic temp-and-rename (`state_file.rs:104-126`). `mod.rs` has `enable` (`:213`) but **no `disable`, no `delete`**. `Settings::validate` already permits `enabled = false` with a consent record (`settings.rs:115-125`). The reader answers `Unavailable(Off)` whenever `enabled` is false (`reader.rs:397-400`, `reader_settings_tests.rs:30-39`), so **kept history is unreadable while disabled** until PR 11 decides otherwise (Open decision 6).
+10. Journal mode is DELETE, not WAL (`schema.rs:259`, `writer.rs:434`); a read lock held past `WRITER_BUSY_TIMEOUT = 250 ms` (`capture_writer.rs:22`) costs the writer a batch (`write-failed` gap). Any scan the gate does on a live store (preview checksum) must be chunked into short statements like the reader's (learning `2026-11-24-history-reader-seeks-ties...`: no lock between statements; progress handler at 100 ms).
+11. Files that belong to a store: `history.db` and `-journal`, `-wal`, `-shm` (`sqlite_file.rs:54`), `settings.json`, and settings temp files (`writer.rs:335-345` removes only dead-pid settings temps; **not reusable** for the gate: it matches settings temps only). `refuse_unsafe_sidecars` (`sqlite_file.rs:195`) already refuses a sidecar that is a symlink, FIFO, or foreign.
+12. Gap causes are a closed set of 10 (`schema.rs:113-124`, `ledger.rs:34-59`); an 11th would be schema v5. Causes usable without a migration: `disabled`, `write-failed`, `queue-overflow`, `uncertain`.
+13. `Store::open` creates the file (`open.rs:208-221`, `schema.rs:208-222`: version 0 and empty creates the schema). `crash_tests.rs:1-126` has the child-process-SIGKILL pattern; `analysis_export.rs` the permit-owned-by-worker pattern.
+14. Reader registry facts from PR 9: `quiesce(within)` returns `ControlGuard` or `NotIdle`; the guard reopens on drop only when every overlapping closer is gone; `NotIdle` drop leaves the registry closed; `give_up()` reopens (`reader_registry.rs:172-195`). **#434**: `NotIdle::wait_again(self, registry, within)` takes *any* registry (`:176`), so an idle registry B can turn registry A's `NotIdle` into a `ControlGuard`. PR 10 is the first real caller, so it fixes this first (Design 9).
+
+## Design
+
+New module `history/control.rs` (the gate and operation orchestration; under 400 lines), `control_preview.rs` (token, bounded checksum), `control_files.rs` (exact-name unlink and recreate), `control_lock.rs` (single-writer lock, #418). Each stays under the 50-line-function and 800-line-file budgets.
+
+### 1. The gate and who holds what
+
+`ControlGate` (cheap clone) owns: `Location`, `ReaderRegistry`, one `Arc<Generation>`, one `Arc<AcceptanceSeq>`, the **capture holder** (`CaptureSlot`: an `RwLock<Option<Arc<Capture>>>` plus a "controlling" flag; callers take a read clone for an operation and never hold the lock across one), and the single-writer lock. The reader's `Context.generation` and every `Capture`'s `Shared` use the same `Arc<Generation>`. Operations on the gate are serialised by one `Mutex<()>` (**operation mutex**): two control operations never overlap; a second is refused at once with `control operation in progress` (never queued, same rule as readers).
+
+### 2. The order (closed admission, quiesce, advance, files)
+
+Every destructive operation runs these steps in this order. **The `Shared::control` lock is never held across the quiesce, the writer join, or any filesystem work** (it is taken only for the short in-memory steps in step 3).
+
+0. **Cheap, no side effect:** take the operation mutex; validate the preview token's expiry (60 s) and generation; validate the request (scope, settings). A failure here changes nothing and ingestion was never touched.
+1. **Close read admission and wait for the readers to stop: `registry.quiesce(QUIESCE_WITHIN)`** (close, `cancel_all`, wait idle, atomically; PR 9). `NotIdle` (a worker did not stop in time): **fail closed**: call `give_up()` (reopens readers), return `Refused(ReaderBusy)`, and **nothing has changed** (no generation advance, no consent flip, no file touched). A bound registry-identity `wait_again` (Design 9) may extend the wait once; there is no third wait.
+2. **Short in-memory barrier under `Shared::control`** (brief, no I/O, no waits):
+   a. check **C2's acceptance boundary** against `AcceptanceSeq` (only for clear and delete; see Open decision 2 for what the check means on a live bridge);
+   b. `guard.advance(&generation)`: the generation moves, with readers provably gone (so no reader can tag old data with the new number, finding 1);
+   c. clear `control` (consent `None`), so `begin_decision`/`observe`/`enqueue` refuse from now on and a guard created after this point is none;
+   d. **snapshot and mark the pending-guard registry** (Design 5): pins and arrival times of every guard accepted under the old generation.
+   Release the lock. If 2a fails, steps b-d are not taken: nothing has changed (the quiesce is undone by dropping the guard).
+3. **Persist the new mode before stopping anything (disable and delete):** `settings::save` with `enabled = false` (consent kept for disable; see delete's table). If it fails, undo 2c by restoring `control` to the saved consent and return the error: nothing recorded changed (the generation having advanced is harmless; the cursors of the old generation are refused). **Reason for this order:** a crash between "stop the writer" and "save enabled=false" would restart recording on a user who had disabled it.
+4. **Stop the writer** and wait for its thread to finish (`Capture::quiesce_writer`: takes `&self`, closes the queue, joins the handle, returns the final `CaptureStats`). The writer drains within `SHUTDOWN_DRAIN = 2 s` (`capture_writer.rs:29`) and then `abandon`s (a `write-failed` tally under the oldest pin; unchanged behaviour). After the join the writer's connection is closed. **Fail-closed assertion** (clear and delete): no `history.db-journal`/`-wal`/`-shm` exists; a leftover journal means a commit did not finish, so the gate refuses and leaves the files for the next start's own recovery.
+5. **Re-check C2 with the writer stopped** (clear and delete): the max row id, the checksum and the acceptance boundary, computed on a read-only connection with no concurrent writer, so the chunked-scan race of preview time is gone. A mismatch refuses and **restarts the writer on the same store** (Design 7: the rollback path), leaving the data in place; the user re-previews.
+6. **File operation** (Design 4), only after steps 1-5. Never before the quiesce is confirmed.
+7. **New writer (clear), or none (disable, delete):** respawn the `Capture` on the recreated store with the shared generation; commit the pending-guard gap and release those pins in one transaction (Design 5); publish the new `Capture` in the holder.
+8. **Reopen readers:** drop the `ControlGuard` (registry reopens), release the operation mutex, acknowledge. Responses carry the generation; the bridge refuses to deliver a page whose generation is not current (PR 9 already drops these at `reader.rs:426,606`).
+
+### 3. What each operation does
+
+| | `preview` | `disable` | `clear` | `delete` |
+|---|---|---|---|---|
+| Purpose | Count what a clear or delete would remove; nothing changes | Stop recording; **keep** history (owner decision 10) | Remove all stored history, keep consent and settings, keep recording if it was on | Remove the store and its settings (the separate confirmed "Delete history"): see Open decision 4 |
+| Needs a token | produces one | no | **yes** (C2) | **yes** (C2) |
+| Quiesce readers | no (takes a reader slot while it scans, so a concurrent control op sees it) | yes (to advance the generation) | yes | yes |
+| Generation | unchanged | **advances** (invalidates old guards and cursors; a re-enable under equal consent cannot revive them, finding 7) | advances | advances |
+| Pending prompts (guards) | untouched; pins untouched | invalidated with **one durable gap** (`disabled`), pins released in the same transaction; their later settle writes nothing (Design 5) | invalidated; a gap in the new file per Open decision 5; pins released with it | same as clear, then no file to hold the gap: see Open decision 5 |
+| Queued, accepted events | untouched | **written** (disable keeps history; the writer drains them as in `stop`) | discarded **with** the store (in scope, as previewed) | discarded with the store |
+| Pins / watermark | untouched | released only when their gap row (or event row) is durable (W1); the new session's watermark follows | all pins released; the new file starts a fresh ledger | pins released with the store; no ledger remains |
+| Ledger and sessions | untouched | session ends `disabled` (existing behaviour) | **discarded with the file** (clear recreates the file; the user asked for everything to go); the new file begins its own session and ledger | removed with the file |
+| `history.db` and sidecars | untouched | untouched | unlinked and recreated empty (Design 4) | unlinked; **not** recreated |
+| `settings.json` | unchanged | `enabled=false`, consent, retention and budget **kept** | kept unchanged (consent, retention, budget, `enabled` as it was); Open decision 4 | removed, consent revoked (Open decision 4) |
+| Reader | unaffected | readers return `Unavailable(Off)` from the moment `enabled=false` is saved (existing PR 9 behaviour; Open decision 6) | stopped before unlink; delivers nothing afterwards; cursors of the old generation refused `stale-generation`; reopens on the new file | stopped before unlink; then `Unavailable(Off)` (no file) |
+| Recording after | unchanged | stopped | continues on the new empty store, new generation | stopped |
+
+(The two rows where `clear` and `delete` differ in what they do to settings are Open decision 4; the table states the recommended reading.)
+
+**Disable's scope is empty**, so it has no preview token and no C2 check; but it still takes the barrier, because its job is to invalidate pending guards durably (spec step 4) and to advance the generation.
+
+### 4. Files: exact names, atomicity, crash safety
+
+- **What the gate may unlink:** exactly `history.db`, `history.db-journal`, `history.db-wal`, `history.db-shm` (the existing `SIDECAR_SUFFIXES`, `sqlite_file.rs:54`), plus the gate's own tombstone name (below), each by name relative to the validated history directory (opened with `O_DIRECTORY|O_NOFOLLOW`, checked 0700 and ours, `open.rs:70-97`), via `unlinkat`. **No glob, no directory walk, no recursive delete, no path from a request.** `settings.json`, its temp files, the single-writer lockfile and every other name in the directory are never touched by clear. Delete removes `settings.json` (and its temp) only, by exact name; never the directory itself and never anything outside it. An entry that is a symlink or a non-regular file is **refused unremoved** (consistent with `refuse_unsafe_sidecars`), not followed.
+- **Clear = rename-then-unlink-then-create**, not unlink-then-create, so the window with no store is explicit and bounded:
+  1. `renameat(history.db, history.db.deleting)` (atomic; **fsync the directory**). From here the old content has no `history.db` name. A crash after this point leaves no `history.db` and a tombstone; on the next start the opener **finishes the deletion** (unlinks `history.db.deleting` and any sidecar of it) before it creates a new empty store.
+  2. Unlink the sidecars of the old store (`-journal`, `-wal`, `-shm`, already asserted absent in step 4) and then the tombstone; fsync the directory.
+  3. `Store::open` creates the empty store (`schema::prepare` version 0, empty: `schema.rs:222`); then the new `Capture` starts and its first transaction begins the session.
+  - **Kill points.** (a) before step 1: the old store intact and `enabled` as saved; (b) between rename and unlink: no `history.db`, tombstone present; restart removes it and starts fresh; (c) after unlink, before create: no store, history will create on the next enable-or-start; (d) after create: an empty store. At none of them is a partial old store readable under the live name. The spec's "recreate" is satisfied by (d), "no giant delete transaction, no journal growth" by never deleting inside the file.
+- **S5 (deleted content is not left readable):** `secure_delete=ON` already covers in-place deletes; clear removes the whole file instead. The test scans the history directory (every file, any name) for canary bytes after clear, after delete, **and after a kill at every kill point followed by a restart with history off** (where no start-up code would otherwise clean a leftover tombstone). So the tombstone-finishing code also runs on a history-off start, as part of `locate`/`load_state`'s caller, but **creates nothing and only removes the exact names**.
+- **Delete** is the same sequence without step 3, then `settings.json` is removed last (fsync), so a crash between leaves "no store, settings says disabled" (safe) rather than "no settings, store present" (a store with no consent that the opener would refuse anyway).
+- **Settings write is durable before the files move**: `state_file::write` renames atomically; PR 10 adds a directory fsync after the rename if it does not already (verify at `state_file.rs:125`; the gate depends on "saved" meaning durable).
+
+### 5. Pending prompts: #420 resolved by the gate, not left to `settle`
+
+- **A mismatched `settle` never releases its pin.** The early return at `capture.rs:436-439` changes to: hand the pin to the gate's **pending-guard registry** and return. A pin is released only by (i) the transaction that makes its event durable, or (ii) the transaction that commits the gate's gap for it (spec: "a pin is never released by a discard alone").
+- **The pending-guard registry** (`Shared`, a `Mutex<BTreeMap<PinId, i64>>` of pin to arrival, filled at `begin_decision`, emptied at settle or discard; bounded by the number of in-flight prompts, which is bounded by the `AskRule` concurrency the bridge already limits). It lets the gate, at step 2d, **snapshot every pending guard's arrival** without touching the guards.
+- **One gap, not one per guard.** At step 7 the gate commits a single gap from the **earliest** pending arrival to the control instant (cause per the table: `disabled` for disable; Open decision 5 for clear/delete), `count` = number of pending guards (a lower bound like every count, #419), and releases **all** their pins in the same transaction (`commit_gap`, `durable.rs:98`, takes the pins). If there is no pending guard, no gap is written (the session end already says `disabled`/`clean`).
+- **Late settles after the gap**: a guard that settles after the gate committed finds its pin gone (`PinError::Unknown`) and its generation stale: it writes nothing and counts nothing twice. (Test: settle after the gap; row count, gap count and pin count are unchanged.)
+- **The plain stop/shutdown path gets the same treatment (#420)**: a guard that settles after `stop` has cleared consent is counted into the registry's tally and covered by a gap, or leaves its pin held (so the session end is `unclean`, honestly), never silently dropped. The #420 test: accept a prompt, stop, settle the prompt; a gap row covers it and the session end is consistent.
+- **Guards dropped without a settle** (`guard.rs:101` records `Cancelled`) are unaffected when current; stale ones follow the same rule.
+
+### 6. Preview
+
+- `preview(scope)` returns `{count, from_ms, to_ms, approx_bytes, token}` where counts are exact at preview time and bytes labelled an estimate (spec). The token is `{generation, max_id, checksum = (row_count, sum(id), sum(repeat_count)), acceptance_boundary, issued_at (monotonic), scope}`; opaque, signed with a per-process random key so a client cannot forge or edit one; expires after 60 s.
+- **The scan is bounded the way the reader is**: chunked into index windows, each statement at most 100 ms in autocommit, **no lock held between statements**, on a read-only connection that takes a **reader slot** (so a concurrent clear's quiesce cancels it). A busy-timeout hit yields `retry`, never a partial token. A whole-table checksum in one statement under DELETE journal mode would hold SHARED past 250 ms and cost the writer a batch (finding 10).
+- **Preview changes nothing**: no pin, no queue entry, no generation, no acceptance number (a preview is not an accepted item), no writes. Test: the writer is unaffected, a preview during a blocked writer leaves queue, guards, pins and watermark byte-identical.
+- The **authoritative** checksum is re-computed at confirm with the writer stopped (step 5); the preview-time scan is advisory and can race coalescing, which is exactly why confirm re-checks.
+
+### 7. Rollback and restart of the writer
+
+Any refusal after step 4 (C2 mismatch, journal leftover, unlink failure) **restarts the writer on the same store**: a new `Capture` is spawned on the existing file (`start`-like, with the same shared generation, the old settings), and the operation returns the refusal. Nothing the user sees has changed except that the previous session ended and a new one began (an honest `bridge-down`-style boundary, cause `disabled`/`clean` per `stop`). If the respawn itself fails, history is `unavailable: <reason>` (never silently on), the bridge keeps running, and the next operation or restart retries.
+
+### 8. Two processes and the single-writer lock (#418)
+
+**PR 10 takes the single-writer lock** (recommended; Open decision 7). Unlinking and recreating the file under a second writer is unsafe in a way the current code only suffers as a coverage glitch: a second bridge would keep a deleted inode open and write into an orphan, or start a session in the new file and close the first bridge's. The lock is `flock(LOCK_EX|LOCK_NB)` on a **separate lockfile** `history.lock` in the history directory (never on the db itself: closing any descriptor of an inode drops POSIX record locks, as `sqlite_file.rs` already notes for lstat; `flock` locks belong to the open file description, not the process, so SQLite's own fcntl locks and ours do not interfere). Taken by the gate before the first writable open, held for the life of the bridge's history (also while disabled, so the gate's own clear/delete runs only in the one process that owns it), released at exit. The **reader does not take it** (it must keep working beside a writer). A second bridge on the same state dir gets `unavailable: history is in use by another bridge` and records nothing; the first bridge's coverage is untouched. The lockfile is excluded from clear and delete.
+
+### 9. #434 and the registry
+
+`NotIdle` gains a registry identity (`Arc` pointer) and `wait_again` becomes a method on it checked against that identity: `NotIdle::wait_again(self, within) -> Result<ControlGuard, Self>`, holding its own `ReaderRegistry` clone. Test: a timed-out registry A and an idle registry B: the wait still reports not idle for A. Mutation: drop the identity check, the test fails. This is the first PR with a real caller, so it lands first in the TDD order.
+
+### 10. Wiring the generation into the reader and capture
+
+`Shared::new` takes the bridge-wide `Arc<Generation>` and `Arc<AcceptanceSeq>`; `begin_decision`, `enqueue`'s non-guard paths and `begin_ping` assign an acceptance number **under the same `control` lock** the gate checks, so "nothing accepted after the boundary" is decided against a consistent counter. `Capture::start` and `spawn` get the shared handles; the reader's `Context` is built from the same `Arc<Generation>`. A test pins that a `Capture` built twice yields strictly increasing generations only through the gate, and that the reader's cursor from a pre-respawn generation is refused.
+
+## Interactions with the open issues
+
+- **#418**: taken here (Design 8).
+- **#420**: resolved by Design 5.
+- **#434**: Design 9.
+- **#428, #429, #436**: retention behaviour; the gate stops the writer first, so no retention pass runs concurrently with an unlink. #429 item 3 (cursor ties) and #437 are reader-side and unaffected. A **retention change** (a PR 10 hook) uses the same barrier; its expiry-budget interplay (the persisted debt) is the PR 8 behaviour and is not changed.
+- **#430** (ts-0 marker merge): a clear removes all markers; no interaction. A range delete, if included (Open decision 9), must not rely on marker merging.
+- **#432, #419** (outage rows, pair count): clear removes the ledger; no interaction. The pending-guard gap's `count` is a lower bound.
+- **#421-#425**: gap accounting; unaffected, except #424/#425 (watchdog/liveness) hold `Option<Arc<Capture>>`; the holder change touches the same fields (merge conflicts, not behaviour).
+- **#435**: structural-test seam; PR 10's new files add `control*.rs`; the structural test for "no write path in the reader" still covers only reader files.
+
+## Files
+
+- New: `history/control.rs`, `control_preview.rs`, `control_files.rs`, `control_lock.rs`, and test files `control_tests.rs`, `control_order_tests.rs`, `control_crash_tests.rs`, `control_prompts_tests.rs`, `control_preview_tests.rs`, `control_lock_tests.rs`, `control_e2e_tests.rs`.
+- Edited: `history/capture.rs` (shared generation and acceptance seq, pending-guard registry, `settle` mismatch branch, `quiesce_writer(&self)`), `history/guard.rs` (registry hook on drop), `history/lifecycle.rs`, `history/reader_registry.rs` (#434), `history/mod.rs` (`disable`, `delete_all`, tombstone finishing on start), `history/settings.rs` (a `disabled` save helper), `history/open.rs`/`schema.rs` (lock before writable open, tombstone check), `state_file.rs` (directory fsync if missing), `history/gaps.rs` (acceptance number in `begin_ping`), `grpc_server.rs` and `daemon_watchdog.rs` (take the `CaptureSlot` instead of a fixed `Arc<Capture>`), `snitchwatch-bridge-cli/src/lib.rs` (build the gate and slot; no wire change). Plus the trail learning at the end.
+- Never touched: the reader's query code, retention, the writer's insert path, `schema.rs` tables (no migration, Open decision 5), anything under `vendor/`, anything outside the history directory.
+
+## Spec edits (erratum, in the same PR)
+
+- H02 step 2/3 and PR 9 Design 7: the barrier order is **quiesce, then advance the generation** (not the reverse), with the reason from `reader_registry.rs:155-162`.
+- H02 step 4 for disable: the gap is one row for all pending guards, not one per guard.
+- If Open decision 2 picks (b) or (c), C2's wording "refuses if anything accepted after the boundary" is amended accordingly.
+
+## Tests first (each seen to fail before the code exists, then pass)
+
+All tests use tempdir `XDG_RUNTIME_DIR`/`XDG_STATE_HOME`, `mock_opensnitchd`, and a blocked writer with a non-empty queue unless stated. No live daemon, no `sudo`. History-off CLI tests need a short `TMPDIR` and `CARGO_TARGET_DIR` in the same shell command.
+
+Registry and order
+1. **#434**: a timed-out registry A's `NotIdle` cannot be satisfied by an idle B.
+2. **Order**: with a stub recorder, the operation sequence is exactly `quiesce, (C2 boundary check, advance, clear consent, snapshot guards), save settings, stop writer, re-check C2, files, respawn, reopen`. A reader admitted after the quiesce gets `ControlOperation`, never a cursor tagged with the new generation (the finding-1 race, forced with a barrier between quiesce and advance).
+3. **Quiesce timeout fails closed**: a stuck reader worker makes the operation return `ReaderBusy`; afterwards generation, consent, queue, pins, watermark, files and settings are byte-identical, readers are reopened by `give_up`, and no file was touched. Mutation target.
+4. The `Shared::control` lock is **not held** across the quiesce, the writer join or the file step: an `AskRule` through `mock_opensnitchd` (`begin_decision`) completes within its normal time while a clear is blocked in the join (timed).
+5. Two control operations: the second is refused at once, never queued.
+
+Rejected operations leave everything unchanged (each with a blocked writer and a non-empty queue)
+6. A **stale preview** (older than 60 s, wrong generation, or forged) is refused; queue, guards, pins, watermark, files and settings are unchanged and ingestion was never interrupted.
+7. **Preview, then accept one more event, then confirm**: refused per Open decision 2; the event survives (not discarded) and a fresh preview works.
+8. **Retention or coalescing changes the previewed set** between preview and confirm (checksum differs; a `repeat_count` raised with no new max id): refused, nothing deleted.
+9. A **journal left behind** after the writer joins: refused, files untouched, the writer restarted on the same store.
+10. A **settings save failure** in step 3: refused, consent restored, recording continues, no file moved.
+
+Disable
+11. **Disable keeps history**: all rows, the accepted queued events and the ledger are present afterwards; the session ends `disabled`; `settings.json` keeps consent and retention with `enabled=false`; the generation advanced.
+12. **Disable with prompts pending, then re-enable under the same consent, then settle the old prompts**: nothing is written except the single gap committed at disable (no event, no snapshot, no pin left); one gap row covers from the earliest pending arrival; `count` equals the number of pending guards; a settle after the gap changes nothing.
+13. **kill -9 right after the disable gap commit**: the gap is present after restart; **kill -9 between `settings::save(enabled=false)` and the writer stop**: restart does **not** record (the enabled flag was saved first).
+
+Clear and delete
+14. **Clear removes exactly the previewed scope**: afterwards no row, snapshot, gap, session, pin or queued item from before exists; settings and consent survive (clear-all recreation per the PR 1 file); the new file has the schema and begins its own session; recording resumes under the new generation.
+15. **Reader interlock via quiesce**: a reader mid-query when clear arrives is cancelled and joined before the unlink and delivers no deleted row afterwards (a sink that reads the response after clear sees nothing); a stalled worker blocks the clear (fail closed) rather than being unlinked under; with two real readers at their cap during clear, disable and retention change (PR 9 gives real readers).
+16. **Generation and cursor refusal after clear**: a cursor from before a clear, a disable/re-enable, a clear then a respawn, and (per Open decision 3) a bridge restart, is refused `stale-generation`; a page that completes after the advance is dropped, not delivered.
+17. **No journal growth, no in-file delete**: after clear the new file's size is the empty-schema size; no `DELETE FROM events` ran (statement counter).
+18. **S5 canary scan**: unique canary strings in a path, host, process path and a snapshot: after clear, after delete, and after a kill at each kill point plus a **restart with history off**, every file in the directory is scanned (any name); no canary, no tombstone, no orphan journal remains.
+19. **Delete removes the store and its settings only**: `history.db` and its three sidecars and `settings.json` (and temps) are gone; the directory, the lockfile, and a decoy file (`other.txt`) and a decoy symlink beside them are untouched; a symlinked `history.db` is refused unfollowed and its target left alone.
+20. **kill -9 mid-clear at every step** (child-SIGKILL harness from `crash_tests.rs`, an env-selected hook after each step): before the rename (old store intact, readable after restart, no recording unless `enabled`); between rename and unlink (restart finishes the tombstone and starts empty); after unlink (no store; restart creates a fresh one only if enabled); after create (an empty store with a session). At every point the store is either the **old store whole** or **absent or empty**; never a partial one. After restart a history-off bridge also cleans the tombstone.
+21. **End-to-end G1: clear, and disable then re-enable, while prompts are pending** (guards from PR 6, real gate): after they settle, nothing from before is written except the gaps committed by the gate; the queue, pins and watermark are consistent; a prompt accepted after the operation is recorded normally. (The parent plan's assigned test.)
+22. **#420**: accept a prompt, stop the capture (no gate), settle the prompt: a gap row covers it or its pin keeps the session end `unclean`; never a silent drop and never an exact end that hides it.
+
+Single writer (#418)
+23. A second bridge opening the same state dir gets `unavailable: history is in use by another bridge`, records nothing, and the first bridge's open session and watermark are untouched; the lock is released at exit (a crash, `kill -9`, releases it with the descriptor); a clear in bridge A is never possible while B holds the lock (B's writer is never given a deleted inode).
+
+Preview
+24. **Preview changes nothing and holds no lock across statements**: a writer committing during a preview scan succeeds inside `WRITER_BUSY_TIMEOUT` and loses no batch (no `write-failed` gap); a preview takes a reader slot (`Busy` when two readers run); a concurrent clear's quiesce cancels it.
+
+## Mutation checks (apply locally, name the test that must fail, revert)
+
+- Advance the generation before the quiesce (or call the unchecked test advance): tests 2, 16.
+- Proceed after `NotIdle` instead of failing closed, or drop `give_up`: tests 3, 15.
+- Hold `Shared::control` across the join or the files: test 4.
+- Skip the C2 re-check after the writer stops: tests 7, 8, 9.
+- Unlink before the writer joins, or skip the no-journal assertion: tests 9, 15, 18.
+- Unlink with a glob, or walk the directory: test 19.
+- Delete in place (`DELETE FROM`) instead of recreating: tests 17, 18.
+- Save `enabled=false` after the stop instead of before: test 13.
+- Release a pin on the `settle` mismatch path again: tests 12, 21, 22.
+- One gap per guard instead of one gap with the earliest arrival, or no pin release in the gap transaction: test 12.
+- Per-`Capture` generation (not shared): test 16.
+- Skip the `flock`, or take it on the db file: test 23.
+- Let the preview run one long statement, or hold a transaction across chunks: test 24.
+- Drop the registry identity from `NotIdle`: test 1.
+- Remove the tombstone finishing on a history-off start: test 18, 20.
+
+## Review focus
+
+The step order (quiesce, advance, files) and the rule that no pin is released by a discard alone; that `Shared::control` is never held across anything slow; that every kill point leaves the old store whole or no/empty store; that the unlink names are exact; that fail-closed means nothing changed (compare every observable); that a stale cursor is refused after a respawn and after a restart. This is the highest-risk PR; it gets two `/codex` passes (design and security), a `code-reviewer`, and a `security-reviewer` pass (filesystem operations, authorisation is PR 11), separate from the author pass.
+
+## Verification
+
+`CARGO_TARGET_DIR=/home/user/.sw-pr10-target TMPDIR=/home/user/.sw-pr10-tmp just check`, `just test-bridge`, then `just test`. `cargo fmt --all`; no function over 50 lines, no file over 800. `trail check` before the commit. No push, PR or merge without instruction. Tell the tower: no wire change in this PR; the bridge binary changes (dormant).
+
+## Open decisions (not guessed; owner to decide)
+
+1. **How the capture is restarted: respawn or toggle in place.** (a) Respawn a new `Capture` behind a swappable `CaptureSlot` (the writer thread, queue, engine, pin registry and admission state are rebuilt; the old ones are dropped after the join). (b) Make `Capture` restartable in place (a re-openable queue, a re-spawnable writer thread, `Shared` kept). (c) Stop only for clear and keep the same `Capture` for disable by gating ingestion with the consent flag (no thread restart on disable). **Recommend (a)** with the slot in `grpc_server.rs`/`daemon_watchdog.rs`. Why: the queue's receiver is taken once and the engine moves into the thread, so (b) rewrites the writer lifecycle that three PRs of review hardened; (c) would need the writer to hold a store open while disabled and cannot honour clear's unlink. The cost of (a) is the holder and one more edit across `grpc_server.rs` and the watchdog.
+
+2. **What C2's acceptance boundary means on a live bridge.** On a desktop, events arrive every few seconds, so a literal reading of owner decision 12 ("refuse if anything was accepted after the preview boundary") refuses nearly every clear. Spec H02 step 4 also says out-of-scope queued items are **kept**, which contradicts refusing. (a) Refuse, exactly as written; the UI retries with a fresh preview, and clear only succeeds in quiet windows. (b) Scope is everything accepted at or before the boundary; items accepted after it are **kept** (carried into the new file) and the confirmation message says so. (c) The gate **pauses ingestion** (like a closed admission) for the short confirm window, then resumes; anything refused during the pause is counted as a `queue-overflow` loss. **Recommend (b).** Why: it honours "clear deletes exactly the previewed set or fewer" (C2's actual invariant) and spec step 4's queue split, without a clear that never works or a lossy pause; (a) makes the feature unusable on a busy machine, (c) invents a new loss cause for a user action. It needs the owner because it changes decision 12's wording, and (b) requires carrying queued items and their pins across the file swap (more work in the gate). Interim fallback if the owner prefers literal: (a).
+
+3. **Generation identity across a bridge restart.** The shared counter is in memory; a restart resets it. (a) Seed the counter from a random per-process epoch in its high bits (a stale cursor from an earlier process is refused; nothing persists). (b) Persist the generation in `meta` (schema v5) and reload it. (c) Accept the reset (a restart without a clear leaves a cursor valid, and a cursor from before a clear in a previous process could be accepted against the new process). **Recommend (a).** Why: no migration, and it makes "a cursor from another bridge process is refused" true; (b) is a durable format change for a number that only guards in-flight pages; (c) fails the refusal property the plan promises.
+
+4. **What `clear` and `delete` each do to the settings file.** (a) `clear` keeps `settings.json` (consent, retention, budget, `enabled`) and recording continues on the new empty store; `delete` removes `history.db`, its sidecars **and** `settings.json`, revokes consent, history is off and never recorded until re-enabled with a fresh consent. (b) Both keep settings; `delete` is only "clear and stay off". (c) `clear` also turns history off. **Recommend (a).** Why: the parent plan says "settings and consent survive clear-all recreation (PR 1 file)", and the spec calls "Delete history" a separate confirmed action distinct from clear; (a) gives the two a real difference: clear is "forget what was recorded", delete is "remove everything including my consent". This is a product meaning the owner should confirm, and the wording shown in PR 12.
+
+5. **How a pending prompt's gap is recorded across a clear or delete** (the spec says "each with its durable gap before its pin is released", but the file the gap would live in is being deleted or recreated, and the gaps table has no cause for it). (a) Clear: one gap in the **new** file, cause `write-failed` (the #420 suggestion), from the earliest pending arrival to the clear time, `count` = pending guards; delete: no file, so no gap, pins released after the file is gone. (b) Clear and delete: discard silently, since the user approved removing everything and the prompts predate the clear (no gap, pins released with the old store); disable keeps its `disabled` gap. (c) Add a new gap cause `cleared` (schema v5). **Recommend (b) for clear and delete, (a)-style gap only for disable.** Why: a gap placed in the new file would reveal that something happened before the clear in a file the user just emptied, and would show a "coverage uncertain" interval over a period that has no data and no meaning; the pin-release rule is satisfied because there is no surviving ledger to hold a false watermark. This departs from the spec's literal text for clear, so it needs the owner. Option (a) is the literal-spec fallback; (c) is not worth a migration.
+
+6. **Reading kept history while disabled.** Today the reader answers `Unavailable(Off)` whenever `enabled=false` (`reader.rs:397`), so "disable keeps history" keeps data nobody can read. (a) Leave as is: kept history is read after re-enable; the GUI says "history is off; N events kept". (b) Let the reader serve an existing store while disabled (with a `recording: off` header). (c) Decide in PR 11. **Recommend (c), with (a) as the PR 10 behaviour.** Why: it is a wire and consent-surface question (who can read data the user turned recording off for), not a gate one; PR 10 only needs to not break the existing PR 9 behaviour and to say so. Flagged because PR 12's "disable keeps" copy depends on it.
+
+7. **Whether PR 10 takes the single-writer lock (#418).** (a) Yes: `flock` on `history.lock`, held for the history's life, released at exit. (b) No: leave #418 open and document that a second bridge makes clear unsafe. (c) Take the lock only inside the gate's destructive operations. **Recommend (a).** Why: clear and delete unlink and recreate the file, which under a second writer orphans its inode or ends its session; (c) cannot protect the writer that already holds the file open. The cost is a small lockfile in the history directory (excluded from clear and delete, on a different inode from the db so SQLite's POSIX locks are unaffected) and a new `unavailable: history is in use by another bridge` state for the dev/misconfigured case #418 describes.
+
+8. **How long a control operation may wait for readers and for the writer.** The bounds: `QUIESCE_WITHIN` for readers (one statement budget is 100 ms and the query deadline 2 s, so a cancelled reader stops within a statement) and the writer's existing `SHUTDOWN_DRAIN = 2 s`. (a) Readers 3 s plus one extension of 3 s through the identity-bound `wait_again`, writer 2 s drain (existing), both fail closed. (b) Shorter (1 s, no extension): the GUI sees `reader busy, try again` more often. (c) Unbounded wait. **Recommend (a).** Why: it is above the reader's worst case (2 s plus one statement) so a healthy reader never trips it, and bounded, so a stuck worker produces a refusal and not a hung control path; (c) hangs the control operation behind a wedged SQLite call, (b) trips on a slow disk. The numbers are constants, not settings, like the reader's.
+
+9. **Scope of PR 10: range delete and retention change.** The parent plan's PR 10 also lists range delete, retention change, orphan-snapshot cleanup in the same transaction, and limit reduction. (a) Include them all in PR 10. (b) Split: **10a** = the barrier, preview, disable, clear and delete (this plan), **10b** = range delete, retention change and limit reduction on top of the same gate. (c) Defer range delete and retention change out of v1 (the opt-in text offers fixed retention choices already, `settings.rs:34-37`). **Recommend (b).** Why: the gate is the highest-risk code and its order, crash and C2 tests are the part that needs the two `/codex` passes; chunked range deletes and snapshot cleanup are a second, bounded-chunk problem (S2) with their own preview checksums, and mixing them multiplies the test matrix. The 10a gate exposes the hook (`Scope`) so 10b does not change it. Needs the owner because it changes the parent plan's PR boundaries (and tells PR 11 that range delete and retention messages arrive after the first control messages).
+
+10. **Confirmation and consent: who owns what.** The gate owns **enforcement**: the token (60 s, generation, checksum, acceptance boundary), C2, the order, and fail-closed. PR 11 owns **authorisation** (system mode: only a client on the GUI socket, decision 14) and message validation, and the capability flag. PR 12 owns the **consent wording** and the two confirmations (disable-and-keep is a single action; delete is preview then confirm with counts and bytes shown only from the preview, "removal from the database file and its free pages, not from backups, snapshots or exports"). (a) As stated: the gate never trusts a client's claim that "the user confirmed"; it requires a valid token for clear and delete and no token for disable. (b) Add a second confirmation field the gate checks (`confirm: true`). (c) Require a fresh consent record for delete. **Recommend (a).** Why: a boolean the gate cannot verify adds nothing the token does not already prove (a token only exists after a preview), and consent text belongs to PR 12 (decision point 2: the owner reviews the wording there).
+
+11. **Whether the preview's token is signed.** (a) Signed with a per-process random key (a client cannot forge or edit a token; it also dies on restart). Design 6 says "signed"; amend it to match this decision. (b) A server-side table of issued tokens (the client holds an id). (c) Unsigned structured token, trusted because the generation and checksum are re-verified at confirm. **Recommend (b): a server-side table of at most 4 live tokens, each with its fields and expiry.** Why: a signature needs a MAC dependency or hand-rolled code for no gain over a table whose entries the gate already must validate and expire, and a bounded table makes preview spam harmless. Low risk; the owner may leave it to the implementer.
