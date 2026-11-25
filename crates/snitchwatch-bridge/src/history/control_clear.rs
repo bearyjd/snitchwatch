@@ -54,11 +54,12 @@ fn incomplete(tombstone_removed: bool, refused: &Refused) -> Refused {
 }
 
 /// A retry that could not finish a leftover: the rows are still on disk when
-/// the tombstone is.
+/// the tombstone is, or when another link keeps them. Nothing here knows
+/// whether recording is on, so it says nothing about it.
 fn leftover_failed(location: &Location, e: FilesError) -> Refused {
     let tombstone = location.dir().join(super::control_files::TOMBSTONE);
-    if tombstone.symlink_metadata().is_ok() {
-        Refused::DataLeft(format!("{e}; recording stays off"))
+    if matches!(e, FilesError::Linked(_)) || tombstone.symlink_metadata().is_ok() {
+        Refused::DataLeft(e.to_string())
     } else {
         files(e)
     }

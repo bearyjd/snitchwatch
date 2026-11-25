@@ -53,6 +53,10 @@ pub(super) enum FilesError {
     /// finish, so the next start's own recovery must see it.
     #[error("{0} is present; nothing was removed")]
     Sidecar(&'static str),
+    /// The tombstone was unlinked but another name for the same file keeps
+    /// the deleted history on disk.
+    #[error("another link to the deleted history remains ({0})")]
+    Linked(&'static str),
     #[error("{0}: {1}")]
     Io(&'static str, io::Error),
 }
@@ -101,6 +105,31 @@ impl StoreDir {
         // SAFETY: `fstatat` succeeded and filled the buffer.
         let mode = unsafe { st.assume_init() }.st_mode;
         Ok(Some(mode & libc::S_IFMT == libc::S_IFREG))
+    }
+
+    /// How many names the file `name` has (0 when it is absent).
+    fn links(&self, name: &'static str) -> Result<u64, FilesError> {
+        let c = cname(name);
+        let mut st = std::mem::MaybeUninit::<libc::stat>::zeroed();
+        // SAFETY: valid fd, NUL-terminated name, and `st` is a stat buffer.
+        let rc = unsafe {
+            libc::fstatat(
+                self.fd(),
+                c.as_ptr(),
+                st.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            let e = io::Error::last_os_error();
+            return if e.kind() == io::ErrorKind::NotFound {
+                Ok(0)
+            } else {
+                Err(FilesError::Io(name, e))
+            };
+        }
+        // SAFETY: `fstatat` succeeded and filled the buffer.
+        Ok(unsafe { st.assume_init() }.st_nlink)
     }
 
     fn require_plain(&self, name: &'static str) -> Result<bool, FilesError> {
@@ -206,8 +235,12 @@ impl StoreDir {
             observe(Step::Renamed);
         }
         if self.require_plain(TOMBSTONE)? {
+            let shared = self.links(TOMBSTONE)? > 1;
             self.unlink(TOMBSTONE)?;
             self.sync()?;
+            if shared {
+                return Err(FilesError::Linked(TOMBSTONE));
+            }
         }
         observe(Step::TombstoneRemoved);
         Ok(())
@@ -240,7 +273,9 @@ impl StoreDir {
     /// is not a plain file is left alone.
     pub(super) fn finish_leftover(&self) -> Result<(), FilesError> {
         let mut removed = false;
+        let mut shared = false;
         if self.require_plain(TOMBSTONE)? {
+            shared = self.links(TOMBSTONE)? > 1;
             self.unlink(TOMBSTONE)?;
             removed = true;
         }
@@ -254,6 +289,9 @@ impl StoreDir {
         }
         if removed {
             self.sync()?;
+        }
+        if shared {
+            return Err(FilesError::Linked(TOMBSTONE));
         }
         Ok(())
     }

@@ -129,9 +129,52 @@ fn a_tombstone_that_cannot_be_scanned_still_gets_a_token_to_retry_with() {
     let preview = rig.gate.preview().expect("a retry must be able to start");
     assert!(preview.leftover);
     assert_eq!(preview.count, 0, "nothing could be counted");
-    rig.gate.delete(preview.token).unwrap();
+    // The other name keeps a full copy: the delete does not claim success.
+    let result = rig.gate.delete(preview.token);
+    let Err(Refused::DataLeft(reason)) = &result else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("another link"), "{reason}");
     assert!(!rig.location.dir().join(TOMBSTONE).exists());
-    assert!(!rig.location.settings_path().exists());
+}
+
+#[test]
+fn a_tombstone_that_cannot_be_scanned_beside_a_store_gets_no_token() {
+    let rig = gate_rig(Limits::default());
+    feed_canary(&rig, 1);
+    wait_rows(&rig, 1);
+    tombstone_beside_store(&rig);
+    fs::hard_link(
+        rig.location.dir().join(TOMBSTONE),
+        rig.location.dir().join("other-name"),
+    )
+    .unwrap();
+    let result = rig.gate.preview();
+    assert!(
+        matches!(result, Err(Refused::Unavailable(_))),
+        "its rows would go uncounted and unchecked: {result:?}"
+    );
+}
+
+#[test]
+fn a_retry_blocked_by_a_non_plain_tombstone_does_not_claim_recording_is_off() {
+    let rig = gate_rig(Limits::default());
+    feed_canary(&rig, 1);
+    wait_rows(&rig, 1);
+    // No store, and a tombstone that is not a file: nothing can be scanned.
+    let dir = rig.location.dir();
+    fs::remove_file(rig.location.db_path()).unwrap();
+    fs::create_dir(dir.join(TOMBSTONE)).unwrap();
+    let token = rig.gate.preview().unwrap().token;
+    let result = rig.gate.delete(token);
+    let Err(Refused::DataLeft(reason)) = &result else {
+        panic!("{result:?}");
+    };
+    assert!(
+        !reason.contains("stays off"),
+        "recording is still on: {reason}"
+    );
+    assert!(rig.gate.slot().get().is_some());
 }
 
 #[test]

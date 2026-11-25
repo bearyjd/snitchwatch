@@ -264,14 +264,16 @@ impl ControlGate {
         }
     }
 
-    /// The tombstone's scan, if there is one. One that cannot be scanned (a
-    /// second link, a failure, a timeout) is reported unchecked and
-    /// uncounted rather than refused: the delete that `DataLeft` says to
-    /// retry must be able to start.
+    /// The tombstone's scan, if there is one. With no store beside it, one
+    /// that cannot be scanned (a second link, a failure, a timeout) is
+    /// reported unchecked and uncounted rather than refused: the delete that
+    /// `DataLeft` says to retry must be able to start. Beside a store the
+    /// preview is refused, so no clear unlinks rows it never counted.
     fn scan_tombstone(
         &self,
         ticket: &ReaderTicket,
         location: &super::Location,
+        store_present: bool,
     ) -> Result<(Scan, Leftover), Refused> {
         let path = location.dir().join(super::control_files::TOMBSTONE);
         if path.symlink_metadata().is_err() {
@@ -283,7 +285,9 @@ impl ControlGate {
                 Ok((scan, counted))
             }
             Err(Refused::Busy) if ticket.cancel_token().is_cancelled() => Err(Refused::Busy),
-            Err(Refused::Busy | Refused::Unavailable(_)) => Ok((empty_scan(), Leftover::Unchecked)),
+            Err(Refused::Busy | Refused::Unavailable(_)) if !store_present => {
+                Ok((empty_scan(), Leftover::Unchecked))
+            }
             Err(other) => Err(other),
         }
     }
@@ -308,7 +312,8 @@ impl ControlGate {
             .map(|p| std::fs::metadata(p).map_or(0, |m| m.len()))
             .sum();
         let store = self.scan_file(&ticket, &db)?;
-        let (left, leftover) = self.scan_tombstone(&ticket, location)?;
+        let (left, leftover) =
+            self.scan_tombstone(&ticket, location, db.symlink_metadata().is_ok())?;
         let rows = |s: &Scan| u64::try_from(s.checksum.repeat_sum).unwrap_or(0);
         let count = rows(&store) + rows(&left);
         let token = self.0.tokens.issue(Token {
