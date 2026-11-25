@@ -26,11 +26,11 @@ pub(super) const LEDGER_ROWS_MAX: usize = 4096;
 
 /// Candidates the duplicate lookup may examine for one event, at most. One
 /// value for every page and client: a row's `possible_duplicate` is a fact of
-/// the store, never of the page size. It is the scan budget shared out over a
-/// default page (`scan_rows_max / (events_per_page + 1)`), so a page examines
-/// at most about `scan_rows_max` candidates in all; the statement budget and
-/// the query deadline cut a slower page short, with the rows read so far.
-pub(super) const DUPLICATE_PROBE_CAP: usize = 99;
+/// the store, never of the page size. A page's total is therefore at most its
+/// rows times `DUPLICATE_PROBE_CAP + 1` index entries (about 51 000 for the
+/// default 200), and the statement budget and the query deadline cut a slower
+/// page short, with the rows read so far.
+pub(super) const DUPLICATE_PROBE_CAP: usize = 256;
 
 const WHY_NONE: u8 = 0;
 const WHY_CANCELLED: u8 = 1;
