@@ -7,7 +7,9 @@ use rusqlite::Connection;
 use super::reader::Unavail;
 use super::reader_sql::{scalar_i64, Control, Stop};
 use super::schema::{schema_sql, SCHEMA_VERSION};
-use crate::sqlite_file::{open_owner_only_readonly, require_known_schema, OpenError};
+use crate::sqlite_file::{
+    open_owner_only_readonly, require_known_schema, schema_object_count, OpenError,
+};
 
 fn no_retry(reason: impl Into<String>) -> Unavail {
     Unavail {
@@ -71,13 +73,7 @@ fn check_schema(conn: &Connection, ctl: &Control) -> Result<(), Unavail> {
     require_known_schema(conn, &schema)
         .map_err(|e| no_retry(format!("history schema refused: {e}")))?;
     let objects = scalar_i64(conn, ctl, "SELECT count(*) FROM sqlite_master").map_err(from_stop)?;
-    let reference = Connection::open_in_memory().map_err(|e| no_retry(e.to_string()))?;
-    reference
-        .execute_batch(&schema)
-        .map_err(|e| no_retry(e.to_string()))?;
-    let expected: i64 = reference
-        .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
-        .map_err(|e| no_retry(e.to_string()))?;
+    let expected = schema_object_count(&schema).map_err(|e| no_retry(e.to_string()))?;
     if objects != expected {
         return Err(no_retry("the history schema is incomplete"));
     }

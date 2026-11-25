@@ -260,6 +260,16 @@ pub fn require_known_schema(conn: &Connection, schema: &str) -> Result<(), OpenE
     Ok(())
 }
 
+/// How many `sqlite_master` rows running `schema` on an empty database
+/// makes: what a complete store has. [`require_known_schema`] accepts fewer
+/// (a crash between two `CREATE`s); a reader that must not repair needs the
+/// exact number.
+pub fn schema_object_count(schema: &str) -> Result<i64, OpenError> {
+    let reference = Connection::open_in_memory()?;
+    reference.execute_batch(schema)?;
+    Ok(reference.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?)
+}
+
 #[cfg(test)]
 #[path = "sqlite_file_readonly_tests.rs"]
 mod readonly_tests;

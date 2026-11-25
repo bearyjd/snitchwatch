@@ -253,12 +253,7 @@ pub(super) fn assemble(
         .or(shrunk.then_some(Partial::Bytes))
         .or(loaded.partial);
     let more = loaded.more || shrunk;
-    let evicted = c.gaps.iter().any(|g| g.cause == GapCause::Evicted);
-    let end = match (more, evicted) {
-        (true, _) => End::More,
-        (false, true) => End::RetentionFloor,
-        (false, false) => End::OldestRecorded,
-    };
+    let end = end_state(more, &c.gaps);
     Page {
         generation,
         at_head: request.cursor.is_none(),
@@ -277,6 +272,15 @@ pub(super) fn assemble(
         partial,
         end,
         bytes: c.bytes,
+    }
+}
+
+fn end_state(more: bool, gaps: &[Gap]) -> End {
+    let evicted = gaps.iter().any(|g| g.cause == GapCause::Evicted);
+    match (more, evicted) {
+        (true, _) => End::More,
+        (false, true) => End::RetentionFloor,
+        (false, false) => End::OldestRecorded,
     }
 }
 

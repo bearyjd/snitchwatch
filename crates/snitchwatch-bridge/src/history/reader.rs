@@ -32,7 +32,7 @@ use super::timeline::Segment;
 
 /// The safety bounds (D8). Constants, not settings (Decision 6): a struct
 /// whose `Default` is production, so a test can shrink a budget without a
-/// `cfg(test)` branch in the read path.
+/// test-only branch in the read path.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     /// Events per page.
@@ -260,6 +260,17 @@ pub struct Read<'a> {
     loaded: Loaded,
 }
 
+/// What one `load_events` run has collected so far.
+#[derive(Default)]
+struct Collect {
+    limit: usize,
+    rows: Vec<EventView>,
+    after: Option<(i64, i64)>,
+    statements: usize,
+    scanned: usize,
+    bytes: usize,
+}
+
 fn unavailable(u: Unavail) -> Outcome {
     Outcome::Unavailable(u)
 }
@@ -310,67 +321,75 @@ impl<'a> Read<'a> {
     /// Up to a page of events, newest first, as short statements.
     pub fn load_events(&mut self) -> Result<(), Outcome> {
         self.check()?;
-        let limits = &self.ctx.limits;
-        let limit = self.request.limit.clamp(1, limits.events_per_page);
-        let mut after = self.request.cursor.map(|c| (c.ts_ms, c.id));
-        let mut collected: Vec<EventView> = Vec::new();
-        let (mut statements, mut scanned, mut bytes) = (0usize, 0usize, 0usize);
-        loop {
-            if statements > 0 && self.control.deadline_passed() {
-                self.loaded.partial = Some(Partial::Time);
-                self.loaded.more = true;
-                break;
-            }
-            if scanned >= limits.scan_rows_max {
-                self.loaded.partial = Some(Partial::Scan);
-                self.loaded.more = true;
-                break;
-            }
-            self.check()?;
-            let want = (limit + 1 - collected.len())
-                .min(limits.scan_window)
-                .min(limits.scan_rows_max - scanned);
-            let chunk = events_chunk(&self.conn, &self.control, after, want);
-            statements += 1;
-            scanned += chunk.rows.len();
-            let asked = chunk.rows.len() == want;
-            for row in chunk.rows {
-                bytes += event_bytes(&row);
-                if bytes > limits.page_bytes - HEADER_BYTES && !collected.is_empty() {
-                    self.loaded.partial = Some(Partial::Bytes);
-                    self.loaded.more = true;
-                    break;
-                }
-                after = Some((row.ts_ms, row.id));
-                collected.push(row);
-            }
-            if self.loaded.partial.is_some() {
-                break;
-            }
-            match chunk.stop {
-                Some(Stop::Cancelled) => return Err(Outcome::Cancelled),
-                Some(Stop::Statement | Stop::Deadline) => {
-                    self.loaded.partial = Some(Partial::Time);
-                    self.loaded.more = true;
-                    break;
-                }
-                Some(Stop::Busy) => {
-                    self.loaded.partial = Some(Partial::Busy);
-                    self.loaded.more = true;
-                    break;
-                }
-                Some(fail @ Stop::Fail { .. }) => return Err(stopped(fail)),
-                None if !asked => break,
-                None if collected.len() > limit => break,
-                None => {}
-            }
-        }
-        if collected.len() > limit {
-            collected.truncate(limit);
+        let limit = self.request.limit.clamp(1, self.ctx.limits.events_per_page);
+        let mut run = Collect {
+            limit,
+            after: self.request.cursor.map(|c| (c.ts_ms, c.id)),
+            ..Collect::default()
+        };
+        while self.step(&mut run)? {}
+        if run.rows.len() > limit {
+            run.rows.truncate(limit);
             self.loaded.more = true;
         }
-        self.loaded.events = collected;
+        self.loaded.events = run.rows;
         Ok(())
+    }
+
+    /// Ends the page early, with an older page to follow.
+    fn cut(&mut self, why: Partial) -> Result<bool, Outcome> {
+        self.loaded.partial = Some(why);
+        self.loaded.more = true;
+        Ok(false)
+    }
+
+    /// One statement's worth. `Ok(true)`: read on.
+    fn step(&mut self, run: &mut Collect) -> Result<bool, Outcome> {
+        let limits = &self.ctx.limits;
+        if run.statements > 0 && self.control.deadline_passed() {
+            return self.cut(Partial::Time);
+        }
+        if run.scanned >= limits.scan_rows_max {
+            return self.cut(Partial::Scan);
+        }
+        self.check()?;
+        let want = (run.limit + 1 - run.rows.len())
+            .min(limits.scan_window)
+            .min(limits.scan_rows_max - run.scanned);
+        let chunk = events_chunk(&self.conn, &self.control, run.after, want);
+        run.statements += 1;
+        run.scanned += chunk.rows.len();
+        let exhausted = chunk.rows.len() < want && chunk.stop.is_none();
+        if !self.take_rows(run, chunk.rows) {
+            return self.cut(Partial::Bytes);
+        }
+        match chunk.stop {
+            Some(stop) => self.on_stop(stop),
+            None => Ok(!exhausted && run.rows.len() <= run.limit),
+        }
+    }
+
+    /// Keeps the rows that fit the byte bound. `false`: one did not.
+    fn take_rows(&self, run: &mut Collect, rows: Vec<EventView>) -> bool {
+        let room = self.ctx.limits.page_bytes - HEADER_BYTES;
+        for row in rows {
+            run.bytes += event_bytes(&row);
+            if run.bytes > room && !run.rows.is_empty() {
+                return false;
+            }
+            run.after = Some((row.ts_ms, row.id));
+            run.rows.push(row);
+        }
+        true
+    }
+
+    fn on_stop(&mut self, stop: Stop) -> Result<bool, Outcome> {
+        match stop {
+            Stop::Cancelled => Err(Outcome::Cancelled),
+            Stop::Statement | Stop::Deadline => self.cut(Partial::Time),
+            Stop::Busy => self.cut(Partial::Busy),
+            fail @ Stop::Fail { .. } => Err(stopped(fail)),
+        }
     }
 
     /// The gap and session rows that explain the page's window, read after

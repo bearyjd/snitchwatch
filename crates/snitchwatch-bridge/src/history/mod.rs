@@ -45,7 +45,11 @@ mod reader_limits_tests;
 #[cfg(test)]
 mod reader_paging_tests;
 #[cfg(test)]
+mod reader_structure_tests;
+#[cfg(test)]
 mod reader_tests;
+#[cfg(test)]
+mod reader_writer_tests;
 pub mod reader_registry;
 pub mod record;
 mod retention;
