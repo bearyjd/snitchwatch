@@ -109,7 +109,7 @@ impl ControlGate {
         }
         let done = self
             .remove_files(&location, &token, kind, observe)
-            .and_then(|carry| self.finish(&location, kind, capture.is_some(), carry));
+            .and_then(|carry| self.finish(&location, (kind, capture.is_some()), carry, observe));
         if let Err(refused) = &done {
             tracing::warn!(%refused, "a control operation was refused; restarting recording");
             self.rollback(&location, prior, capture.is_some());
@@ -145,9 +145,9 @@ impl ControlGate {
     fn finish(
         &self,
         location: &Location,
-        kind: Kind,
-        was_recording: bool,
+        (kind, was_recording): (Kind, bool),
         carry: Carry,
+        observe: &dyn Fn(Step),
     ) -> Result<(), Refused> {
         let dir = StoreDir::open(location.dir(), super::open::effective_uid()).map_err(files)?;
         if kind == Kind::Delete {
@@ -161,7 +161,9 @@ impl ControlGate {
             .flatten()
             .ok_or_else(|| Refused::Settings("settings are gone".into()))?;
         open_store(location).map_err(|e| Refused::Unavailable(e.to_string()))?;
+        observe(Step::Created);
         insert_carry(location, &carry).map_err(|e| Refused::Unavailable(e.to_string()))?;
+        observe(Step::Carried);
         let capture = spawn_capture(location, &settings, &self.0).map_err(Refused::Unavailable)?;
         self.0.slot.set(Some(Arc::new(capture)));
         Ok(())

@@ -266,9 +266,13 @@ mod control_preview_tests;
 #[cfg(test)]
 mod control_prompts_tests;
 #[cfg(test)]
+mod control_reader_tests;
+#[cfg(test)]
 pub(crate) mod control_support;
 #[cfg(test)]
 mod control_tests;
+#[cfg(test)]
+mod control_two_bridge_tests;
 #[cfg(test)]
 mod control_wiring_tests;
 #[cfg(test)]

@@ -189,6 +189,8 @@ const OWNERS: &[&str] = &[
     "control.rs",
     "control_tests.rs",
     "capture_control.rs",
+    "control_reader_tests.rs",
+    "control_two_bridge_tests.rs",
     "dormant_tests.rs",
 ];
 
@@ -320,7 +322,7 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 50] = [
+const DURABLE_OWNERS: [&str; 52] = [
     "timeline.rs",
     "timeline_tests.rs",
     "gap_counts.rs",
@@ -370,6 +372,8 @@ const DURABLE_OWNERS: [&str; 50] = [
     "control.rs",
     "control_tests.rs",
     "capture_control.rs",
+    "control_reader_tests.rs",
+    "control_two_bridge_tests.rs",
     "dormant_tests.rs",
 ];
 
@@ -441,6 +445,8 @@ const CAPTURE_OWNERS: &[&str] = &[
     "control_wiring_tests.rs",
     "control_e2e_tests.rs",
     "capture_control.rs",
+    "control_reader_tests.rs",
+    "control_two_bridge_tests.rs",
     "dormant_tests.rs",
     "mod.rs",
 ];

@@ -121,18 +121,28 @@ fn crashed(step: &str, kind: &str) -> (tempfile::TempDir, std::path::PathBuf, Lo
 
 #[test]
 fn a_kill_at_every_step_leaves_the_old_store_whole_or_an_empty_one() {
-    for step in ["Begin", "Renamed", "TombstoneRemoved"] {
+    for step in ["Begin", "Renamed", "TombstoneRemoved", "Created", "Carried"] {
         let (_root, state, location) = crashed_clear(step);
         let dir = location.dir().to_owned();
         let live = dir.join("history.db");
-        if step == "Begin" {
-            assert!(live.exists(), "{step}: the old store is still whole");
-        } else {
-            assert!(!live.exists(), "{step}: nothing under the live name");
+        match step {
+            "Begin" => assert!(live.exists(), "{step}: the old store is still whole"),
+            "Renamed" | "TombstoneRemoved" => {
+                assert!(!live.exists(), "{step}: nothing under the live name");
+            }
+            _ => {
+                assert!(live.exists(), "{step}: the new store exists");
+                assert_eq!(dir_canaries(&dir), Vec::<String>::new(), "{step}");
+                assert_eq!(count(&location, "SELECT COUNT(*) FROM events"), 0, "{step}");
+            }
         }
         // Restart, history on: the old store whole, or a fresh empty one.
         let gate = ControlGate::start(Mode::User, Some(&state), Limits::default());
         assert!(gate.slot().get().is_some(), "{step}: recording again");
+        assert!(
+            count(&location, "SELECT COUNT(*) FROM sessions") >= 1,
+            "{step}"
+        );
         let events = count(&location, "SELECT COUNT(*) FROM events");
         if step == "Begin" {
             assert_eq!(events, 3, "{step}");

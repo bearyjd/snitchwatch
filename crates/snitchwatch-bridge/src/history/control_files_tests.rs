@@ -206,7 +206,8 @@ fn a_history_off_start_finishes_a_crashed_removal_and_creates_nothing() {
     fs::write(dir.join(TOMBSTONE), CANARY).unwrap();
     fs::write(dir.join("history.db-journal"), CANARY).unwrap();
     assert!(start(Mode::User, Some(&state)).is_none());
-    assert_eq!(names(&dir), Vec::<String>::new());
+    // Only the lock file the start took beside it; nothing else is created.
+    assert_eq!(names(&dir), ["history.lock"]);
     // And with no history directory at all, none is created.
     let bare = tempdir();
     let bare_state = super::test_support::state_dir(&bare);

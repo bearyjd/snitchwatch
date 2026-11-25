@@ -136,6 +136,21 @@ pub(super) fn spawn_capture(
     .map_err(|e| e.to_string())
 }
 
+/// Takes the writer lock if the history directory exists (it is never
+/// created here), and only **then** finishes what a crashed removal left:
+/// another bridge's half-done clear is not ours to finish.
+pub(super) fn lock_and_recover(location: &Location) -> Result<Option<WriterLock>, String> {
+    if !matches!(super::open::dir_exists(location.dir()), Ok(true)) {
+        return Ok(None);
+    }
+    let held = StoreDir::open(location.dir(), super::open::effective_uid())
+        .map_err(|e| e.to_string())?
+        .lock_writer()
+        .map_err(|e| e.to_string())?;
+    control_files::recover(location);
+    Ok(Some(held))
+}
+
 impl ControlGate {
     /// The bridge's history: finishes what a crashed removal left, takes the
     /// writer lock, and starts recording if history is enabled. Never fails:
@@ -145,8 +160,7 @@ impl ControlGate {
         let mut blocked = None;
         let mut lock = None;
         if let Ok(location) = &location {
-            control_files::recover(location);
-            match Self::lock_existing(location) {
+            match lock_and_recover(location) {
                 Ok(held) => lock = held,
                 Err(reason) => blocked = Some(reason),
             }
@@ -166,18 +180,6 @@ impl ControlGate {
         let gate = Self(Arc::new(inner));
         gate.resume();
         gate
-    }
-
-    /// The lock, if the history directory exists (it is never created here).
-    fn lock_existing(location: &Location) -> Result<Option<WriterLock>, String> {
-        if !matches!(super::open::dir_exists(location.dir()), Ok(true)) {
-            return Ok(None);
-        }
-        StoreDir::open(location.dir(), super::open::effective_uid())
-            .map_err(|e| e.to_string())?
-            .lock_writer()
-            .map(Some)
-            .map_err(|e| e.to_string())
     }
 
     /// Starts recording on the existing settings, if history is enabled.
@@ -218,15 +220,12 @@ impl ControlGate {
 
     /// The one operation at a time; a second is refused, never queued.
     pub(super) fn begin(&self) -> Result<MutexGuard<'_, ()>, Refused> {
-        self.0.op.try_lock().map_err(|e| match e {
-            std::sync::TryLockError::WouldBlock => Refused::InProgress,
-            std::sync::TryLockError::Poisoned(p) => {
-                tracing::error!("a control operation panicked; continuing");
-                // The operation holds nothing else: the poison is only a flag.
-                let _ = p;
-                Refused::InProgress
-            }
-        })
+        match self.0.op.try_lock() {
+            Ok(held) => Ok(held),
+            // A panicked operation holds nothing else: the poison is a flag.
+            Err(std::sync::TryLockError::Poisoned(p)) => Ok(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => Err(Refused::InProgress),
+        }
     }
 
     /// Step 1: close read admission and wait for the readers, once more if

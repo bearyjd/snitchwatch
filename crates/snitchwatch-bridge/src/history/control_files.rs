@@ -36,6 +36,10 @@ pub(super) enum Step {
     Renamed,
     /// The tombstone is gone.
     TombstoneRemoved,
+    /// A clear created the new, empty store.
+    Created,
+    /// A clear put what was accepted after the preview into it.
+    Carried,
 }
 
 #[derive(Debug, thiserror::Error)]

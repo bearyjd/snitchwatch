@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use super::super::budget::Budget;
-use super::super::control_files::StoreDir;
 use super::super::lifecycle::{Exhausted, Generation};
 use super::super::pins::PinRegistry;
 use super::super::reader_registry::ControlGuard;
@@ -63,21 +62,18 @@ impl Capture {
 /// thread, no directory, no queue.
 pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
     let location = locate(mode, state_dir).ok()?;
-    super::super::control_files::recover(&location);
+    // The lock first: only its holder may finish another run's removal.
+    let lock = match super::super::control::lock_and_recover(&location) {
+        Ok(lock) => lock,
+        Err(reason) => {
+            tracing::warn!(%reason, "history is held by another bridge");
+            return None;
+        }
+    };
     let State::Enabled(settings) = load_state(&location) else {
         return None;
     };
     let budget = Budget::new(u64::from(settings.budget_mib) * 1024 * 1024).ok()?;
-    let lock = match StoreDir::open(location.dir(), super::super::open::effective_uid())
-        .map_err(Into::into)
-        .and_then(|dir| dir.lock_writer())
-    {
-        Ok(lock) => lock,
-        Err(reason) => {
-            tracing::warn!(%reason, "history is enabled but another bridge holds it");
-            return None;
-        }
-    };
     let store = match open_store(&location) {
         Ok(store) => store,
         Err(reason) => {
@@ -99,7 +95,7 @@ pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
     );
     match capture {
         Ok(mut capture) => {
-            capture._lock = Some(lock);
+            capture._lock = lock;
             Some(Arc::new(capture))
         }
         Err(e) => {
