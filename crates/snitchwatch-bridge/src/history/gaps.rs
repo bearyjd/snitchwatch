@@ -539,6 +539,13 @@ type TakenSlot = (Slot, LossCounter, i64);
 /// Writes `group` in one transaction (see
 /// [`Engine::flush_counters_at`]); when that failed, every tally goes back
 /// (with anything counted meanwhile) as [`flush_taken`] does for one.
+///
+/// "All or none" holds per flush, not per outage: a flush that runs between
+/// `begin_ping` and `finish_ping` finds the daemon row due but the upstream
+/// rows not yet tallied, and commits the daemon row alone (the upstream rows
+/// follow in a later flush, the watermark held by their pins meanwhile). One
+/// bad pin in the group fails the whole transaction, so it blocks all of its
+/// rows until it is gone.
 fn flush_group(
     engine: &mut Engine,
     registry: &PinRegistry,
@@ -553,6 +560,9 @@ fn flush_group(
             .collect();
         engine.flush_counters_at(&mut parts, registry, limits)
     };
+    if let Err(error) = &result {
+        tracing::warn!(%error, "history outage rows were not written together; retrying");
+    }
     let mut guard = locked(losses);
     guard.disconnect_flushing = false;
     for (slot, taken, _) in group {
@@ -587,8 +597,15 @@ pub(super) fn flush_due(
     }
     let group: Vec<TakenSlot> = {
         let mut guard = locked(losses);
+        // A daemon tally still waiting for its end (the daemon dropped again
+        // before this flush) keeps the upstream rows of the outage it closed
+        // from committing without it: they would read as two unpaired rows.
+        let held = !closing
+            && guard.disconnect.is_pending()
+            && due_end(&guard, registry, Slot::Disconnect, closing).is_none();
         OUTAGE_GROUP
             .into_iter()
+            .filter(|_| !held)
             .filter_map(|slot| {
                 let (taken, end_ms) = take_due(&mut guard, registry, slot, closing)?;
                 Some((slot, taken, end_ms))

@@ -105,7 +105,7 @@ fn a_clock_step_back_never_leaves_the_watermark_past_a_live_pin() {
 // ---- 2. a failed post-outage tally -----------------------------------------
 
 #[test]
-fn a_failed_post_outage_tally_keeps_the_watermark_before_the_lost_stretch() {
+fn a_failed_outage_group_commit_keeps_the_watermark_before_the_lost_stretch() {
     let mut rig = rig(1000);
     rig.engine
         .begin_session(&rig.registry, &rig.limits)
@@ -693,4 +693,71 @@ fn a_failed_outage_commit_writes_none_of_its_rows_and_releases_no_pin() {
     assert_eq!(all.len(), 3, "{all:?}");
     assert_eq!(summarize(&all).lost_at_least, 1);
     assert!(rig.registry.len() < pins, "the pins were released");
+}
+
+#[test]
+fn a_daemon_that_drops_again_before_the_flush_holds_the_upstream_rows_with_its_tally() {
+    let mut rig = rig(1000);
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
+    let losses = losses();
+    one_event_lost_across_an_outage(&rig, &losses);
+    // The daemon drops again before the first outage's rows were flushed: the
+    // pending daemon tally is now an open outage and has no end.
+    locked(&losses).daemon_down(&rig.registry);
+    let worst = worst_read_between_commits(&mut rig);
+    flush_due(&mut rig.engine, &rig.registry, &rig.limits, &losses, false).unwrap();
+    assert!(
+        summarize(&rows(&rig)).lost_at_least <= 1,
+        "two unpaired upstream rows: {:?}",
+        rows(&rig)
+    );
+    rig.set(6000);
+    locked(&losses).daemon_up(6000);
+    flush_due(&mut rig.engine, &rig.registry, &rig.limits, &losses, false).unwrap();
+    let all = rows(&rig);
+    assert_eq!(
+        all.iter()
+            .filter(|g| g.cause == GapCause::UpstreamLoss)
+            .count(),
+        2,
+        "{all:?}"
+    );
+    assert!(worst.load(Ordering::SeqCst) <= 1);
+}
+
+/// The daemon row can commit alone, before the ping that reports the loss
+/// has tallied it; the group commit that then fails must still hold the
+/// watermark before the lost stretch.
+#[test]
+fn a_failed_group_after_the_daemon_row_committed_alone_holds_the_watermark() {
+    let mut rig = rig(1000);
+    rig.engine
+        .begin_session(&rig.registry, &rig.limits)
+        .unwrap();
+    let losses = losses();
+    {
+        let mut l = locked(&losses);
+        let first = l.begin_ping(&rig.registry, ping(0, None, 1000), 0);
+        l.finish_ping(&rig.registry, first);
+    }
+    rig.set(2000);
+    locked(&losses).daemon_down(&rig.registry);
+    rig.set(4000);
+    locked(&losses).daemon_up(4000);
+    rig.set(4200);
+    flush_due(&mut rig.engine, &rig.registry, &rig.limits, &losses, false).unwrap();
+    assert_eq!(rows(&rig).len(), 1, "the daemon row alone");
+    rig.set(4500);
+    locked(&losses).upstream_loss(&rig.registry, ping(3, Some(1000), 4500));
+    rig.set(5000);
+    rig.engine.fault_before_commit_for_test(fail_nth(0));
+    let failed = flush_due(&mut rig.engine, &rig.registry, &rig.limits, &losses, false);
+    assert!(failed.is_err());
+    assert_eq!(rows(&rig).len(), 1, "the group wrote nothing");
+    assert_watermark_held(&rig, "after the failed group");
+    let mut all = rows(&rig);
+    all.extend(rows_after_a_crash(&rig, 6000));
+    assert_covered(&all, 1000, 4500, "nothing from the last ping to the first");
 }
