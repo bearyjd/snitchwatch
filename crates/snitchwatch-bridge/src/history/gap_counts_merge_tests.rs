@@ -81,14 +81,24 @@ fn layouts() -> impl Strategy<Value = Vec<Layout>> {
     // Outages in time order, 10..=90 apart; `p` may be shared (no ping in
     // between) and `q` may stretch over later outages.
     prop::collection::vec(
-        (1i64..30, 1i64..30, 0i64..200, 1u64..6, any::<bool>()),
+        (
+            1i64..30,
+            1i64..30,
+            0i64..200,
+            1u64..6,
+            any::<bool>(),
+            // Starts where the last outage ended: the ledger merges the two
+            // disconnect rows into one with count 2.
+            prop::bool::weighted(0.3),
+        ),
         1..6,
     )
     .prop_map(|steps| {
         let mut at = 1000;
         let mut last_ping = 900;
         let mut out = Vec::new();
-        for (gap, len, tail, n, share) in steps {
+        for (gap, len, tail, n, share, tight) in steps {
+            let gap = if tight && !out.is_empty() { 0 } else { gap };
             let (d, u) = (at + gap, at + gap + len);
             let p = if share { last_ping } else { at.min(d) - 1 };
             last_ping = p;
@@ -99,7 +109,7 @@ fn layouts() -> impl Strategy<Value = Vec<Layout>> {
                 q: u + tail,
                 n,
             });
-            at = u + 1;
+            at = if tight { u } else { u + 1 };
         }
         out
     })
@@ -114,23 +124,43 @@ proptest! {
     }
 }
 
+/// What stands where an outage's disconnect row was.
+#[derive(Debug, Clone, Copy)]
+enum Hide {
+    No,
+    Uncertain,
+    /// A failed write that lost this many items.
+    WriteFailed(u64),
+}
+
 /// What happened to the ledger after the outages were written: disconnect
-/// rows replaced by an `uncertain` span (failed write, collapse by L1),
-/// the oldest rows collapsed, an evicted prefix, and a page window that
-/// clips rows away. Every one of them loses information, none adds loss.
+/// rows replaced by an `uncertain` span or a `write-failed` row, the oldest
+/// rows collapsed, an evicted prefix that removed the rows it covered, and a
+/// page window that clips rows away. Every one of
+/// them loses information; only a failed write or an eviction adds lost items,
+/// and those are part of the truth.
 #[derive(Debug, Clone)]
 struct Damage {
-    hide: Vec<bool>,
+    hide: Vec<Hide>,
     collapse_oldest: usize,
-    evicted: Option<u64>,
+    /// `(items lost, rows ending by this instant removed)`.
+    evicted: Option<(u64, i64)>,
     window: Option<(i64, i64)>,
+}
+
+fn hide() -> impl Strategy<Value = Hide> {
+    prop_oneof![
+        2 => Just(Hide::No),
+        1 => Just(Hide::Uncertain),
+        1 => (1u64..5).prop_map(Hide::WriteFailed),
+    ]
 }
 
 fn damage(outages: usize) -> impl Strategy<Value = Damage> {
     (
-        prop::collection::vec(any::<bool>(), outages),
+        prop::collection::vec(hide(), outages),
         0usize..8,
-        prop::option::of(1u64..4),
+        prop::option::of((1u64..4, 900i64..1300)),
         prop::option::of((0i64..400, 0i64..900)),
     )
         .prop_map(|(hide, collapse_oldest, evicted, window)| Damage {
@@ -141,9 +171,11 @@ fn damage(outages: usize) -> impl Strategy<Value = Damage> {
         })
 }
 
-/// Rows of `layouts` after `damage`, and the true loss they must not exceed.
+/// Rows of `layouts` after `damage` before any page trim, and the true loss
+/// they must not exceed.
 fn damaged_rows(ls: &[Layout], dm: &Damage) -> (Vec<Gap>, u64) {
     let mut kept = Vec::new();
+    let mut truth: u64 = ls.iter().map(|l| l.n).sum();
     let (mut pre, mut post, mut down) = (Vec::new(), Vec::new(), Vec::new());
     for (l, hide) in ls.iter().zip(&dm.hide) {
         pre.push(row(l.p, l.d, GapCause::UpstreamLoss, 1));
@@ -153,10 +185,13 @@ fn damaged_rows(ls: &[Layout], dm: &Damage) -> (Vec<Gap>, u64) {
             GapCause::UpstreamLoss,
             l.n.saturating_sub(1).max(1),
         ));
-        if *hide {
-            kept.push(row(l.d, l.u, GapCause::Uncertain, 1));
-        } else {
-            down.push(row(l.d, l.u, GapCause::DaemonDisconnected, 1));
+        match *hide {
+            Hide::No => down.push(row(l.d, l.u, GapCause::DaemonDisconnected, 1)),
+            Hide::Uncertain => kept.push(row(l.d, l.u, GapCause::Uncertain, 1)),
+            Hide::WriteFailed(c) => {
+                kept.push(row(l.d, l.u, GapCause::WriteFailed, c));
+                truth += c;
+            }
         }
     }
     let mut rows = [merged([pre, post].concat()), merged(down), kept].concat();
@@ -170,9 +205,10 @@ fn damaged_rows(ls: &[Layout], dm: &Damage) -> (Vec<Gap>, u64) {
         rows.drain(..k);
         rows.push(row(span.0, span.1, GapCause::Uncertain, 1));
     }
-    let mut truth: u64 = ls.iter().map(|l| l.n).sum();
-    if let Some(e) = dm.evicted {
-        rows.push(row(800, 1000, GapCause::Evicted, e));
+    if let Some((e, cut)) = dm.evicted {
+        // The rows the eviction covered are gone, not just joined by a row.
+        rows.retain(|g| g.end_ms > cut);
+        rows.push(row(800, cut, GapCause::Evicted, e));
         truth += e;
     }
     if let Some((lo, hi)) = dm.window {
@@ -187,7 +223,7 @@ proptest! {
         ls in layouts(),
         mut dm in damage(6),
     ) {
-        dm.hide.resize(ls.len(), false);
+        dm.hide.resize(ls.len(), Hide::No);
         let (rows, truth) = damaged_rows(&ls, &dm);
         let (lo, hi) = dm.window.unwrap_or((i64::MIN, i64::MAX));
         let shown = summarize_window(&rows, lo, hi).lost_at_least;

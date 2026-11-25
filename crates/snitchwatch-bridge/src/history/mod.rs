@@ -44,6 +44,8 @@ mod reader_fit_tests;
 mod reader_fixture;
 #[cfg(test)]
 mod reader_limits_tests;
+#[cfg(test)]
+mod reader_loss_tests;
 mod reader_open;
 #[cfg(test)]
 mod reader_open_tests;

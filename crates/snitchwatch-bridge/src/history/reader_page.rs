@@ -50,7 +50,6 @@ struct Rows {
 
 struct Candidate {
     lo_ms: i64,
-    gaps: Vec<Gap>,
     gap_views: Vec<GapView>,
     session_views: Vec<SessionView>,
     segments: Vec<Segment>,
@@ -163,7 +162,6 @@ impl Loaded {
         if over_rows {
             return Candidate {
                 lo_ms: rows.lo_ms,
-                gaps: rows.gaps,
                 gap_views: Vec::new(),
                 session_views: Vec::new(),
                 segments: Vec::new(),
@@ -202,7 +200,6 @@ impl Loaded {
             session_views: session_views(&sessions, ctx.live_session_start_ms),
             over_rows: false,
             bytes: 0,
-            gaps,
             segments,
         };
         c.bytes = c.bytes_with(&self.events[..n]);
@@ -356,12 +353,10 @@ pub(super) fn assemble(
         // Even an empty window is over the row caps: trim it, and say so.
         None => (0, Some(Partial::Gaps)),
     };
-    // Read before any trimming: a dropped marker still says what was there.
-    let evicted = loaded
-        .rows(n, ctx)
-        .gaps
-        .iter()
-        .any(|g| g.cause == GapCause::Evicted);
+    // Read before any trimming: a dropped marker still says what was there,
+    // and a dropped row that hid an outage still pools the rows it hid.
+    let window_rows = loaded.rows(n, ctx).gaps;
+    let evicted = window_rows.iter().any(|g| g.cause == GapCause::Evicted);
     let c = match forced {
         Some(_) => trimmed(&loaded, n, ctx)?,
         None => loaded.candidate(n, ctx),
@@ -381,7 +376,7 @@ pub(super) fn assemble(
         next_cursor: more
             .then(|| cursor_after(&loaded.events, generation, request))
             .flatten(),
-        summary: summarize_window(&c.gaps, c.lo_ms, loaded.hi_ms).into(),
+        summary: summarize_window(&window_rows, c.lo_ms, loaded.hi_ms).into(),
         gaps: c.gap_views,
         sessions: c.session_views,
         coverage: c.segments,
