@@ -94,6 +94,17 @@ struct Inner {
     idle: Condvar,
 }
 
+impl Inner {
+    fn wait_idle(&self, within: Duration) -> bool {
+        let state = locked(&self.state);
+        let (state, _) = self
+            .idle
+            .wait_timeout_while(state, within, |s| !s.live.is_empty())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.live.is_empty()
+    }
+}
+
 /// A query's admission. Owned by the blocking worker; dropping it (the
 /// worker returning, or unwinding) frees the slot and wakes
 /// [`ReaderRegistry::wait_idle`].
@@ -173,12 +184,10 @@ pub struct NotIdle(Closer);
 
 impl NotIdle {
     /// Waits again; on success the guard reopens on drop as usual.
-    pub fn wait_again(
-        self,
-        registry: &ReaderRegistry,
-        within: Duration,
-    ) -> Result<ControlGuard, Self> {
-        if registry.wait_idle(within) {
+    /// It waits on the registry that was closed, never on one the caller
+    /// names: another registry being idle says nothing about this one.
+    pub fn wait_again(self, within: Duration) -> Result<ControlGuard, Self> {
+        if self.0.inner.wait_idle(within) {
             Ok(ControlGuard {
                 _closer: self.0.armed(),
             })
@@ -276,13 +285,7 @@ impl ReaderRegistry {
     /// True once every worker has returned its ticket; false if `within`
     /// passes first.
     fn wait_idle(&self, within: Duration) -> bool {
-        let state = locked(&self.0.state);
-        let (state, _) = self
-            .0
-            .idle
-            .wait_timeout_while(state, within, |s| !s.live.is_empty())
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.live.is_empty()
+        self.0.wait_idle(within)
     }
 
     pub fn in_use(&self) -> usize {

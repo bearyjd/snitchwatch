@@ -64,7 +64,7 @@ fn a_timed_out_quiesce_can_wait_again_or_give_up() {
         panic!("a stuck worker is not idle")
     };
     drop(ticket);
-    let guard = not_idle.wait_again(&registry, LONG).ok().expect("idle now");
+    let guard = not_idle.wait_again(LONG).ok().expect("idle now");
     assert!(refused(&registry));
     drop(guard);
     assert!(registry.try_acquire().is_ok());
@@ -76,6 +76,24 @@ fn a_timed_out_quiesce_can_wait_again_or_give_up() {
     not_idle.give_up();
     assert!(!refused(&registry), "given up: open again");
     drop(ticket);
+}
+
+#[test]
+fn waiting_again_is_bound_to_the_registry_that_timed_out() {
+    let stuck_registry = ReaderRegistry::new();
+    let other = ReaderRegistry::new();
+    let ticket = stuck_registry.try_acquire().unwrap();
+    let Err(not_idle) = stuck_registry.quiesce(Duration::from_millis(20)) else {
+        panic!("a stuck worker is not idle")
+    };
+    // `other` is idle, and the type gives no way to ask it instead.
+    assert!(other.quiesce(LONG).is_ok());
+    let outcome = not_idle.wait_again(Duration::from_millis(20));
+    assert!(outcome.is_err(), "the stuck registry's worker still runs");
+    assert_eq!(stuck_registry.in_use(), 1, "the worker still owns its slot");
+    let Err(not_idle) = outcome else { unreachable!() };
+    drop(ticket);
+    assert!(not_idle.wait_again(LONG).is_ok());
 }
 
 struct Counted(Arc<AtomicUsize>);
