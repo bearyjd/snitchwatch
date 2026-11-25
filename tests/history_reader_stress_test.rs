@@ -246,7 +246,9 @@ fn no_reader_lock_outlasts_the_writers_busy_timeout() {
         let probe = open_owner_only(&db).unwrap();
         probe.busy_timeout(Duration::ZERO).unwrap();
         let (mut longest, mut since) = (Duration::ZERO, None::<Instant>);
+        let give_up = Instant::now() + Duration::from_secs(60);
         while reads.load(Ordering::SeqCst) < 40 {
+            assert!(Instant::now() < give_up, "the readers delivered no pages");
             match probe.execute_batch("BEGIN EXCLUSIVE; COMMIT;") {
                 Ok(()) => since = None,
                 Err(_) => {

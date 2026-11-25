@@ -175,6 +175,17 @@ fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// [`file_problem`] for a sidecar, which SQLite creates and deletes as it
+/// works: a journal caught mid-unlink still stats, with no name left, and
+/// SQLite can no longer open it, so it is not a problem.
+fn sidecar_problem(facts: &FileFacts, euid: u32) -> Option<&'static str> {
+    if facts.links == 0 {
+        None
+    } else {
+        file_problem(facts, euid)
+    }
+}
+
 fn refuse_unsafe_sidecars(path: &Path) -> Result<(), OpenError> {
     use std::os::unix::fs::MetadataExt;
     let euid = effective_uid();
@@ -193,7 +204,7 @@ fn refuse_unsafe_sidecars(path: &Path) -> Result<(), OpenError> {
             uid: meta.uid(),
             links: meta.nlink(),
         };
-        if let Some(why) = file_problem(&facts, euid) {
+        if let Some(why) = sidecar_problem(&facts, euid) {
             return Err(OpenError::Refused(format!(
                 "{} {why}; SQLite would use it, so remove it and restart",
                 sidecar.display()
@@ -407,6 +418,24 @@ mod tests {
             std::fs::write(sidecar(&db, suffix), b"").unwrap();
             open_owner_only(&db).unwrap_or_else(|e| panic!("{suffix}: {e}"));
         }
+    }
+
+    #[test]
+    fn a_sidecar_caught_mid_unlink_is_no_problem_but_a_second_link_is() {
+        let gone = FileFacts {
+            regular: true,
+            uid: 1000,
+            links: 0,
+        };
+        assert_eq!(sidecar_problem(&gone, 1000), None);
+        let linked = FileFacts { links: 2, ..gone };
+        assert!(sidecar_problem(&linked, 1000).is_some_and(|why| why.contains("hard link")));
+        let theirs = FileFacts {
+            uid: 1001,
+            links: 1,
+            ..gone
+        };
+        assert!(sidecar_problem(&theirs, 1000).is_some());
     }
 
     #[test]

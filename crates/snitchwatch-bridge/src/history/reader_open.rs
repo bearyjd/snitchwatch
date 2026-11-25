@@ -45,6 +45,15 @@ fn open_error(e: OpenError) -> Unavail {
     }
 }
 
+/// What a failed schema check means. A lock is the writer's, and passes; only
+/// a database that is not the history one, or is damaged, is refused for good.
+pub(super) fn schema_unavailable(e: OpenError) -> Unavail {
+    match e {
+        OpenError::Sqlite(e) => from_stop(super::reader_sql::classify_error(&e)),
+        other => no_retry(format!("history schema refused: {other}")),
+    }
+}
+
 /// A read-only connection to the history database at `path`, whose
 /// directory is the bridge's own 0700 one and whose schema is exactly
 /// version 4's: the same object names and `CREATE` text a store creates, and
@@ -78,10 +87,9 @@ fn check_schema(conn: &Connection, ctl: &Control) -> Result<(), Unavail> {
         )));
     }
     let schema = schema_sql();
-    require_known_schema(conn, &schema)
-        .map_err(|e| no_retry(format!("history schema refused: {e}")))?;
+    require_known_schema(conn, &schema).map_err(schema_unavailable)?;
     let objects = scalar_i64(conn, ctl, "SELECT count(*) FROM sqlite_master").map_err(from_stop)?;
-    let expected = schema_object_count(&schema).map_err(|e| no_retry(e.to_string()))?;
+    let expected = schema_object_count(&schema).map_err(schema_unavailable)?;
     if objects != expected {
         return Err(no_retry("the history schema is incomplete"));
     }

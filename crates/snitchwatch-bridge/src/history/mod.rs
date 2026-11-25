@@ -39,6 +39,8 @@ mod reader_fixture;
 #[cfg(test)]
 mod reader_limits_tests;
 mod reader_open;
+#[cfg(test)]
+mod reader_open_tests;
 mod reader_page;
 #[cfg(test)]
 mod reader_paging_tests;
