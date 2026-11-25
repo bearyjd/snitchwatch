@@ -423,6 +423,7 @@ const CAPTURE_OWNERS: &[&str] = &[
     "control_prompts_tests.rs",
     "control_support.rs",
     "control_files_tests.rs",
+    "control_lock_tests.rs",
     "dormant_tests.rs",
     "mod.rs",
 ];

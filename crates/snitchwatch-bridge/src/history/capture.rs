@@ -71,6 +71,8 @@ use super::budget::Budget;
 use super::caps::{DstHost, ProcessPath, Protocol, RuleName};
 pub use super::capture_stats::CaptureStats;
 use super::capture_stats::{add, Counters};
+use super::control_files::StoreDir;
+use super::control_lock::WriterLock;
 use super::gaps::{Losses, StandingLabels};
 use super::guard::{DecisionGuard, DecisionOutcome};
 use super::ledger::{LedgerLimits, LossCounter};
@@ -524,6 +526,9 @@ impl Shared {
 pub struct Capture {
     pub(super) shared: Arc<Shared>,
     writer: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// The single-writer lock of a capture that [`start`] made; released
+    /// only after the writer has been joined (fields drop after `Drop`).
+    _lock: Option<WriterLock>,
 }
 
 impl Capture {
@@ -589,6 +594,7 @@ impl Capture {
         Ok(Self {
             shared,
             writer: Mutex::new(Some(handle)),
+            _lock: None,
         })
     }
 
@@ -682,6 +688,7 @@ impl Capture {
         config: CaptureConfig,
     ) -> Self {
         Self {
+            _lock: None,
             shared: Arc::new(Shared::new(
                 registry,
                 config,
@@ -760,6 +767,16 @@ pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
         return None;
     };
     let budget = Budget::new(u64::from(settings.budget_mib) * 1024 * 1024).ok()?;
+    let lock = match StoreDir::open(location.dir(), super::open::effective_uid())
+        .map_err(Into::into)
+        .and_then(|dir| dir.lock_writer())
+    {
+        Ok(lock) => lock,
+        Err(reason) => {
+            tracing::warn!(%reason, "history is enabled but another bridge holds it");
+            return None;
+        }
+    };
     let store = match open_store(&location) {
         Ok(store) => store,
         Err(reason) => {
@@ -780,7 +797,10 @@ pub fn start(mode: Mode, state_dir: Option<&Path>) -> Option<Arc<Capture>> {
         CaptureConfig::for_settings(&budget, &settings),
     );
     match capture {
-        Ok(capture) => Some(Arc::new(capture)),
+        Ok(mut capture) => {
+            capture._lock = Some(lock);
+            Some(Arc::new(capture))
+        }
         Err(e) => {
             tracing::warn!(error = %e, "history writer thread could not start");
             None

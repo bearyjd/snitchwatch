@@ -136,6 +136,37 @@ impl StoreDir {
         Ok(())
     }
 
+    /// Opens (creating, 0600) the plain file `name` in this directory,
+    /// refusing a link or anything that is not a regular file.
+    pub(super) fn open_private(
+        &self,
+        name: &'static str,
+    ) -> Result<std::os::fd::OwnedFd, FilesError> {
+        use std::os::fd::FromRawFd;
+        let c = cname(name);
+        let flags = libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: valid fd and NUL-terminated name; the mode is passed as the
+        // variadic argument `openat` reads when O_CREAT is set.
+        let raw = unsafe { libc::openat(self.fd(), c.as_ptr(), flags, 0o600 as libc::c_uint) };
+        if raw < 0 {
+            let e = io::Error::last_os_error();
+            return Err(if e.raw_os_error() == Some(libc::ELOOP) {
+                FilesError::NotPlain(name)
+            } else {
+                FilesError::Io(name, e)
+            });
+        }
+        // SAFETY: `raw` is a fresh descriptor nothing else owns.
+        let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        let meta = fs::File::from(owned.try_clone().map_err(|e| FilesError::Io(name, e))?)
+            .metadata()
+            .map_err(|e| FilesError::Io(name, e))?;
+        if !meta.is_file() {
+            return Err(FilesError::NotPlain(name));
+        }
+        Ok(owned)
+    }
+
     /// Removes the store: `history.db` becomes the tombstone, then the
     /// tombstone is unlinked. Nothing else is touched.
     pub(super) fn remove_store(&self, observe: &dyn Fn(Step)) -> Result<(), FilesError> {
