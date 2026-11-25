@@ -338,8 +338,8 @@ fn refusal(kind: UnavailKind, reason: String) -> Outcome {
     })
 }
 
-/// A cut by time or by a writer's commit that read no event: the same
-/// request can succeed a moment later.
+/// A cut by a writer's commit, or by time of a one-row page, that read no
+/// event: the same request can succeed a moment later.
 fn try_again(why: Partial) -> Outcome {
     let cause = match why {
         Partial::Busy => "a writer is committing",
@@ -352,8 +352,8 @@ fn try_again(why: Partial) -> Outcome {
     })
 }
 
-/// A scan-cap cut that read no event at all: the same retry would repeat the
-/// same expensive scan, so say so instead.
+/// A scan-cap or time cut of a larger page that read no event at all: the same
+/// retry would repeat the same expensive read, so say so instead.
 fn too_expensive() -> Outcome {
     refusal(
         UnavailKind::TooExpensive,
@@ -449,12 +449,15 @@ impl<'a> Read<'a> {
 
     /// Ends the page early, with an older page to follow. A cut that read no
     /// event is never a page (it would hand the client the same cursor
-    /// again): a scan-cap cut says the request is too big; a writer's commit
-    /// or a time cut says to ask again.
+    /// again): a scan-cap cut, or a time cut of a page larger than one row,
+    /// says the request is too big (the same request is cut the same way, so
+    /// `retry: true` would loop for ever); a writer's commit says to ask
+    /// again, and so does a time cut of a one-row page (nothing is smaller).
     fn cut(&mut self, why: Partial, run: &Collect) -> Result<bool, Outcome> {
         if run.rows.is_empty() {
             return Err(match why {
                 Partial::Scan => too_expensive(),
+                Partial::Time if run.limit > 1 => too_expensive(),
                 _ => try_again(why),
             });
         }

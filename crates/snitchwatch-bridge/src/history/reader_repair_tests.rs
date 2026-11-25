@@ -134,26 +134,29 @@ fn repeated_requests_over_the_dense_store_each_make_progress() {
     }
 }
 
-#[test]
-fn a_cut_before_the_first_event_is_never_an_empty_page_with_more_to_come() {
+/// A zero statement budget cuts the first statement before any row: the
+/// only way to a cut that read no event, deterministically.
+fn first_outcome_under_a_cut(limit: usize) -> Outcome {
     let mut fx = Fx::new();
     dense_store(&fx, 60_000, 300);
     fx.limits.statement_budget = Duration::ZERO;
-    let mut cursor = None;
-    for _ in 0..5 {
-        match fx.read(cursor, 200) {
-            Outcome::Page(page) => {
-                assert!(!page.events.is_empty(), "End::More with nothing: {page:?}");
-                cursor = page.next_cursor;
-            }
-            Outcome::Unavailable(u) => {
-                assert_ne!(u.kind, UnavailKind::TooExpensive, "{}", u.reason);
-                assert!(u.retry, "a time cut may fit next time: {}", u.reason);
-                return;
-            }
-            other => panic!("{other:?}"),
-        }
-    }
+    fx.read(None, limit)
+}
+
+#[test]
+fn a_time_cut_with_no_event_at_a_page_larger_than_one_says_ask_for_less() {
+    // The same request would be cut again: retry:true would loop forever.
+    let u = unavailable(first_outcome_under_a_cut(200));
+    assert_eq!(u.kind, UnavailKind::TooExpensive, "{}", u.reason);
+    assert!(!u.retry, "{}", u.reason);
+}
+
+#[test]
+fn a_time_cut_with_no_event_at_a_page_of_one_is_retryable() {
+    // Nothing smaller exists to ask for.
+    let u = unavailable(first_outcome_under_a_cut(1));
+    assert_ne!(u.kind, UnavailKind::TooExpensive, "{}", u.reason);
+    assert!(u.retry, "{}", u.reason);
 }
 
 fn pings_with_prompts(fx: &Fx, prompts: usize) {

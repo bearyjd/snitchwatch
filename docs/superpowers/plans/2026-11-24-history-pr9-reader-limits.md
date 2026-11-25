@@ -137,3 +137,10 @@ Each item below keeps its option text; the option marked recommended is the deci
 6. **Reader pool and limits: fixed numbers.** Options: keep D8's 2 readers and 2 slots, 100 ms statement budget, 512-entry scan window, 20,000-entry scan cap, 100 gap rows per page; or make them settings. Recommendation: constants in `reader.rs`, not settings. Why: they are safety bounds, not preferences; settings would make them part of the consent/retention surface and of PR 10's validation.
 7. **Reader refusal while a control operation runs.** Options: (a) `busy` (same as full); (b) a distinct `unavailable: control operation in progress`. Recommendation: (b). Why: the GUI should not retry-spin on `busy` while a clear is running, and it keeps `busy` meaning "try again soon" for PR 11.
 8. **Open per query versus a pooled read connection.** Options: (a) open and close per query; (b) one pooled connection per slot. Recommendation: (a). Why: at most 2 queries at once and each path is a short sequence; a pooled fd would survive a clear's unlink and make the quiesce proof harder.
+
+## Repair pass 4 notes
+
+- **Hidden outages.** `lost_at_least` pools every upstream-loss row that overlaps or abuts an `uncertain`, `write-failed` or `evicted` row, or that the page window clips (the outage row between its halves may be gone), and counts the pool once as `ceil(rows / 2)`: an outage's rows sum to `n`, or to 2 for `n = 1`, so rows summing to `r` come from a loss of at least `ceil(r / 2)`. An outage row that left no trace at all cannot be told from a plain loss; that case is not covered.
+- **Duplicate flag.** The probe cap is one value (256) for every page and client; a page is bounded by its rows times 257 index entries and by the statement budget and query deadline (time cut, with the rows read so far).
+- **Zero-event cuts.** A scan cut, or a time cut of a page larger than one row, is `TooExpensive` (`retry: false`, ask for a smaller page). A busy cut, or a time cut at `limit == 1`, is `retry: true`.
+- **Not fixed (E1).** SQLite's own memory for a 100 MiB `substr` is outside the reader's bounds.
