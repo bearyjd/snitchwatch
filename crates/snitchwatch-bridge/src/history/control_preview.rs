@@ -182,7 +182,7 @@ impl ControlGate {
     /// so a control operation sees it (and cancels it); writes nothing,
     /// pins nothing and numbers nothing.
     pub fn preview(&self) -> Result<Preview, Refused> {
-        let location = self.location()?;
+        let location = &self.owned_location()?;
         let ticket = self.0.registry.try_acquire().map_err(|e| match e {
             NotAdmitted::Busy => Refused::Busy,
             NotAdmitted::ControlOperation => Refused::InProgress,

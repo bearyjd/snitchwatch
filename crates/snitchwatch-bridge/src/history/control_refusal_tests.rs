@@ -150,7 +150,7 @@ fn a_second_bridge_that_started_before_history_existed_cannot_rewrite_consent() 
 }
 
 #[test]
-fn a_refusal_that_could_not_put_recording_back_says_so() {
+fn a_delete_failing_past_the_rename_is_incomplete_and_not_rolled_back() {
     for step in [Step::Renamed, Step::TombstoneRemoved] {
         let rig = gate_rig(Limits::default());
         feed_canary(&rig, 1);
@@ -165,8 +165,8 @@ fn a_refusal_that_could_not_put_recording_back_says_so() {
         });
         chmod(&rig, 0o700);
         assert!(
-            matches!(result, Err(Refused::RollbackFailed { .. })),
-            "{step:?}: {result:?}"
+            matches!(result, Err(Refused::Incomplete(_))),
+            "{step:?}: a delete past the rename is not rolled back: {result:?}"
         );
     }
 }

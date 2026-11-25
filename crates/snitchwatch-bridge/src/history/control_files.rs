@@ -188,9 +188,12 @@ impl StoreDir {
         }
         if self.require_plain(DB_FILE)? {
             self.rename_to_tombstone()?;
+            // Reported before the sync: from the rename on, the store is gone.
+            observe(Step::Renamed);
             self.sync()?;
+        } else {
+            observe(Step::Renamed);
         }
-        observe(Step::Renamed);
         if self.require_plain(TOMBSTONE)? {
             self.unlink(TOMBSTONE)?;
             self.sync()?;

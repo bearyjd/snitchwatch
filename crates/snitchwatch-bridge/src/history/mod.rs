@@ -260,9 +260,13 @@ mod control_epoch_tests;
 #[cfg(test)]
 mod control_files_tests;
 #[cfg(test)]
+mod control_incomplete_tests;
+#[cfg(test)]
 mod control_lock_tests;
 #[cfg(test)]
 mod control_outage_tests;
+#[cfg(test)]
+mod control_owner_tests;
 #[cfg(test)]
 mod control_preview_tests;
 #[cfg(test)]

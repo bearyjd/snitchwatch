@@ -80,7 +80,7 @@ impl ControlGate {
 
     fn destructive(&self, id: TokenId, kind: Kind, observe: &dyn Fn(Step)) -> Result<(), Refused> {
         let _op = self.begin()?;
-        let location = self.location()?.clone();
+        let location = self.owned_location()?;
         let ttl = self.0.limits.token_ttl;
         let token = self
             .0
@@ -88,6 +88,7 @@ impl ControlGate {
             .take(id, self.0.generation.current(), ttl)
             .ok_or(Refused::StaleToken)?;
         let guard = self.quiesce()?;
+        self.check_owner()?;
         let capture = self.0.slot.get();
         // Delete turns recording off first; nothing here is closed yet, so a
         // refusal changes nothing.
@@ -103,10 +104,22 @@ impl ControlGate {
         if let Some(c) = &capture {
             c.quiesce_writer(false);
         }
+        // Once the store is out of place the user's request cannot be undone.
+        let renamed = std::cell::Cell::new(false);
+        let watch = |step: Step| {
+            renamed.set(renamed.get() || step == Step::Renamed);
+            observe(step);
+        };
         let done = self
-            .remove_files(&location, &token, kind, observe)
-            .and_then(|carry| self.finish(&location, (kind, capture.is_some()), carry, observe));
+            .remove_files(&location, &token, kind, &watch)
+            .and_then(|carry| self.finish(&location, (kind, capture.is_some()), carry, &watch));
         let outcome = match done {
+            Err(refused) if kind == Kind::Delete && renamed.get() => {
+                // Delete means off: settings were saved off before anything
+                // closed, so keep them, respawn nothing and say what failed.
+                tracing::error!(%refused, "a delete failed after the store was removed");
+                Err(Refused::Incomplete(refused.to_string()))
+            }
             Err(refused) => Err(self.undo(&location, changed, capture.is_some(), refused)),
             ok => ok,
         };

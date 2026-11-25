@@ -62,6 +62,12 @@ pub enum Refused {
     /// recording back failed too: history may now be off.
     #[error("{refused}; recording could not be put back: {reason}")]
     RollbackFailed { refused: String, reason: String },
+    /// A delete passed the point of no return (the store was taken out of
+    /// place) and then failed. History is off and stays off; what could not
+    /// be finished is named, so a client can say "history was removed;
+    /// settings could not be removed".
+    #[error("history was removed but the delete did not finish: {0}; recording stays off")]
+    Incomplete(String),
 }
 
 /// How long a control operation waits for readers: one wait and one
@@ -287,7 +293,7 @@ impl ControlGate {
         // bridge that owns the store.
         super::open::ensure_dir(location.dir(), super::open::effective_uid())
             .map_err(|e| Refused::Unavailable(e.to_string()))?;
-        self.holdwriter_lock(&location)?;
+        self.hold_writer_lock(&location)?;
         super::enable(&location, consent).map_err(|e| Refused::Settings(e.to_string()))?;
         if self.0.slot.get().is_none() {
             self.resume();
@@ -298,17 +304,45 @@ impl ControlGate {
         }
     }
 
-    fn holdwriter_lock(&self, location: &Location) -> Result<(), Refused> {
+    /// Takes the writer lock if this bridge does not hold it yet, and
+    /// finishes what a crashed removal left, once, as the lock is first
+    /// taken. No directory means history was never enabled here: nothing to
+    /// hold, so nothing may be changed.
+    fn hold_writer_lock(&self, location: &Location) -> Result<(), Refused> {
         let mut held = self.0.writer_lock.lock().unwrap_or_else(|e| e.into_inner());
         if held.is_none() {
-            let dir = StoreDir::open(location.dir(), super::open::effective_uid())
-                .map_err(|e| Refused::Unavailable(e.to_string()))?;
-            *held = Some(Arc::new(
-                dir.lock_writer()
-                    .map_err(|e| Refused::Unavailable(e.to_string()))?,
-            ));
+            match lock_and_recover(location) {
+                Ok(Some(lock)) => *held = Some(lock),
+                Ok(None) => {
+                    return Err(Refused::Unavailable(
+                        "history has never been enabled; nothing to change".into(),
+                    ))
+                }
+                Err(reason) => return Err(Refused::Unavailable(reason)),
+            }
         }
         Ok(())
+    }
+
+    /// The location, for an operation other than `enable`: only the bridge
+    /// that holds the writer lock may preview, clear, delete or disable.
+    pub(super) fn owned_location(&self) -> Result<Location, Refused> {
+        let location = self.location()?.clone();
+        self.hold_writer_lock(&location)?;
+        Ok(location)
+    }
+
+    /// Ownership is re-checked after every wait inside an operation. The lock
+    /// is held for the life of the bridge once taken, so this fails only if
+    /// that invariant is ever broken.
+    pub(super) fn check_owner(&self) -> Result<(), Refused> {
+        let held = self.0.writer_lock.lock().unwrap_or_else(|e| e.into_inner());
+        match *held {
+            Some(_) => Ok(()),
+            None => Err(Refused::Unavailable(
+                "the writer lock is not held by this bridge".into(),
+            )),
+        }
     }
 
     /// Step 3: advance the generation and stop accepting, through the
@@ -333,8 +367,9 @@ impl ControlGate {
     /// between the two never restarts recording on a user who disabled it.
     pub fn disable(&self) -> Result<(), Refused> {
         let _op = self.begin()?;
-        let location = self.location()?.clone();
+        let location = self.owned_location()?;
         let guard = self.quiesce()?;
+        self.check_owner()?;
         let capture = self.0.slot.get();
         let prior = persist_off(&location, capture.is_none())?;
         if let Err(refused) = self.close(&guard, capture.as_ref()) {
