@@ -100,6 +100,51 @@ pub fn open_owner_only(path: &Path) -> Result<Connection, OpenError> {
     Ok(conn)
 }
 
+/// Open an existing store file for reading only: the checks of
+/// [`open_owner_only`] (no unsafe sidecar, a regular file of ours with one
+/// link, `O_NOFOLLOW`; also `O_NONBLOCK`, since a FIFO opened for reading
+/// would otherwise wait for a writer), but nothing is created and nothing is
+/// changed: no `set_permissions`, no `CREATE`, `SQLITE_OPEN_READ_ONLY` and
+/// `query_only`, no `ATTACH`. A missing file is `OpenError::Io(NotFound)`.
+///
+/// There is no busy timeout: the caller decides how long a read may wait for
+/// a writer's commit, because in rollback-journal mode a reader's lock delays
+/// that commit.
+pub fn open_owner_only_readonly(path: &Path) -> Result<Connection, OpenError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    refuse_unsafe_sidecars(path)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)?;
+    let meta = file.metadata()?;
+    let facts = FileFacts {
+        regular: meta.is_file(),
+        uid: meta.uid(),
+        links: meta.nlink(),
+    };
+    if let Some(why) = file_problem(&facts, effective_uid()) {
+        return Err(OpenError::Refused(format!(
+            "{} {why}, so it was left as it is",
+            path.display()
+        )));
+    }
+    drop(file);
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    conn.busy_timeout(std::time::Duration::ZERO)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    conn.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_ATTACHED, 0)?;
+    conn.execute_batch(
+        "PRAGMA trusted_schema = OFF; PRAGMA cell_size_check = ON; PRAGMA query_only = ON;",
+    )?;
+    Ok(conn)
+}
+
 /// What matters about an existing store file or SQLite sidecar file.
 pub(crate) struct FileFacts {
     pub regular: bool,
@@ -214,6 +259,10 @@ pub fn require_known_schema(conn: &Connection, schema: &str) -> Result<(), OpenE
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "sqlite_file_readonly_tests.rs"]
+mod readonly_tests;
 
 #[cfg(test)]
 mod tests {
