@@ -364,6 +364,9 @@ pub struct Engine {
     pub(super) tally: super::retention_room::Tally,
     /// What tier 1 may still remove (F1); its debt is kept in `meta`.
     pub(super) expiry: super::expiry_budget::ExpiryBudget,
+    /// Most eviction chunks one attempt to make room takes
+    /// ([`EVICTION_ROUNDS`] outside tests).
+    pub(super) eviction_rounds: u32,
     /// Test seam: an error to raise after a transaction's rows were written
     /// and before `COMMIT`, to prove nothing else happens when it fails.
     #[cfg(test)]
@@ -421,6 +424,7 @@ impl Engine {
             released: std::collections::HashMap::new(),
             tally: super::retention_room::Tally::default(),
             expiry,
+            eviction_rounds: EVICTION_ROUNDS,
             #[cfg(test)]
             fault_before_commit: None,
         };
@@ -490,6 +494,11 @@ impl Engine {
 
     pub fn file_pages(&self) -> Result<u64, WriteError> {
         self.pragma_u64("page_count")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_eviction_rounds_for_test(&mut self, rounds: u32) {
+        self.eviction_rounds = rounds;
     }
 
     #[cfg(test)]

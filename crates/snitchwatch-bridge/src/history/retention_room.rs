@@ -24,7 +24,7 @@ use rusqlite::Connection;
 use super::admission::SHARE_PERCENT;
 use super::measure::{estimate_bytes, row_bytes_sql};
 use super::retention::Victims;
-use super::writer::{Engine, Item, WriteError, EVICTION_ROUNDS};
+use super::writer::{Engine, Item, WriteError};
 
 /// Most processes the [`Tally`] follows; one more and it is dropped, so the
 /// next pressure scans (never an entry silently lost).
@@ -185,7 +185,7 @@ impl Engine {
         for (process, mut held) in self.over_share()? {
             let mut cursor = None;
             while held > share
-                && *chunks < EVICTION_ROUNDS
+                && *chunks < self.eviction_rounds
                 && !self.stopping()
                 && self.used_pages()? > low
             {
@@ -215,7 +215,7 @@ impl Engine {
         let low = self.budget().low_water_pages();
         let mut chunks = 0;
         self.evict_over_share(low, &mut chunks)?;
-        while chunks < EVICTION_ROUNDS && !self.stopping() && self.used_pages()? > low {
+        while chunks < self.eviction_rounds && !self.stopping() && self.used_pages()? > low {
             if self.evict_chunk()?.units == 0 {
                 break;
             }

@@ -162,7 +162,18 @@ struct Live {
 
 /// A capture over a store already `over` pages past high-water.
 fn live(over: u64, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
-    let rig = rig();
+    live_over(rig(), over, tweak)
+}
+
+/// [`live`] over a small store with the writer's chunk limit per attempt
+/// lowered to `rounds`.
+fn live_rounds(over: u64, rounds: u32, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
+    let mut rig = rig_with(SMALL_STORE);
+    rig.engine.set_eviction_rounds_for_test(rounds);
+    live_over(rig, over, tweak)
+}
+
+fn live_over(rig: Rig, over: u64, tweak: impl FnOnce(&mut CaptureConfig)) -> Live {
     fill_to(&rig, over);
     let Rig {
         _root,
@@ -285,11 +296,18 @@ fn while_paused_events_are_lost_without_another_eviction_and_the_ledger_still_wr
     );
 }
 
+/// A small store: filling a 16 MiB one past its high-water mark is most of
+/// what made this scenario slow.
+const SMALL_STORE: u64 = 3 * 1024 * 1024;
+const ROUNDS: u32 = 3;
+const OVER: u64 = 6;
+
 #[test]
 fn recording_resumes_when_a_retry_makes_room_and_the_pause_state_clears() {
     // More than one attempt's chunks clear: the first attempt pauses, the retry
-    // finishes.
-    let live = live(120, |c| c.pause_min = Duration::from_millis(20));
+    // finishes. The chunk limit is lowered (not the production 128) so that
+    // "more than one attempt" costs a few chunks, not a hundred.
+    let live = live_rounds(OVER, ROUNDS, |c| c.pause_min = Duration::from_millis(20));
     let mut sent = 0;
     wait_for("recording to resume", || {
         sent += 1;

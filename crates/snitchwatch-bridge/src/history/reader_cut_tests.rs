@@ -55,7 +55,7 @@ fn dense_store(fx: &Fx) {
 }
 
 #[test]
-fn a_time_cut_before_the_first_event_is_retryable_not_too_expensive() {
+fn a_time_cut_before_the_first_event_of_a_page_of_one_is_too_slow_not_retryable() {
     let mut fx = Fx::new();
     dense_store(&fx);
     fx.limits.statement_budget = Duration::ZERO;
@@ -65,8 +65,8 @@ fn a_time_cut_before_the_first_event_is_retryable_not_too_expensive() {
             Outcome::Page(page) => assert!(!page.events.is_empty(), "{page:?}"),
             Outcome::Unavailable(u) => {
                 cut_seen = true;
-                assert!(u.retry, "the same request may fit next time: {}", u.reason);
-                assert_ne!(u.kind, UnavailKind::TooExpensive, "{}", u.reason);
+                assert!(!u.retry, "a retry loop has no bound: {}", u.reason);
+                assert_eq!(u.kind, UnavailKind::TooExpensive, "{}", u.reason);
             }
             other => panic!("{other:?}"),
         }
@@ -173,16 +173,14 @@ fn two_hundred_pings_over_257_prompts_stay_within_the_page_bound() {
         )
         .unwrap();
     // One cap for every page: a page examines at most its rows times
-    // (cap + 1) candidates, and still ends within the query deadline with
-    // progress.
+    // (cap + 1) candidates, and the statement stays under a virtual machine
+    // step ceiling. Counts only: wall-clock time depends on the machine.
     let limits = Limits::default();
     assert!(
         limits.events_per_page * (DUPLICATE_PROBE_CAP + 1) <= 52_000,
         "candidates a page may examine"
     );
-    let started = std::time::Instant::now();
     let page = fx.page(None, 200);
-    assert!(started.elapsed() < limits.query_deadline);
     assert!(!page.events.is_empty(), "progress");
     let steps = head_steps(&fx, 200, DUPLICATE_PROBE_CAP);
     assert!(steps < 1_000_000, "{steps} virtual machine steps");
