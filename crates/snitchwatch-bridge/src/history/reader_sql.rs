@@ -24,15 +24,13 @@ const TICK_OPS: i32 = 1000;
 /// More rows than the ledger's own ceiling (L1): never a reason to read on.
 pub(super) const LEDGER_ROWS_MAX: usize = 4096;
 
-/// Candidates the duplicate lookup may examine for one event, at most.
+/// Candidates the duplicate lookup may examine for one event, at most. One
+/// value for every page and client: a row's `possible_duplicate` is a fact of
+/// the store, never of the page size. A page's total is therefore at most its
+/// rows times `DUPLICATE_PROBE_CAP + 1` index entries (about 51 000 for the
+/// default 200), and the statement budget and the query deadline cut a slower
+/// page short, with the rows read so far.
 pub(super) const DUPLICATE_PROBE_CAP: usize = 256;
-
-/// Candidates the lookups of one whole page may examine, at most (the scan
-/// budget, [`super::reader::Limits::scan_rows_max`]): shared out over the
-/// rows the page may return.
-pub(super) fn probe_cap(limit: usize, scan_rows_max: usize) -> usize {
-    (scan_rows_max / limit.saturating_add(1)).clamp(1, DUPLICATE_PROBE_CAP)
-}
 
 const WHY_NONE: u8 = 0;
 const WHY_CANCELLED: u8 = 1;

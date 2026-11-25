@@ -6,7 +6,7 @@ use std::time::Duration;
 use super::ledger::GapCause;
 use super::reader::*;
 use super::reader_fixture::Fx;
-use super::reader_sql::{events_sql, probe_cap, Seek};
+use super::reader_sql::{events_sql, Seek, DUPLICATE_PROBE_CAP};
 
 fn unavailable(outcome: Outcome) -> Unavail {
     match outcome {
@@ -160,7 +160,7 @@ fn head_steps(fx: &Fx, limit: usize, cap: usize) -> i32 {
 }
 
 #[test]
-fn two_hundred_pings_over_257_prompts_stay_within_the_scan_budget() {
+fn two_hundred_pings_over_257_prompts_stay_within_the_page_bound() {
     let fx = Fx::new();
     fx.conn()
         .execute_batch(
@@ -172,17 +172,20 @@ fn two_hundred_pings_over_257_prompts_stay_within_the_scan_budget() {
              SELECT 2000, '/b', 'allow', 'rule' FROM c;",
         )
         .unwrap();
+    // One cap for every page: a page examines at most its rows times
+    // (cap + 1) candidates, and still ends within the query deadline with
+    // progress.
     let limits = Limits::default();
-    let cap = probe_cap(201, limits.scan_rows_max);
-    // Candidates one page may examine: every row's probe, in total.
     assert!(
-        201 * (cap + 1) <= limits.scan_rows_max + 201,
-        "{} candidates",
-        201 * (cap + 1)
+        limits.events_per_page * (DUPLICATE_PROBE_CAP + 1) <= 52_000,
+        "candidates a page may examine"
     );
-    let old = head_steps(&fx, 200, 256);
-    let new = head_steps(&fx, 200, cap);
-    assert!(new * 2 < old, "steps {new} against {old} at the old cap");
+    let started = std::time::Instant::now();
+    let page = fx.page(None, 200);
+    assert!(started.elapsed() < limits.query_deadline);
+    assert!(!page.events.is_empty(), "progress");
+    let steps = head_steps(&fx, 200, DUPLICATE_PROBE_CAP);
+    assert!(steps < 1_000_000, "{steps} virtual machine steps");
 }
 
 #[test]

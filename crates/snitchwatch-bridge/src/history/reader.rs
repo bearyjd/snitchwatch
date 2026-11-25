@@ -25,8 +25,8 @@ use super::reader_page::{assemble, Loaded};
 use super::reader_registry::CancelToken;
 use super::reader_size::{event_bytes, HEADER_BYTES, MIN_PAGE_BYTES};
 use super::reader_sql::{
-    events_chunk, floor, gaps_overlapping, ledger_start, probe_cap, sessions_overlapping,
-    watermark, Control, Stop,
+    events_chunk, floor, gaps_overlapping, ledger_start, sessions_overlapping, watermark, Control,
+    Stop, DUPLICATE_PROBE_CAP,
 };
 use super::timeline::Segment;
 use super::{load_state_read_only, Location, State};
@@ -479,8 +479,13 @@ impl<'a> Read<'a> {
             .saturating_sub(run.rows.len())
             .min(limits.scan_window.max(1))
             .min(limits.scan_rows_max - run.scanned);
-        let cap = probe_cap(run.limit, limits.scan_rows_max);
-        let chunk = events_chunk(&self.conn, &self.control, run.after, want, cap);
+        let chunk = events_chunk(
+            &self.conn,
+            &self.control,
+            run.after,
+            want,
+            DUPLICATE_PROBE_CAP,
+        );
         run.statements += 1;
         run.scanned += chunk.rows.len();
         let exhausted = chunk.rows.len() < want && chunk.stop.is_none();

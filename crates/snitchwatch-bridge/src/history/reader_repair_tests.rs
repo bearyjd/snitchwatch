@@ -179,3 +179,16 @@ fn the_flag_is_exact_up_to_the_cap_and_undetermined_past_it() {
     let ping = past.page(None, 1).events.remove(0);
     assert!(ping.possible_duplicate, "cannot be ruled out past the cap");
 }
+
+#[test]
+fn a_rows_duplicate_flag_does_not_depend_on_the_page_size() {
+    // 150 prompts within two seconds of every ping: past the cap a page of 200
+    // would once have shared out (99), under the fixed one (256) it is exact.
+    let fx = Fx::new();
+    dense_store(&fx, 150, 200);
+    let flags: Vec<bool> = [1, 50, 200]
+        .iter()
+        .map(|&limit| fx.page(None, limit).events[0].possible_duplicate)
+        .collect();
+    assert_eq!(flags, vec![false, false, false], "one answer per row");
+}
