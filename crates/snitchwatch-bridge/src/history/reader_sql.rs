@@ -24,8 +24,15 @@ const TICK_OPS: i32 = 1000;
 /// More rows than the ledger's own ceiling (L1): never a reason to read on.
 pub(super) const LEDGER_ROWS_MAX: usize = 4096;
 
-/// Candidates the duplicate lookup may examine for one event.
+/// Candidates the duplicate lookup may examine for one event, at most.
 pub(super) const DUPLICATE_PROBE_CAP: usize = 256;
+
+/// Candidates the lookups of one whole page may examine, at most (the scan
+/// budget, [`super::reader::Limits::scan_rows_max`]): shared out over the
+/// rows the page may return.
+pub(super) fn probe_cap(limit: usize, scan_rows_max: usize) -> usize {
+    (scan_rows_max / limit.saturating_add(1)).clamp(1, DUPLICATE_PROBE_CAP)
+}
 
 const WHY_NONE: u8 = 0;
 const WHY_CANCELLED: u8 = 1;
@@ -189,42 +196,81 @@ impl Control {
     }
 }
 
-/// Lossy text: a crafted file with invalid UTF-8 must not break a read.
-fn text(row: &Row<'_>, i: usize) -> rusqlite::Result<Option<String>> {
+/// The longest text the reader keeps of any stored field, in characters: the
+/// writer's own longest cap (a process path). A malformed file can hold a
+/// value of any size; SQL cuts it to one more than this before it reaches
+/// Rust, and the row is marked [`EventView::truncated`].
+pub(super) const FIELD_CAP: usize = super::caps::PROCESS_PATH;
+
+/// `column`, cut by SQLite to `FIELD_CAP + 1` characters (or bytes, for a
+/// blob): the copy into Rust is bounded whatever the stored value.
+fn bounded(column: &str) -> String {
+    format!("substr({column}, 1, {})", FIELD_CAP + 1)
+}
+
+/// Lossy text: a crafted file with invalid UTF-8 must not break a read. A
+/// value past [`FIELD_CAP`] is cut and sets `cut`.
+fn text(row: &Row<'_>, i: usize, cut: &mut bool) -> rusqlite::Result<Option<String>> {
     Ok(match row.get_ref(i)? {
         ValueRef::Null => None,
-        ValueRef::Text(b) | ValueRef::Blob(b) => Some(String::from_utf8_lossy(b).into_owned()),
+        ValueRef::Text(b) | ValueRef::Blob(b) => {
+            let lossy = String::from_utf8_lossy(b);
+            Some(match lossy.char_indices().nth(FIELD_CAP) {
+                Some((end, _)) => {
+                    *cut = true;
+                    lossy[..end].to_owned()
+                }
+                None => lossy.into_owned(),
+            })
+        }
         ValueRef::Integer(n) => Some(n.to_string()),
         ValueRef::Real(f) => Some(f.to_string()),
     })
 }
 
 fn event_from_row(row: &Row<'_>) -> rusqlite::Result<EventView> {
-    Ok(EventView {
+    let mut cut = false;
+    let c = &mut cut;
+    let mut view = EventView {
         id: row.get(0)?,
         ts_ms: row.get(1)?,
         decided_ts_ms: row.get(2)?,
-        process_path: text(row, 3)?,
-        dst_host: text(row, 4)?,
-        dst_ip: text(row, 5)?,
+        process_path: text(row, 3, c)?,
+        dst_host: text(row, 4, c)?,
+        dst_ip: text(row, 5, c)?,
         dst_port: row.get(6)?,
-        protocol: text(row, 7)?,
-        action: text(row, 8)?.unwrap_or_default(),
-        answered_by: text(row, 9)?.unwrap_or_default(),
-        rule_name: text(row, 10)?,
-        rule_hash: text(row, 11)?,
-        rule_class: text(row, 12)?,
+        protocol: text(row, 7, c)?,
+        action: text(row, 8, c)?.unwrap_or_default(),
+        answered_by: text(row, 9, c)?.unwrap_or_default(),
+        rule_name: text(row, 10, c)?,
+        rule_hash: text(row, 11, c)?,
+        rule_class: text(row, 12, c)?,
         repeat_count: row.get(13)?,
         src_port: row.get(14)?,
-        src_ip: text(row, 15)?,
-        prompt_outcome: text(row, 16)?,
+        src_ip: text(row, 15, c)?,
+        prompt_outcome: text(row, 16, c)?,
         possible_duplicate: row.get::<_, i64>(17)? != 0,
-    })
+        truncated: false,
+    };
+    view.truncated = cut;
+    Ok(view)
 }
 
-const EVENT_COLUMNS: &str = "id, ts_ms, decided_ts_ms, process_path, dst_host, dst_ip, \
-    dst_port, protocol, action, answered_by, rule_name, lower(hex(rule_hash)), rule_class, \
-    repeat_count, src_port, src_ip, prompt_outcome";
+fn event_columns() -> String {
+    let text = ["process_path", "dst_host", "dst_ip"]
+        .map(bounded)
+        .join(", ");
+    let more = ["protocol", "action", "answered_by", "rule_name"]
+        .map(bounded)
+        .join(", ");
+    let tail = ["rule_class"].map(bounded).join(", ");
+    let last = ["src_ip", "prompt_outcome"].map(bounded).join(", ");
+    format!(
+        "id, ts_ms, decided_ts_ms, {text}, dst_port, {more}, \
+         lower(hex({hash})), {tail}, repeat_count, src_port, {last}",
+        hash = bounded("rule_hash")
+    )
+}
 
 /// `possible_duplicate`, with the view's lookup bounded. The view examines
 /// every event within two seconds of a prompt (or every prompt within two
@@ -234,19 +280,23 @@ const EVENT_COLUMNS: &str = "id, ts_ms, decided_ts_ms, process_path, dst_host, d
 /// the cap the lookup is not run and the flag is **true**: it says "possible",
 /// and a pair cannot be ruled out without the scan. Within the cap it is the
 /// view's own answer.
-fn possible_duplicate_sql() -> String {
-    let cap = DUPLICATE_PROBE_CAP;
+fn possible_duplicate_sql(cap: usize) -> String {
+    let limit = cap + 1;
+    // Only a prompt (an outcome) or a ping (no outcome and no decision) can
+    // be half of a pair: any other row keeps the view's answer, which is no.
     format!(
-        "CASE WHEN CASE WHEN h.prompt_outcome IS NOT NULL \
+        "CASE WHEN CASE \
+             WHEN h.prompt_outcome IS NOT NULL \
              THEN (SELECT count(*) FROM (SELECT 1 FROM events x \
                    WHERE x.ts_ms BETWEEN h.decided_ts_ms - 2000 AND h.decided_ts_ms + 2000 \
                    LIMIT {limit})) \
-             ELSE (SELECT count(*) FROM (SELECT 1 FROM events x \
+             WHEN h.decided_ts_ms IS NULL \
+             THEN (SELECT count(*) FROM (SELECT 1 FROM events x \
                    WHERE x.prompt_outcome IS NOT NULL \
                    AND x.decided_ts_ms BETWEEN h.ts_ms - 2000 AND h.ts_ms + 2000 \
-                   LIMIT {limit})) END > {cap} \
-         THEN 1 ELSE h.possible_duplicate END",
-        limit = cap + 1
+                   LIMIT {limit})) \
+             ELSE 0 END > {cap} \
+         THEN 1 ELSE h.possible_duplicate END"
     )
 }
 
@@ -270,16 +320,17 @@ pub(super) enum Seek {
     Older,
 }
 
-pub(super) fn events_sql(seek: Seek) -> String {
+pub(super) fn events_sql(seek: Seek, cap: usize) -> String {
     let (filter, limit) = match seek {
         Seek::Head => ("", "?1"),
         Seek::Ties => ("WHERE ts_ms = ?1 AND id < ?2", "?3"),
         Seek::Older => ("WHERE ts_ms < ?1", "?2"),
     };
     format!(
-        "SELECT {EVENT_COLUMNS}, {flag} FROM history_events h {filter} \
+        "SELECT {columns}, {flag} FROM history_events h {filter} \
          ORDER BY ts_ms DESC, id DESC LIMIT {limit}",
-        flag = possible_duplicate_sql()
+        columns = event_columns(),
+        flag = possible_duplicate_sql(cap)
     )
 }
 
@@ -289,11 +340,11 @@ fn run_events(
     ctl: &Control,
     seek: Seek,
     after: (i64, i64),
-    n: usize,
+    (n, cap): (usize, usize),
     chunk: &mut Chunk,
 ) -> Result<(), rusqlite::Error> {
     let limit = i64::try_from(n).unwrap_or(i64::MAX);
-    let mut stmt = conn.prepare(&events_sql(seek))?;
+    let mut stmt = conn.prepare(&events_sql(seek, cap))?;
     ctl.begin_statement();
     let mut rows = match seek {
         Seek::Head => stmt.query(rusqlite::params![limit])?,
@@ -314,6 +365,7 @@ pub(super) fn events_chunk(
     ctl: &Control,
     after: Option<(i64, i64)>,
     n: usize,
+    cap: usize,
 ) -> Chunk {
     let mut chunk = Chunk {
         rows: Vec::new(),
@@ -329,7 +381,14 @@ pub(super) fn events_chunk(
         if want == 0 || ctl.cancelled() {
             break;
         }
-        if let Err(e) = run_events(conn, ctl, *seek, after.unwrap_or((0, 0)), want, &mut chunk) {
+        if let Err(e) = run_events(
+            conn,
+            ctl,
+            *seek,
+            after.unwrap_or((0, 0)),
+            (want, cap),
+            &mut chunk,
+        ) {
             chunk.stop = Some(ctl.stop_for(&e));
             break;
         }

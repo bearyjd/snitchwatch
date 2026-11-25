@@ -8,7 +8,7 @@ use rusqlite::StatementStatus;
 use super::ledger::GapCause;
 use super::reader::*;
 use super::reader_fixture::Fx;
-use super::reader_sql::{events_sql, Seek};
+use super::reader_sql::{events_sql, Seek, DUPLICATE_PROBE_CAP};
 use super::retention_support::evict_before;
 use super::session::SessionEnd;
 
@@ -54,7 +54,7 @@ fn every_page_statement_uses_the_time_index_with_no_sort_and_no_table_scan() {
         (Seek::Ties, vec![5, 5, 200]),
         (Seek::Older, vec![5, 200]),
     ] {
-        let lines = plan(fx.conn(), &events_sql(seek), &params);
+        let lines = plan(fx.conn(), &events_sql(seek, DUPLICATE_PROBE_CAP), &params);
         let joined = lines.join(" | ");
         assert!(joined.contains("events_ts"), "{seek:?}: {joined}");
         assert!(!joined.contains("TEMP B-TREE"), "{seek:?} sorts: {joined}");
@@ -66,7 +66,12 @@ fn every_page_statement_uses_the_time_index_with_no_sort_and_no_table_scan() {
         );
     }
     // The tie statement is a range on the index itself, not a filter over it.
-    let ties = plan(fx.conn(), &events_sql(Seek::Ties), &[5, 5, 200]).join(" | ");
+    let ties = plan(
+        fx.conn(),
+        &events_sql(Seek::Ties, DUPLICATE_PROBE_CAP),
+        &[5, 5, 200],
+    )
+    .join(" | ");
     assert!(
         ties.contains("ts_ms=?") && ties.contains("rowid<?"),
         "{ties}"
@@ -84,7 +89,9 @@ fn steps(conn: &rusqlite::Connection, cursor: Option<(i64, i64)>) -> i32 {
         None => vec![(Seek::Head, vec![200])],
     };
     for (seek, params) in statements {
-        let mut stmt = conn.prepare(&events_sql(seek)).unwrap();
+        let mut stmt = conn
+            .prepare(&events_sql(seek, DUPLICATE_PROBE_CAP))
+            .unwrap();
         let mut rows = stmt.query(rusqlite::params_from_iter(&params)).unwrap();
         while rows.next().unwrap().is_some() {
             got += 1;

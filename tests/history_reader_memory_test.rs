@@ -101,3 +101,62 @@ fn a_page_over_a_huge_nested_ledger_stays_under_a_stated_memory_bound() {
     // most. The whole tiling would be over 300 MiB.
     assert!(peak < 16 * 1024 * 1024, "peak {peak} bytes");
 }
+
+/// A malformed 100 MiB `process_path` (and a second, ordinary event): the
+/// reader's copy of any stored value is cut by SQLite before it reaches Rust.
+#[test]
+fn a_malformed_hundred_mib_value_is_cut_before_it_is_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().canonicalize().unwrap().join("state");
+    std::fs::create_dir(&state).unwrap();
+    let location = locate(Mode::User, Some(&state)).unwrap();
+    enable(
+        &location,
+        Consent {
+            text_id: "t".into(),
+            accepted_ms: 1,
+        },
+    )
+    .unwrap();
+    let store = open_store(&location).unwrap();
+    store
+        .connection()
+        .execute_batch(
+            "PRAGMA ignore_check_constraints = ON; \
+             INSERT INTO events (ts_ms, action, answered_by, process_path) \
+             VALUES (40000, 'allow', 'rule', '/usr/bin/y'); \
+             INSERT INTO events (ts_ms, action, answered_by, process_path) \
+             VALUES (50000, 'allow', 'rule', hex(zeroblob(50 * 1024 * 1024)));",
+        )
+        .unwrap();
+    let (generation, cancel) = (Generation::default(), CancelToken::default());
+    let ctx = Context {
+        location: &location,
+        generation: &generation,
+        cancel: &cancel,
+        now_ms: 100_000,
+        live_session_start_ms: None,
+        standing: None,
+        limits: Limits::default(),
+    };
+    let request = Request {
+        cursor: None,
+        limit: 200,
+    };
+    let baseline = LIVE.load(Ordering::SeqCst);
+    PEAK.store(baseline, Ordering::SeqCst);
+    let outcome = read_page(&request, &ctx);
+    let peak = PEAK.load(Ordering::SeqCst) - baseline;
+    let Outcome::Page(page) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(page.events.len(), 2, "paging goes on past the bad row");
+    let bad = &page.events[0];
+    assert!(bad.truncated, "the cut row says so");
+    assert_eq!(bad.process_path.as_ref().map(String::len), Some(4096));
+    assert!(!page.events[1].truncated);
+    assert!(
+        peak < 2 * 1024 * 1024,
+        "peak {peak} bytes for a 100 MiB value"
+    );
+}

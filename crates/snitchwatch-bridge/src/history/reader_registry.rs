@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use super::lifecycle::{ReaderGate, ReaderPermit};
+use super::lifecycle::{Exhausted, Generation, ReaderGate, ReaderPermit};
 
 /// Concurrent history queries, bridge-wide (D8).
 pub const MAX_READERS: usize = 2;
@@ -151,6 +151,18 @@ impl Drop for Closer {
 #[must_use = "the registry reopens when the guard is dropped"]
 pub struct ControlGuard {
     _closer: Closer,
+}
+
+impl ControlGuard {
+    /// Advances the generation, which only a quiesced registry may do. A
+    /// reader captures the generation once, when it starts, and tags its
+    /// cursor with that value: advancing while readers are still admitted
+    /// would let one that starts in the gap read the old database and
+    /// return a cursor tagged as the new generation, which the replacement
+    /// would accept.
+    pub fn advance(&self, generation: &Generation) -> Result<u64, Exhausted> {
+        generation.advance()
+    }
 }
 
 /// A quiesce whose workers did not stop in time. The registry stays closed:

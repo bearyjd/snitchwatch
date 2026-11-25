@@ -313,11 +313,14 @@ const DURABLE_MODULES: [&str; 10] = [
 ];
 
 /// The files that implement and test the durable half.
-const DURABLE_OWNERS: [&str; 40] = [
+const DURABLE_OWNERS: [&str; 43] = [
     "timeline.rs",
     "timeline_tests.rs",
     "gap_counts.rs",
     "gap_counts_tests.rs",
+    "gap_counts_merge_tests.rs",
+    "reader_ceiling_tests.rs",
+    "reader_cut_tests.rs",
     "reader.rs",
     "reader_page.rs",
     "reader_sql.rs",

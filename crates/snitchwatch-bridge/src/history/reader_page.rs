@@ -356,6 +356,12 @@ pub(super) fn assemble(
         // Even an empty window is over the row caps: trim it, and say so.
         None => (0, Some(Partial::Gaps)),
     };
+    // Read before any trimming: a dropped marker still says what was there.
+    let evicted = loaded
+        .rows(n, ctx)
+        .gaps
+        .iter()
+        .any(|g| g.cause == GapCause::Evicted);
     let c = match forced {
         Some(_) => trimmed(&loaded, n, ctx)?,
         None => loaded.candidate(n, ctx),
@@ -368,7 +374,7 @@ pub(super) fn assemble(
         .or(shrunk.then_some(Partial::Bytes))
         .or(loaded.partial);
     let more = loaded.more || shrunk;
-    let end = end_state(more, &c.gaps);
+    let end = end_state(more, evicted);
     Ok(Page {
         generation,
         at_head: request.cursor.is_none(),
@@ -390,8 +396,7 @@ pub(super) fn assemble(
     })
 }
 
-fn end_state(more: bool, gaps: &[Gap]) -> End {
-    let evicted = gaps.iter().any(|g| g.cause == GapCause::Evicted);
+fn end_state(more: bool, evicted: bool) -> End {
     match (more, evicted) {
         (true, _) => End::More,
         (false, true) => End::RetentionFloor,

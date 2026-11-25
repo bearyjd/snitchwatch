@@ -37,6 +37,8 @@ mod reader_ceiling_tests;
 #[cfg(test)]
 mod reader_coverage_tests;
 #[cfg(test)]
+mod reader_cut_tests;
+#[cfg(test)]
 mod reader_fit_tests;
 #[cfg(test)]
 mod reader_fixture;

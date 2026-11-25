@@ -9,10 +9,13 @@ use std::time::Duration;
 use super::reader::{EventView, GapView, Limits, SessionView};
 use super::timeline::Segment;
 
-/// The page header: generation, window, standing labels, summary, cursor.
-pub(super) const HEADER_BYTES: usize = 4096;
-/// The smallest page limit a reader accepts: the header and room for rows.
-pub(super) const MIN_PAGE_BYTES: usize = 2 * HEADER_BYTES;
+/// The page header: generation, window, standing labels, summary, cursor. An
+/// upper bound with room to spare (the worst case serializes to about 700
+/// bytes; a test pins it).
+pub(super) const HEADER_BYTES: usize = 1024;
+/// The smallest page limit a reader accepts: the header, and room for a
+/// maximum-length event (a 4 KiB path) with the gap and segment rows around it.
+pub(super) const MIN_PAGE_BYTES: usize = 8 * 1024;
 const INT: usize = 20;
 const BOOL: usize = 5;
 const NULL: usize = 4;
@@ -64,6 +67,7 @@ pub(super) fn event_bytes(e: &EventView) -> usize {
         + field("src_ip", opt_text(&e.src_ip))
         + field("prompt_outcome", opt_text(&e.prompt_outcome))
         + field("possible_duplicate", BOOL)
+        + field("truncated", BOOL)
 }
 
 pub(super) fn gap_bytes(g: &GapView) -> usize {

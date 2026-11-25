@@ -123,7 +123,7 @@ fn run_big_statement(
                 token.cancel();
             });
         }
-        events_chunk(&conn, &ctl, None, 60_000)
+        events_chunk(&conn, &ctl, None, 60_000, 100)
     });
     (chunk.stop, started.elapsed())
 }

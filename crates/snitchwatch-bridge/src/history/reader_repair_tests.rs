@@ -147,8 +147,8 @@ fn a_cut_before_the_first_event_is_never_an_empty_page_with_more_to_come() {
                 cursor = page.next_cursor;
             }
             Outcome::Unavailable(u) => {
-                assert_eq!(u.kind, UnavailKind::TooExpensive, "{}", u.reason);
-                assert!(!u.retry, "a retry of the same request cannot loop");
+                assert_ne!(u.kind, UnavailKind::TooExpensive, "{}", u.reason);
+                assert!(u.retry, "a time cut may fit next time: {}", u.reason);
                 return;
             }
             other => panic!("{other:?}"),

@@ -153,6 +153,7 @@ fn read_checked(path: &std::path::Path, repair: bool) -> Result<Option<Vec<u8>>,
 
 /// [`read_checked`] with the retry cap and a hook that runs after each open
 /// and before the `fstat` (tests replace the file by hand there).
+#[cfg(test)]
 pub(crate) fn read_checked_with(
     path: &std::path::Path,
     tries: u32,

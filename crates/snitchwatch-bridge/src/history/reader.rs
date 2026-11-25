@@ -25,8 +25,8 @@ use super::reader_page::{assemble, Loaded};
 use super::reader_registry::CancelToken;
 use super::reader_size::{event_bytes, HEADER_BYTES, MIN_PAGE_BYTES};
 use super::reader_sql::{
-    events_chunk, floor, gaps_overlapping, ledger_start, sessions_overlapping, watermark, Control,
-    Stop,
+    events_chunk, floor, gaps_overlapping, ledger_start, probe_cap, sessions_overlapping,
+    watermark, Control, Stop,
 };
 use super::timeline::Segment;
 use super::{load_state_read_only, Location, State};
@@ -122,6 +122,9 @@ pub struct EventView {
     pub src_ip: Option<String>,
     pub prompt_outcome: Option<String>,
     pub possible_duplicate: bool,
+    /// A stored field was longer than the reader keeps and was cut: the row
+    /// is not what was recorded (a malformed file, never a writer's row).
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -335,10 +338,22 @@ fn refusal(kind: UnavailKind, reason: String) -> Outcome {
     })
 }
 
-/// A time or scan cut that read no event at all. A page with nothing and an
-/// older page to come would hand the client the same cursor again, and the
-/// same retry would repeat the same expensive scan: say so instead. (A busy
-/// cut is a writer's doing, not the request's: it stays a retryable page.)
+/// A cut by time or by a writer's commit that read no event: the same
+/// request can succeed a moment later.
+fn try_again(why: Partial) -> Outcome {
+    let cause = match why {
+        Partial::Busy => "a writer is committing",
+        _ => "the read ran out of time",
+    };
+    Outcome::Unavailable(Unavail {
+        reason: format!("history is busy ({cause}): ask again"),
+        retry: true,
+        kind: UnavailKind::Other,
+    })
+}
+
+/// A scan-cap cut that read no event at all: the same retry would repeat the
+/// same expensive scan, so say so instead.
 fn too_expensive() -> Outcome {
     refusal(
         UnavailKind::TooExpensive,
@@ -432,10 +447,16 @@ impl<'a> Read<'a> {
         Ok(())
     }
 
-    /// Ends the page early, with an older page to follow.
+    /// Ends the page early, with an older page to follow. A cut that read no
+    /// event is never a page (it would hand the client the same cursor
+    /// again): a scan-cap cut says the request is too big; a writer's commit
+    /// or a time cut says to ask again.
     fn cut(&mut self, why: Partial, run: &Collect) -> Result<bool, Outcome> {
-        if run.rows.is_empty() && why != Partial::Busy {
-            return Err(too_expensive());
+        if run.rows.is_empty() {
+            return Err(match why {
+                Partial::Scan => too_expensive(),
+                _ => try_again(why),
+            });
         }
         self.loaded.partial = Some(why);
         self.loaded.more = true;
@@ -458,7 +479,8 @@ impl<'a> Read<'a> {
             .saturating_sub(run.rows.len())
             .min(limits.scan_window.max(1))
             .min(limits.scan_rows_max - run.scanned);
-        let chunk = events_chunk(&self.conn, &self.control, run.after, want);
+        let cap = probe_cap(run.limit, limits.scan_rows_max);
+        let chunk = events_chunk(&self.conn, &self.control, run.after, want, cap);
         run.statements += 1;
         run.scanned += chunk.rows.len();
         let exhausted = chunk.rows.len() < want && chunk.stop.is_none();
