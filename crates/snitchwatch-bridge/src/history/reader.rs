@@ -294,6 +294,14 @@ struct Collect {
     bytes: usize,
 }
 
+impl Context<'_> {
+    /// The limits this read runs under: the caller's, clamped to the
+    /// reader's hard ceilings.
+    pub(super) fn bounds(&self) -> Limits {
+        self.limits.clamped()
+    }
+}
+
 fn unavailable(u: Unavail) -> Outcome {
     Outcome::Unavailable(u)
 }
@@ -364,7 +372,7 @@ impl<'a> Read<'a> {
         if ctx.cancel.is_cancelled() {
             return Err(Outcome::Cancelled);
         }
-        if ctx.limits.page_bytes < MIN_PAGE_BYTES {
+        if ctx.bounds().page_bytes < MIN_PAGE_BYTES {
             return Err(refusal(
                 UnavailKind::LimitsTooSmall,
                 format!("the page byte limit is under {MIN_PAGE_BYTES}, less than a page"),
@@ -376,10 +384,10 @@ impl<'a> Read<'a> {
             State::Off => return Err(refusal(UnavailKind::Off, "history is off".into())),
             State::Unavailable(why) => return Err(refusal(UnavailKind::Other, why.0)),
         }
-        let control = Control::new(ctx.cancel, &ctx.limits);
+        let control = Control::new(ctx.cancel, &ctx.bounds());
         // A cancel that lands while the file is being checked is a cancel, not
         // an unavailable store (a cancel is sticky).
-        let conn = open_validated(&ctx.location.db_path(), &control, ctx.limits.busy_wait)
+        let conn = open_validated(&ctx.location.db_path(), &control, ctx.bounds().busy_wait)
             .map_err(|u| {
                 if ctx.cancel.is_cancelled() {
                     Outcome::Cancelled
@@ -409,7 +417,7 @@ impl<'a> Read<'a> {
         let limit = self
             .request
             .limit
-            .clamp(1, self.ctx.limits.events_per_page.max(1));
+            .clamp(1, self.ctx.bounds().events_per_page.max(1));
         let mut run = Collect {
             limit,
             after: self.request.cursor.map(|c| (c.ts_ms, c.id)),
@@ -436,7 +444,7 @@ impl<'a> Read<'a> {
 
     /// One statement's worth. `Ok(true)`: read on.
     fn step(&mut self, run: &mut Collect) -> Result<bool, Outcome> {
-        let limits = &self.ctx.limits;
+        let limits = self.ctx.bounds();
         if run.statements > 0 && self.control.deadline_passed() {
             return self.cut(Partial::Time, run);
         }
@@ -466,7 +474,7 @@ impl<'a> Read<'a> {
     /// Keeps the rows that fit the byte bound. `Ok(false)`: one did not. An
     /// event that alone does not fit is refused: no page may exceed the bound.
     fn take_rows(&self, run: &mut Collect, rows: Vec<EventView>) -> Result<bool, Outcome> {
-        let room = self.ctx.limits.page_bytes.saturating_sub(HEADER_BYTES);
+        let room = self.ctx.bounds().page_bytes.saturating_sub(HEADER_BYTES);
         for row in rows {
             let size = event_bytes(&row);
             if run.rows.is_empty() && size > room {

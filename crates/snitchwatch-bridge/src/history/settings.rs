@@ -143,7 +143,12 @@ pub(crate) fn encode(settings: &Settings) -> Result<Vec<u8>, Unavailable> {
 /// linked. That is retried (the new file is already in place); a file that
 /// keeps vanishing is refused.
 fn read_checked(path: &std::path::Path, repair: bool) -> Result<Option<Vec<u8>>, Unavailable> {
-    read_checked_in(path, repair, crate::state_file::REPLACED_RETRIES, &mut || {})
+    read_checked_in(
+        path,
+        repair,
+        crate::state_file::REPLACED_RETRIES,
+        &mut || {},
+    )
 }
 
 /// [`read_checked`] with the retry cap and a hook that runs after each open

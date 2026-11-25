@@ -157,8 +157,9 @@ impl Loaded {
     /// fit costs a count, not a tiling.
     fn candidate(&self, n: usize, ctx: &Context<'_>) -> Candidate {
         let rows = self.rows(n, ctx);
-        let over_rows = rows.gaps.len() > ctx.limits.gap_rows_per_page
-            || rows.sessions.len() > ctx.limits.session_rows_per_page;
+        let bounds = ctx.bounds();
+        let over_rows = rows.gaps.len() > bounds.gap_rows_per_page
+            || rows.sessions.len() > bounds.session_rows_per_page;
         if over_rows {
             return Candidate {
                 lo_ms: rows.lo_ms,
@@ -227,17 +228,17 @@ fn fits(c: &Candidate, limits: &Limits) -> bool {
 /// Out of time, the best fit found so far stands.
 fn largest_fit(loaded: &Loaded, ctx: &Context<'_>, ctl: &Control) -> Option<usize> {
     let n = loaded.events.len();
-    if fits(&loaded.candidate(n, ctx), &ctx.limits) {
+    if fits(&loaded.candidate(n, ctx), &ctx.bounds()) {
         return Some(n);
     }
-    if !fits(&loaded.candidate(0, ctx), &ctx.limits) {
+    if !fits(&loaded.candidate(0, ctx), &ctx.bounds()) {
         return None;
     }
     // Fewer events, a smaller window, fewer rows and bytes: monotone.
     let (mut ok, mut bad) = (0, n);
     while bad - ok > 1 && !ctl.deadline_passed() {
         let mid = ok + (bad - ok) / 2;
-        if fits(&loaded.candidate(mid, ctx), &ctx.limits) {
+        if fits(&loaded.candidate(mid, ctx), &ctx.bounds()) {
             ok = mid;
         } else {
             bad = mid;
@@ -252,7 +253,7 @@ fn largest_fit(loaded: &Loaded, ctx: &Context<'_>, ctl: &Control) -> Option<usiz
 /// not even the events and a bare tiling fit, the page cannot be made.
 fn trimmed(loaded: &Loaded, n: usize, ctx: &Context<'_>) -> Result<Candidate, Unavail> {
     let rows = loaded.rows(n, ctx);
-    let limits = &ctx.limits;
+    let limits = &ctx.bounds();
     let mut keep = (
         rows.gaps.len().min(limits.gap_rows_per_page),
         rows.sessions.len().min(limits.session_rows_per_page),

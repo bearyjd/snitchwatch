@@ -4,7 +4,9 @@
 //! character (a control character is `\u00XX`, six bytes; a quote or
 //! backslash, two). Summing stored lengths would undercount.
 
-use super::reader::{EventView, GapView, SessionView};
+use std::time::Duration;
+
+use super::reader::{EventView, GapView, Limits, SessionView};
 use super::timeline::Segment;
 
 /// The page header: generation, window, standing labels, summary, cursor.
@@ -89,4 +91,31 @@ pub(super) fn segment_bytes(s: &Segment) -> usize {
         + field("kind", 14)
         + field("session", BOOL)
         + field("gaps", 2 + s.gaps.len() * (INT + 1))
+}
+
+/// The most a caller may make SQLite wait for a writer's commit, per
+/// statement: well under the writer's own 250 ms, and under rusqlite's
+/// millisecond conversion, which panics past `i32::MAX`.
+const BUSY_WAIT_CEILING: Duration = Duration::from_millis(100);
+
+impl Limits {
+    /// These limits, each lowered to the production value if it is higher:
+    /// the lock, time and memory ceilings are the reader's own, whatever a
+    /// caller passes. A caller can ask for less, never for more.
+    pub(super) fn clamped(&self) -> Self {
+        let ceiling = Self::default();
+        Self {
+            events_per_page: self.events_per_page.min(ceiling.events_per_page),
+            gap_rows_per_page: self.gap_rows_per_page.min(ceiling.gap_rows_per_page),
+            session_rows_per_page: self
+                .session_rows_per_page
+                .min(ceiling.session_rows_per_page),
+            page_bytes: self.page_bytes.min(ceiling.page_bytes),
+            statement_budget: self.statement_budget.min(ceiling.statement_budget),
+            query_deadline: self.query_deadline.min(ceiling.query_deadline),
+            scan_window: self.scan_window.min(ceiling.scan_window),
+            scan_rows_max: self.scan_rows_max.min(ceiling.scan_rows_max),
+            busy_wait: self.busy_wait.min(BUSY_WAIT_CEILING),
+        }
+    }
 }

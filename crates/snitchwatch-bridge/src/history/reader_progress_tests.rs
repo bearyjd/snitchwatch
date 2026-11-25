@@ -4,6 +4,8 @@
 use super::ledger::GapCause;
 use super::reader::*;
 use super::reader_fixture::Fx;
+use super::reader_open::open_validated;
+use super::reader_sql::{events_chunk, Control, Stop};
 
 /// A store with one event and more gap rows at its instant than a page may
 /// carry, so the window around it cannot fit.
@@ -104,32 +106,39 @@ fn slow_statement_store(fx: &Fx, prompts: u32) {
     fx.conn().execute_batch(&sql).unwrap();
 }
 
+/// One statement over every prompt, as the production budget meets it.
+fn run_big_statement(
+    fx: &Fx,
+    cancel_after: Option<std::time::Duration>,
+) -> (Option<Stop>, std::time::Duration) {
+    let limits = Limits::default();
+    let ctl = Control::new(&fx.cancel, &limits);
+    let conn = open_validated(&fx.db, &ctl, limits.busy_wait).unwrap();
+    let started = std::time::Instant::now();
+    let token = fx.cancel.clone();
+    let chunk = std::thread::scope(|scope| {
+        if let Some(after) = cancel_after {
+            scope.spawn(move || {
+                std::thread::sleep(after);
+                token.cancel();
+            });
+        }
+        events_chunk(&conn, &ctl, None, 60_000)
+    });
+    (chunk.stop, started.elapsed())
+}
+
 #[test]
 fn a_cancel_stops_a_slow_statement_in_the_reader_itself() {
-    let mut fx = Fx::new();
+    let fx = Fx::new();
     slow_statement_store(&fx, 60_000);
-    // Neither the statement budget nor the deadline may be what ends it.
-    fx.limits.statement_budget = std::time::Duration::from_secs(600);
-    fx.limits.query_deadline = std::time::Duration::from_secs(600);
-    fx.limits.events_per_page = 60_000;
-    fx.limits.scan_window = 60_000;
-    fx.limits.scan_rows_max = 60_000;
-    let started = std::time::Instant::now();
-    let outcome = std::thread::scope(|scope| {
-        scope.spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            fx.cancel.cancel();
-        });
-        fx.read(None, 60_000)
-    });
-    assert!(matches!(outcome, Outcome::Cancelled), "{outcome:?}");
-    assert!(
-        // Left alone the statement runs for many seconds; the stage-boundary
-        // check alone would only notice after it.
-        started.elapsed() < std::time::Duration::from_secs(3),
-        "stopped promptly: {:?}",
-        started.elapsed()
-    );
+    // Under the production statement budget the same statement is cut by the
+    // budget: it really does outlast it, so the cancel below lands inside it.
+    let (stop, took) = run_big_statement(&fx, None);
+    assert_eq!(stop, Some(Stop::Statement), "ran {took:?}");
+    let (stop, took) = run_big_statement(&fx, Some(std::time::Duration::from_millis(30)));
+    assert_eq!(stop, Some(Stop::Cancelled), "ran {took:?}");
+    assert!(took < std::time::Duration::from_millis(90), "{took:?}");
 }
 
 #[test]
@@ -138,13 +147,13 @@ fn a_cancel_during_the_file_check_is_cancelled_not_unavailable() {
     fx.events(1..=10);
     // The writer holds the file, so opening waits out the busy wait and then
     // fails: that failure is the cancel's doing if one landed meanwhile.
-    fx.limits.busy_wait = std::time::Duration::from_millis(600);
+    fx.limits.busy_wait = std::time::Duration::from_millis(100);
     let writer = rusqlite::Connection::open(&fx.db).unwrap();
     writer.busy_timeout(std::time::Duration::ZERO).unwrap();
     writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
     let outcome = std::thread::scope(|scope| {
         scope.spawn(|| {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(30));
             fx.cancel.cancel();
         });
         fx.read(None, 10)

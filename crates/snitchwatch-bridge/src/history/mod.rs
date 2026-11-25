@@ -33,6 +33,8 @@ mod pinned_queue;
 pub mod pins;
 pub mod reader;
 #[cfg(test)]
+mod reader_ceiling_tests;
+#[cfg(test)]
 mod reader_coverage_tests;
 #[cfg(test)]
 mod reader_fit_tests;
@@ -55,9 +57,9 @@ mod reader_registry_guard_tests;
 mod reader_repair_tests;
 #[cfg(test)]
 mod reader_settings_tests;
+mod reader_size;
 #[cfg(test)]
 mod reader_slot_cap_tests;
-mod reader_size;
 mod reader_sql;
 #[cfg(test)]
 mod reader_stage_tests;

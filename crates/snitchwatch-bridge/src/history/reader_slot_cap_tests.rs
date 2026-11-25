@@ -14,7 +14,11 @@ fn a_slot_that_was_taken_cannot_be_filled_again() {
     let slot = slots.acquire().unwrap();
     assert!(slot.fill(vec![1]).is_ok());
     let first = slot.take().expect("the page");
-    assert_eq!(slot.fill(vec![2]), Err(vec![2]), "a second page in the slot");
+    assert_eq!(
+        slot.fill(vec![2]),
+        Err(vec![2]),
+        "a second page in the slot"
+    );
     assert!(slot.take().is_none(), "nothing is left to take");
     drop(first);
 }

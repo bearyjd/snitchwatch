@@ -70,14 +70,18 @@ fn a_page_byte_limit_below_a_page_is_refused_not_wrapped() {
 
 #[test]
 fn the_largest_limits_saturate_instead_of_overflowing() {
+    // The ceilings, not the caller's numbers, bound the page: 300 events are
+    // two pages however large the limits are asked to be.
     let mut fx = Fx::new();
     fx.events(1..=300);
     fx.limits.events_per_page = usize::MAX;
     let page = fx.page(None, usize::MAX);
-    assert_eq!(page.events.len(), 300);
+    assert_eq!(page.events.len(), 200);
     fx.limits.scan_rows_max = usize::MAX;
     fx.limits.scan_window = usize::MAX;
-    assert_eq!(fx.page(None, usize::MAX).events.len(), 300);
+    let pages = fx.all_pages(usize::MAX);
+    let total: usize = pages.iter().map(|p| p.events.len()).sum();
+    assert_eq!(total, 300);
 }
 
 #[test]
