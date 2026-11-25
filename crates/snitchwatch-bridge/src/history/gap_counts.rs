@@ -140,26 +140,74 @@ fn component_lower_bound(gaps: &[Gap], rows: &[usize]) -> u64 {
     upstream.saturating_sub(outages.min(upstream)).max(1)
 }
 
+/// Rows that can stand where an outage row used to be: a failed write, an L1
+/// collapse into an `uncertain` span, or an eviction removed it.
+fn hides_outages(cause: GapCause) -> bool {
+    matches!(
+        cause,
+        GapCause::Uncertain | GapCause::WriteFailed | GapCause::Evicted
+    )
+}
+
+/// An upstream-loss row that overlaps or abuts a row that can hide an outage:
+/// it may be half of a pair whose outage row is gone, and then both halves
+/// would count in full (a loss of 1 reads as 2). A row that the page window
+/// clips is treated alike: the outage row between its halves may lie outside.
+fn near_hidden(gaps: &[Gap], i: usize, window: (i64, i64)) -> bool {
+    let clipped = gaps[i].start_ms < window.0 || gaps[i].end_ms > window.1;
+    gaps[i].cause == GapCause::UpstreamLoss
+        && (clipped
+            || gaps
+                .iter()
+                .any(|g| hides_outages(g.cause) && touches(g, &gaps[i])))
+}
+
+/// What a pool of upstream rows whose outages may be missing proves at least.
+/// Every outage's rows sum to its loss, or to 2 for a loss of 1, so rows
+/// summing to `r` come from a loss of at least `ceil(r / 2)`. The pool is
+/// bounded once: bounding groups separately could count the two halves of one
+/// outage twice.
+fn pool_lower_bound(rows: u64) -> u64 {
+    rows.div_ceil(2)
+}
+
 pub fn summarize(gaps: &[Gap]) -> Summary {
+    summarize_window(gaps, i64::MIN, i64::MAX)
+}
+
+/// `summarize` for rows loaded for the window `[lo, hi]`.
+pub fn summarize_window(gaps: &[Gap], lo: i64, hi: i64) -> Summary {
+    let window = (lo, hi);
     let flags = pair_flags(gaps);
-    let comps = components(gaps);
     let mut in_comp = vec![false; gaps.len()];
     let mut grouped = 0u64;
     let mut unclaimed = 0usize;
-    for rows in &comps {
-        grouped = grouped.saturating_add(component_lower_bound(gaps, rows));
+    let mut pool = 0u64;
+    for rows in &components(gaps) {
+        let hidden = rows.iter().any(|&i| near_hidden(gaps, i, window));
+        if hidden {
+            pool = pool.saturating_add(sum(gaps, rows, GapCause::UpstreamLoss));
+        } else {
+            grouped = grouped.saturating_add(component_lower_bound(gaps, rows));
+        }
         for &i in rows {
             in_comp[i] = true;
             unclaimed += usize::from(gaps[i].cause == GapCause::UpstreamLoss && !flags[i]);
         }
     }
-    let singles = gaps
-        .iter()
-        .enumerate()
-        .filter(|(i, g)| !in_comp[*i] && counts_items(g.cause))
-        .fold(0u64, |sum, (_, g)| sum.saturating_add(g.count));
+    let mut singles = 0u64;
+    for (i, g) in gaps.iter().enumerate().filter(|(i, _)| !in_comp[*i]) {
+        if near_hidden(gaps, i, window) {
+            pool = pool.saturating_add(g.count.max(1));
+            unclaimed += 1;
+        } else if counts_items(g.cause) {
+            singles = singles.saturating_add(g.count);
+        }
+    }
     Summary {
-        lost_at_least: singles.saturating_add(grouped),
+        lost_at_least: singles
+            .saturating_add(grouped)
+            .saturating_add(pool_lower_bound(pool)),
         gap_rows: gaps.len(),
         may_overcount_by_pairs: unclaimed,
     }

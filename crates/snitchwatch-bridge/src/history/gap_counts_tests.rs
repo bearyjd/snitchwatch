@@ -127,7 +127,7 @@ fn only_causes_that_count_items_add_to_the_total() {
         row(60, 70, GapCause::AdmissionDrop, 5),
         row(70, 80, GapCause::WriteFailed, 7),
         row(80, 90, GapCause::Evicted, 11),
-        row(90, 99, GapCause::UpstreamLoss, 13),
+        row(95, 99, GapCause::UpstreamLoss, 13),
     ];
     let summary = summarize(&gaps);
     assert_eq!(summary.lost_at_least, 3 + 5 + 7 + 11 + 13);

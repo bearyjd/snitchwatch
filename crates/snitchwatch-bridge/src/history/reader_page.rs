@@ -7,7 +7,7 @@
 //! the cursor stays at the last kept one and no gap row is ever dropped or
 //! truncated: a smaller window simply covers fewer of them.
 
-use super::gap_counts::{pair_flags, summarize};
+use super::gap_counts::{pair_flags, summarize_window};
 use super::ledger::{Gap, GapCause};
 use super::reader::{
     Context, Cursor, End, EventView, GapView, Label, Limits, Page, Partial, Request, SessionView,
@@ -381,7 +381,7 @@ pub(super) fn assemble(
         next_cursor: more
             .then(|| cursor_after(&loaded.events, generation, request))
             .flatten(),
-        summary: summarize(&c.gaps).into(),
+        summary: summarize_window(&c.gaps, c.lo_ms, loaded.hi_ms).into(),
         gaps: c.gap_views,
         sessions: c.session_views,
         coverage: c.segments,

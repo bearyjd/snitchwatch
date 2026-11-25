@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8d194f83ce04aec8afffdd65dfa7d29f9a988fc01f8052c509085a552a561f40 # shrinks to ls = [Layout { p: 999, d: 1001, u: 1010, q: 1028, n: 1 }, Layout { p: 1010, d: 1012, u: 1013, q: 1013, n: 1 }], dm = (1, Damage { hide: [true], collapse_oldest: 0, evicted: None, window: None })
+cc 075d7b4a5d88d32ce8b76237ed67b513fb65402c65161b1a63ecb0e410bdbeb4 # shrinks to ls = [Layout { p: 999, d: 1001, u: 1002, q: 1034, n: 1 }, Layout { p: 1002, d: 1004, u: 1005, q: 1116, n: 1 }], mut dm = Damage { hide: [false, false, false, false, false, false], collapse_oldest: 0, evicted: None, window: Some((1006, 1006)) }
