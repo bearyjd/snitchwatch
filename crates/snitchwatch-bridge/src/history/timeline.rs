@@ -11,6 +11,8 @@
 //! failure, and it is returned as [`Kind::Unexplained`] rather than dropped.
 //! A gap is never clipped: the window only decides which part is shown.
 
+use serde::Serialize;
+
 use super::ledger::Gap;
 use super::session::Session;
 
@@ -29,7 +31,7 @@ impl Window {
 }
 
 /// What a stretch of the window is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Kind {
     /// A session was running and nothing is known to be missing.
     Recorded,
@@ -45,7 +47,7 @@ pub enum Kind {
     Unexplained,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Segment {
     pub start_ms: i64,
     pub end_ms: i64,
