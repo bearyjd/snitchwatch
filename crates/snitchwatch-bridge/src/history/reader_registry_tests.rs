@@ -1,5 +1,6 @@
 use super::*;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 const LONG: Duration = Duration::from_secs(10);
@@ -191,7 +192,7 @@ fn two_response_slots_then_none_until_one_is_released() {
 
 #[test]
 fn a_slot_nobody_reads_is_reclaimed_at_the_send_deadline() {
-    let slots = ResponseSlots::with_deadline(2, Duration::from_millis(20));
+    let slots = ResponseSlots::<()>::with_deadline(2, Duration::from_millis(20));
     let stuck_a = slots.acquire().unwrap();
     let stuck_b = slots.acquire().unwrap();
     let give_up = Instant::now() + LONG;
@@ -209,4 +210,61 @@ fn a_slot_nobody_reads_is_reclaimed_at_the_send_deadline() {
     let one = slots.acquire().unwrap();
     assert!(slots.acquire().is_none(), "still at most two outstanding");
     drop((fresh, one));
+}
+
+/// A page whose drops are counted: reclaiming a slot must free the memory.
+struct Counted(Arc<AtomicUsize>);
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn reclaiming_a_slot_drops_its_page_not_just_a_counter() {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let slots = ResponseSlots::<Counted>::with_deadline(1, Duration::from_millis(20));
+    let stuck = slots.acquire().unwrap();
+    assert!(stuck.fill(Counted(Arc::clone(&dropped))).is_ok());
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    let give_up = Instant::now() + LONG;
+    let fresh = loop {
+        if let Some(slot) = slots.acquire() {
+            break slot;
+        }
+        assert!(Instant::now() < give_up, "never reclaimed");
+        std::thread::yield_now();
+    };
+    // The sender still holds its slot handle, and the page is already gone.
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    assert!(stuck.reclaimed());
+    assert!(stuck.take().is_none());
+    assert!(stuck.fill(Counted(Arc::clone(&dropped))).is_err());
+    assert_eq!(dropped.load(Ordering::SeqCst), 2, "the refused page came back and dropped");
+    drop((stuck, fresh));
+}
+
+#[test]
+fn a_filled_slot_hands_its_page_to_the_sender_once() {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let slots = ResponseSlots::<Counted>::with_deadline(1, LONG);
+    let slot = slots.acquire().unwrap();
+    assert!(slot.fill(Counted(Arc::clone(&dropped))).is_ok());
+    let page = slot.take().expect("the page");
+    assert!(slot.take().is_none());
+    drop(page);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_cancel_before_attach_leaves_the_flag_for_the_reader_to_see() {
+    // SQLite forgets an interrupt that arrives while no statement runs, so
+    // the flag is what the reader checks before each statement.
+    let registry = ReaderRegistry::new();
+    let ticket = registry.try_acquire().unwrap();
+    let token = ticket.cancel_token();
+    token.cancel();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    token.attach(conn.get_interrupt_handle());
+    assert!(token.is_cancelled());
 }

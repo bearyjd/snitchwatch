@@ -31,6 +31,7 @@ pub mod open;
 pub mod ping;
 mod pinned_queue;
 pub mod pins;
+pub mod reader;
 pub mod reader_registry;
 pub mod record;
 mod retention;

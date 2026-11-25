@@ -244,52 +244,79 @@ impl Drop for ConnectionReads {
     }
 }
 
-struct SlotFlag {
+struct SlotFlag<P> {
     reclaimed: AtomicBool,
     taken: Instant,
+    payload: Mutex<Option<P>>,
 }
 
-struct SlotsInner {
+struct SlotsInner<P> {
     limit: usize,
     deadline: Duration,
-    held: Mutex<Vec<Arc<SlotFlag>>>,
+    held: Mutex<Vec<Arc<SlotFlag<P>>>>,
 }
 
-/// The response slots: memory for pages that are built and not yet sent.
-#[derive(Clone)]
-pub struct ResponseSlots(Arc<SlotsInner>);
+/// The response slots: memory for pages that are built and not yet sent. A
+/// slot **owns its page**, so taking a slot back at the deadline drops the
+/// page, not just a counter.
+pub struct ResponseSlots<P>(Arc<SlotsInner<P>>);
 
-impl Default for ResponseSlots {
+impl<P> Clone for ResponseSlots<P> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl Default for ResponseSlots<super::reader::Page> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// A page's place. Released on drop. Past the send deadline the slot is
-/// taken back and [`Self::reclaimed`] says so: the sender must drop the page
-/// and close its connection.
-pub struct ResponseSlot {
-    flag: Arc<SlotFlag>,
-    slots: Arc<SlotsInner>,
+/// taken back **lazily, by the next [`ResponseSlots::acquire`]** (there is no
+/// timer): its page is dropped, [`Self::take`] returns `None` and
+/// [`Self::reclaimed`] says so. The sender must then close its connection.
+pub struct ResponseSlot<P> {
+    flag: Arc<SlotFlag<P>>,
+    slots: Arc<SlotsInner<P>>,
 }
 
-impl ResponseSlot {
+impl<P> ResponseSlot<P> {
     pub fn reclaimed(&self) -> bool {
         self.flag.reclaimed.load(Ordering::SeqCst)
     }
+
+    /// Puts the built page in the slot. Refused (the page is handed back) if
+    /// the slot was already reclaimed.
+    pub fn fill(&self, page: P) -> Result<(), P> {
+        let mut payload = locked(&self.flag.payload);
+        if self.reclaimed() {
+            return Err(page);
+        }
+        *payload = Some(page);
+        Ok(())
+    }
+
+    /// The page, to send; `None` if it was reclaimed or never filled.
+    pub fn take(&self) -> Option<P> {
+        locked(&self.flag.payload).take()
+    }
 }
 
-impl Drop for ResponseSlot {
+impl<P> Drop for ResponseSlot<P> {
     fn drop(&mut self) {
         locked(&self.slots.held).retain(|f| !Arc::ptr_eq(f, &self.flag));
     }
 }
 
-impl ResponseSlots {
+impl ResponseSlots<super::reader::Page> {
     pub fn new() -> Self {
         Self::with_deadline(RESPONSE_SLOTS, SEND_DEADLINE)
     }
+}
 
+impl<P> ResponseSlots<P> {
     pub fn with_deadline(limit: usize, deadline: Duration) -> Self {
         Self(Arc::new(SlotsInner {
             limit,
@@ -298,14 +325,16 @@ impl ResponseSlots {
         }))
     }
 
-    /// A slot, taking back any that outlived the send deadline; `None` when
-    /// all are in use and none is overdue.
-    pub fn acquire(&self) -> Option<ResponseSlot> {
+    /// A slot, taking back (and dropping the page of) any that outlived the
+    /// send deadline; `None` when all are in use and none is overdue.
+    pub fn acquire(&self) -> Option<ResponseSlot<P>> {
         let mut held = locked(&self.0.held);
         held.retain(|flag| {
             let overdue = flag.taken.elapsed() >= self.0.deadline;
             if overdue {
+                let mut payload = locked(&flag.payload);
                 flag.reclaimed.store(true, Ordering::SeqCst);
+                drop(payload.take());
             }
             !overdue
         });
@@ -315,6 +344,7 @@ impl ResponseSlots {
         let flag = Arc::new(SlotFlag {
             reclaimed: AtomicBool::new(false),
             taken: Instant::now(),
+            payload: Mutex::new(None),
         });
         held.push(Arc::clone(&flag));
         Some(ResponseSlot {

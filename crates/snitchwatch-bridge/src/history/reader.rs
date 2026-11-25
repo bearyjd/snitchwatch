@@ -1,0 +1,3 @@
+//! stub
+#[derive(Debug, Clone, Default)]
+pub struct Page;
