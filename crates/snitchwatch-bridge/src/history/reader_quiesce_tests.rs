@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::reader::*;
 use super::reader_fixture::Fx;
-use super::reader_registry::{ReaderRegistry, NotAdmitted};
+use super::reader_registry::{NotAdmitted, ReaderRegistry};
 
 const LONG: Duration = Duration::from_secs(20);
 

@@ -283,7 +283,11 @@ fn a_writer_mid_commit_makes_a_read_unavailable_retry_never_an_empty_page() {
     let u = unavailable(fx.read(None, 10));
     assert!(u.retry, "{}", u.reason);
     writer.execute_batch("ROLLBACK").unwrap();
-    assert_eq!(fx.page(None, 10).events.len(), 10, "and it reads once the writer is done");
+    assert_eq!(
+        fx.page(None, 10).events.len(),
+        10,
+        "and it reads once the writer is done"
+    );
 }
 
 #[test]
@@ -291,16 +295,24 @@ fn a_writer_arriving_between_stages_ends_the_events_partial_busy() {
     let fx = Fx::new();
     fx.events(1..=100);
     let ctx = fx.ctx();
-    let request = Request { cursor: None, limit: 50 };
+    let request = Request {
+        cursor: None,
+        limit: 50,
+    };
     let mut read = Read::open(&request, &ctx).unwrap_or_else(|o| panic!("{o:?}"));
     let writer = locked_writer(&fx);
     read.load_events().unwrap_or_else(|o| panic!("{o:?}"));
     // The ledger cannot be explained while the file is locked: unavailable.
     let ledger = read.load_ledger();
-    assert!(matches!(ledger, Err(Outcome::Unavailable(ref u)) if u.retry), "{ledger:?}");
+    assert!(
+        matches!(ledger, Err(Outcome::Unavailable(ref u)) if u.retry),
+        "{ledger:?}"
+    );
     writer.execute_batch("ROLLBACK").unwrap();
     read.load_ledger().unwrap_or_else(|o| panic!("{o:?}"));
-    let Outcome::Page(page) = read.finish() else { panic!("a page") };
+    let Outcome::Page(page) = read.finish() else {
+        panic!("a page")
+    };
     assert_eq!(page.partial, Some(Partial::Busy));
     assert!(page.events.is_empty(), "it read nothing, and says why");
     assert_eq!(page.end, End::More, "not 'the end': ask again");

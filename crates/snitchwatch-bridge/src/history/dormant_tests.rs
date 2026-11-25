@@ -329,7 +329,6 @@ const DURABLE_OWNERS: [&str; 38] = [
     "reader_limits_tests.rs",
     "reader_coverage_tests.rs",
     "reader_writer_tests.rs",
-
     "capture.rs",
     "capture_writer.rs",
     "capture_tests.rs",
