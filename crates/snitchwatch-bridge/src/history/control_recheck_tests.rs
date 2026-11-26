@@ -11,7 +11,7 @@ use rusqlite::Connection as Db;
 use super::control::{Limits, Refused};
 use super::control_clear::EVENT_COLUMNS;
 use super::control_clear_tests::{feed_canary, rows, wait_rows};
-use super::control_preview::{scan_events, Token};
+use super::control_preview::{scan_events, Leftover, Token};
 use super::control_support::start_after_drop;
 use super::control_tests::{feed, gate_rig, settings_json, GateRig};
 
@@ -103,6 +103,7 @@ fn the_recheck_is_not_cut_by_the_previews_statement_budget() {
         generation: rig.gate.generation().current(),
         max_id: scan.max_id,
         checksum: scan.checksum,
+        leftover: Leftover::Absent,
     });
     drop(conn);
     rig.gate

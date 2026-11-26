@@ -12,6 +12,7 @@
 //! The prompts pending at the time are discarded with the old store (owner
 //! decision 5): no row, no gap, their pins go with the old registry.
 
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use rusqlite::types::Value;
@@ -19,7 +20,7 @@ use rusqlite::Connection;
 
 use super::control::{persist_off, restore_settings, spawn_capture, ControlGate, Refused};
 use super::control_files::{FilesError, Step, StoreDir};
-use super::control_preview::{scan_events, Checksum, ScanError, Token, TokenId};
+use super::control_preview::{recheck_tombstone, scan_events, Checksum, ScanError, Token, TokenId};
 use super::{open_store, settings, Location, Settings};
 
 /// The most events that a clear carries into the new store.
@@ -48,7 +49,19 @@ fn incomplete(tombstone_removed: bool, refused: &Refused) -> Refused {
     if tombstone_removed {
         Refused::Incomplete(format!("settings could not be removed: {refused}"))
     } else {
-        Refused::DataLeft(refused.to_string())
+        Refused::DataLeft(format!("{refused}; recording stays off"))
+    }
+}
+
+/// A retry that could not finish a leftover: the rows are still on disk when
+/// the tombstone is, or when another link keeps them. Nothing here knows
+/// whether recording is on, so it says nothing about it.
+fn leftover_failed(location: &Location, e: FilesError) -> Refused {
+    let tombstone = location.dir().join(super::control_files::TOMBSTONE);
+    if matches!(e, FilesError::Linked(_)) || tombstone.symlink_metadata().is_ok() {
+        Refused::DataLeft(e.to_string())
+    } else {
+        files(e)
     }
 }
 
@@ -101,9 +114,10 @@ impl ControlGate {
         self.check_owner()?;
         // What an earlier removal left (a tombstone that could not be
         // unlinked) is finished first, so a retry completes it.
+        recheck_tombstone(&location, &token)?;
         StoreDir::open(location.dir(), super::open::effective_uid())
             .and_then(|dir| dir.finish_leftover())
-            .map_err(files)?;
+            .map_err(|e| leftover_failed(&location, e))?;
         let capture = self.0.slot.get();
         // Delete turns recording off first, and revokes consent in the same
         // write; nothing here is closed yet, so a refusal changes nothing.
@@ -140,7 +154,8 @@ impl ControlGate {
         observe: &dyn Fn(Step),
     ) -> Result<(), Refused> {
         // Once the store is out of place the user's request cannot be undone.
-        let reached = std::cell::Cell::new((false, false));
+        let reached = Cell::new((false, false));
+        let kept = RefCell::new(Carry::default());
         let watch = |step: Step| {
             let (renamed, unlinked) = reached.get();
             reached.set((
@@ -150,8 +165,8 @@ impl ControlGate {
             observe(step);
         };
         let done = self
-            .remove_files(location, token, kind, &watch)
-            .and_then(|carry| self.finish(location, (kind, was_recording), carry, &watch));
+            .remove_files(location, token, kind, &kept, &watch)
+            .and_then(|()| self.finish(location, (kind, was_recording), kept.take(), &watch));
         match done {
             Err(refused) if kind == Kind::Delete && reached.get().0 => {
                 // Delete means off: settings were saved off (consent revoked)
@@ -159,6 +174,12 @@ impl ControlGate {
                 // say what failed.
                 tracing::error!(%refused, "a delete failed after the store was removed");
                 Err(incomplete(reached.get().1, &refused))
+            }
+            Err(refused) if kind == Kind::Clear && reached.get() == (true, false) => {
+                // The rows are still in the tombstone; the ones accepted
+                // after the preview go into a new store (decision 2).
+                tracing::error!(%refused, "a clear failed after the store was removed");
+                Err(self.keep_rows(location, was_recording, &kept.take(), &refused))
             }
             Err(refused) => Err(self.undo(location, changed, was_recording, refused)),
             ok => ok,
@@ -184,13 +205,16 @@ impl ControlGate {
         }
     }
 
+    /// Leaves what a clear must carry in `kept` before the store is moved,
+    /// so a failure past the rename can still write it.
     fn remove_files(
         &self,
         location: &Location,
         token: &Token,
         kind: Kind,
+        kept: &RefCell<Carry>,
         observe: &dyn Fn(Step),
-    ) -> Result<Carry, Refused> {
+    ) -> Result<(), Refused> {
         let dir = StoreDir::open(location.dir(), super::open::effective_uid()).map_err(files)?;
         dir.check_removable().map_err(files)?;
         let carry = match crate::sqlite_file::open_owner_only_readonly(&location.db_path()) {
@@ -202,8 +226,8 @@ impl ControlGate {
             }
             Err(e) => return Err(Refused::Files(e.to_string())),
         };
-        dir.remove_store(observe).map_err(files)?;
-        Ok(carry)
+        kept.replace(carry);
+        dir.remove_store(observe).map_err(files)
     }
 
     /// After the files are gone: delete drops the settings; clear starts the
@@ -231,6 +255,44 @@ impl ControlGate {
         insert_carry(location, &carry).map_err(|e| Refused::Unavailable(e.to_string()))?;
         observe(Step::Carried);
         let capture = spawn_capture(location, &settings, &self.0).map_err(Refused::Unavailable)?;
+        self.0.slot.set(Some(Arc::new(capture)));
+        Ok(())
+    }
+
+    /// A clear that failed past the rename (the tombstone still holds the
+    /// rows): record on a new store with what was carried if it was
+    /// recording, and say the rows are on disk. If that fails too, recording
+    /// stays off.
+    fn keep_rows(
+        &self,
+        location: &Location,
+        was_recording: bool,
+        carry: &Carry,
+        refused: &Refused,
+    ) -> Refused {
+        match self.resume_with(location, was_recording, carry) {
+            Ok(()) => Refused::DataLeft(format!("{refused}; recording resumed on a new store")),
+            Err(reason) => Refused::DataLeft(format!(
+                "{refused}; recording could not be resumed: {reason}; recording stays off"
+            )),
+        }
+    }
+
+    fn resume_with(
+        &self,
+        location: &Location,
+        was_recording: bool,
+        carry: &Carry,
+    ) -> Result<(), String> {
+        if !was_recording {
+            return Ok(());
+        }
+        let settings = settings::load(location)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "settings are gone".to_owned())?;
+        open_store(location).map_err(|e| e.to_string())?;
+        insert_carry(location, carry)?;
+        let capture = spawn_capture(location, &settings, &self.0)?;
         self.0.slot.set(Some(Arc::new(capture)));
         Ok(())
     }

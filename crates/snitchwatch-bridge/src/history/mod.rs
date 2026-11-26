@@ -286,6 +286,8 @@ pub(crate) mod control_support;
 #[cfg(test)]
 mod control_tests;
 #[cfg(test)]
+mod control_tombstone_tests;
+#[cfg(test)]
 mod control_two_bridge_tests;
 #[cfg(test)]
 mod control_wiring_tests;

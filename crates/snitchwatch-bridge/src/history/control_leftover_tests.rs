@@ -17,7 +17,7 @@ fn chmod(rig: &GateRig, mode: u32) {
 }
 
 /// A rig with one row whose delete fails when `step` is reached.
-fn failed_delete_at(step: Step) -> (GateRig, Result<(), Refused>) {
+pub(super) fn failed_delete_at(step: Step) -> (GateRig, Result<(), Refused>) {
     let rig = gate_rig(Limits::default());
     feed_canary(&rig, 1);
     wait_rows(&rig, 1);
