@@ -234,6 +234,26 @@ pub(super) fn recheck_tombstone(location: &super::Location, token: &Token) -> Re
     }
 }
 
+/// Why a tombstone beside a store could not be checked, and what removes it.
+/// Judged without following a link.
+fn unchecked_reason(path: &Path) -> &'static str {
+    use std::os::unix::fs::MetadataExt;
+    match path.symlink_metadata() {
+        Ok(m) if !m.is_file() => {
+            "the leftover of an old store is not a plain file; it must be removed \
+             by hand, then restart the bridge"
+        }
+        Ok(m) if m.nlink() > 1 => {
+            "the leftover of an old store could not be checked; restarting the bridge \
+             removes only this name, and another link may keep its rows"
+        }
+        _ => {
+            "the leftover of an old store could not be checked; restart the bridge \
+             to finish removing it"
+        }
+    }
+}
+
 impl ControlGate {
     /// Scans one file with a reader slot's cancel token; a missing file is
     /// an empty scan.
@@ -288,11 +308,9 @@ impl ControlGate {
             Err(Refused::Busy | Refused::Unavailable(_)) if !store_present => {
                 Ok((empty_scan(), Leftover::Unchecked))
             }
-            Err(Refused::Busy | Refused::Unavailable(_)) => Err(Refused::Unavailable(
-                "the leftover of an old store could not be checked; restart the bridge \
-                 to finish removing it"
-                    .into(),
-            )),
+            Err(Refused::Busy | Refused::Unavailable(_)) => {
+                Err(Refused::Unavailable(unchecked_reason(&path).into()))
+            }
             Err(other) => Err(other),
         }
     }

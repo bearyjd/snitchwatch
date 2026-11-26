@@ -138,23 +138,45 @@ fn a_tombstone_that_cannot_be_scanned_still_gets_a_token_to_retry_with() {
     assert!(!rig.location.dir().join(TOMBSTONE).exists());
 }
 
-#[test]
-fn a_tombstone_that_cannot_be_scanned_beside_a_store_gets_no_token() {
+/// A preview of a store beside a tombstone that `make` left unscannable:
+/// refused, with the reason.
+fn refusal_beside_a_store(make: impl Fn(&std::path::Path)) -> String {
     let rig = gate_rig(Limits::default());
     feed_canary(&rig, 1);
     wait_rows(&rig, 1);
-    tombstone_beside_store(&rig);
-    fs::hard_link(
-        rig.location.dir().join(TOMBSTONE),
-        rig.location.dir().join("other-name"),
-    )
-    .unwrap();
-    let result = rig.gate.preview();
+    make(rig.location.dir());
+    match rig.gate.preview() {
+        Err(Refused::Unavailable(reason)) => reason,
+        other => panic!("its rows would go uncounted and unchecked: {other:?}"),
+    }
+}
+
+#[test]
+fn a_tombstone_that_cannot_be_scanned_beside_a_store_gets_no_token() {
+    // Damaged: the next start unlinks it.
+    let reason = refusal_beside_a_store(|dir| {
+        fs::write(dir.join(TOMBSTONE), [7u8; 4096]).unwrap();
+    });
     assert!(
-        matches!(&result, Err(Refused::Unavailable(r))
-            if r.contains("leftover") && r.contains("restart")),
-        "its rows would go uncounted and unchecked: {result:?}"
+        reason.contains("restart the bridge to finish removing it"),
+        "{reason}"
     );
+    // A second link: a restart removes only this name.
+    let reason = refusal_beside_a_store(|dir| {
+        fs::write(dir.join(TOMBSTONE), b"old").unwrap();
+        fs::hard_link(dir.join(TOMBSTONE), dir.join("other-name")).unwrap();
+    });
+    assert!(reason.contains("another link may keep"), "{reason}");
+    // Not a plain file: a restart leaves it where it is.
+    let not_plain: [fn(&std::path::Path); 2] = [
+        |dir| fs::create_dir(dir.join(TOMBSTONE)).unwrap(),
+        |dir| std::os::unix::fs::symlink("history.db", dir.join(TOMBSTONE)).unwrap(),
+    ];
+    for make in not_plain {
+        let reason = refusal_beside_a_store(make);
+        assert!(reason.contains("not a plain file"), "{reason}");
+        assert!(reason.contains("by hand, then restart"), "{reason}");
+    }
 }
 
 #[test]
