@@ -837,3 +837,49 @@ fn the_halves_of_a_written_outage_are_not_held_by_the_next_one() {
     );
     assert_eq!(all.len(), 3, "{all:?}");
 }
+
+/// #432, the accepted limit: a loss no outage touched, still in the `upstream`
+/// tally when an outage half joins it, waits with that half if the daemon
+/// drops again before the flush. A crash then keeps the span covered (the
+/// bridge-down gap starts at the held watermark) but not the count. Without
+/// the second drop the count is written before the crash.
+#[test]
+fn a_crash_with_a_held_mixed_tally_covers_the_span_and_loses_only_its_count() {
+    for second_drop in [false, true] {
+        let mut rig = rig(1000);
+        rig.engine
+            .begin_session(&rig.registry, &rig.limits)
+            .unwrap();
+        let (losses, mut clock) = (losses(), ClockWatch::new());
+        {
+            let mut l = locked(&losses);
+            let first = l.begin_ping(&rig.registry, ping(0, None, 1000), 0);
+            l.finish_ping(&rig.registry, first);
+        }
+        rig.set(1500);
+        locked(&losses).upstream_loss(&rig.registry, ping(2, Some(1000), 1500));
+        rig.set(2000);
+        locked(&losses).daemon_down(&rig.registry);
+        rig.set(4000);
+        locked(&losses).daemon_up(4000);
+        rig.set(4500);
+        locked(&losses).upstream_loss(&rig.registry, ping(1, Some(1500), 4500));
+        rig.set(5000);
+        if second_drop {
+            locked(&losses).daemon_down(&rig.registry);
+        }
+        rig.set(5500);
+        beat_ok(&mut rig, &losses, &mut clock, 0);
+        assert_watermark_held(&rig, "before the crash");
+        let after = rows_after_a_crash(&rig, 6000);
+        assert_covered(&after, 1000, 6000, &format!("second_drop={second_drop}"));
+        let counted: u64 = after
+            .iter()
+            .filter(|g| g.cause == GapCause::UpstreamLoss)
+            .map(|g| g.count)
+            .sum();
+        // Written: the unrelated 2 and the outage's pair of 1 + 1 (#419).
+        let expected = if second_drop { 0 } else { 4 };
+        assert_eq!(counted, expected, "second_drop={second_drop}: {after:?}");
+    }
+}
