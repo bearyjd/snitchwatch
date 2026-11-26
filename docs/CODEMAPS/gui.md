@@ -1,19 +1,20 @@
-<!-- Generated: 2026-11-06 | Token estimate: ~880 (o200k_base) -->
+<!-- Generated: 2026-11-25 | Files scanned: 588 | Token estimate: ~870 -->
 # GUI
 
-## snitchwatch-kirigami (target shell; excluded from `default-members`)
-Qt6/QML + Kirigami (cxx-qt). 428 tracked .rs, 102 `qml/*.qml` (~15.9k lines), 187 tracked files under `tests/` (151 .rs). QML module `com.snitchwatch.shell` is declared in `crates/snitchwatch-kirigami/build.rs:17`; `qml/main.qml` is loaded from `src/main.rs`.
+## snitchwatch-kirigami (the only shell; excluded from `default-members`)
+Qt6/QML + Kirigami (cxx-qt). 439 tracked .rs, 103 `qml/*.qml` (~15.9k lines), 191 tracked files under `tests/` (155 .rs). QML module `com.snitchwatch.shell` is declared in `crates/snitchwatch-kirigami/build.rs:18`; `qml/main.qml` is loaded from `src/main.rs`.
 
 ### Startup (`src/main.rs`)
-`logging::init` (:31) -> `panic_hook::install(paths::crash_log_path())` (:34) -> `bridge_runtime::ensure_started()` (:61, skipped when `demo::enabled()`) -> QQmlApplicationEngine loads `main.qml` -> on exit `learned::flush_and_wait` (:85).
+`logging::init` (:32) -> `panic_hook::install(paths::crash_log_path())` (:35) -> `single_instance::acquire()` (:42; a second launch raises the first and exits, fails open) -> `bridge_runtime::ensure_started()` (:72, skipped when `demo::enabled()`) -> QQmlApplicationEngine loads `main.qml` -> on exit `learned::flush_and_wait` (:100).
 
 ### State flow
 ```
 bridge WS (Unix sock) --bridge_runtime.rs--> broadcast<ServerMessage> --bridge_dispatch/bridge_feed--> per-model tasks --> Qt thread --> QML
 QML action --> model/controller (qinvokable) --> BridgeHandles::send ClientMessage --> bridge
 ```
-- `bridge_runtime.rs`: `client_loop` :372, `connect_and_relay` :410, `await_authentication_ack` :508, `resolve_token_path` :290, `handles()` :688. Env: `SNITCHWATCH_WS_SOCKET`, `SNITCHWATCH_SYSTEM_BRIDGE`, `SNITCHWATCH_WS_TOKEN_PATH`.
+- `bridge_runtime.rs`: `client_loop` :374, `connect_and_relay` :412, `await_authentication_ack` :513, `resolve_token_path` :292, `handles()` :695. Env: `SNITCHWATCH_WS_SOCKET`, `SNITCHWATCH_SYSTEM_BRIDGE`, `SNITCHWATCH_WS_TOKEN_PATH`.
 - `bridge_feed.rs:145` `BridgeFeedRust`: link status for the `main.qml` InlineMessage. Each model filters messages before queueing to Qt.
+- Daemon state from the bridge: `DaemonPolicy` (editor, simulator and rules list flag what the daemon refuses, `rules/daemon_refusal.rs`); a `/proc` monitor fallback shows in tray and Daemon Health.
 
 ### Rust <-> QML objects (cxx-qt, non-exhaustive)
 BridgeFeed, `*Model` types (Connections, Rules, Traffic, Blocklists, Profiles, CuratedDefaults, DaemonHealth, DenyStatus, Geo, About) and `*Controller` types (Settings, Tray, Notification, Scanner, Wizard, RuleEditor, MakeRule, RulesIo, LearningReview, AnalysisExport), plus AppInfo. Qt-free logic sits in modules beside the wrappers (`connections/`, `rules/`, `geo/`, `learned/`); the crate itself always builds with Qt (`build.rs:17`) and integration tests link the cxx-qt code (`src/lib.rs:5`).
