@@ -704,6 +704,9 @@ pub(super) fn close(
 }
 
 #[cfg(test)]
+#[path = "gaps_group_tests.rs"]
+mod group_tests;
+#[cfg(test)]
 #[path = "gaps_repair_tests.rs"]
 mod repair_tests;
 #[cfg(test)]
