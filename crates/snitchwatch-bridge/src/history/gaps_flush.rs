@@ -1,5 +1,5 @@
-//! Flushing the tallies of [`Losses`] to gap rows: which are due, which are
-//! held back, and the one transaction that writes an outage's rows.
+//! Flushing the tallies of [`Losses`] to gap rows: which are due, and the one
+//! transaction that writes a whole outage's rows.
 
 use std::sync::Mutex;
 
@@ -10,18 +10,18 @@ use super::super::writer::Engine;
 use super::{locked, Losses, Slot, EVERY_SLOT};
 
 impl Losses {
-    /// Whether the upstream tallies hold the halves of an outage whose
-    /// daemon row cannot be written yet (the daemon dropped again before the
-    /// flush, and the tally is now an open outage): written without it, they
-    /// would read as two unpaired rows, so they wait for it. An unrelated
-    /// loss already counted in the same `upstream` tally cannot be separated
-    /// from its half and waits too, its pin holding the watermark. Halves of
-    /// an outage whose row committed, and tallies without halves, never wait.
-    fn halves_await_daemon(&self, registry: &PinRegistry) -> bool {
+    /// Whether this flush holds a whole outage: halves in the upstream
+    /// tallies (`upstream_pre` carries nothing else) and, due now, the daemon
+    /// tally that covers the down edge they end at. A daemon tally opened
+    /// after that edge belongs to a later outage.
+    fn whole_outage_is_due(&self, registry: &PinRegistry, closing: bool) -> bool {
         self.upstream_pre.is_pending()
-            && self.halves_outage > self.outages_written
-            && self.disconnect.is_pending()
-            && due_end(self, registry, Slot::Disconnect, false).is_none()
+            && self
+                .disconnect
+                .first_ms()
+                .zip(self.pre_outage_end)
+                .is_some_and(|(opened, down)| opened <= down)
+            && due_end(self, registry, Slot::Disconnect, closing).is_some()
     }
 }
 
@@ -30,7 +30,6 @@ fn take_slot(guard: &mut Losses, slot: Slot) -> LossCounter {
     let taken = guard.slot(slot).take();
     if matches!(slot, Slot::Disconnect) {
         guard.disconnect_flushing = taken.is_pending();
-        guard.outages_flushing = guard.outages_begun;
     }
     taken
 }
@@ -100,11 +99,8 @@ fn flush_taken(
 fn settle_taken(guard: &mut Losses, registry: &PinRegistry, slot: Slot, taken: LossCounter) {
     if taken.is_pending() {
         guard.slot(slot).absorb(registry, taken);
-    } else if matches!(slot, Slot::Disconnect) {
-        guard.outages_written = guard.outages_flushing;
-        if !guard.disconnect.is_pending() {
-            guard.disconnect_end = None;
-        }
+    } else if matches!(slot, Slot::Disconnect) && !guard.disconnect.is_pending() {
+        guard.disconnect_end = None;
     }
 }
 
@@ -156,9 +152,9 @@ fn flush_group(
 /// daemon-disconnected gap alone; `closing` (shutdown, disable) flushes it
 /// too. The first error is returned, after every counter was tried. Each
 /// tally's end and the tally itself are read under one lock, so an outage
-/// that begins meanwhile is a tally of its own. The outage's three tallies
-/// are taken under one lock and written in one transaction; the daemon's is
-/// among them only once its end is known.
+/// that begins meanwhile is a tally of its own. Every tally commits alone,
+/// except that a whole outage due in one flush is taken under one lock and
+/// written in one transaction.
 pub(in crate::history) fn flush_due(
     engine: &mut Engine,
     registry: &PinRegistry,
@@ -168,28 +164,24 @@ pub(in crate::history) fn flush_due(
 ) -> Result<(), DurableError> {
     let mut first = Ok(());
     for slot in EVERY_SLOT {
-        if matches!(slot, Slot::UpstreamPre | Slot::Upstream | Slot::Disconnect) {
-            continue;
+        let mut guard = locked(losses);
+        if matches!(slot, Slot::UpstreamPre) && guard.whole_outage_is_due(registry, closing) {
+            let group: Vec<TakenSlot> = OUTAGE_GROUP
+                .into_iter()
+                .filter_map(|slot| {
+                    let (taken, end_ms) = take_due(&mut guard, registry, slot, closing)?;
+                    Some((slot, taken, end_ms))
+                })
+                .collect();
+            drop(guard);
+            // The group is the tail of `EVERY_SLOT`: nothing is left over.
+            return first.and(flush_group(engine, registry, limits, losses, group));
         }
-        let due = take_due(&mut locked(losses), registry, slot, closing);
+        let due = take_due(&mut guard, registry, slot, closing);
+        drop(guard);
         let Some((taken, end_ms)) = due else { continue };
         let done = flush_taken(engine, registry, limits, losses, (slot, taken), end_ms);
         first = first.and(done);
-    }
-    let group: Vec<TakenSlot> = {
-        let mut guard = locked(losses);
-        let held = !closing && guard.halves_await_daemon(registry);
-        OUTAGE_GROUP
-            .into_iter()
-            .filter(|_| !held)
-            .filter_map(|slot| {
-                let (taken, end_ms) = take_due(&mut guard, registry, slot, closing)?;
-                Some((slot, taken, end_ms))
-            })
-            .collect()
-    };
-    if !group.is_empty() {
-        first = first.and(flush_group(engine, registry, limits, losses, group));
     }
     first
 }

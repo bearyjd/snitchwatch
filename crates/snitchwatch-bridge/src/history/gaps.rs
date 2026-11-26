@@ -79,15 +79,6 @@ pub(super) struct Losses {
     back_at: Option<i64>,
     /// When the outage that `back_at` closes began.
     down_at: Option<i64>,
-    /// Outages begun so far: the number of the one `down_at` is about.
-    outages_begun: u64,
-    /// The latest outage whose daemon row has committed.
-    outages_written: u64,
-    /// The latest outage in the daemon tally that is out being flushed.
-    outages_flushing: u64,
-    /// The latest outage whose halves went into `upstream_pre` and
-    /// `upstream`: above `outages_written`, its daemon row is still pending.
-    halves_outage: u64,
     /// One per ping, keyed by the ping's own time and held until the ping
     /// that reports its losses after that time has its events queued, so that
     /// a crash's `bridge-down` gap begins no later than that `since_ms` (the
@@ -149,10 +140,6 @@ impl Losses {
             disconnect_flushing: false,
             back_at: None,
             down_at: None,
-            outages_begun: 0,
-            outages_written: 0,
-            outages_flushing: 0,
-            halves_outage: 0,
             guards: Vec::new(),
             next_ping: 0,
             in_flight: Vec::new(),
@@ -203,7 +190,6 @@ impl Losses {
             // the daemon row starts.
             let at = fresh.then(|| self.disconnect.first_ms()).flatten();
             self.down_at = Some(at.unwrap_or_else(|| registry.now()));
-            self.outages_begun = self.outages_begun.saturating_add(1);
             self.back_at = None;
         }
     }
@@ -240,7 +226,6 @@ impl Losses {
             events,
             previous: None,
             outage: None,
-            outage_number: 0,
             in_flight: None,
             seq: self.next_ping,
         };
@@ -254,7 +239,6 @@ impl Losses {
         }
         if self.back_at.is_some() {
             begun.outage = self.back_at.take().zip(self.down_at.take());
-            begun.outage_number = self.outages_begun;
         }
         begun.previous = self.take_guard_for(loss.since_ms);
         let since = loss.since_ms.unwrap_or(i64::MAX);
@@ -348,7 +332,6 @@ impl Losses {
             loss,
             mut previous,
             outage,
-            outage_number,
             ..
         } = begun;
         // Deliberate: a loss reported once the session is closing is dropped,
@@ -363,7 +346,6 @@ impl Losses {
         let mut floor = outage.map(|(up, _)| up);
         if let (Some(outage), true) = (outage, n > 0) {
             if self.record_around_outage(registry, &mut previous, loss.since_ms, n, outage) {
-                self.halves_outage = self.halves_outage.max(outage_number);
                 return;
             }
             // No pin for the part before the outage: overlap rather than a hole.
@@ -448,8 +430,6 @@ pub(super) struct PingBegun {
     previous: Option<PinId>,
     /// `(up, down)` of an outage that ended since the previous ping.
     outage: Option<(i64, i64)>,
-    /// That outage's number among those begun.
-    outage_number: u64,
     /// What this ping registered in [`Losses::in_flight`], if it did.
     in_flight: Option<i64>,
     /// The id its own guard carries until [`Losses::finish_ping`].
