@@ -350,6 +350,8 @@ batch.
 
 ## PR 11: WS messages and capability
 
+**Known limitation to carry into this PR (#432, accepted 2026-11-26):** gap loss totals (`lost_at_least`) can read high around an outage, in one case permanently (see the `history/gap_counts.rs` module doc). The wire contract must present them as estimates, not guaranteed minimums. If this causes problems, the storage of outage losses (database schema) may be refactored later.
+
 - **Goal:** request/response messages for status, query (paged), preview,
   enable/disable, clear/delete, retention settings; capability flag
   `historyV1`; older-bridge behaviour is "history unavailable", never empty.
@@ -394,6 +396,8 @@ batch.
   true and complete.
 
 ## PR 13: GUI history view
+
+**Known limitation to carry into this PR (#432, accepted 2026-11-26):** gap loss totals (`lost_at_least`) can read high around an outage, in one case permanently (see the `history/gap_counts.rs` module doc). Show them as estimates (for example "about N"), never as "at least N". If this causes problems, the storage of outage losses (database schema) may be refactored later.
 
 - **Goal:** paged history list with gaps and standing labels inline, `answered
   in GUI (may be silent mode)`, plain-text rendering of untrusted strings,

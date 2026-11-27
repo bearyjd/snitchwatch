@@ -1,5 +1,6 @@
-//! Connection history PR 9: gap counts are lower bounds, and a lower bound
-//! must never be summed into an over-claim (#419).
+//! Connection history PR 9: gap counts aim to be lower bounds, and a lower
+//! bound must never be summed into an over-claim (#419). In the cases below it
+//! can still read high, so a view shows these totals as estimates (#432).
 //!
 //! After a daemon outage the first ping's upstream loss of `n` is written as
 //! two `upstream-loss` rows with `count >= 1` each: last ping to the down
@@ -7,7 +8,23 @@
 //! between. For `n = 1` the rows sum to 2; for `n >= 2` they sum to `n`, but
 //! the pre-outage row asserts a loss that may not have happened. Read time
 //! pairs the rows by adjacency and counts `max(1, c1 + c2 - 1)` for the pair,
-//! which never exceeds the truth. No schema change.
+//! which does not exceed the truth once all three rows are written. No schema
+//! change.
+//!
+//! # Known limitation (#432, accepted 2026-11-26)
+//!
+//! The writer commits the two upstream-loss rows before the outage row, so
+//! the total can exceed the truth:
+//!
+//! - for a read between those commits (one lost event reads as 2);
+//! - while the outage row stays unwritten: a failed write, or the daemon
+//!   dropping again before the flush. Where the halves also merge into one row,
+//!   two lost events can read as 3 or 4;
+//! - permanently, after a crash between those commits.
+//!
+//! Fixing it in the writer or in this reader was tried and lost real counts or
+//! coverage, or undercounted real losses. If it causes problems, the way
+//! outage losses are stored (the database schema) may be refactored later.
 //!
 //! Only causes that count lost items add to the total. A `bridge-down`,
 //! `daemon-disconnected`, `disabled` or `clock-jump` row counts occurrences
@@ -18,10 +35,10 @@ use super::ledger::{Gap, GapCause};
 /// What a range of gap rows adds up to, never as one exact number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Summary {
-    /// Items lost, at least, among the rows given. Every part of it is a
-    /// lower bound. A row that a page window clips is counted in full on
-    /// every page it overlaps, so these totals describe one window and must
-    /// not be added across pages.
+    /// Items lost, at least, among the rows given. Meant as a lower bound,
+    /// but an estimate: see the module's known limitation (#432). A row that
+    /// a page window clips is counted in full on every page it overlaps, so
+    /// these totals describe one window and must not be added across pages.
     pub lost_at_least: u64,
     pub gap_rows: usize,
     /// Upstream-loss rows that touch an outage on one side only (the other
