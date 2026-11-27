@@ -85,6 +85,10 @@ pub enum Refused {
     /// a power loss may bring the old store back.
     #[error("history was cleared, but the change may not survive a power loss: {0}")]
     ClearedNotDurable(String),
+    /// A clear's rename failed and what is under the store's name could not be
+    /// told: the history may or may not be cleared. Never "nothing changed".
+    #[error("cannot tell whether the history was cleared: {0}")]
+    ClearOutcomeUnknown(String),
 }
 
 /// How long a control operation waits for readers: one wait and one

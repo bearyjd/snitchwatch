@@ -274,10 +274,11 @@ fn a_rename_that_reports_a_failure_but_happened_counts_as_cleared() {
 fn an_unknown_replace_outcome_is_reported_as_neither_cleared_nor_unchanged() {
     let (rig, token) = previewed_with_one_to_carry();
     let result = with_fault(Fault::OutcomeUnknown, || rig.gate.clear(token));
-    let Err(Refused::Unavailable(reason)) = &result else {
+    let Err(Refused::ClearOutcomeUnknown(reason)) = &result else {
         panic!("{result:?}");
     };
-    assert!(reason.contains("cannot tell"), "{reason}");
+    let shown = result.as_ref().unwrap_err().to_string();
+    assert!(shown.contains("cannot tell"), "{shown} / {reason}");
     assert!(reason.contains("recording stays off"), "{reason}");
     assert!(rig.gate.slot().get().is_none());
 }

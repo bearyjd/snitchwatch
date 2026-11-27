@@ -66,3 +66,5 @@ Delete, disable and non-recording clear paths; #441 tombstone preview logic; rea
 1. No space to stage: refuse the clear (proposed), or offer "clear without keeping", which departs from decision 2 and needs a new confirmation.
 2. Add `Refused::ClearedNotResumed` before PR 11 exposes the gate (proposed).
 3. Tighten the crash invariant from "old store whole or empty store" to "old store whole, or new store with the carry"; update the PR 10 plan text and the crash test (proposed).
+
+Owner decision 2026-11-26: an unknown rename outcome has its own refusal, `Refused::ClearOutcomeUnknown` (it was `Unavailable`). PR 11 must not present it as "nothing changed".

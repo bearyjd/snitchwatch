@@ -255,9 +255,7 @@ impl ControlGate {
             }
             Replaced::Unknown(reason) => {
                 tracing::error!(%reason, "the outcome of a clear is unknown");
-                return Err(Refused::Unavailable(format!(
-                    "cannot tell whether the history was cleared: {reason}{off}"
-                )));
+                return Err(Refused::ClearOutcomeUnknown(format!("{reason}{off}")));
             }
         };
         let resumed = resume.map(|settings| self.record_again(location, settings));
