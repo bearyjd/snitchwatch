@@ -12,6 +12,11 @@
 //! unlinking the tombstone, each followed by a directory fsync. A crash
 //! between the two leaves no `history.db` and a tombstone that
 //! [`StoreDir::finish_leftover`] removes on the next start, enabled or not.
+//!
+//! A clear that records, or has rows to keep, instead builds the new store
+//! beside the old one and renames it over `history.db` (see `replace`). A
+//! crash before that rename leaves the old store and a staged file that
+//! [`StoreDir::finish_leftover`] removes too.
 
 use std::ffi::CString;
 use std::fs;
@@ -25,6 +30,20 @@ use super::{open, Unavailable, DB_FILE, SETTINGS_FILE};
 pub(super) const TOMBSTONE: &str = "history.db.deleting";
 /// The sidecars SQLite may leave beside `history.db`.
 const SIDECARS: [&str; 3] = ["history.db-journal", "history.db-wal", "history.db-shm"];
+/// The store a clear is building, until it takes the live name.
+pub(super) const STAGED: &str = "history.db.new";
+const STAGED_SIDECARS: [&str; 3] = [
+    "history.db.new-journal",
+    "history.db.new-wal",
+    "history.db.new-shm",
+];
+/// Every name a staged store can leave.
+const STAGED_NAMES: [&str; 4] = [
+    STAGED,
+    STAGED_SIDECARS[0],
+    STAGED_SIDECARS[1],
+    STAGED_SIDECARS[2],
+];
 
 /// Where a removal has got to; reported after each step completes, so a test
 /// can kill the process at exactly that point. Production passes a no-op.
@@ -36,10 +55,14 @@ pub(super) enum Step {
     Renamed,
     /// The tombstone is gone.
     TombstoneRemoved,
-    /// A clear created the new, empty store.
+    /// A clear created the staged store, with its schema and no rows.
     Created,
-    /// A clear put what was accepted after the preview into it.
+    /// A clear committed what was accepted after the preview into it.
     Carried,
+    /// The staged store is closed and synced; the old one is untouched.
+    Staged,
+    /// The staged store has the live name; the directory is not yet synced.
+    Replaced,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -49,10 +72,16 @@ pub(super) enum FilesError {
     /// An entry that is not a plain file: left exactly as it was.
     #[error("{0} is not a plain file; nothing was removed")]
     NotPlain(&'static str),
-    /// A sidecar of a store that is supposed to be closed: a commit did not
-    /// finish, so the next start's own recovery must see it.
+    /// A sidecar of a store that is supposed to be closed (a commit did not
+    /// finish, so the next start's own recovery must see it), or a tombstone
+    /// where a store is about to be replaced.
     #[error("{0} is present; nothing was removed")]
     Sidecar(&'static str),
+    #[error("{0} is missing; nothing was replaced")]
+    Missing(&'static str),
+    /// Not the file that was created for staging, or it gained a link.
+    #[error("{0} is not the file that was staged; nothing was replaced")]
+    NotStaged(&'static str),
     /// The tombstone was unlinked but another name for the same file keeps
     /// the deleted history on disk.
     #[error("another link to the deleted history remains ({0})")]
@@ -60,6 +89,12 @@ pub(super) enum FilesError {
     #[error("{0}: {1}")]
     Io(&'static str, io::Error),
 }
+
+#[path = "control_replace.rs"]
+mod replace;
+#[cfg(test)]
+pub(super) use replace::{with_fault, Fault};
+pub(super) use replace::{FileId, Replaced};
 
 pub(super) struct StoreDir {
     handle: fs::File,
@@ -80,9 +115,9 @@ impl StoreDir {
         self.handle.as_raw_fd()
     }
 
-    /// `Some(is_plain_file)` when `name` exists (judged without following a
-    /// link), `None` when it does not.
-    fn plain(&self, name: &'static str) -> Result<Option<bool>, FilesError> {
+    /// What `name` is, judged without following a link; `None` when there is
+    /// no such name.
+    fn stat(&self, name: &'static str) -> Result<Option<libc::stat>, FilesError> {
         let c = cname(name);
         let mut st = std::mem::MaybeUninit::<libc::stat>::zeroed();
         // SAFETY: valid fd, NUL-terminated name, and `st` is a stat buffer.
@@ -103,33 +138,19 @@ impl StoreDir {
             };
         }
         // SAFETY: `fstatat` succeeded and filled the buffer.
-        let mode = unsafe { st.assume_init() }.st_mode;
-        Ok(Some(mode & libc::S_IFMT == libc::S_IFREG))
+        Ok(Some(unsafe { st.assume_init() }))
+    }
+
+    /// `Some(is_plain_file)` when `name` exists, `None` when it does not.
+    fn plain(&self, name: &'static str) -> Result<Option<bool>, FilesError> {
+        Ok(self
+            .stat(name)?
+            .map(|st| st.st_mode & libc::S_IFMT == libc::S_IFREG))
     }
 
     /// How many names the file `name` has (0 when it is absent).
     fn links(&self, name: &'static str) -> Result<u64, FilesError> {
-        let c = cname(name);
-        let mut st = std::mem::MaybeUninit::<libc::stat>::zeroed();
-        // SAFETY: valid fd, NUL-terminated name, and `st` is a stat buffer.
-        let rc = unsafe {
-            libc::fstatat(
-                self.fd(),
-                c.as_ptr(),
-                st.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if rc != 0 {
-            let e = io::Error::last_os_error();
-            return if e.kind() == io::ErrorKind::NotFound {
-                Ok(0)
-            } else {
-                Err(FilesError::Io(name, e))
-            };
-        }
-        // SAFETY: `fstatat` succeeded and filled the buffer.
-        Ok(unsafe { st.assume_init() }.st_nlink)
+        Ok(self.stat(name)?.map_or(0, |st| st.st_nlink))
     }
 
     fn require_plain(&self, name: &'static str) -> Result<bool, FilesError> {
@@ -155,10 +176,10 @@ impl StoreDir {
             .map_err(|e| FilesError::Io("the history directory", e))
     }
 
-    /// Every name that belongs to a store is a plain file or absent, and no
-    /// sidecar exists. Changes nothing.
+    /// Every name that belongs to a store is a plain file or absent, and the
+    /// live store has no sidecar. Changes nothing.
     pub(super) fn check_removable(&self) -> Result<(), FilesError> {
-        for name in [DB_FILE, TOMBSTONE] {
+        for name in [DB_FILE, TOMBSTONE].into_iter().chain(STAGED_NAMES) {
             self.require_plain(name)?;
         }
         for name in SIDECARS {
@@ -169,10 +190,10 @@ impl StoreDir {
         Ok(())
     }
 
-    /// Whether the store, its settings or a tombstone is here: there is
-    /// history to own.
+    /// Whether the store, its settings, a tombstone or a staged store is
+    /// here: there is history to own.
     pub(super) fn has_history(&self) -> Result<bool, FilesError> {
-        for name in [DB_FILE, SETTINGS_FILE, TOMBSTONE] {
+        for name in [DB_FILE, SETTINGS_FILE, TOMBSTONE, STAGED] {
             if self.plain(name)?.is_some() {
                 return Ok(true);
             }
@@ -227,7 +248,8 @@ impl StoreDir {
             self.unlink(TOMBSTONE)?;
         }
         if self.require_plain(DB_FILE)? {
-            self.rename_to_tombstone()?;
+            self.rename(DB_FILE, TOMBSTONE)
+                .map_err(|e| FilesError::Io(DB_FILE, e))?;
             // Reported before the sync: from the rename on, the store is gone.
             observe(Step::Renamed);
             self.sync()?;
@@ -246,12 +268,12 @@ impl StoreDir {
         Ok(())
     }
 
-    fn rename_to_tombstone(&self) -> Result<(), FilesError> {
-        let (from, to) = (cname(DB_FILE), cname(TOMBSTONE));
+    fn rename(&self, from: &'static str, to: &'static str) -> io::Result<()> {
+        let (from, to) = (cname(from), cname(to));
         // SAFETY: valid fd, NUL-terminated names, both relative to that fd.
         let rc = unsafe { libc::renameat(self.fd(), from.as_ptr(), self.fd(), to.as_ptr()) };
         if rc != 0 {
-            return Err(FilesError::Io(DB_FILE, io::Error::last_os_error()));
+            return Err(io::Error::last_os_error());
         }
         Ok(())
     }
@@ -267,15 +289,39 @@ impl StoreDir {
         Ok(())
     }
 
-    /// What a crash during [`remove_store`](Self::remove_store) left: the
-    /// tombstone, and, when there is no `history.db`, sidecars that belong to
-    /// nothing. Creates nothing; removes only those exact names; a name that
-    /// is not a plain file is left alone.
+    /// Removes whatever of a staged store is there, by its exact names, and
+    /// returns whether anything was, and a name another link still keeps. If
+    /// one of the names is not a plain file nothing is removed.
+    fn unlink_staged(&self) -> Result<(bool, Option<&'static str>), FilesError> {
+        let mut present = Vec::new();
+        for name in STAGED_NAMES {
+            if self.require_plain(name)? {
+                present.push(name);
+            }
+        }
+        let mut linked = None;
+        for name in &present {
+            if self.links(name)? > 1 {
+                linked = Some(*name);
+            }
+            self.unlink(name)?;
+        }
+        Ok((!present.is_empty(), linked))
+    }
+
+    /// What a crash during [`remove_store`](Self::remove_store) or a clear's
+    /// staging left: the tombstone, the staged store, and, when there is no
+    /// `history.db`, sidecars that belong to nothing. Creates nothing;
+    /// removes only those exact names; a name that is not a plain file is
+    /// left alone, and a staged one stops this before anything is removed.
     pub(super) fn finish_leftover(&self) -> Result<(), FilesError> {
+        for name in STAGED_NAMES {
+            self.require_plain(name)?;
+        }
         let mut removed = false;
-        let mut shared = false;
+        let mut shared = None;
         if self.require_plain(TOMBSTONE)? {
-            shared = self.links(TOMBSTONE)? > 1;
+            shared = (self.links(TOMBSTONE)? > 1).then_some(TOMBSTONE);
             self.unlink(TOMBSTONE)?;
             removed = true;
         }
@@ -287,13 +333,14 @@ impl StoreDir {
                 }
             }
         }
-        if removed {
+        let (staged, linked) = self.unlink_staged()?;
+        if removed || staged {
             self.sync()?;
         }
-        if shared {
-            return Err(FilesError::Linked(TOMBSTONE));
+        match shared.or(linked) {
+            Some(name) => Err(FilesError::Linked(name)),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -311,6 +358,10 @@ pub(super) fn recover(location: &super::Location) {
             // The tombstone is gone; the journal check must still run.
             Err(FilesError::Linked(name)) => {
                 tracing::warn!(name, "another link keeps deleted history");
+            }
+            // A staged name is not the store's: the journal check still runs.
+            Err(FilesError::NotPlain(name)) if STAGED_NAMES.contains(&name) => {
+                tracing::warn!(name, "a staged history name is not a plain file");
             }
             Err(e) => return Err(e),
         }

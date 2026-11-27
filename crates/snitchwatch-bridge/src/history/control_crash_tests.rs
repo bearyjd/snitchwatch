@@ -129,69 +129,54 @@ fn crashed(step: &str, kind: &str) -> (tempfile::TempDir, std::path::PathBuf, Lo
 }
 
 const TOMBSTONE: &str = "history.db.deleting";
+const STAGED: &str = "history.db.new";
 
 /// What the directory holds at the instant of the kill, before any restart.
 fn assert_at_the_kill(step: &str, dir: &Path, location: &Location) {
-    let live = dir.join("history.db");
-    match step {
-        "Begin" => {
-            assert_eq!(
-                dir_canaries(dir),
-                ["history.db"],
-                "{step}: positive control"
-            );
-            assert_eq!(count(location, "SELECT COUNT(*) FROM events"), 4, "{step}");
-        }
-        "Renamed" => {
-            assert!(!live.exists(), "{step}: nothing under the live name");
-            assert_eq!(dir_canaries(dir), [TOMBSTONE], "{step}: only the tombstone");
-        }
-        "TombstoneRemoved" => {
-            assert!(!live.exists(), "{step}: nothing under the live name");
-            assert_eq!(
-                dir_canaries(dir),
-                Vec::<String>::new(),
-                "{step}: it is gone"
-            );
-        }
-        "Created" => {
-            assert_eq!(dir_canaries(dir), Vec::<String>::new(), "{step}");
-            assert_eq!(count(location, "SELECT COUNT(*) FROM events"), 0, "{step}");
-        }
-        _ => {
-            assert_eq!(dir_canaries(dir), Vec::<String>::new(), "{step}");
-            let kept = "SELECT COUNT(*) FROM events WHERE dst_host = 'carry.example'";
-            assert_eq!(count(location, "SELECT COUNT(*) FROM events"), 1, "{step}");
-            assert_eq!(count(location, kept), 1, "{step}: the carried row");
-        }
+    let events = count(location, "SELECT COUNT(*) FROM events");
+    let kept = "SELECT COUNT(*) FROM events WHERE dst_host = 'carry.example'";
+    assert_eq!(count(location, kept), 1, "{step}: the carried row");
+    if step == "Replaced" {
+        assert_eq!(events, 1, "{step}: the new store holds only the carry");
+        assert_eq!(dir_canaries(dir), Vec::<String>::new(), "{step}");
+        assert!(!dir.join(STAGED).exists(), "{step}: renamed away");
+    } else {
+        assert_eq!(events, 4, "{step}: the old store is untouched");
+        assert_eq!(
+            dir_canaries(dir),
+            ["history.db"],
+            "{step}: positive control"
+        );
+        assert_eq!(dir.join(STAGED).exists(), step != "Begin", "{step}");
     }
 }
 
 #[test]
-fn a_kill_at_every_step_leaves_the_old_store_whole_or_an_empty_one() {
-    for step in ["Begin", "Renamed", "TombstoneRemoved", "Created", "Carried"] {
+fn a_kill_at_every_step_leaves_the_old_store_whole_or_the_new_one_with_the_carry() {
+    for step in ["Begin", "Created", "Carried", "Staged", "Replaced"] {
         let (_root, state, location) = crashed_clear(step);
         let dir = location.dir().to_owned();
         assert_at_the_kill(step, &dir, &location);
-        // Restart, history on: the old store whole, or a fresh empty one.
+        // Restart, history on: the old store whole, or the carried row alone.
         let gate = ControlGate::start(Mode::User, Some(&state), Limits::default());
         assert!(gate.slot().get().is_some(), "{step}: recording again");
-        let sessions = if step == "Begin" { 2 } else { 1 };
+        let replaced = step == "Replaced";
+        let sessions = if replaced { 1 } else { 2 };
         assert_eq!(
             count(&location, "SELECT COUNT(*) FROM sessions"),
             sessions,
             "{step}"
         );
         let events = count(&location, "SELECT COUNT(*) FROM events");
-        let expected = match step {
-            "Begin" => 4,
-            "Carried" => 1,
-            _ => 0,
-        };
-        assert_eq!(events, expected, "{step}");
-        if step != "Begin" {
+        assert_eq!(events, if replaced { 1 } else { 4 }, "{step}");
+        if replaced {
             assert_eq!(dir_canaries(&dir), Vec::<String>::new(), "{step}");
         }
+        let left: Vec<String> = names(&dir)
+            .into_iter()
+            .filter(|n| n.starts_with(STAGED))
+            .collect();
+        assert_eq!(left, Vec::<String>::new(), "{step}: no staged file");
         assert!(!dir.join(TOMBSTONE).exists(), "{step}");
         assert_crash_not_recorded(&gate, &location, step);
     }
@@ -235,32 +220,43 @@ fn assert_crash_not_recorded(gate: &ControlGate, location: &Location, step: &str
         );
     }
     let gap_before = near.iter().any(|s| matches!(s.kind, Kind::Gap));
-    match step {
-        // The old session is in the old store: its end is a crash gap.
-        "Begin" => assert!(gap_before, "{step}: the crash is a gap: {near:?}"),
+    if step == "Replaced" {
         // The carried event is older than the new store: shown, unexplained.
-        "Carried" => assert!(!near.is_empty(), "{step}: the carried row has a place"),
-        // The old store is gone: nothing of it is claimed.
-        _ => assert!(
-            near.is_empty(),
-            "{step}: nothing before the restart: {near:?}"
-        ),
+        assert!(!near.is_empty(), "{step}: the carried row has a place");
+    } else {
+        // The old session is in the old store: its end is a crash gap.
+        assert!(gap_before, "{step}: the crash is a gap: {near:?}");
     }
+}
+
+fn switch_off(location: &Location) {
+    let mut current = settings::load(location).unwrap().unwrap();
+    current.enabled = false;
+    settings::save(location, &current).unwrap();
 }
 
 #[test]
 fn a_history_off_restart_finishes_the_removal_and_creates_nothing() {
     for step in ["Renamed", "TombstoneRemoved"] {
-        let (_root, state, location) = crashed_clear(step);
+        let (_root, state, location) = crashed(step, "delete");
         let dir = location.dir().to_owned();
-        let mut current = settings::load(&location).unwrap().unwrap();
-        current.enabled = false;
-        settings::save(&location, &current).unwrap();
+        switch_off(&location);
         let gate = ControlGate::start(Mode::User, Some(&state), Limits::default());
         assert!(gate.slot().get().is_none());
         assert_eq!(dir_canaries(&dir), Vec::<String>::new(), "{step}");
         assert_eq!(names(&dir), ["history.lock", "settings.json"], "{step}");
     }
+}
+
+#[test]
+fn a_history_off_restart_drops_a_staged_store_and_keeps_the_old_one() {
+    let (_root, state, location) = crashed_clear("Staged");
+    let dir = location.dir().to_owned();
+    switch_off(&location);
+    let gate = ControlGate::start(Mode::User, Some(&state), Limits::default());
+    assert!(gate.slot().get().is_none());
+    assert_eq!(names(&dir), ["history.db", "history.lock", "settings.json"]);
+    assert_eq!(count(&location, "SELECT COUNT(*) FROM events"), 4);
 }
 
 #[test]

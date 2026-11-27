@@ -69,21 +69,24 @@ fn a_delete_that_fails_after_the_store_is_gone_keeps_recording_off() {
 }
 
 #[test]
-fn a_clear_that_fails_after_the_store_is_gone_says_data_left_and_still_records() {
+fn a_clear_that_leaves_a_link_to_the_old_store_says_data_left_and_still_records() {
     let rig = gate_rig(Limits::default());
     feed_canary(&rig, 1);
     wait_rows(&rig, 1);
     let token = rig.gate.preview().unwrap().token;
-    // The tombstone cannot be unlinked (it is a directory now), but the
-    // directory stays writable: recording can be put back on an empty store.
-    let tombstone = rig.location.dir().join("history.db.deleting");
+    // Another name keeps the old store through the replace: the new store is
+    // in place and records, but the old rows are still on disk.
+    let other = rig.location.dir().join("other-name");
     let result = rig.gate.clear_observed(token, &|at| {
-        if at == Step::Renamed {
-            fs::remove_file(&tombstone).unwrap();
-            fs::create_dir(&tombstone).unwrap();
+        if at == Step::Staged {
+            fs::hard_link(rig.location.db_path(), &other).unwrap();
         }
     });
-    assert!(matches!(result, Err(Refused::DataLeft(_))), "{result:?}");
+    let Err(Refused::DataLeft(reason)) = &result else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("another link"), "{reason}");
+    assert!(reason.contains("recording resumed"), "{reason}");
     assert!(rig.gate.slot().get().is_some(), "recording is back");
     let settings = settings_json(&rig);
     assert!(settings.contains("\"enabled\":true"), "{settings}");

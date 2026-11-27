@@ -74,6 +74,17 @@ pub enum Refused {
     /// recording stays off; a clear resumes it on a new store.
     #[error("deleted history is still on disk; retry delete: {0}")]
     DataLeft(String),
+    /// A clear replaced the store and then could not record on it. `kept`
+    /// rows accepted after the preview are in the new store.
+    #[error(
+        "history was cleared; {kept} rows accepted since the preview were kept; \
+         recording could not be resumed: {reason}"
+    )]
+    ClearedNotResumed { kept: usize, reason: String },
+    /// A clear replaced the store but the directory could not be synced, so
+    /// a power loss may bring the old store back.
+    #[error("history was cleared, but the change may not survive a power loss: {0}")]
+    ClearedNotDurable(String),
 }
 
 /// How long a control operation waits for readers: one wait and one

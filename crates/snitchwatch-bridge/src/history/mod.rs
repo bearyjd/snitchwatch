@@ -282,6 +282,10 @@ mod control_recheck_tests;
 #[cfg(test)]
 mod control_refusal_tests;
 #[cfg(test)]
+mod control_staged_file_tests;
+#[cfg(test)]
+mod control_staged_tests;
+#[cfg(test)]
 pub(crate) mod control_support;
 #[cfg(test)]
 mod control_tests;
