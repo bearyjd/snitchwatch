@@ -1,27 +1,34 @@
 //! PR 10: clear and delete. Both run the gate's order (see [`super::control`])
-//! and then the file work: the store is renamed to a tombstone and
-//! unlinked, never emptied in place. A refusal after the writer stopped
-//! restarts it on the same store.
+//! and then the file work: a store is never emptied in place. A refusal
+//! with the old store still whole restarts the writer on it.
 //!
-//! * **clear** keeps `settings.json` and consent, recreates an empty store
-//!   and goes on recording if it was recording. What was accepted after the
-//!   preview is **kept**: copied into the new store (owner decision 2).
-//! * **delete** also removes `settings.json`: history is off and needs a
-//!   fresh consent to start again.
+//! * **clear** keeps `settings.json` and consent and goes on recording if it
+//!   was recording. What was accepted after the preview is **kept** (owner
+//!   decision 2): the new store is built with it beside the old one, synced,
+//!   and renamed over it (#444). From that rename on, the clear is never
+//!   undone. A clear that is not recording and has nothing to keep removes
+//!   the store as delete does.
+//! * **delete** renames the store to a tombstone, unlinks it and removes
+//!   `settings.json`: nothing is kept, history is off and needs a fresh
+//!   consent to start again.
 //!
 //! The prompts pending at the time are discarded with the old store (owner
 //! decision 5): no row, no gap, their pins go with the old registry.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::sync::Arc;
 
 use rusqlite::types::Value;
 use rusqlite::Connection;
 
+use super::budget::Budget;
 use super::control::{persist_off, restore_settings, spawn_capture, ControlGate, Refused};
-use super::control_files::{FilesError, Step, StoreDir};
+use super::control_files::{FileId, FilesError, Replaced, Step, StoreDir, STAGED};
 use super::control_preview::{recheck_tombstone, scan_events, Checksum, ScanError, Token, TokenId};
-use super::{open_store, settings, Location, Settings};
+use super::{schema, settings, Location, Settings, DB_FILE};
+
+/// `PRAGMA synchronous = FULL`.
+const SYNCHRONOUS_FULL: i64 = 2;
 
 /// The most events that a clear carries into the new store.
 const CARRY_MAX: i64 = 10_000;
@@ -153,9 +160,11 @@ impl ControlGate {
         (changed, was_recording): (Option<Settings>, bool),
         observe: &dyn Fn(Step),
     ) -> Result<(), Refused> {
+        if kind == Kind::Clear {
+            return self.clear_files(location, token, was_recording, observe);
+        }
         // Once the store is out of place the user's request cannot be undone.
         let reached = Cell::new((false, false));
-        let kept = RefCell::new(Carry::default());
         let watch = |step: Step| {
             let (renamed, unlinked) = reached.get();
             reached.set((
@@ -164,26 +173,110 @@ impl ControlGate {
             ));
             observe(step);
         };
-        let done = self
-            .remove_files(location, token, kind, &kept, &watch)
-            .and_then(|()| self.finish(location, (kind, was_recording), kept.take(), &watch));
+        let done = previewed(location, token, false)
+            .and_then(|(dir, _)| dir.remove_store(&watch).map_err(files))
+            .and_then(|()| remove_settings(location));
         match done {
-            Err(refused) if kind == Kind::Delete && reached.get().0 => {
+            Err(refused) if reached.get().0 => {
                 // Delete means off: settings were saved off (consent revoked)
                 // before anything closed, so keep them, respawn nothing and
                 // say what failed.
                 tracing::error!(%refused, "a delete failed after the store was removed");
                 Err(incomplete(reached.get().1, &refused))
             }
-            Err(refused) if kind == Kind::Clear && reached.get() == (true, false) => {
-                // The rows are still in the tombstone; the ones accepted
-                // after the preview go into a new store (decision 2).
-                tracing::error!(%refused, "a clear failed after the store was removed");
-                Err(self.keep_rows(location, was_recording, &kept.take(), &refused))
-            }
             Err(refused) => Err(self.undo(location, changed, was_recording, refused)),
             ok => ok,
         }
+    }
+
+    /// Clear: with rows to keep or recording to resume, the store is replaced
+    /// by a staged one; otherwise there is nothing to make and it is removed.
+    fn clear_files(
+        &self,
+        location: &Location,
+        token: &Token,
+        was_recording: bool,
+        observe: &dyn Fn(Step),
+    ) -> Result<(), Refused> {
+        let (dir, found) = match previewed(location, token, true) {
+            Ok(checked) => checked,
+            Err(refused) => return Err(self.undo(location, None, was_recording, refused)),
+        };
+        // With no store there is nothing the staged one may replace.
+        let had_store = found.is_some();
+        let carry = found.unwrap_or_default();
+        if !was_recording && carry.events.is_empty() {
+            return remove_unrecorded(&dir, observe);
+        }
+        observe(Step::Begin);
+        let replaced = staging_settings(location, was_recording).and_then(|settings| {
+            let id = stage(&dir, location, &settings, &carry, observe)?;
+            let replaced = dir.replace_store(id, had_store, observe).map_err(files)?;
+            Ok((settings, replaced))
+        });
+        match replaced {
+            Ok((settings, replaced)) => {
+                let resume = was_recording.then_some(&settings);
+                self.after_replace(location, replaced, resume, carry.events.len())
+            }
+            // Nothing was replaced.
+            Err(refused) => {
+                dir.discard_staged();
+                Err(self.undo(location, None, was_recording, refused))
+            }
+        }
+    }
+
+    /// The rename was attempted and may have happened: nothing is undone.
+    /// `resume` holds the settings to record with, if it was recording;
+    /// `kept` is how many rows the new store holds.
+    fn after_replace(
+        &self,
+        location: &Location,
+        replaced: Replaced,
+        resume: Option<&Settings>,
+        kept: usize,
+    ) -> Result<(), Refused> {
+        let off = if resume.is_some() {
+            "; recording stays off"
+        } else {
+            ""
+        };
+        let linked = match replaced {
+            Replaced::Done { linked } => linked,
+            Replaced::NotDurable { linked, reason } => {
+                tracing::error!(%reason, "a cleared history store could not be made durable");
+                let link = if linked {
+                    format!("; {}", FilesError::Linked(DB_FILE))
+                } else {
+                    String::new()
+                };
+                return Err(Refused::ClearedNotDurable(format!("{reason}{link}{off}")));
+            }
+            Replaced::Unknown(reason) => {
+                tracing::error!(%reason, "the outcome of a clear is unknown");
+                return Err(Refused::ClearOutcomeUnknown(format!("{reason}{off}")));
+            }
+        };
+        let resumed = resume.map(|settings| self.record_again(location, settings));
+        if linked {
+            return Err(linked_clear(resumed, off));
+        }
+        match resumed {
+            Some(Err(reason)) => Err(Refused::ClearedNotResumed { kept, reason }),
+            _ => Ok(()),
+        }
+    }
+
+    /// Records on the replaced store, with one retry: the clear cannot be
+    /// undone, so a passing failure is worth a second try.
+    fn record_again(&self, location: &Location, settings: &Settings) -> Result<(), String> {
+        let capture = spawn_capture(location, settings, &self.0).or_else(|first| {
+            tracing::warn!(reason = %first, "recording did not resume; trying once more");
+            spawn_capture(location, settings, &self.0)
+        })?;
+        self.0.slot.set(Some(Arc::new(capture)));
+        Ok(())
     }
 
     /// A refusal after the writer stopped: restart recording and say so if
@@ -203,98 +296,6 @@ impl ControlGate {
                 reason,
             },
         }
-    }
-
-    /// Leaves what a clear must carry in `kept` before the store is moved,
-    /// so a failure past the rename can still write it.
-    fn remove_files(
-        &self,
-        location: &Location,
-        token: &Token,
-        kind: Kind,
-        kept: &RefCell<Carry>,
-        observe: &dyn Fn(Step),
-    ) -> Result<(), Refused> {
-        let dir = StoreDir::open(location.dir(), super::open::effective_uid()).map_err(files)?;
-        dir.check_removable().map_err(files)?;
-        let carry = match crate::sqlite_file::open_owner_only_readonly(&location.db_path()) {
-            Ok(mut conn) => recheck(&mut conn, token, kind == Kind::Clear, None)?,
-            Err(crate::sqlite_file::OpenError::Io(e))
-                if e.kind() == std::io::ErrorKind::NotFound =>
-            {
-                Carry::default()
-            }
-            Err(e) => return Err(Refused::Files(e.to_string())),
-        };
-        kept.replace(carry);
-        dir.remove_store(observe).map_err(files)
-    }
-
-    /// After the files are gone: delete drops the settings; clear starts the
-    /// new store (with what was carried) if it was recording.
-    fn finish(
-        &self,
-        location: &Location,
-        (kind, was_recording): (Kind, bool),
-        carry: Carry,
-        observe: &dyn Fn(Step),
-    ) -> Result<(), Refused> {
-        let dir = StoreDir::open(location.dir(), super::open::effective_uid()).map_err(files)?;
-        if kind == Kind::Delete {
-            return dir.remove_settings().map_err(files);
-        }
-        if !was_recording {
-            return Ok(());
-        }
-        let settings = settings::load(location)
-            .ok()
-            .flatten()
-            .ok_or_else(|| Refused::Settings("settings are gone".into()))?;
-        open_store(location).map_err(|e| Refused::Unavailable(e.to_string()))?;
-        observe(Step::Created);
-        insert_carry(location, &carry).map_err(|e| Refused::Unavailable(e.to_string()))?;
-        observe(Step::Carried);
-        let capture = spawn_capture(location, &settings, &self.0).map_err(Refused::Unavailable)?;
-        self.0.slot.set(Some(Arc::new(capture)));
-        Ok(())
-    }
-
-    /// A clear that failed past the rename (the tombstone still holds the
-    /// rows): record on a new store with what was carried if it was
-    /// recording, and say the rows are on disk. If that fails too, recording
-    /// stays off.
-    fn keep_rows(
-        &self,
-        location: &Location,
-        was_recording: bool,
-        carry: &Carry,
-        refused: &Refused,
-    ) -> Refused {
-        match self.resume_with(location, was_recording, carry) {
-            Ok(()) => Refused::DataLeft(format!("{refused}; recording resumed on a new store")),
-            Err(reason) => Refused::DataLeft(format!(
-                "{refused}; recording could not be resumed: {reason}; recording stays off"
-            )),
-        }
-    }
-
-    fn resume_with(
-        &self,
-        location: &Location,
-        was_recording: bool,
-        carry: &Carry,
-    ) -> Result<(), String> {
-        if !was_recording {
-            return Ok(());
-        }
-        let settings = settings::load(location)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "settings are gone".to_owned())?;
-        open_store(location).map_err(|e| e.to_string())?;
-        insert_carry(location, carry)?;
-        let capture = spawn_capture(location, &settings, &self.0)?;
-        self.0.slot.set(Some(Arc::new(capture)));
-        Ok(())
     }
 
     /// Put the settings back and record again on whatever store is there (a
@@ -318,6 +319,100 @@ impl ControlGate {
         self.0.slot.set(Some(Arc::new(capture)));
         Ok(())
     }
+}
+
+/// With the writer stopped, before anything changes: the files can be
+/// removed and the previewed rows still add up to the token. With `carry`,
+/// also what came after them; `None` when there is no store.
+fn previewed(
+    location: &Location,
+    token: &Token,
+    carry: bool,
+) -> Result<(StoreDir, Option<Carry>), Refused> {
+    let dir = StoreDir::open(location.dir(), super::open::effective_uid()).map_err(files)?;
+    dir.check_removable().map_err(files)?;
+    let found = match crate::sqlite_file::open_owner_only_readonly(&location.db_path()) {
+        Ok(mut conn) => Some(recheck(&mut conn, token, carry, None)?),
+        Err(crate::sqlite_file::OpenError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            None
+        }
+        Err(e) => return Err(Refused::Files(e.to_string())),
+    };
+    Ok((dir, found))
+}
+
+fn remove_settings(location: &Location) -> Result<(), Refused> {
+    StoreDir::open(location.dir(), super::open::effective_uid())
+        .and_then(|dir| dir.remove_settings())
+        .map_err(files)
+}
+
+/// A clear that is not recording and keeps nothing: the store is removed.
+/// Past the rename its rows are still on disk if this fails.
+fn remove_unrecorded(dir: &StoreDir, observe: &dyn Fn(Step)) -> Result<(), Refused> {
+    let renamed = Cell::new(false);
+    let removed = dir.remove_store(&|step| {
+        renamed.set(renamed.get() || step == Step::Renamed);
+        observe(step);
+    });
+    removed.map_err(|e| {
+        let refused = files(e);
+        if renamed.get() {
+            tracing::error!(%refused, "a clear failed after the store was removed");
+            Refused::DataLeft(refused.to_string())
+        } else {
+            refused
+        }
+    })
+}
+
+/// A clear that replaced the store while another name still keeps the old
+/// one. `resumed` is how resuming went, if it was recording.
+fn linked_clear(resumed: Option<Result<(), String>>, off: &str) -> Refused {
+    let recording = match resumed {
+        None => String::new(),
+        Some(Ok(())) => "; recording resumed on a new store".into(),
+        Some(Err(reason)) => format!("; recording could not be resumed: {reason}{off}"),
+    };
+    let link = FilesError::Linked(DB_FILE);
+    Refused::DataLeft(format!("{link}{recording}"))
+}
+
+/// The settings a staged store is built under. Without recording to resume,
+/// unreadable ones do not stop the rows from being kept.
+fn staging_settings(location: &Location, was_recording: bool) -> Result<Settings, Refused> {
+    match settings::load(location) {
+        Ok(Some(settings)) => Ok(settings),
+        _ if !was_recording => Ok(Settings::default()),
+        _ => Err(Refused::Settings("settings are gone".into())),
+    }
+}
+
+/// Builds the store that will replace the old one: a file created through the
+/// directory handle, the carry committed with `synchronous = FULL`, checked,
+/// closed and synced. The old store is not touched.
+fn stage(
+    dir: &StoreDir,
+    location: &Location,
+    settings: &Settings,
+    carry: &Carry,
+    observe: &dyn Fn(Step),
+) -> Result<FileId, Refused> {
+    let id = dir.create_staged().map_err(files)?;
+    let budget = Budget::new(u64::from(settings.budget_mib) * 1024 * 1024)
+        .map_err(|e| Refused::Unavailable(e.to_string()))?;
+    let mut conn = schema::prepare(&location.dir().join(STAGED), &budget)
+        .map_err(|e| Refused::Unavailable(e.to_string()))?;
+    dir.require_staged(id).map_err(files)?;
+    observe(Step::Created);
+    insert_carry(&mut conn, carry).map_err(Refused::Unavailable)?;
+    observe(Step::Carried);
+    check_staged(&conn, carry).map_err(Refused::Unavailable)?;
+    conn.close()
+        .map_err(|(_, e)| Refused::Unavailable(e.to_string()))?;
+    dir.sync_staged(id).map_err(files)?;
+    observe(Step::Staged);
+    Ok(id)
 }
 
 /// With the writer stopped: the previewed rows still add up to the token,
@@ -389,13 +484,16 @@ fn read_carry_rows(conn: &Connection, after: i64) -> Result<Carry, CarryError> {
     Ok(Carry { events, rules })
 }
 
-/// One transaction on the new store, before its writer starts.
-fn insert_carry(location: &Location, carry: &Carry) -> Result<(), String> {
+/// One durable transaction on the staged store.
+fn insert_carry(conn: &mut Connection, carry: &Carry) -> Result<(), String> {
+    conn.execute_batch("PRAGMA synchronous = FULL;")
+        .map_err(|e| e.to_string())?;
+    if pragma(conn, "synchronous")? != SYNCHRONOUS_FULL {
+        return Err("synchronous = FULL could not be set".into());
+    }
     if carry.events.is_empty() {
         return Ok(());
     }
-    let mut conn =
-        crate::sqlite_file::open_owner_only(&location.db_path()).map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     for (hash, snapshot, first_seen) in &carry.rules {
         tx.execute(
@@ -417,4 +515,31 @@ fn insert_carry(location: &Location, carry: &Carry) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())
+}
+
+fn pragma(conn: &Connection, name: &str) -> Result<i64, String> {
+    conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+        .map_err(|e| e.to_string())
+}
+
+/// The staged store is at this build's version and holds exactly the carry.
+fn check_staged(conn: &Connection, carry: &Carry) -> Result<(), String> {
+    let version = pragma(conn, "user_version")?;
+    if version != schema::SCHEMA_VERSION {
+        return Err(format!("the staged store is at version {version}"));
+    }
+    for (table, kept) in [
+        ("events", carry.events.len()),
+        ("rules_seen", carry.rules.len()),
+    ] {
+        let held: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if usize::try_from(held) != Ok(kept) {
+            return Err(format!(
+                "the staged store holds {held} rows in {table}, not the {kept} to keep"
+            ));
+        }
+    }
+    Ok(())
 }

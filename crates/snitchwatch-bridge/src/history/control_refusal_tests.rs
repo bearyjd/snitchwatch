@@ -185,14 +185,15 @@ fn a_failure_after_the_new_store_exists_does_not_claim_nothing_changed() {
     feed_canary(&rig, 1);
     wait_rows(&rig, 2);
     let path = rig.location.db_path();
-    // The new store is destroyed before the carry goes into it.
+    // The new store is destroyed once it has replaced the old one.
     let result = rig.gate.clear_observed(token, &|at| {
-        if at == Step::Created {
+        if at == Step::Replaced {
             fs::write(&path, vec![b'x'; 4096]).unwrap();
         }
     });
     assert!(
-        matches!(result, Err(Refused::RollbackFailed { .. })),
+        matches!(result, Err(Refused::ClearedNotResumed { kept: 1, .. })),
         "{result:?}"
     );
+    assert!(rig.gate.slot().get().is_none());
 }
