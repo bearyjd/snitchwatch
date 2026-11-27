@@ -2,7 +2,8 @@
 //! created through the directory handle, filled and synced while the old
 //! store is untouched, and takes the live name in one `renameat`, so a crash
 //! or a failure leaves either the old store whole or the new one with what
-//! it keeps.
+//! it keeps. Where there was no store, the rename is one that never
+//! replaces.
 
 use std::fs;
 use std::io;
@@ -87,7 +88,7 @@ impl StoreDir {
     /// would drop SQLite's locks.
     pub(in crate::history) fn create_staged(&self) -> Result<FileId, FilesError> {
         if let (_, Some(name)) = self.unlink_staged()? {
-            return Err(FilesError::Linked(name));
+            return Err(FilesError::StagedLinked(name));
         }
         let file = self.open_at(STAGED, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
         // Whatever the umask left.
@@ -134,11 +135,13 @@ impl StoreDir {
         }
     }
 
-    /// Renames the staged store over `history.db`. An error means the old
-    /// store is still in place; anything else is in the returned outcome.
+    /// Renames the staged store over `history.db`, or, without `had_store`,
+    /// onto that name only while nothing is there. An error means nothing was
+    /// replaced; anything else is in the returned outcome.
     pub(in crate::history) fn replace_store(
         &self,
         id: FileId,
+        had_store: bool,
         observe: &dyn Fn(Step),
     ) -> Result<Replaced, FilesError> {
         // Checked immediately before the rename: a journal left beside either
@@ -151,14 +154,23 @@ impl StoreDir {
         if self.plain(TOMBSTONE)?.is_some() {
             return Err(FilesError::Sidecar(TOMBSTONE));
         }
-        let (old, links) = self.file_at(DB_FILE)?.ok_or(FilesError::Missing(DB_FILE))?;
+        let old = if had_store {
+            Some(self.file_at(DB_FILE)?.ok_or(FilesError::Missing(DB_FILE))?)
+        } else {
+            None
+        };
         self.require_staged(id)?;
-        let linked = links > 1;
-        if let Err(error) = self.rename_staged() {
+        let linked = old.is_some_and(|(_, links)| links > 1);
+        let old = old.map(|(old, _)| old);
+        if let Err(error) = self.rename_staged(had_store) {
+            // The name is taken, and what took it was not touched.
+            if !had_store && error.kind() == io::ErrorKind::AlreadyExists {
+                return Err(FilesError::Io(DB_FILE, error));
+            }
             // A reported failure does not say what happened: look.
             match self.live_file() {
                 Ok(Some(live)) if live == id => {}
-                Ok(Some(live)) if live == old => return Err(FilesError::Io(DB_FILE, error)),
+                Ok(live) if live == old => return Err(FilesError::Io(DB_FILE, error)),
                 Ok(_) => {
                     return Ok(Replaced::Unknown(format!(
                         "{error}; {DB_FILE} is neither the old store nor the new one"
@@ -177,17 +189,34 @@ impl StoreDir {
         })
     }
 
-    fn rename_staged(&self) -> io::Result<()> {
+    fn rename_staged(&self, had_store: bool) -> io::Result<()> {
         #[cfg(test)]
         if injected(Fault::Rename) {
             return Err(injected_error());
         }
-        let done = self.rename(STAGED, DB_FILE);
+        let done = if had_store {
+            self.rename(STAGED, DB_FILE)
+        } else {
+            self.rename_new(STAGED, DB_FILE)
+        };
         #[cfg(test)]
         if injected(Fault::RenameReportedFailed) || injected(Fault::OutcomeUnknown) {
             return Err(injected_error());
         }
         done
+    }
+
+    /// A rename that never replaces: `EEXIST` if `to` is any entry at all.
+    /// A file system without it refuses; there is no fallback.
+    fn rename_new(&self, from: &'static str, to: &'static str) -> io::Result<()> {
+        let (from, to) = (cname(from), cname(to));
+        let (fd, flags) = (self.fd(), libc::RENAME_NOREPLACE);
+        // SAFETY: valid fd, NUL-terminated names, both relative to that fd.
+        let rc = unsafe { libc::renameat2(fd, from.as_ptr(), fd, to.as_ptr(), flags) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     fn live_file(&self) -> Result<Option<FileId>, FilesError> {

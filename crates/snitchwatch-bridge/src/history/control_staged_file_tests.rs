@@ -11,6 +11,7 @@ use std::path::Path;
 use super::control::{Limits, Refused};
 use super::control_clear_tests::{feed_canary, rows, wait_rows};
 use super::control_files::{FilesError, Step, StoreDir};
+use super::control_leftover_tests::failed_delete_at;
 use super::control_support::start_after_drop;
 use super::control_tests::{gate_rig, settings_json, GateRig};
 
@@ -77,7 +78,7 @@ fn a_leftover_staged_name_with_a_second_link_is_reported() {
         fs::hard_link(dir.join(name), dir.join("other-name")).unwrap();
         let result = open(dir).finish_leftover();
         assert!(
-            matches!(result, Err(FilesError::Linked(n)) if n == name),
+            matches!(result, Err(FilesError::StagedLinked(n)) if n == name),
             "{name}: {result:?}"
         );
         assert!(!dir.join(name).exists(), "{name}");
@@ -165,17 +166,22 @@ fn a_staged_name_that_is_not_a_plain_file_is_refused_unfollowed() {
 }
 
 #[test]
-fn a_staged_name_that_is_not_plain_stops_the_leftover_before_anything_is_removed() {
+fn a_staged_name_that_is_not_plain_does_not_keep_the_tombstone() {
     let rig = disabled_store();
     let dir = rig.location.dir();
     fs::write(dir.join("history.db.deleting"), CANARY).unwrap();
     fs::create_dir(dir.join(STAGED[0])).unwrap();
-    let result = open(dir).finish_leftover();
+    fs::write(dir.join(STAGED[1]), CANARY).unwrap();
+    let reason = open(dir).finish_leftover().unwrap_err().to_string();
     assert!(
-        matches!(result, Err(FilesError::NotPlain("history.db.new"))),
-        "{result:?}"
+        reason.contains("history.db.new is not a plain file"),
+        "{reason}"
     );
-    assert!(dir.join("history.db.deleting").exists());
+    assert!(!reason.contains("nothing was removed"), "{reason}");
+    assert!(!dir.join("history.db.deleting").exists());
+    // The staged part is refused whole.
+    assert!(dir.join(STAGED[0]).is_dir());
+    assert!(dir.join(STAGED[1]).exists());
 }
 
 #[test]
@@ -225,4 +231,106 @@ fn recovery_still_rolls_back_a_hot_journal_when_a_staged_name_is_not_plain() {
             assert_eq!(fs::read_to_string(&target).unwrap(), "keep", "{case}");
         }
     }
+}
+
+/// A staged file with another name for it, beside the store.
+fn plant_linked_staged(dir: &Path) {
+    fs::write(dir.join(STAGED[0]), CANARY).unwrap();
+    fs::hard_link(dir.join(STAGED[0]), dir.join("other-name")).unwrap();
+}
+
+fn assert_staged_link_refusal(result: &Result<(), Refused>, case: &str) {
+    let Err(refused @ Refused::Files(reason)) = result else {
+        panic!("{case}: {result:?}");
+    };
+    assert!(reason.contains("staged copy"), "{case}: {reason}");
+    assert!(reason.contains("another link"), "{case}: {reason}");
+    let text = refused.to_string();
+    assert!(!text.contains("still on disk"), "{case}: {text}");
+    assert!(!text.contains("deleted history"), "{case}: {text}");
+}
+
+#[test]
+fn a_linked_leftover_staged_copy_is_not_reported_as_deleted_history() {
+    for delete in [false, true] {
+        let rig = gate_rig(Limits::default());
+        feed_canary(&rig, 1);
+        wait_rows(&rig, 1);
+        let token = rig.gate.preview().unwrap().token;
+        plant_linked_staged(rig.location.dir());
+        let result = if delete {
+            rig.gate.delete(token)
+        } else {
+            rig.gate.clear(token)
+        };
+        let case = format!("delete={delete}");
+        assert_staged_link_refusal(&result, &case);
+        assert_eq!(rows(&rig), 1, "{case}");
+        assert!(rig.gate.slot().get().is_some(), "{case}");
+    }
+}
+
+#[test]
+fn a_linked_staged_copy_planted_before_staging_is_not_deleted_history() {
+    let rig = gate_rig(Limits::default());
+    feed_canary(&rig, 1);
+    wait_rows(&rig, 1);
+    let token = rig.gate.preview().unwrap().token;
+    let result = rig.gate.clear_observed(token, &|step| {
+        if step == Step::Begin {
+            plant_linked_staged(rig.location.dir());
+        }
+    });
+    assert_staged_link_refusal(&result, "create");
+    assert_eq!(rows(&rig), 1);
+    assert!(rig.gate.slot().get().is_some());
+}
+
+#[test]
+fn recovery_still_rolls_back_a_hot_journal_beside_a_linked_staged_copy() {
+    let GateRig {
+        root: _root,
+        state: _,
+        location,
+        gate,
+    } = disabled_store();
+    drop(gate);
+    let dir = location.dir();
+    plant_linked_staged(dir);
+    fs::write(dir.join("history.db-journal"), [7u8; 1024]).unwrap();
+    super::control_files::recover(&location);
+    assert!(!dir.join("history.db-journal").exists());
+}
+
+#[test]
+fn a_retried_delete_unlinks_the_tombstone_despite_a_staged_name_that_is_not_plain() {
+    let (rig, _) = failed_delete_at(Step::Renamed);
+    let token = rig.gate.preview().unwrap().token;
+    let at = rig.location.dir().join(STAGED[0]);
+    plant(Planted::Fifo, &at, &at);
+    let result = rig.gate.delete(token);
+    let Err(refused @ Refused::Files(reason)) = &result else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("not a plain file"), "{reason}");
+    assert!(!refused.to_string().contains("nothing was removed"));
+    assert!(!rig.location.dir().join("history.db.deleting").exists());
+    assert!(still_there(Planted::Fifo, &at));
+    assert!(rig.gate.slot().get().is_none(), "recording stays off");
+}
+
+#[test]
+fn a_linked_tombstone_is_reported_before_a_staged_name_that_is_not_plain() {
+    let rig = disabled_store();
+    let dir = rig.location.dir();
+    let tombstone = dir.join("history.db.deleting");
+    fs::write(&tombstone, CANARY).unwrap();
+    fs::hard_link(&tombstone, dir.join("other-name")).unwrap();
+    fs::create_dir(dir.join(STAGED[0])).unwrap();
+    let result = open(dir).finish_leftover();
+    assert!(
+        matches!(result, Err(FilesError::Linked("history.db.deleting"))),
+        "{result:?}"
+    );
+    assert!(!tombstone.exists());
 }

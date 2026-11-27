@@ -46,6 +46,7 @@ fn clear_child() {
         return;
     };
     let gate = ControlGate::start(Mode::User, Some(Path::new(&state)), Limits::default());
+    let kind = std::env::var(KIND).unwrap_or_default();
     let capture = gate.slot().get().expect("recording");
     let events: Vec<_> = (0..3)
         .map(|i| {
@@ -61,12 +62,20 @@ fn clear_child() {
     while count(&location, "SELECT COUNT(*) FROM events") < 3 {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    let off = kind.starts_with("off");
+    if off {
+        gate.disable().unwrap();
+    }
     let token = gate.preview().unwrap().token;
     // Accepted after the preview: a clear carries it into the new store.
-    let later = event("/usr/bin/curl", "carry.example", 99);
-    capture.observe(&[&later]);
-    while count(&location, "SELECT COUNT(*) FROM events") < 4 {
-        std::thread::sleep(std::time::Duration::from_millis(5));
+    if kind == "off-carry" {
+        insert_carried(&location);
+    } else if !off {
+        let later = event("/usr/bin/curl", "carry.example", 99);
+        capture.observe(&[&later]);
+        while count(&location, "SELECT COUNT(*) FROM events") < 4 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
     let kill = |step: Step| {
         if format!("{step:?}") == at {
@@ -74,11 +83,22 @@ fn clear_child() {
             unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
         }
     };
-    if std::env::var(KIND).is_ok_and(|k| k == "delete") {
+    if kind == "delete" {
         let _ = gate.delete_observed(token, &kill);
     } else {
         let _ = gate.clear_observed(token, &kill);
     }
+}
+
+/// A row written past a stopped writer, after the preview.
+fn insert_carried(location: &Location) {
+    let db = rusqlite::Connection::open(location.db_path()).unwrap();
+    db.execute(
+        "INSERT INTO events (ts_ms, dst_host, action, answered_by) \
+         VALUES (99, 'carry.example', 'allow', 'rule')",
+        [],
+    )
+    .unwrap();
 }
 
 /// The child of the disable test: kills itself as the writer's stop begins,
@@ -304,6 +324,60 @@ fn a_kill_at_every_step_of_a_delete_leaves_the_store_whole_or_gone_and_history_o
         } else {
             assert!(!dir.join("history.db").exists(), "{step}: none");
             assert_eq!(dir_canaries(&dir), Vec::<String>::new(), "{step}");
+        }
+    }
+}
+
+/// After the restart of a clear that was not recording: still off with its
+/// consent, and nothing staged or tombstoned is left.
+fn assert_off_restart(step: &str, state: &Path, location: &Location) {
+    let gate = ControlGate::start(Mode::User, Some(state), Limits::default());
+    assert!(gate.slot().get().is_none(), "{step}: recording stays off");
+    let saved = settings::load(location).unwrap().unwrap();
+    assert!(!saved.enabled, "{step}");
+    assert!(saved.consent.is_some(), "{step}: consent kept");
+    let left: Vec<String> = names(location.dir())
+        .into_iter()
+        .filter(|n| n.starts_with(STAGED) || n == TOMBSTONE)
+        .collect();
+    assert_eq!(left, Vec::<String>::new(), "{step}");
+}
+
+#[test]
+fn a_kill_at_every_step_of_an_unrecorded_clear_with_a_carry_keeps_the_carry() {
+    for step in ["Begin", "Created", "Carried", "Staged", "Replaced"] {
+        let (_root, state, location) = crashed(step, "off-carry");
+        let dir = location.dir().to_owned();
+        assert_at_the_kill(step, &dir, &location);
+        assert_off_restart(step, &state, &location);
+        let events = count(&location, "SELECT COUNT(*) FROM events");
+        let replaced = step == "Replaced";
+        assert_eq!(events, if replaced { 1 } else { 4 }, "{step}");
+        let kept = "SELECT COUNT(*) FROM events WHERE dst_host = 'carry.example'";
+        assert_eq!(count(&location, kept), 1, "{step}");
+        if replaced {
+            assert_eq!(dir_canaries(&dir), Vec::<String>::new(), "{step}");
+        }
+    }
+}
+
+#[test]
+fn a_kill_at_every_step_of_an_unrecorded_clear_leaves_the_store_whole_or_gone() {
+    for step in ["Begin", "Renamed", "TombstoneRemoved"] {
+        let (_root, state, location) = crashed(step, "off");
+        let dir = location.dir().to_owned();
+        let holding = match step {
+            "Begin" => vec!["history.db"],
+            "Renamed" => vec![TOMBSTONE],
+            _ => vec![],
+        };
+        assert_eq!(dir_canaries(&dir), holding, "{step}: at the kill");
+        assert_off_restart(step, &state, &location);
+        if step == "Begin" {
+            let events = count(&location, "SELECT COUNT(*) FROM events");
+            assert_eq!(events, 3, "{step}: whole");
+        } else {
+            assert_eq!(names(&dir), ["history.lock", "settings.json"], "{step}");
         }
     }
 }

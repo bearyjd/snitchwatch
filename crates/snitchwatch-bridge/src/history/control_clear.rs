@@ -198,17 +198,20 @@ impl ControlGate {
         was_recording: bool,
         observe: &dyn Fn(Step),
     ) -> Result<(), Refused> {
-        let (dir, carry) = match previewed(location, token, true) {
+        let (dir, found) = match previewed(location, token, true) {
             Ok(checked) => checked,
             Err(refused) => return Err(self.undo(location, None, was_recording, refused)),
         };
+        // With no store there is nothing the staged one may replace.
+        let had_store = found.is_some();
+        let carry = found.unwrap_or_default();
         if !was_recording && carry.events.is_empty() {
             return remove_unrecorded(&dir, observe);
         }
         observe(Step::Begin);
         let replaced = staging_settings(location, was_recording).and_then(|settings| {
             let id = stage(&dir, location, &settings, &carry, observe)?;
-            let replaced = dir.replace_store(id, observe).map_err(files)?;
+            let replaced = dir.replace_store(id, had_store, observe).map_err(files)?;
             Ok((settings, replaced))
         });
         match replaced {
@@ -216,7 +219,7 @@ impl ControlGate {
                 let resume = was_recording.then_some(&settings);
                 self.after_replace(location, replaced, resume, carry.events.len())
             }
-            // The old store is whole.
+            // Nothing was replaced.
             Err(refused) => {
                 dir.discard_staged();
                 Err(self.undo(location, None, was_recording, refused))
@@ -322,22 +325,22 @@ impl ControlGate {
 
 /// With the writer stopped, before anything changes: the files can be
 /// removed and the previewed rows still add up to the token. With `carry`,
-/// also what came after them.
+/// also what came after them; `None` when there is no store.
 fn previewed(
     location: &Location,
     token: &Token,
     carry: bool,
-) -> Result<(StoreDir, Carry), Refused> {
+) -> Result<(StoreDir, Option<Carry>), Refused> {
     let dir = StoreDir::open(location.dir(), super::open::effective_uid()).map_err(files)?;
     dir.check_removable().map_err(files)?;
-    let carry = match crate::sqlite_file::open_owner_only_readonly(&location.db_path()) {
-        Ok(mut conn) => recheck(&mut conn, token, carry, None)?,
+    let found = match crate::sqlite_file::open_owner_only_readonly(&location.db_path()) {
+        Ok(mut conn) => Some(recheck(&mut conn, token, carry, None)?),
         Err(crate::sqlite_file::OpenError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            Carry::default()
+            None
         }
         Err(e) => return Err(Refused::Files(e.to_string())),
     };
-    Ok((dir, carry))
+    Ok((dir, found))
 }
 
 fn remove_settings(location: &Location) -> Result<(), Refused> {
@@ -527,14 +530,18 @@ fn check_staged(conn: &Connection, carry: &Carry) -> Result<(), String> {
     if version != schema::SCHEMA_VERSION {
         return Err(format!("the staged store is at version {version}"));
     }
-    let events: i64 = conn
-        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
-    if usize::try_from(events) != Ok(carry.events.len()) {
-        return Err(format!(
-            "the staged store holds {events} events, not the {} to keep",
-            carry.events.len()
-        ));
+    for (table, kept) in [
+        ("events", carry.events.len()),
+        ("rules_seen", carry.rules.len()),
+    ] {
+        let held: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if usize::try_from(held) != Ok(kept) {
+            return Err(format!(
+                "the staged store holds {held} rows in {table}, not the {kept} to keep"
+            ));
+        }
     }
     Ok(())
 }

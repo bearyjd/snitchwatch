@@ -119,6 +119,9 @@ fn a_staged_store_that_does_not_hold_the_carry_is_refused() {
     for sql in [
         "INSERT INTO events (ts_ms, action, answered_by) VALUES (1, 'allow', 'rule');",
         "DELETE FROM events;",
+        "DELETE FROM rules_seen;",
+        "INSERT INTO rules_seen (rule_hash, snapshot, first_seen_ms) \
+         VALUES (zeroblob(16), '{}', 1);",
         "PRAGMA user_version = 3;",
     ] {
         let (rig, token) = previewed_with_one_to_carry();
@@ -133,6 +136,14 @@ fn a_staged_store_that_does_not_hold_the_carry_is_refused() {
         );
         assert_old_store_whole(&rig, sql);
     }
+}
+
+/// Positive control for the `rules_seen` cases above: the carry has a rule.
+#[test]
+fn a_clear_carries_the_rule_of_a_kept_row() {
+    let (rig, token) = previewed_with_one_to_carry();
+    rig.gate.clear(token).unwrap();
+    assert_eq!(count(&rig.location, "SELECT COUNT(*) FROM rules_seen"), 1);
 }
 
 #[test]
@@ -321,4 +332,76 @@ fn a_clear_that_is_not_recording_still_keeps_the_later_rows() {
     rig.gate.clear(token).unwrap();
     assert_replaced(&rig);
     assert!(rig.gate.slot().get().is_none(), "recording stays off");
+}
+
+/// A recording rig whose `history.db` was unlinked from outside, previewed.
+fn previewed_without_a_store() -> (GateRig, TokenId) {
+    let rig = gate_rig(Limits::default());
+    feed_canary(&rig, 1);
+    wait_rows(&rig, 1);
+    fs::remove_file(rig.location.db_path()).unwrap();
+    let token = rig.gate.preview().unwrap().token;
+    (rig, token)
+}
+
+#[test]
+fn a_clear_while_recording_with_no_store_makes_a_new_one() {
+    let (rig, token) = previewed_without_a_store();
+    let steps = std::cell::RefCell::new(Vec::new());
+    rig.gate
+        .clear_observed(token, &|at| steps.borrow_mut().push(at))
+        .unwrap();
+    assert_eq!(steps.into_inner().last(), Some(&Step::Replaced));
+    assert_eq!(rows(&rig), 0);
+    assert_eq!(staged_left(&rig), Vec::<String>::new());
+    assert!(rig.gate.slot().get().is_some(), "recording");
+    feed(&rig, 1);
+    wait_rows(&rig, 1);
+}
+
+#[test]
+fn what_appears_where_there_was_no_store_is_never_replaced() {
+    for kind in ["file", "link", "directory"] {
+        let (rig, token) = previewed_without_a_store();
+        let live = rig.location.db_path();
+        let target = rig.root.path().join("victim");
+        fs::write(&target, "keep").unwrap();
+        let result = rig.gate.clear_observed(token, &|at| {
+            if at == Step::Staged {
+                match kind {
+                    "file" => fs::write(&live, "planted").unwrap(),
+                    "link" => symlink(&target, &live).unwrap(),
+                    _ => fs::create_dir(&live).unwrap(),
+                }
+            }
+        });
+        // Recording cannot start on what was planted, and the refusal says so.
+        let Err(Refused::RollbackFailed { refused, .. }) = &result else {
+            panic!("{kind}: {result:?}");
+        };
+        assert!(refused.contains("File exists"), "{kind}: {refused}");
+        match kind {
+            "file" => assert_eq!(fs::read_to_string(&live).unwrap(), "planted"),
+            "link" => assert_eq!(fs::read_link(&live).unwrap(), target),
+            _ => assert!(live.is_dir()),
+        }
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep", "{kind}");
+        assert_eq!(staged_left(&rig), Vec::<String>::new(), "{kind}");
+    }
+}
+
+#[test]
+fn a_failed_rename_with_no_store_is_a_plain_refusal() {
+    let (rig, token) = previewed_without_a_store();
+    let result = with_fault(Fault::Rename, || rig.gate.clear(token));
+    assert!(matches!(result, Err(Refused::Files(_))), "{result:?}");
+    assert_eq!(staged_left(&rig), Vec::<String>::new());
+    assert!(rig.gate.slot().get().is_some(), "recording");
+}
+
+#[test]
+fn a_rename_onto_no_store_that_reports_a_failure_but_happened_counts() {
+    let (rig, token) = previewed_without_a_store();
+    with_fault(Fault::RenameReportedFailed, || rig.gate.clear(token)).unwrap();
+    assert!(rig.gate.slot().get().is_some(), "recording");
 }

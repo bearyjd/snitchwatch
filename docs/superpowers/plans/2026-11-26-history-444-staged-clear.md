@@ -25,6 +25,13 @@ Unchanged: preview token and recheck (the staged file holds only rows above `max
 - **A6.** A failed staged fsync discards `.new`; never retry then rename. The old inode is freed by the rename, not scrubbed (no worse than the tombstone path).
 - Tests added: rename error and directory-fsync failure outcomes; swapped staged inode refused; test 7 plants the journal after staging.
 
+## Review round 1 (security review, LOW findings; override A1-A6 and the steps where they differ)
+- A staged name with another link is a plain files refusal naming a staged copy. "Deleted history is still on disk" is kept for the tombstone and `history.db`.
+- `finish_leftover` unlinks the tombstone (and orphan sidecars) and syncs before it refuses a staged name that is not a plain file. A linked tombstone is reported first. This replaces "a staged name that is not plain stops the leftover before anything is removed".
+- A clear that finds no `history.db` when it rechecks moves the staged store there with `renameat2(RENAME_NOREPLACE)`, after the same identity, sidecar and tombstone checks and with the same sync order. Anything that has appeared at the name is refused and left. A file system without that flag refuses; there is no fallback. A store that was there at the recheck and is gone at the replace is still refused.
+- The staged store's `rules_seen` count must equal the carried rules, as `events` does.
+- Kill tests also cover a clear that is not recording, with and without a carry.
+
 ## Crash points
 | Kill at | On disk | Next start | Result |
 |---|---|---|---|

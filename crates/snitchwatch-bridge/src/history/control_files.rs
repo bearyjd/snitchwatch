@@ -16,7 +16,8 @@
 //! A clear that records, or has rows to keep, instead builds the new store
 //! beside the old one and renames it over `history.db` (see `replace`). A
 //! crash before that rename leaves the old store and a staged file that
-//! [`StoreDir::finish_leftover`] removes too.
+//! [`StoreDir::finish_leftover`] removes too. Where there was no store, the
+//! rename never replaces: whatever has appeared at the name is left.
 
 use std::ffi::CString;
 use std::fs;
@@ -82,10 +83,16 @@ pub(super) enum FilesError {
     /// Not the file that was created for staging, or it gained a link.
     #[error("{0} is not the file that was staged; nothing was replaced")]
     NotStaged(&'static str),
-    /// The tombstone was unlinked but another name for the same file keeps
-    /// the deleted history on disk.
+    /// The tombstone was unlinked, or the store replaced, but another name
+    /// for the same file keeps the deleted history on disk.
     #[error("another link to the deleted history remains ({0})")]
     Linked(&'static str),
+    /// A staged name held a file with another name: only copies of rows.
+    #[error("a leftover staged copy of history ({0}) has another link, which remains")]
+    StagedLinked(&'static str),
+    /// The staged part of a leftover, refused after the rest was finished.
+    #[error("{0} is not a plain file; it was left as it was")]
+    StagedNotPlain(&'static str),
     #[error("{0}: {1}")]
     Io(&'static str, io::Error),
 }
@@ -310,14 +317,12 @@ impl StoreDir {
     }
 
     /// What a crash during [`remove_store`](Self::remove_store) or a clear's
-    /// staging left: the tombstone, the staged store, and, when there is no
-    /// `history.db`, sidecars that belong to nothing. Creates nothing;
-    /// removes only those exact names; a name that is not a plain file is
-    /// left alone, and a staged one stops this before anything is removed.
+    /// staging left: the tombstone, when there is no `history.db` the
+    /// sidecars that belong to nothing, and last the staged store. Creates
+    /// nothing; removes only those exact names; a name that is not a plain
+    /// file is left alone, and a staged one keeps only the staged names. A
+    /// linked tombstone is reported before anything about the staged store.
     pub(super) fn finish_leftover(&self) -> Result<(), FilesError> {
-        for name in STAGED_NAMES {
-            self.require_plain(name)?;
-        }
         let mut removed = false;
         let mut shared = None;
         if self.require_plain(TOMBSTONE)? {
@@ -333,13 +338,18 @@ impl StoreDir {
                 }
             }
         }
-        let (staged, linked) = self.unlink_staged()?;
-        if removed || staged {
+        let staged = self.unlink_staged();
+        if removed || matches!(staged, Ok((true, _))) {
             self.sync()?;
         }
-        match shared.or(linked) {
-            Some(name) => Err(FilesError::Linked(name)),
-            None => Ok(()),
+        if let Some(name) = shared {
+            return Err(FilesError::Linked(name));
+        }
+        match staged {
+            Ok((_, None)) => Ok(()),
+            Ok((_, Some(name))) => Err(FilesError::StagedLinked(name)),
+            Err(FilesError::NotPlain(name)) => Err(FilesError::StagedNotPlain(name)),
+            Err(e) => Err(e),
         }
     }
 }
@@ -360,8 +370,8 @@ pub(super) fn recover(location: &super::Location) {
                 tracing::warn!(name, "another link keeps deleted history");
             }
             // A staged name is not the store's: the journal check still runs.
-            Err(FilesError::NotPlain(name)) if STAGED_NAMES.contains(&name) => {
-                tracing::warn!(name, "a staged history name is not a plain file");
+            Err(e @ (FilesError::StagedNotPlain(_) | FilesError::StagedLinked(_))) => {
+                tracing::warn!(error = %e, "a staged history store was not fully removed");
             }
             Err(e) => return Err(e),
         }
