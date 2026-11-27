@@ -1,7 +1,7 @@
 # Environment variables
 
 The variables the program code and shipped units read, plus the notable build, release and
-test knobs, with the file and line that reads each (line numbers are for commit 606083d2;
+test knobs, with the file and line that reads each (line numbers are for commit 55a41edc;
 re-run the greps if they drift). Not exhaustive: Cargo-provided `CARGO_*` variables, GitHub
 Actions context variables (`GITHUB_*`, `RUNNER_TEMP`) and generic shell variables are not
 listed one by one. Never
@@ -34,7 +34,7 @@ Variables fixed by the shipped units (not read from your shell):
 | Unit | Sets | Source |
 |---|---|---|
 | system unit | `SNITCHWATCH_SYSTEM_BRIDGE=1`, `SNITCHWATCH_WS_SOCKET=/run/snitchwatch/bridge.sock`, `SNITCHWATCH_WS_TOKEN_PATH=/run/snitchwatch-auth/token`, `HOME=/var/lib/snitchwatch`, `XDG_STATE_HOME=/var/lib` | `packaging/system/snitchwatch-system-bridge.service:20-24` |
-| system Flatpak | `SNITCHWATCH_SYSTEM_BRIDGE=1` (`--env=`) | `packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml:79` |
+| system Flatpak | `SNITCHWATCH_SYSTEM_BRIDGE=1` (`--env=`) | `packaging/flatpak/org.snitchwatch.Snitchwatch.system.yml:77` |
 
 ## Runtime: GUI (`snitchwatch-kirigami`)
 
@@ -82,8 +82,10 @@ Variables fixed by the shipped units (not read from your shell):
 
 ## Build and release pins
 
-`packaging/release/pins.env` is the single source of truth (plain `KEY=value`
-lines, sourced by the justfile and scripts).
+`packaging/release/pins.env` is the source of truth for the release pins (plain
+`KEY=value` lines, sourced by the justfile and release scripts). The eBPF module
+build has its own `packaging/ebpf/pins.env`, parsed and never sourced; its
+`SW_OPENSNITCH_COMMIT` must equal the release one.
 
 <!-- AUTO-GENERATED: packaging/release/{pins.env,build-bridge.sh,repro-check.sh,check-install.sh,bridge_artifact.py}, .github/workflows/release.yml, packaging/ebpf/{pins.env,build-modules.sh}, packaging/scanner/stage.sh, packaging/endpoint-events/verify.sh, crates/snitchwatch-kirigami/build.rs, justfile -->
 | Variable | Where | Value / meaning |
@@ -114,15 +116,16 @@ lines, sourced by the justfile and scripts).
 
 | Variable | Read / set at | Purpose |
 |---|---|---|
-| `QT_QPA_PLATFORM=offscreen`, `QT_QUICK_CONTROLS_STYLE=Basic` | `crates/snitchwatch-kirigami/tests/smoke.rs:28-32` (set if unset); `.github/workflows/ci.yml` kirigami job; justfile `qml-test` | Headless Qt. Default Kirigami style hangs offscreen (`main.rs:51-55` comment). |
+| `QT_QPA_PLATFORM=offscreen`, `QT_QUICK_CONTROLS_STYLE=Basic` | `crates/snitchwatch-kirigami/tests/smoke.rs:32-37` (set if unset); `.github/workflows/ci.yml` kirigami job; justfile `qml-test` | Headless Qt. Default Kirigami style hangs offscreen (`main.rs:51-55` comment). |
 | `QT_FORCE_STDERR_LOGGING=1` | justfile `qml-test`; `ci.yml` qmltestrunner step | QML test output to stderr. |
 | `QT_QUICK_BACKEND=software` | justfile `kirigami-screenshots`; `crates/snitchwatch-kirigami/tests/native-tray/run.sh:46,57` | Software Qt Quick renderer for the screenshot recipe and the native tray fixture. |
 | `QT_LOGGING_RULES`, `QML_XHR_ALLOW_FILE_READ/WRITE` | `crates/snitchwatch-kirigami/tests/geo_qml.rs:29`, `crates/snitchwatch-kirigami/tests/status_pages_keyboard_qml.rs:219`, `crates/snitchwatch-kirigami/tests/level_rule_unavailable_once_qml.rs:33` | Set inside individual probes. |
-| `CI` | `crates/snitchwatch-kirigami/src/notification_signals/bus_tests.rs:33,156`; `ci.yml` kirigami job (`CI: "true"`) | When set, missing `dbus-daemon`/`xdg-dbus-proxy` fails the private-bus tests instead of skipping. |
-| `SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS` | `tests/mock_opensnitchd/src/lib.rs:75` | Shrinks the mock's AskRule deadline (clamped; cannot exceed the real 120 s). Read once per process. |
+| `CI` | `crates/snitchwatch-kirigami/src/notification_signals/bus_tests.rs:33,162`; `ci.yml` kirigami job (`CI: "true"`) | When set, missing `dbus-daemon`/`xdg-dbus-proxy` fails the private-bus tests instead of skipping. |
+| `SNITCHWATCH_MOCK_ASK_RULE_DEADLINE_MS` | `tests/mock_opensnitchd/src/lib.rs:77` | Shrinks the mock's AskRule deadline (clamped; cannot exceed the real 120 s). Read once per process. |
 | `SNITCHWATCH_DBIP_PROOF`, `SNITCHWATCH_DBIP_CITY_PROOF` | `crates/snitchwatch-kirigami/src/geo/install/tests.rs:158,540`; `crates/snitchwatch-kirigami/tests/geo_validation_worker.rs:177` | Path to a real DB-IP file for proof tests; the tests `expect` it, so leave them unset in normal runs. |
 | `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `SNITCHWATCH_WS_SOCKET`, `SNITCHWATCH_WS_TOKEN_PATH` | set to tempdirs by many `crates/snitchwatch-kirigami/tests/*_qml.rs` (e.g. `tray_lifecycle_qml.rs:33-35`, `learning_end_qml.rs:37`) | Test isolation; see `docs/CONTRIBUTING.md` "Test safety". |
 | `SNITCHWATCH_TEST_*`, `*_CHILD` | `scanner-privileged/src/{command,containment,main}.rs`, `snitchwatch-bridge/src/history/tests.rs:502`, others | Internal re-exec markers for child-process tests; not user-facing. |
+| `SNITCHWATCH_PROBE_ORIGINAL_HOME`, `SNITCHWATCH_PROBE_HOME` | `crates/snitchwatch-kirigami/tests/common/mod.rs:90,92` (set at `:217,219`) | Set by the pre-`main` test isolation constructor: the HOME the process started with, and the throwaway one; not user-facing. |
 | `SW_STEPS` | `crates/snitchwatch-kirigami/tests/support/probe_runner.rs:64` | QML probe step limit; default `1000000`. |
 | `SNITCHWATCH_TRAY_TEST_SDK` | `crates/snitchwatch-kirigami/tests/native-tray/run.sh:58` | Flatpak SDK for the native tray fixture; default `org.kde.Sdk//6.11`. |
 | `R16_2_CANDIDATE_REVIEWED_SHA` | repository variable (`vars.`), `.github/workflows/candidate-gui.yml` | Owner-set full SHA authorising the candidate build and publish. Not a secret; the owner sets it (see `docs/RUNBOOK.md`). |
